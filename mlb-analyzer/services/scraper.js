@@ -27,33 +27,67 @@ async function callClaude(prompt, maxTokens, useSearch) {
 }
 
 function parseJSON(text) {
-  const match = text.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON found in response');
-  return JSON.parse(match[0]);
+  // Strip markdown code blocks if present
+  text = text.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+  // Find the JSON array
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start === -1 || end === -1) throw new Error('No JSON array found in response');
+  const jsonStr = text.substring(start, end + 1);
+  try {
+    return JSON.parse(jsonStr);
+  } catch(e) {
+    // Try to fix common issues: trailing commas, unescaped chars
+    const fixed = jsonStr
+      .replace(/,\s*([}\]])/g, '$1')  // trailing commas
+      .replace(/[\x00-\x1F\x7F]/g, ' '); // control characters
+    return JSON.parse(fixed);
+  }
+}
+
+// Strip HTML to plain text to reduce tokens
+function htmlToText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#[0-9]+;/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 async function fetchLineups(dateStr) {
-  console.log(`[scraper] Fetching RotoWire HTML for ${dateStr}`);
+  console.log(`[scraper] Fetching RotoWire for ${dateStr}`);
   const html = await fetchRotoWireHTML();
+  console.log(`[scraper] Got ${html.length} chars, converting to text`);
 
-  // Extract only the lineup section to save tokens
-  const start = html.indexOf('lineup__main');
-  const chunk = start > 0 ? html.substring(Math.max(0, start - 200), start + 80000) : html.substring(0, 80000);
-  const trimmed = chunk.length > 70000 ? chunk.substring(0, 70000) : chunk;
+  // Convert HTML to plain text — massively reduces tokens
+  const fullText = htmlToText(html);
 
-  const prompt = `Parse this RotoWire HTML and extract ALL MLB games for ${dateStr}. Include both Confirmed AND Expected lineups.
+  // Find lineup section
+  const lineupStart = fullText.indexOf('Confirmed Lineup') !== -1
+    ? Math.max(0, fullText.indexOf('Confirmed Lineup') - 500)
+    : Math.max(0, fullText.indexOf('Expected Lineup') - 500);
 
-CRITICAL: awaySP pitches AGAINST home batters. homeSP pitches AGAINST away batters.
+  const chunk = fullText.substring(lineupStart, lineupStart + 40000);
+  console.log(`[scraper] Sending ${chunk.length} chars to Claude`);
 
-Return ONLY raw JSON array:
-[{"game_id":"stl-det","away_team":"STL","home_team":"DET","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Dustin May","hand":"R"},"home_sp":{"name":"Jack Flaherty","hand":"R"},"market_away_ml":144,"market_home_ml":-171,"market_total":7.5,"park_factor":0.96,"away_lineup":[{"slot":1,"name":"JJ Wetherholt","hand":"L"}],"home_lineup":[{"slot":1,"name":"Colt Keith","hand":"L"}]}]
+  const prompt = `Extract ALL MLB games from this RotoWire lineup page text for ${dateStr}. Include both Confirmed AND Expected lineups.
+
+CRITICAL pitcher rules:
+- awaySP = pitcher for the AWAY team, pitches AGAINST home batters
+- homeSP = pitcher for the HOME team, pitches AGAINST away batters
+
+Return ONLY a raw JSON array with no markdown:
+[{"game_id":"stl-det","away_team":"STL","home_team":"DET","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Dustin May","hand":"R"},"home_sp":{"name":"Jack Flaherty","hand":"R"},"market_away_ml":144,"market_home_ml":-171,"market_total":7.5,"park_factor":0.96,"away_lineup":[{"slot":1,"name":"JJ Wetherholt","hand":"L"},{"slot":2,"name":"Ivan Herrera","hand":"R"}],"home_lineup":[{"slot":1,"name":"Colt Keith","hand":"L"},{"slot":2,"name":"Kevin McGonigle","hand":"L"}]}]
 
 Teams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH not OAK)
 Park factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:0.97 SEA:0.95 LAA:0.97 HOU:1.00 ATH:0.96 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93
-Hands: R=right L=left S=switch. Raw JSON only, no markdown.
+Hands: R=right L=left S=switch
+Raw JSON array only, no explanation, no markdown.
 
-HTML:
-${trimmed}`;
+PAGE TEXT:
+${chunk}`;
 
   const text = await callClaude(prompt, 4000, false);
   return parseJSON(text);
@@ -61,16 +95,4 @@ ${trimmed}`;
 
 async function fetchScores(dateStr) {
   const prompt = `Get final MLB scores for ${dateStr}. Search "MLB scores ${dateStr} final results" and check https://www.rotowire.com/baseball/scoreboard.php?date=${dateStr}
-Return only completed games: [{"away_team":"LAD","home_team":"WAS","away_score":5,"home_score":3,"final":true}]
-Teams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH)
-Raw JSON only.`;
-  const text = await callClaude(prompt, 1500, true);
-  const scores = parseJSON(text);
-  return scores.filter(s => s.final);
-}
-
-function makeGameId(awayTeam, homeTeam) {
-  return `${awayTeam}-${homeTeam}`.toLowerCase();
-}
-
-module.exports = { fetchLineups, fetchScores, makeGameId };
+Return only completed games as JSON
