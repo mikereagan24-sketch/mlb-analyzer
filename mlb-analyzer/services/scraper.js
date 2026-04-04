@@ -19,22 +19,38 @@ function htmlToText(html) {
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, 'and').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/['']/g, "'").replace(/[""]/g, '"')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
-function parseJSON(text) {
+function cleanJSON(text) {
   text = text.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
-  if (start === -1 || end === -1) throw new Error('No JSON array found');
-  const jsonStr = text.substring(start, end + 1);
+  if (start === -1 || end === -1) throw new Error('No JSON array found in response');
+  let s = text.substring(start, end + 1);
+  // Fix apostrophes in names (O'Hearn -> OHearn in JSON strings)
+  // Replace unescaped single quotes inside double-quoted strings
+  s = s.replace(/"([^"]*)'/g, function(m, p1) { return '"' + p1; });
+  // Remove control characters
+  s = s.replace(/[\x00-\x1F\x7F]/g, ' ');
+  // Fix trailing commas
+  s = s.replace(/,\s*([}\]])/g, '$1');
+  // Fix missing commas between objects (common Claude mistake)
+  s = s.replace(/}\s*{/g, '},{');
+  return s;
+}
+
+function parseJSON(text) {
+  const cleaned = cleanJSON(text);
   try {
-    return JSON.parse(jsonStr);
+    return JSON.parse(cleaned);
   } catch(e) {
-    const fixed = jsonStr.replace(/,\s*([}\]])/g, '$1').replace(/[\x00-\x1F\x7F]/g, ' ');
-    return JSON.parse(fixed);
+    console.error('[scraper] JSON parse error:', e.message);
+    console.error('[scraper] Near position:', cleaned.substring(Math.max(0, (e.message.match(/\d+/)||[0])[0] - 50), parseInt((e.message.match(/\d+/)||[0])[0]) + 50));
+    throw new Error('JSON parse failed: ' + e.message);
   }
 }
 
@@ -64,15 +80,16 @@ async function fetchLineups(dateStr) {
   console.log('[scraper] Fetching RotoWire for ' + dateStr);
   const html = await fetchRotoWireHTML();
   const fullText = htmlToText(html);
-  console.log('[scraper] Page text length: ' + fullText.length);
+  console.log('[scraper] Text length: ' + fullText.length);
 
   const idx = fullText.indexOf('Confirmed Lineup');
   const start = idx > 0 ? Math.max(0, idx - 500) : 0;
-  const chunk = fullText.substring(start, start + 40000);
+  const chunk = fullText.substring(start, start + 35000);
 
-  const prompt = 'Extract ALL MLB games from this RotoWire lineup page for ' + dateStr + '. Include Confirmed AND Expected lineups.\n\nCRITICAL: awaySP pitches AGAINST home batters. homeSP pitches AGAINST away batters.\n\nReturn ONLY a raw JSON array:\n[{"game_id":"stl-det","away_team":"STL","home_team":"DET","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Dustin May","hand":"R"},"home_sp":{"name":"Jack Flaherty","hand":"R"},"market_away_ml":144,"market_home_ml":-171,"market_total":7.5,"park_factor":0.96,"away_lineup":[{"slot":1,"name":"JJ Wetherholt","hand":"L"}],"home_lineup":[{"slot":1,"name":"Colt Keith","hand":"L"}]}]\n\nTeams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH)\nPark factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:0.97 SEA:0.95 LAA:0.97 HOU:1.00 ATH:0.96 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93\nHands: R=right L=left S=switch\nRaw JSON only.\n\nPAGE TEXT:\n' + chunk;
+  const prompt = 'Extract ALL MLB games from this RotoWire lineup page for ' + dateStr + '. Include Confirmed AND Expected lineups.\n\nCRITICAL pitcher rules:\n- awaySP pitches AGAINST home batters\n- homeSP pitches AGAINST away batters\n\nIMPORTANT: In player names with apostrophes like O\'Hearn or D\'Arnaud, write them WITHOUT the apostrophe (OHearn, DArnaud) to keep JSON valid.\n\nReturn ONLY a raw JSON array, no markdown:\n[{"game_id":"stl-det","away_team":"STL","home_team":"DET","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Dustin May","hand":"R"},"home_sp":{"name":"Jack Flaherty","hand":"R"},"market_away_ml":144,"market_home_ml":-171,"market_total":7.5,"park_factor":0.96,"away_lineup":[{"slot":1,"name":"JJ Wetherholt","hand":"L"},{"slot":2,"name":"Ivan Herrera","hand":"R"}],"home_lineup":[{"slot":1,"name":"Colt Keith","hand":"L"},{"slot":2,"name":"Kevin McGonigle","hand":"L"}]}]\n\nTeams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH)\nPark factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:0.97 SEA:0.95 LAA:0.97 HOU:1.00 ATH:0.96 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93\nHands: R=right L=left S=switch\nRaw JSON array only.\n\nPAGE TEXT:\n' + chunk;
 
   const text = await callClaude(prompt, 4000, false);
+  console.log('[scraper] Claude response length: ' + text.length);
   return parseJSON(text);
 }
 
