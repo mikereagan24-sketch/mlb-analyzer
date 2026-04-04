@@ -248,7 +248,7 @@ async function runScoreJob(dateStr) {
 function startCronJobs() {
   // 5:00 PM Eastern = 22:00 UTC (21:00 UTC during EDT)
   // Using 22:00 UTC — covers both EST and EDT safely
-  cron.schedule('0 22 * * *', () => {
+  cron.schedule('0 17 22 * * *', () => {
     console.log('[cron] Triggering lineup pull');
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
@@ -259,7 +259,7 @@ function startCronJobs() {
     runScoreJob(yesterdayET());
   }, { timezone: 'UTC' });
 
-  console.log('[cron] Jobs scheduled — lineups at 22:00 UTC, scores at 12:00 UTC');
+  console.log('[cron] Jobs scheduled — lineups at 17:00 and 22:00 UTC, scores at 12:00 UTC');
 }
 
 module.exports = {
