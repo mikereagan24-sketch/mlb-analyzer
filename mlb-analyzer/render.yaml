@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: mlb-analyzer
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: RENDER
+        value: true
+      - key: ANTHROPIC_API_KEY
+        sync: false   # You'll set this in the Render dashboard
+    disk:
+      name: mlb-data
+      mountPath: /data
+      sizeGB: 1       # 1GB is plenty for SQLite + all CSV data
