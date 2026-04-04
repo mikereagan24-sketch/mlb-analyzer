@@ -3,7 +3,12 @@ const path = require('path');
 const fs = require('fs');
 
 // On Render, use /data for persistent disk. Locally use ./data
-const DATA_DIR = process.env.RENDER ? '/data' : path.join(__dirname, '../data');
+let DATA_DIR;
+if (process.env.RENDER) {
+  DATA_DIR = fs.existsSync('/data') ? '/data' : path.join(__dirname, '../data');
+} else {
+  DATA_DIR = path.join(__dirname, '../data');
+}
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, 'mlb.db');
