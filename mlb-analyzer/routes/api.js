@@ -42,7 +42,7 @@ function detectKey(filename) {
 }
 
 function parseCSV(buffer, isPitcher) {
-  const text = buffer.toString('utf-8');
+  const text = buffer.toString('utf-8').replace(/^\uFEFF/, '');
   const delim = text.includes('\t') ? '\t' : ',';
   const records = parse(text, { columns: true, skip_empty_lines: true, delimiter: delim, trim: true });
   if (!records.length) return [];
