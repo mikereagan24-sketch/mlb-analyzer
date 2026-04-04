@@ -89,7 +89,7 @@ async function fetchLineups(dateStr) {
 
   const idx = fullText.indexOf('Confirmed Lineup');
   const start = idx > 0 ? Math.max(0, idx - 500) : 0;
-  const chunk = fullText.substring(start, start + 35000);
+  const chunk = fullText.substring(start, start + 35000).replace(/\u2019/g, '').replace(/'/g, '').replace(/`/g, '');
 
   const prompt = 'Extract ALL MLB games from this RotoWire lineup page for ' + dateStr + '. Include Confirmed AND Expected lineups.\n\nCRITICAL pitcher rules:\n- awaySP pitches AGAINST home batters\n- homeSP pitches AGAINST away batters\n\nVERY IMPORTANT for valid JSON: Do NOT use apostrophes in any name values. Write OHearn not O\'Hearn, DArnaud not D\'Arnaud, etc.\n\nReturn ONLY a raw JSON array, no markdown:\n[{"game_id":"stl-det","away_team":"STL","home_team":"DET","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Dustin May","hand":"R"},"home_sp":{"name":"Jack Flaherty","hand":"R"},"market_away_ml":144,"market_home_ml":-171,"market_total":7.5,"park_factor":0.96,"away_lineup":[{"slot":1,"name":"JJ Wetherholt","hand":"L"},{"slot":2,"name":"Ivan Herrera","hand":"R"}],"home_lineup":[{"slot":1,"name":"Colt Keith","hand":"L"},{"slot":2,"name":"Kevin McGonigle","hand":"L"}]}]\n\nTeams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH)\nPark factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:0.97 SEA:0.95 LAA:0.97 HOU:1.00 ATH:0.96 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93\nHands: R=right L=left S=switch\nRaw JSON array only, no explanation.\n\nPAGE TEXT:\n' + chunk;
 
