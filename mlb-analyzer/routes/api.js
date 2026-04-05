@@ -115,9 +115,10 @@ router.post('/games/upsert', async (req, res) => {
   try {
     const g = req.body;
     const gameId = g.game_id || (g.away_team + '-' + g.home_team).toLowerCase();
-    q.upsertGame.run({
+  q.upsertGame.run({
       game_date: g.game_date, game_id: gameId,
       away_team: g.away_team, home_team: g.home_team,
+      game_time: g.game_time || null,
       away_sp: g.away_sp, away_sp_hand: g.away_sp_hand,
       home_sp: g.home_sp, home_sp_hand: g.home_sp_hand,
       market_away_ml: g.market_away_ml, market_home_ml: g.market_home_ml,
