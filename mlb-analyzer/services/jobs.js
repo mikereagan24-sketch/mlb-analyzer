@@ -248,7 +248,7 @@ async function runScoreJob(dateStr) {
 function startCronJobs() {
   // 5:00 PM Eastern = 22:00 UTC (21:00 UTC during EDT)
   // Using 22:00 UTC — covers both EST and EDT safely
-  cron.schedule('0 17 22 * * *', () => {
+  cron.schedule('0 17 ,22 * * *', () => {
     console.log('[cron] Triggering lineup pull');
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
