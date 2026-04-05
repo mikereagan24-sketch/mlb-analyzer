@@ -213,4 +213,59 @@ router.delete('/games/:date/:gameId', (req, res) => {
   }
 });
 
+// ── WOBA LOOKUP FOR MATCHUP TAB ─────────────────────────────────────────────
+router.get('/woba/game/:date/:gameId', (req, res) => {
+  try {
+    const { date, gameId } = req.params;
+    const game = q.getGameById.get(date, gameId);
+    if (!game) return res.status(404).json({ error: 'Game not found' });
+    const wobaIdx = getWobaIndex();
+    const settings = getSettings();
+    const W_PROJ = settings.W_PROJ || 0.65;
+    const W_ACT  = settings.W_ACT  || 0.35;
+    const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
+    const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
+    function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
+    function lookupBatter(name, hand, oppSpHand) {
+      const eff=hand==='S'?(oppSpHand==='R'?'L':'R'):hand;
+      const vsKey=eff==='L'?'bat-proj-lhp':'bat-proj-rhp';
+      const actKey=eff==='L'?'bat-act-lhp':'bat-act-rhp';
+      const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
+      const dfltV=oppSpHand==='R'?dflt.vsRHP:dflt.vsLHP;
+      const key=normName(name);
+      const proj=wobaIdx[vsKey]&&wobaIdx[vsKey][key]?wobaIdx[vsKey][key].woba:null;
+      const act=wobaIdx[actKey]&&wobaIdx[actKey][key]?wobaIdx[actKey][key].woba:null;
+      if(proj&&act) return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
+      if(proj) return{woba:+proj.toFixed(3),source:'proj'};
+      if(act) return{woba:+act.toFixed(3),source:'act'};
+      return{woba:+dfltV.toFixed(3),source:'default'};
+    }
+    function lookupPitcher(name, hand) {
+      const dflt=PIT_DFLT[hand]||PIT_DFLT['R'];
+      const key=normName(name);
+      function bs(projKey,actKey,dfltV){
+        const proj=wobaIdx[projKey]&&wobaIdx[projKey][key]?wobaIdx[projKey][key].woba:null;
+        const act=wobaIdx[actKey]&&wobaIdx[actKey][key]?wobaIdx[actKey][key].woba:null;
+        if(proj&&act) return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
+        if(proj) return{woba:+proj.toFixed(3),source:'proj'};
+        if(act) return{woba:+act.toFixed(3),source:'act'};
+        return{woba:+dfltV.toFixed(3),source:'default'};
+      }
+      return{vsLHB:bs('pit-proj-lhb','pit-act-lhb',dflt.vsLHB),vsRHB:bs('pit-proj-rhb','pit-act-rhb',dflt.vsRHB)};
+    }
+    const awayLineup=tryParse(game.away_lineup_json)||[];
+    const homeLineup=tryParse(game.home_lineup_json)||[];
+    res.json({
+      game_id:gameId,
+      away_sp_woba:lookupPitcher(game.away_sp,game.away_sp_hand||'R'),
+      home_sp_woba:lookupPitcher(game.home_sp,game.home_sp_hand||'R'),
+      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R')})),
+      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R')})),
+    });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+
 module.exports = router;
+
+
