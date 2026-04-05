@@ -1,7 +1,7 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchScores, makeGameId } = require('./scraper');
-const { runModel, getSignals, calcPnl, buildWobaIndex } = require('./model');
+const { runModel, getSignals, calcPnl } = require('./model');
 
 function todayET() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -38,10 +38,14 @@ function tryParse(str) {
   try { return str ? JSON.parse(str) : null; } catch { return null; }
 }
 function processGameSignals(gameRow, wobaIdx, settings) {
-  const game = { ...gameRow, awayLineup: tryParse(gameRow.away_lineup_json) || [], homeLineup: tryParse(gameRow.home_lineup_json) || [] };
+  const game = {
+    ...gameRow,
+    awayLineup: tryParse(gameRow.away_lineup_json) || [],
+    homeLineup: tryParse(gameRow.home_lineup_json) || [],
+  };
   const model = runModel(game, wobaIdx, settings);
   const signals = getSignals(game, model, settings);
-  db.prepare('UPDATE game_log SET model_away_ml=?,model_home_ml=?,model_total=?,updated_at=datetime("now") WHERE game_date=? AND game_id=?')
+  db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
     .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
@@ -53,8 +57,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     q.insertSignal.run({
       game_log_id: gl.id, game_date: gameRow.game_date, game_id: gameRow.game_id,
       signal_type: sig.type, signal_side: sig.side, signal_label: sig.label, category: sig.category,
-      market_line: sig.type==='ML' ? (sig.side==='away' ? gl.market_away_ml : gl.market_home_ml) : gl.market_total,
-      model_line: sig.type==='ML' ? (sig.side==='away' ? model.aML : model.hML) : Math.round(model.estTot*10),
+      market_line: sig.type === 'ML' ? (sig.side === 'away' ? gl.market_away_ml : gl.market_home_ml) : gl.market_total,
+      model_line: sig.type === 'ML' ? (sig.side === 'away' ? model.aML : model.hML) : Math.round(model.estTot * 10),
       edge_pct: sig.edge, outcome, pnl,
     });
   }
@@ -69,11 +73,11 @@ async function runLineupJob(dateStr) {
     const games = await fetchLineups(dateStr);
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
-    const insertLineupJSON = db.prepare('UPDATE game_log SET away_lineup_json=?,home_lineup_json=?,updated_at=datetime("now") WHERE game_date=? AND game_id=?');
+    const updateLineup = db.prepare(`UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`);
     for (const g of games) {
       const gameId = g.game_id || makeGameId(g.away_team, g.home_team);
-      const awayLU = (g.away_lineup||[]).map(b=>({name:b.name,hand:b.hand}));
-      const homeLU = (g.home_lineup||[]).map(b=>({name:b.name,hand:b.hand}));
+      const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
+      const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       q.upsertGame.run({
         game_date: dateStr, game_id: gameId,
         away_team: g.away_team, home_team: g.home_team,
@@ -83,10 +87,14 @@ async function runLineupJob(dateStr) {
         market_total: g.market_total, park_factor: g.park_factor || 1.0,
         model_away_ml: null, model_home_ml: null, model_total: null, lineup_source: 'auto',
       });
-      insertLineupJSON.run(JSON.stringify(awayLU), JSON.stringify(homeLU), dateStr, gameId);
+      updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
       if (gameRow) {
-        processGameSignals({ ...gameRow, away_lineup_json: JSON.stringify(awayLU), home_lineup_json: JSON.stringify(homeLU) }, wobaIdx, settings);
+        processGameSignals({
+          ...gameRow,
+          away_lineup_json: JSON.stringify(awayLU),
+          home_lineup_json: JSON.stringify(homeLU),
+        }, wobaIdx, settings);
         gamesUpdated++;
       }
     }
@@ -108,13 +116,20 @@ async function runScoreJob(dateStr) {
     const scores = await fetchScores(dateStr);
     for (const s of scores) {
       const gameId = makeGameId(s.away_team, s.home_team);
-      q.updateScores.run({ game_date: dateStr, game_id: gameId, away_score: s.away_score, home_score: s.home_score, scores_source: 'bref' });
-      const gameRow = db.prepare('SELECT * FROM game_log WHERE game_date=? AND game_id=?').get(dateStr, gameId);
+      q.updateScores.run({
+        game_date: dateStr, game_id: gameId,
+        away_score: s.away_score, home_score: s.home_score,
+        scores_source: 'bref',
+      });
+      const gameRow = db.prepare(`SELECT * FROM game_log WHERE game_date=? AND game_id=?`).get(dateStr, gameId);
       if (gameRow) {
         const signals = q.getSignalsByDate.all(dateStr).filter(sig => sig.game_id === gameId);
-        const updateSignal = db.prepare('UPDATE bet_signals SET outcome=?,pnl=? WHERE id=?');
+        const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
         for (const sig of signals) {
-          const { outcome, pnl } = calcPnl({ type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line }, s.away_score, s.home_score, gameRow.market_total);
+          const { outcome, pnl } = calcPnl(
+            { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line },
+            s.away_score, s.home_score, gameRow.market_total
+          );
           updateSignal.run(outcome, pnl, sig.id);
         }
         gamesUpdated++;
@@ -131,21 +146,18 @@ async function runScoreJob(dateStr) {
 }
 
 function startCronJobs() {
-  // Noon ET = 17:00 UTC
   cron.schedule('0 17 * * *', () => {
-    console.log('[cron] Noon lineup pull');
+    console.log('[cron] Noon ET lineup pull');
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
 
-  // 5 PM ET = 22:00 UTC
   cron.schedule('0 22 * * *', () => {
-    console.log('[cron] Evening lineup pull');
+    console.log('[cron] 5PM ET lineup pull');
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
 
-  // 7 AM ET = 12:00 UTC — scores for yesterday
   cron.schedule('0 12 * * *', () => {
-    console.log('[cron] Morning score pull');
+    console.log('[cron] 7AM ET score pull');
     runScoreJob(yesterdayET());
   }, { timezone: 'UTC' });
 
