@@ -201,4 +201,16 @@ router.get('/export/csv', (req, res) => {
   res.send(csv);
 });
 
+// ── DELETE GAME ───────────────────────────────────────────────────────────
+router.delete('/games/:date/:gameId', (req, res) => {
+  try {
+    const { date, gameId } = req.params;
+    db.prepare('DELETE FROM bet_signals WHERE game_date=? AND game_id=?').run(date, gameId);
+    db.prepare('DELETE FROM game_log WHERE game_date=? AND game_id=?').run(date, gameId);
+    res.json({ success: true, deleted: gameId });
+  } catch(err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
