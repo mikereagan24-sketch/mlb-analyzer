@@ -80,7 +80,7 @@ async function runLineupJob(dateStr) {
       const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       q.upsertGame.run({
         game_date: dateStr, game_id: gameId,
-        away_team: g.away_team, home_team: g.home_team,
+        away_team: g.away_team, home_team: g.home_team, game_time: g.time || null,
         away_sp: g.away_sp && g.away_sp.name, away_sp_hand: g.away_sp && g.away_sp.hand,
         home_sp: g.home_sp && g.home_sp.name, home_sp_hand: g.home_sp && g.home_sp.hand,
         market_away_ml: g.market_away_ml, market_home_ml: g.market_home_ml,
