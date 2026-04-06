@@ -68,7 +68,7 @@ router.post('/upload/:key?', upload.single('file'), (req, res) => {
     const expandedRows = [];
     for (const r of rows) {
       expandedRows.push(r); // plain name
-      if (r.team) expandedRows.push({...r, name: r.name+'|'+r.team}); // name|TEAM
+      if (r.team) expandedRows.push({...r, name: r.name+' '+r.team}); // "Jose Ramirez KC" -> stored as "jose ramirez kc" after normName
     }
     q.upsertWobaBatch(key, expandedRows);
     q.logUpload.run(key, file.originalname, rows.length);
@@ -248,8 +248,9 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
       function findIn(idx,k,teamHint){
         if(!idx)return null;
-        // 1. Try name|TEAM exact match first (most specific)
-        if(teamHint&&idx[k+'|'+teamHint])return idx[k+'|'+teamHint].woba;
+        // 1. Try name+' '+team match first (stored as "jose ramirez cle" after normName)
+        const teamKey=k+' '+teamHint.toLowerCase();
+        if(teamHint&&idx[teamKey])return idx[teamKey].woba;
         // 2. Exact name match
         if(idx[k])return idx[k].woba;
         // 3. Abbreviated name (e.g. "m busch"): find entries matching initial + last name + team
@@ -257,17 +258,19 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
           const initial=parts[0],last=parts[parts.length-1];
           // Try with team first
           if(teamHint){
+            const tl=teamHint.toLowerCase();
             const te=Object.entries(idx).find(([n])=>{
-              const base=n.includes('|')?n.split('|')[0]:n;
-              const nt=n.includes('|')?n.split('|')[1]:null;
+              if(!n.endsWith(' '+tl))return false;
+              const base=n.slice(0,n.length-tl.length-1).trim();
               const p=stripJr(base).split(' ');
-              return nt===teamHint&&p[p.length-1]===last&&p[0]&&p[0][0]===initial;
+              return p[p.length-1]===last&&p[0]&&p[0][0]===initial;
             });
             if(te)return te[1].woba;
           }
           // Without team
           const e=Object.entries(idx).filter(([n])=>{
-            if(n.includes('|'))return false; // skip name|TEAM entries in no-team pass
+            // skip team-suffixed entries (end with 2-3 letter team code like " cle" " kc" etc)
+            if(/\s[a-z]{2,3}$/.test(n))return false;
             const p=stripJr(n).split(' ');
             return p[p.length-1]===last&&p[0]&&p[0][0]===initial;
           });
@@ -284,15 +287,12 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         // 4. Full name: try stripping Jr/Sr suffixes
         const sk=stripJr(k);
         if(teamHint){
-          const te=Object.entries(idx).find(([n])=>{
-            const base=n.includes('|')?n.split('|')[0]:n;
-            const nt=n.includes('|')?n.split('|')[1]:null;
-            return nt===teamHint&&stripJr(base)===sk;
-          });
-          if(te)return te[1].woba;
+          const tl=teamHint.toLowerCase();
+          const teamKey2=sk+' '+tl;
+          if(idx[teamKey2])return idx[teamKey2].woba;
         }
         // Plain name with suffix stripping
-        const e2=Object.entries(idx).filter(([n])=>!n.includes('|')&&stripJr(n)===sk);
+        const e2=Object.entries(idx).filter(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
         if(e2.length===1)return e2[0][1].woba;
         if(e2.length>1)return e2[0][1].woba; // last resort
         return null;
