@@ -233,8 +233,17 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
       const dfltV=oppSpHand==='R'?dflt.vsRHP:dflt.vsLHP;
       const key=normName(name);
-      const proj=wobaIdx[vsKey]&&wobaIdx[vsKey][key]?wobaIdx[vsKey][key].woba:null;
-      const act=wobaIdx[actKey]&&wobaIdx[actKey][key]?wobaIdx[actKey][key].woba:null;
+      // Also try last-name lookup for abbreviated names like "M. Busch" -> match "michael busch"
+      const lastName=key.split(' ').filter(w=>!w.match(/^[a-z]$/)).pop()||key;
+      function findInIdx(idx,k){
+        if(!idx)return null;
+        if(idx[k])return idx[k].woba;
+        // Try matching by last name only
+        const entry=Object.entries(idx).find(([n])=>n.endsWith(' '+lastName)||n===lastName);
+        return entry?entry[1].woba:null;
+      }
+      const proj=findInIdx(wobaIdx[vsKey],key);
+      const act=findInIdx(wobaIdx[actKey],key);
       if(proj&&act) return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
       if(proj) return{woba:+proj.toFixed(3),source:'proj'};
       if(act) return{woba:+act.toFixed(3),source:'act'};
