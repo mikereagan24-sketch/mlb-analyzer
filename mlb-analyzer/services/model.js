@@ -41,14 +41,49 @@ function buildWobaIndex(rows) {
   return idx;
 }
 
-function fuzzyLookup(keyMap, name) {
+function fuzzyLookup(keyMap, name, teamHint) {
   if (!keyMap) return null;
   const k = normName(name);
+  const parts = k.split(' ');
+  const isAbbrev = parts.length >= 2 && parts[0].length === 1;
+  function stripSfx(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
+  // 1. Team-keyed exact match: "jose ramirez cle"
+  if (teamHint) {
+    const tk = k + ' ' + teamHint.toLowerCase();
+    if (keyMap[tk]) return keyMap[tk];
+  }
+  // 2. Exact match
   if (keyMap[k]) return keyMap[k];
-  const words = k.split(' ').filter(w => w.length > 2);
-  if (!words.length) return null;
-  const entry = Object.entries(keyMap).find(([key]) => words.every(w => key.includes(w)));
-  return entry ? entry[1] : null;
+  // 3. Abbreviated name match with team: "m garcia kc"
+  if (isAbbrev && teamHint) {
+    const initial = parts[0], last = parts[parts.length-1], tl = teamHint.toLowerCase();
+    const e = Object.entries(keyMap).find(([n]) => {
+      if (!n.endsWith(' '+tl)) return false;
+      const base = n.slice(0, n.length - tl.length - 1).trim();
+      const p = stripSfx(base).split(' ');
+      return p[p.length-1] === last && p[0] && p[0][0] === initial;
+    });
+    if (e) return e[1];
+  }
+  // 4. Abbreviated name match without team
+  if (isAbbrev) {
+    const initial = parts[0], last = parts[parts.length-1];
+    const matches = Object.entries(keyMap).filter(([n]) => {
+      if (/\s[a-z]{2,3}$/.test(n)) return false; // skip team-suffixed
+      const p = stripSfx(n).split(' ');
+      return p[p.length-1] === last && p[0] && p[0][0] === initial;
+    });
+    if (matches.length === 1) return matches[0][1];
+  }
+  // 5. Jr/Sr suffix stripping with team
+  const sk = stripSfx(k);
+  if (teamHint) {
+    const tk2 = sk + ' ' + teamHint.toLowerCase();
+    if (keyMap[tk2]) return keyMap[tk2];
+  }
+  // 6. Plain suffix stripping (exclude team-suffixed entries)
+  const e2 = Object.entries(keyMap).find(([n]) => !(/\s[a-z]{2,3}$/.test(n)) && stripSfx(n) === sk);
+  return e2 ? e2[1] : null;
 }
 
 function blendWoba(proj, act, minSample) {
@@ -60,15 +95,15 @@ function blendWoba(proj, act, minSample) {
   return null;
 }
 
-function getBatterWoba(idx, name, hand) {
+function getBatterWoba(idx, name, hand, teamHint) {
   const bL = blendWoba(
-    fuzzyLookup(idx['bat-proj-lhp'], name),
-    fuzzyLookup(idx['bat-act-lhp'], name),
+    fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
+    fuzzyLookup(idx['bat-act-lhp'], name, teamHint),
     MIN_PA
   );
   const bR = blendWoba(
-    fuzzyLookup(idx['bat-proj-rhp'], name),
-    fuzzyLookup(idx['bat-act-rhp'], name),
+    fuzzyLookup(idx['bat-proj-rhp'], name, teamHint),
+    fuzzyLookup(idx['bat-act-rhp'], name, teamHint),
     MIN_PA
   );
   const eff = hand === 'S' ? 'R' : (hand || 'R');
@@ -80,15 +115,15 @@ function getBatterWoba(idx, name, hand) {
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source: 'fallback' };
 }
 
-function getPitcherWoba(idx, name, hand) {
+function getPitcherWoba(idx, name, hand, teamHint) {
   const bL = blendWoba(
-    fuzzyLookup(idx['pit-proj-lhb'], name),
-    fuzzyLookup(idx['pit-act-lhb'], name),
+    fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
+    fuzzyLookup(idx['pit-act-lhb'], name, teamHint),
     MIN_BF
   );
   const bR = blendWoba(
-    fuzzyLookup(idx['pit-proj-rhb'], name),
-    fuzzyLookup(idx['pit-act-rhb'], name),
+    fuzzyLookup(idx['pit-proj-rhb'], name, teamHint),
+    fuzzyLookup(idx['pit-act-rhb'], name, teamHint),
     MIN_BF
   );
   const d = PIT_DFLT[hand] || PIT_DFLT['R'];
@@ -145,16 +180,16 @@ function runModel(game, wobaIdx, settings) {
     W_PIT = 0.5, W_BAT = 0.5,
   } = settings;
 
-  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand);
-  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand);
+  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team);
+  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team);
 
   const awayLU = (game.awayLineup || []).map(b => ({
     ...b,
-    ...getBatterWoba(wobaIdx, b.name, b.hand),
+    ...getBatterWoba(wobaIdx, b.name, b.hand, game.away_team),
   }));
   const homeLU = (game.homeLineup || []).map(b => ({
     ...b,
-    ...getBatterWoba(wobaIdx, b.name, b.hand),
+    ...getBatterWoba(wobaIdx, b.name, b.hand, game.home_team),
   }));
 
   // Away batters face HOME pitcher; home batters face AWAY pitcher
