@@ -228,8 +228,8 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
     function lookupBatter(name, hand, oppSpHand) {
       const eff=hand==='S'?(oppSpHand==='R'?'L':'R'):hand;
-      const vsKey=eff==='L'?'bat-proj-lhp':'bat-proj-rhp';
-      const actKey=eff==='L'?'bat-act-lhp':'bat-act-rhp';
+      const vsKey=oppSpHand==='R'?'bat-proj-rhp':'bat-proj-lhp';
+      const actKey=oppSpHand==='R'?'bat-act-rhp':'bat-act-lhp';
       const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
       const dfltV=oppSpHand==='R'?dflt.vsRHP:dflt.vsLHP;
       const key=normName(name);
