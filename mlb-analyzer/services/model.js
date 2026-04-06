@@ -138,14 +138,15 @@ function impliedP(ml) {
 }
 
 function runModel(game, wobaIdx, settings) {
-  const RUN_MULT  = parseFloat(settings.RUN_MULT)  || 48;
-  const HFA_BOOST = parseFloat(settings.HFA_BOOST) || 0.02;
-  const FAV_ADJ   = parseFloat(settings.FAV_ADJ)   || 10;
-  const DOG_ADJ   = parseFloat(settings.DOG_ADJ)   || 5;
-  const W_PIT     = parseFloat(settings.W_PIT)     || 0.5;
-  const W_BAT     = parseFloat(settings.W_BAT)     || 0.5;
-  const W_PROJ    = parseFloat(settings.W_PROJ)    || 0.65;
-  const W_ACT     = parseFloat(settings.W_ACT)     || 0.35;
+    const num = (v, def) => { const n = Number(v); return isNaN(n) ? def : n; };
+  const RUN_MULT  = num(settings.RUN_MULT,  48);
+  const HFA_BOOST = num(settings.HFA_BOOST, 0.02);
+  const FAV_ADJ   = num(settings.FAV_ADJ,   0);
+  const DOG_ADJ   = num(settings.DOG_ADJ,   0);
+  const W_PIT     = num(settings.W_PIT,     0.5);
+  const W_BAT     = num(settings.W_BAT,     0.5);
+  const W_PROJ    = num(settings.W_PROJ,    0.65);
+  const W_ACT     = num(settings.W_ACT,     0.35);
 
   const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT);
   const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT);
