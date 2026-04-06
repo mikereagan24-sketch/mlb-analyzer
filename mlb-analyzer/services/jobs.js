@@ -33,14 +33,14 @@ function getSettings() {
 }
 
 function getWobaIndex() {
-  const rows = db.prepare('SELECT data_key, player_name, woba, sample_size FROM woba_data').all();
+  const rows = db.prepare('SELECT data_key, player_name, team_abbr, woba, sample_size FROM woba_data').all();
   const idx = {};
   for (const r of rows) {
     if (!idx[r.data_key]) idx[r.data_key] = {};
     const key = r.player_name.toLowerCase()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
-    idx[r.data_key][key] = { woba: r.woba, sample: r.sample_size };
+    idx[r.data_key][key] = { woba: r.woba, sample: r.sample_size, team: r.team_abbr||null };
   }
   return idx;
 }
