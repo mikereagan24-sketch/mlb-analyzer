@@ -15,20 +15,22 @@ function yesterdayET() {
 function getSettings() {
   const rows = q.getAllSettings.all();
   const s = {};
-  rows.forEach(r => { s[r.key] = parseFloat(r.value) || r.value; });
+  rows.forEach(r => { s[r.key] = r.value; });
+  // Use Number() and ?? so 0 is valid (|| would replace 0 with default)
+  const num = (key, def) => { const v = Number(s[key]); return isNaN(v) ? def : v; };
   return {
-    RUN_MULT: s.run_mult || 48,
-    HFA_BOOST: s.hfa_boost || 0.02,
-    FAV_ADJ: s.fav_adj || 10,
-    DOG_ADJ: s.dog_adj || 5,
-    W_PIT: s.w_pit || 0.5,
-    W_BAT: s.w_bat || 0.5,
-    W_PROJ: s.w_proj || 0.65,
-    W_ACT: s.w_act || 0.35,
-    ML_VALUE_EDGE: s.ml_value_edge || 0.05,
-    ML_LEAN_EDGE: s.ml_lean_edge || 0.02,
-    TOT_VALUE_EDGE: s.tot_value_edge || 0.4,
-    TOT_LEAN_EDGE: s.tot_lean_edge || 0.2,
+    RUN_MULT:       num('run_mult', 48),
+    HFA_BOOST:      num('hfa_boost', 0.02),
+    FAV_ADJ:        num('fav_adj', 0),
+    DOG_ADJ:        num('dog_adj', 0),
+    W_PIT:          num('w_pit', 0.5),
+    W_BAT:          num('w_bat', 0.5),
+    W_PROJ:         num('w_proj', 0.65),
+    W_ACT:          num('w_act', 0.35),
+    ML_VALUE_EDGE:  num('ml_value_edge', 0.05),
+    ML_LEAN_EDGE:   num('ml_lean_edge', 0.02),
+    TOT_VALUE_EDGE: num('tot_value_edge', 0.4),
+    TOT_LEAN_EDGE:  num('tot_lean_edge', 0.2),
   };
 }
 
