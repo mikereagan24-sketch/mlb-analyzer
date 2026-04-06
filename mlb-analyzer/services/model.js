@@ -86,16 +86,18 @@ function fuzzyLookup(keyMap, name, teamHint) {
   return e2 ? e2[1] : null;
 }
 
-function blendWoba(proj, act, minSample) {
+function blendWoba(proj, act, minSample, W_PROJ, W_ACT) {
   const hp = proj && !isNaN(proj.woba);
   const ha = act && !isNaN(act.woba) && act.sample >= minSample;
-  if (hp && ha) return { woba: proj.woba * 0.65 + act.woba * 0.35, source: 'blend' };
+  const wp = W_PROJ || 0.65;
+  const wa = W_ACT || 0.35;
+  if (hp && ha) return { woba: proj.woba * wp + act.woba * wa, source: 'blend' };
   if (hp) return { woba: proj.woba, source: 'steamer' };
   if (ha) return { woba: act.woba, source: 'actual' };
   return null;
 }
 
-function getBatterWoba(idx, name, hand, teamHint) {
+function getBatterWoba(idx, name, hand, teamHint, W_PROJ, W_ACT) {
   const bL = blendWoba(
     fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
     fuzzyLookup(idx['bat-act-lhp'], name, teamHint),
@@ -115,7 +117,7 @@ function getBatterWoba(idx, name, hand, teamHint) {
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source: 'fallback' };
 }
 
-function getPitcherWoba(idx, name, hand, teamHint) {
+function getPitcherWoba(idx, name, hand, teamHint, W_PROJ, W_ACT) {
   const bL = blendWoba(
     fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
     fuzzyLookup(idx['pit-act-lhb'], name, teamHint),
@@ -152,11 +154,9 @@ function rawToML(wp) {
     : Math.round((1 - clamped) / clamped * 100);
 }
 function applySpread(aML, hML, FAV_ADJ, DOG_ADJ) {
-  // Fav is whichever ML is more negative (lower value)
   const favIsAway = aML <= hML;
   const favML = favIsAway ? aML : hML;
-  // Dog = fav * -1 - 15; if result < 100 (2 digits), add 10 and flip
-  let dog = (favML * -1) - 15;
+  let dog = (favML * -1) - (FAV_ADJ || 15);
   if (Math.abs(dog) < 100) dog = -(dog + 10);
   return { adjA: favIsAway ? favML : dog, adjH: favIsAway ? dog : favML };
 }
@@ -180,16 +180,16 @@ function runModel(game, wobaIdx, settings) {
     W_PIT = 0.5, W_BAT = 0.5,
   } = settings;
 
-  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team);
-  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team);
+  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT);
+  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT);
 
   const awayLU = (game.awayLineup || []).map(b => ({
     ...b,
-    ...getBatterWoba(wobaIdx, b.name, b.hand, game.away_team),
+    ...getBatterWoba(wobaIdx, b.name, b.hand, game.away_team, W_PROJ, W_ACT),
   }));
   const homeLU = (game.homeLineup || []).map(b => ({
     ...b,
-    ...getBatterWoba(wobaIdx, b.name, b.hand, game.home_team),
+    ...getBatterWoba(wobaIdx, b.name, b.hand, game.home_team, W_PROJ, W_ACT),
   }));
 
   // Away batters face HOME pitcher; home batters face AWAY pitcher
