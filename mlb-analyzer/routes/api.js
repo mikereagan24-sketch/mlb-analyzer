@@ -227,42 +227,34 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
     function lookupBatter(name, hand, oppSpHand) {
-      const eff=hand==='S'?(oppSpHand==='R'?'L':'R'):hand;
       const vsKey=oppSpHand==='R'?'bat-proj-rhp':'bat-proj-lhp';
       const actKey=oppSpHand==='R'?'bat-act-rhp':'bat-act-lhp';
       const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
       const dfltV=oppSpHand==='R'?dflt.vsRHP:dflt.vsLHP;
       const key=normName(name);
-      // Smart lookup: exact match, then initial+lastname match for abbreviated names
-      // e.g. "m busch" -> finds "michael busch" but NOT "marcus busch" (wrong player)
-      // We require: same last name AND first initial matches
-      const keyParts=key.split(' ');
-      const keyLast=keyParts[keyParts.length-1];
-      const keyFirst=keyParts[0]||'';
-      const keyInitial=keyFirst.length===1?keyFirst:keyFirst[0]; // 'm' or first char of full name
-      function findInIdx(idx,k){
+      const parts=key.split(' ');
+      const isAbbrev=parts.length>=2&&parts[0].length===1;
+      function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
+      function findIn(idx,k){
         if(!idx)return null;
         if(idx[k])return idx[k].woba;
-        // Try abbreviated name match: same last name + first initial matches
-        // e.g. "m busch" -> "michael busch": last="busch" matches, initial "m"==="m" ✓
-        // "jose ramirez" -> exact full name match required (no abbreviation)
-        if(keyFirst.length===1){
-          // Abbreviated: find entry where last name matches AND first char matches initial
-          const entry=Object.entries(idx).find(([n])=>{
-            const parts=n.split(' ');
-            const last=parts[parts.length-1];
-            const first=parts[0]||'';
-            return last===keyLast && first[0]===keyInitial;
+        if(isAbbrev){
+          const initial=parts[0],last=parts[parts.length-1];
+          const e=Object.entries(idx).find(([n])=>{
+            const p=stripJr(n).split(' ');
+            return p[p.length-1]===last&&p[0]&&p[0][0]===initial;
           });
-          return entry?entry[1].woba:null;
+          return e?e[1].woba:null;
         }
-        return null; // Full name given but not found - don't guess
+        const sk=stripJr(k);
+        const e2=Object.entries(idx).find(([n])=>stripJr(n)===sk);
+        return e2?e2[1].woba:null;
       }
-      const proj=findInIdx(wobaIdx[vsKey],key);
-      const act=findInIdx(wobaIdx[actKey],key);
-      if(proj&&act) return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
-      if(proj) return{woba:+proj.toFixed(3),source:'proj'};
-      if(act) return{woba:+act.toFixed(3),source:'act'};
+      const proj=findIn(wobaIdx[vsKey],key);
+      const act=findIn(wobaIdx[actKey],key);
+      if(proj&&act)return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
+      if(proj)return{woba:+proj.toFixed(3),source:'proj'};
+      if(act)return{woba:+act.toFixed(3),source:'act'};
       return{woba:+dfltV.toFixed(3),source:'default'};
     }
     function lookupPitcher(name, hand) {
