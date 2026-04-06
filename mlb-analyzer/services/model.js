@@ -175,8 +175,11 @@ function runModel(game, wobaIdx, settings) {
   const pf = game.park_factor || 1.0;
   const aRuns = Math.max(0, (aTeamWoba - 0.230) * RUN_MULT * pf);
   const hRuns = Math.max(0, (hTeamWoba - 0.230) * RUN_MULT * pf);
-  const rawHW = hRuns <= 0 ? 0.5 : hRuns ** 2 / (hRuns ** 2 + aRuns ** 2);
-  const adjHW = Math.min(rawHW + HFA_BOOST, 0.98);
+  const rawHW = (aRuns <= 0 && hRuns <= 0) ? 0.5 :
+    hRuns <= 0 ? 0.25 :
+    aRuns <= 0 ? 0.75 :
+    hRuns ** 1.83 / (hRuns ** 1.83 + aRuns ** 1.83);
+  const adjHW = Math.min(Math.max(rawHW + HFA_BOOST, 0.25), 0.75);
   const adjAW = 1 - adjHW;
 
   const rawAML = rawToML(adjAW);
