@@ -9,7 +9,7 @@
 :root{
 --bg:#ffffff;--bg2:#f5f5f4;--bg3:#efefed;
 --text:#1a1a18;--text2:#6b6b68;--text3:#9a9a96;
---border:rgba(0,0,0,.12);--border2:rgba(0,0,0,.22);
+--border:rgba(0,0,0,.12);--border2:rgba(0,0,0,.22);hh
 --r-md:8px;--r-lg:12px;
 --green:#0f5c30;--green-bg:#d4f0e0;--green-border:#9fdfbb;
 --yellow:#b07a00;--yellow-bg:#faeeda;--yellow-border:#f5c475;
@@ -537,61 +537,46 @@ function wobaHeat(w){
   return'background:rgba('+r+','+g+','+b+','+a+');color:rgb('+Math.round(r*.55)+','+Math.round(g*.55)+','+Math.round(b*.55)+');border-radius:3px;padding:3px 4px';
 }
 
-function renderMatchupGame(id){
+async function renderMatchupGame(id){
   const g=currentGames.find(x=>x.game_id===id);
   if(!g){document.getElementById('mu-content').innerHTML='<div class="notice">Select a game above</div>';return;}
-
-  // Use server-computed wOBA from game model data
-  // The server runs the model and stores model_away_ml etc — for batter wOBA display
-  // we fetch the full game detail which includes lineup with wOBA if stored
-  const awayLU=g.away_lineup||[];
-  const homeLU=g.home_lineup||[];
-
-  // Defaults when server wOBA not available
-  const BAT_DFLT={R:{vsRHP:.305,vsLHP:.325},L:{vsRHP:.330,vsLHP:.290},S:{vsRHP:.322,vsLHP:.308}};
+  const date=document.getElementById('games-date').value||todayStr();
+  document.getElementById('mu-content').innerHTML='<div class="notice"><span class="spinner"></span>Loading wOBA data…</div>';
+  let wobaData=null;
+  try{wobaData=await api('/woba/game/'+date+'/'+id);}catch(e){console.log('wOBA fetch failed:',e.message);}
+  const awayLU=wobaData?wobaData.away_batters:(g.away_lineup||[]);
+  const homeLU=wobaData?wobaData.home_batters:(g.home_lineup||[]);
   const PIT_DFLT={R:{vsLHB:.320,vsRHB:.295},L:{vsLHB:.285,vsRHB:.330}};
-  const pitA=PIT_DFLT[g.away_sp_hand||'R'];
-  const pitH=PIT_DFLT[g.home_sp_hand||'R'];
-
+  const pitA=wobaData?wobaData.away_sp_woba:PIT_DFLT[g.away_sp_hand||'R'];
+  const pitH=wobaData?wobaData.home_sp_woba:PIT_DFLT[g.home_sp_hand||'R'];
+  function getPW(pitW,side){if(!pitW)return 0.310;const v=pitW[side];return v&&v.woba!=null?v.woba:(typeof v==='number'?v:0.310);}
+  function wobaHeat(w){const lo=0.260,mid=0.320,hi=0.380;let r,g,b;if(w>=hi){r=39;g=139;b=66;}else if(w>=mid){const t=(w-mid)/(hi-mid);r=Math.round(200-161*t);g=Math.round(180-41*t);b=Math.round(50+16*t);}else if(w>=lo){const t=(w-lo)/(mid-lo);r=200;g=Math.round(50+130*t);b=50;}else{r=200;g=50;b=50;}const a=Math.min(0.18+Math.abs(w-mid)/0.12*0.10,0.32);return'background:rgba('+r+','+g+','+b+','+a+');color:rgb('+Math.round(r*.55)+','+Math.round(g*.55)+','+Math.round(b*.55)+');border-radius:3px;padding:3px 4px';}
   function mkTbl(lineup,oppSpName,oppSpHand,pitW,teamLabel){
     let wBs=0,wPs=0,wAs=0,wTot=0;
     const rows=lineup.map((b,i)=>{
       const pa=PA_WEIGHTS[i]??3.77;
-      const d=BAT_DFLT[b.hand]||BAT_DFLT['R'];
       const eff=b.hand==='S'?(oppSpHand==='R'?'L':'R'):b.hand;
-      // Use server-stored wOBA if available on the batter object, else default
-      const batW=b.woba_vs_rhp!=null&&b.woba_vs_lhp!=null?(oppSpHand==='R'?b.woba_vs_rhp:b.woba_vs_lhp):(oppSpHand==='R'?d.vsRHP:d.vsLHP);
-      const pitWoba=eff==='L'?pitW.vsLHB:pitW.vsRHB;
+      const batW=b.woba!=null?b.woba:(eff==='L'?.330:.305);
+      const pitWoba=eff==='L'?getPW(pitW,'vsLHB'):getPW(pitW,'vsRHB');
       const avg=(batW+pitWoba)/2;
       wBs+=batW*pa;wPs+=pitWoba*pa;wAs+=avg*pa;wTot+=pa;
-      const hd=b.hand==='S'?'S→'+eff:b.hand;
-      return'<tr><td>'+(i+1)+'</td><td><span class="hbadge h'+eff+'" style="font-size:9px;width:20px;height:15px;line-height:15px">'+hd+'</span> '+b.name+'</td><td>'+pa.toFixed(2)+'</td><td style="'+wobaHeat(batW)+'">'+batW.toFixed(3)+'</td><td style="'+wobaHeat(pitWoba)+'">'+pitWoba.toFixed(3)+'</td><td style="'+wobaHeat(avg)+'">'+avg.toFixed(3)+'</td></tr>';
+      const hd=b.hand==='S'?'S->'+eff:b.hand;
+      const src=b.source&&b.source!=='default'?'<span style="font-size:9px;color:var(--green);margin-left:2px">●</span>':'<span style="font-size:9px;color:var(--text3);margin-left:2px">○</span>';
+      return'<tr><td>'+(i+1)+'</td><td><span class="hbadge h'+eff+'" style="font-size:9px;width:20px;height:15px;line-height:15px">'+hd+'</span> '+b.name+src+'</td><td>'+pa.toFixed(2)+'</td><td style="'+wobaHeat(batW)+'">'+batW.toFixed(3)+'</td><td style="'+wobaHeat(pitWoba)+'">'+pitWoba.toFixed(3)+'</td><td style="'+wobaHeat(avg)+'">'+avg.toFixed(3)+'</td></tr>';
     });
     const wtB=wBs/wTot,wtP=wPs/wTot,wtA=wAs/wTot;
-    return'<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup>'+
-      '<thead><tr><th>#</th><th style="text-align:left">'+teamLabel+' vs '+oppSpName+'<br>('+oppSpHand+'HP)</th><th>PA<br>wt</th><th>Bat<br>wOBA</th><th>Pit<br>wOBA</th><th>50/50<br>avg</th></tr></thead>'+
-      '<tbody>'+rows.join('')+'</tbody>'+
-      '<tfoot><tr><td></td><td>PA-wtd avg</td><td style="text-align:center;font-size:10px;color:var(--text2)">'+wTot.toFixed(1)+'</td><td style="'+wobaHeat(wtB)+';font-weight:500">'+wtB.toFixed(3)+'</td><td style="'+wobaHeat(wtP)+';font-weight:500">'+wtP.toFixed(3)+'</td><td style="'+wobaHeat(wtA)+';font-weight:500">'+wtA.toFixed(3)+'</td></tr></tfoot></table>';
+    return'<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+teamLabel+' vs '+oppSpName+'<br>('+oppSpHand+'HP)</th><th>PA<br>wt</th><th>Bat<br>wOBA</th><th>Pit<br>wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>PA-wtd avg</td><td style="text-align:center;font-size:10px;color:var(--text2)">'+wTot.toFixed(1)+'</td><td style="'+wobaHeat(wtB)+';font-weight:500">'+wtB.toFixed(3)+'</td><td style="'+wobaHeat(wtP)+';font-weight:500">'+wtP.toFixed(3)+'</td><td style="'+wobaHeat(wtA)+';font-weight:500">'+wtA.toFixed(3)+'</td></tr></tfoot></table>';
   }
-
   const spBadge=h=>'<span class="sp-hand-'+h+'">'+h+'HP</span>';
+  const srcNote=wobaData?'<div class="notice ok" style="margin-bottom:10px">✓ CSV wOBA loaded — ● CSV data   ○ default</div>':'<div class="notice warn" style="margin-bottom:10px">⚠ Using default wOBA values</div>';
+  const pitAvsL=getPW(pitA,'vsLHB'),pitAvsR=getPW(pitA,'vsRHB');
+  const pitHvsL=getPW(pitH,'vsLHB'),pitHvsR=getPW(pitH,'vsRHB');
   document.getElementById('mu-content').innerHTML=
-    '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap">'+
-    '<span style="font-size:16px;font-weight:500">'+g.away_team+' @ '+g.home_team+'</span>'+
-    '<span style="font-size:12px;color:var(--text2)">'+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' · O/U '+g.market_total+'</span>'+
-    (g.away_score!=null?'<span style="font-size:12px;font-weight:500;color:var(--navy)">Final: '+g.away_score+'-'+g.home_score+'</span>':'')+
-    (g.game_time?'<span style="font-size:11px;color:var(--text3)">'+etToPT(g.game_time)+'</span>':'')+
-    '</div>'+
-    '<div class="grid-2" style="margin-bottom:14px">'+
-    '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Away SP — pitches AGAINST home batters</div><div style="font-size:13px;font-weight:500">'+(g.away_sp||'TBD')+' '+spBadge(g.away_sp_hand||'?')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wobaHeat(pitA.vsLHB)+';padding:1px 5px">'+pitA.vsLHB.toFixed(3)+'</span> vsRHB <span style="'+wobaHeat(pitA.vsRHB)+';padding:1px 5px">'+pitA.vsRHB.toFixed(3)+'</span></div></div>'+
-    '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Home SP — pitches AGAINST away batters</div><div style="font-size:13px;font-weight:500">'+(g.home_sp||'TBD')+' '+spBadge(g.home_sp_hand||'?')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wobaHeat(pitH.vsLHB)+';padding:1px 5px">'+pitH.vsLHB.toFixed(3)+'</span> vsRHB <span style="'+wobaHeat(pitH.vsRHB)+';padding:1px 5px">'+pitH.vsRHB.toFixed(3)+'</span></div></div>'+
-    '</div>'+
-    '<div class="notice warn" style="margin-bottom:10px">ℹ️ Batter wOBA values shown are model defaults. Run <strong>⟳ Refresh Lineups</strong> then <strong>Rerun Model</strong> for CSV-calibrated values.</div>'+
+    '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap"><span style="font-size:16px;font-weight:500">'+g.away_team+' @ '+g.home_team+'</span><span style="font-size:12px;color:var(--text2)">'+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' · O/U '+g.market_total+'</span>'+(g.away_score!=null?'<span style="font-size:12px;font-weight:500;color:var(--navy)">Final: '+g.away_score+'-'+g.home_score+'</span>':'')+(g.game_time?'<span style="font-size:11px;color:var(--text3)">'+etToPT(g.game_time)+'</span>':'')+'</div>'+
+    srcNote+
+    '<div class="grid-2" style="margin-bottom:14px"><div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Away SP — pitches AGAINST home batters</div><div style="font-size:13px;font-weight:500">'+(g.away_sp||'TBD')+' '+spBadge(g.away_sp_hand||'?')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wobaHeat(pitAvsL)+';padding:1px 5px">'+pitAvsL.toFixed(3)+'</span> vsRHB <span style="'+wobaHeat(pitAvsR)+';padding:1px 5px">'+pitAvsR.toFixed(3)+'</span></div></div><div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Home SP — pitches AGAINST away batters</div><div style="font-size:13px;font-weight:500">'+(g.home_sp||'TBD')+' '+spBadge(g.home_sp_hand||'?')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wobaHeat(pitHvsL)+';padding:1px 5px">'+pitHvsL.toFixed(3)+'</span> vsRHB <span style="'+wobaHeat(pitHvsR)+';padding:1px 5px">'+pitHvsR.toFixed(3)+'</span></div></div></div>'+
     '<div class="grid-2" style="gap:16px"><div>'+mkTbl(awayLU,g.home_sp,g.home_sp_hand||'R',pitH,g.away_team)+'</div><div>'+mkTbl(homeLU,g.away_sp,g.away_sp_hand||'R',pitA,g.home_team)+'</div></div>'+
-    '<div style="margin-top:10px;display:flex;gap:8px">'+
-    '<button class="btn btn-primary btn-sm" onclick="analyzeGame(\''+g.game_id+'\')">⚡ Full analysis</button>'+
-    '<button class="btn btn-ghost btn-sm" onclick="rerunModel(\''+g.game_id+'\')">Rerun Model</button>'+
-    '</div>';
+    '<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(''+g.game_id+'')">&#9889; Full analysis</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(''+g.game_id+'')">Rerun Model</button></div>';
 }
 
 async function rerunModel(gameId){
