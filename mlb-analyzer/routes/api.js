@@ -33,6 +33,7 @@ function parseCSV(buffer, isPitcher) {
   const nameCol = Object.keys(records[0]).find(h => ['name', 'player', 'playername'].includes(h.toLowerCase()));
   const sampleCols = isPitcher ? ['tbf', 'bf', 'batters faced'] : ['pa', 'plate appearances'];
   const sampleCol = Object.keys(records[0]).find(h => sampleCols.includes(h.toLowerCase()));
+  const teamCol = Object.keys(records[0]).find(h => h.toLowerCase() === 'team');
   if (!wobaCol || !nameCol) return [];
   const rows = [];
   for (const r of records) {
@@ -40,7 +41,11 @@ function parseCSV(buffer, isPitcher) {
     const woba = parseFloat(r[wobaCol]);
     const sample = sampleCol ? parseFloat(r[sampleCol]) || 0 : 0;
     if (!name || isNaN(woba) || woba < 0.05 || woba > 0.8) continue;
-    rows.push({ name, woba, sample });
+    // Normalize FanGraphs team abbr (KCR->KC, SDP->SD, etc.)
+    const fgTeam = teamCol ? (r[teamCol]||'').trim().toUpperCase() : null;
+    const FG_MAP={'KCR':'KC','SDP':'SD','SFG':'SF','TBR':'TB','WSN':'WAS','CHW':'CWS'};
+    const team = fgTeam ? (FG_MAP[fgTeam]||fgTeam) : null;
+    rows.push({ name, woba, sample, team });
   }
   return rows;
 }
@@ -59,7 +64,13 @@ router.post('/upload/:key?', upload.single('file'), (req, res) => {
     const rows = parseCSV(file.buffer, isPitcher);
     if (!rows.length) return res.status(400).json({ error: 'No valid rows parsed. Check wOBA and Name columns.' });
     q.clearWobaKey.run(key);
-    q.upsertWobaBatch(key, rows);
+    // Store each player twice: by name alone AND by "name|TEAM" for disambiguation
+    const expandedRows = [];
+    for (const r of rows) {
+      expandedRows.push(r); // plain name
+      if (r.team) expandedRows.push({...r, name: r.name+'|'+r.team}); // name|TEAM
+    }
+    q.upsertWobaBatch(key, expandedRows);
     q.logUpload.run(key, file.originalname, rows.length);
     res.json({ success: true, key, filename: file.originalname, rows: rows.length });
   } catch (err) {
@@ -226,7 +237,7 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
-    function lookupBatter(name, hand, oppSpHand) {
+    function lookupBatter(name, hand, oppSpHand, teamHint) {
       const vsKey=oppSpHand==='R'?'bat-proj-rhp':'bat-proj-lhp';
       const actKey=oppSpHand==='R'?'bat-act-rhp':'bat-act-lhp';
       const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
@@ -235,29 +246,59 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       const parts=key.split(' ');
       const isAbbrev=parts.length>=2&&parts[0].length===1;
       function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-      function findIn(idx,k){
+      function findIn(idx,k,teamHint){
         if(!idx)return null;
+        // 1. Try name|TEAM exact match first (most specific)
+        if(teamHint&&idx[k+'|'+teamHint])return idx[k+'|'+teamHint].woba;
+        // 2. Exact name match
         if(idx[k])return idx[k].woba;
+        // 3. Abbreviated name (e.g. "m busch"): find entries matching initial + last name + team
         if(isAbbrev){
           const initial=parts[0],last=parts[parts.length-1];
-          const matches=Object.entries(idx).filter(([n])=>{
+          // Try with team first
+          if(teamHint){
+            const te=Object.entries(idx).find(([n])=>{
+              const base=n.includes('|')?n.split('|')[0]:n;
+              const nt=n.includes('|')?n.split('|')[1]:null;
+              const p=stripJr(base).split(' ');
+              return nt===teamHint&&p[p.length-1]===last&&p[0]&&p[0][0]===initial;
+            });
+            if(te)return te[1].woba;
+          }
+          // Without team
+          const e=Object.entries(idx).filter(([n])=>{
+            if(n.includes('|'))return false; // skip name|TEAM entries in no-team pass
             const p=stripJr(n).split(' ');
             return p[p.length-1]===last&&p[0]&&p[0][0]===initial;
           });
-          if(matches.length===1)return matches[0][1].woba;
-          // Multiple matches for abbreviated name — prefer highest wOBA (likely the star player)
-          if(matches.length>1)return matches.reduce((best,e)=>e[1].woba>best[1].woba?e:best)[1].woba;
+          if(e.length===1)return e[0][1].woba;
+          if(e.length>1){
+            // Multiple plain matches — try to pick by team via name|TEAM entries
+            for(const [,v] of e){
+              // We'll just return first match if no team disambiguation possible
+            }
+            return e[0][1].woba;
+          }
           return null;
         }
+        // 4. Full name: try stripping Jr/Sr suffixes
         const sk=stripJr(k);
-        const matches2=Object.entries(idx).filter(([n])=>stripJr(n)===sk);
-        if(matches2.length===1)return matches2[0][1].woba;
-        // Multiple exact name matches — pick highest wOBA (the known star)
-        if(matches2.length>1)return matches2.reduce((best,e)=>e[1].woba>best[1].woba?e:best)[1].woba;
+        if(teamHint){
+          const te=Object.entries(idx).find(([n])=>{
+            const base=n.includes('|')?n.split('|')[0]:n;
+            const nt=n.includes('|')?n.split('|')[1]:null;
+            return nt===teamHint&&stripJr(base)===sk;
+          });
+          if(te)return te[1].woba;
+        }
+        // Plain name with suffix stripping
+        const e2=Object.entries(idx).filter(([n])=>!n.includes('|')&&stripJr(n)===sk);
+        if(e2.length===1)return e2[0][1].woba;
+        if(e2.length>1)return e2[0][1].woba; // last resort
         return null;
       }
-      const proj=findIn(wobaIdx[vsKey],key);
-      const act=findIn(wobaIdx[actKey],key);
+      const proj=findIn(wobaIdx[vsKey],key,teamHint);
+      const act=findIn(wobaIdx[actKey],key,teamHint);
       if(proj&&act)return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
       if(proj)return{woba:+proj.toFixed(3),source:'proj'};
       if(act)return{woba:+act.toFixed(3),source:'act'};
@@ -282,8 +323,8 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       game_id:gameId,
       away_sp_woba:lookupPitcher(game.away_sp,game.away_sp_hand||'R'),
       home_sp_woba:lookupPitcher(game.home_sp,game.home_sp_hand||'R'),
-      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R')})),
-      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R')})),
+      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R',game.away_team)})),
+      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R',game.home_team)})),
     });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
