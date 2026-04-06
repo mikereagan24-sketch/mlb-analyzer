@@ -129,10 +129,10 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <body>
 <div class="app">
 <div class="hdr">
-<div class="hdr-icon">⚾</div>
+<div class="hdr-icon">â¾</div>
 <div>
 <div class="ttl">MLB Betting Analyzer</div>
-<div class="sub" id="hdr-sub">Loading…</div>
+<div class="sub" id="hdr-sub">Loadingâ¦</div>
 </div>
 </div>
 <div class="tabs">
@@ -150,7 +150,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
 <input type="date" id="games-date" style="width:150px" onchange="loadGamesFromDB()">
 <button class="btn btn-primary btn-sm" onclick="loadGamesFromDB()">Load Games</button>
-<button class="btn btn-ghost btn-sm" onclick="refreshLineups()">⟳ Refresh Lineups</button>
+<button class="btn btn-ghost btn-sm" onclick="refreshLineups()">â³ Refresh Lineups</button>
 <button class="btn btn-ghost btn-sm" onclick="triggerScores()">Pull Scores</button>
 <span id="games-status" style="font-size:11px;color:var(--text2)"></span>
 </div>
@@ -165,27 +165,27 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 
 <!-- ANALYSIS -->
 <div id="sec-analysis" class="sec">
-<div id="no-analysis" class="notice">Click ⚡ Analyze on a game card to open the full analysis view.</div>
+<div id="no-analysis" class="notice">Click â¡ Analyze on a game card to open the full analysis view.</div>
 <div id="analysis-content" style="display:none">
 <div class="model-hero">
 <div class="slabel" style="margin-bottom:10px">Model projected line</div>
 <div class="model-ml-grid">
-<div><div style="font-size:11px;color:var(--text2);margin-bottom:3px" id="a-lbl">Away</div><div class="model-ml-num" id="a-ml">—</div><div class="model-ml-sub" id="a-wp">—</div></div>
+<div><div style="font-size:11px;color:var(--text2);margin-bottom:3px" id="a-lbl">Away</div><div class="model-ml-num" id="a-ml">â</div><div class="model-ml-sub" id="a-wp">â</div></div>
 <div style="font-size:12px;color:var(--text2);text-align:center">vs</div>
-<div><div style="font-size:11px;color:var(--text2);margin-bottom:3px" id="h-lbl">Home</div><div class="model-ml-num" id="h-ml">—</div><div class="model-ml-sub" id="h-wp">—</div></div>
+<div><div style="font-size:11px;color:var(--text2);margin-bottom:3px" id="h-lbl">Home</div><div class="model-ml-num" id="h-ml">â</div><div class="model-ml-sub" id="h-wp">â</div></div>
 </div>
 <div style="border-top:.5px solid var(--border);padding-top:10px">
 <div style="font-size:11px;color:var(--text2);margin-bottom:3px">Projected total</div>
-<div class="model-tot-val" id="a-tot">—</div>
-<div style="font-size:11px;color:var(--text2);margin-top:2px" id="a-runs">—</div>
+<div class="model-tot-val" id="a-tot">â</div>
+<div style="font-size:11px;color:var(--text2);margin-top:2px" id="a-runs">â</div>
 </div>
 </div>
 <div class="card">
 <div class="slabel">Model vs market</div>
 <div class="grid-3">
-<div class="rbox" id="comp-a"><div class="rbox-label" id="ca-lbl">Away ML</div><div class="rbox-val" id="ca-model">—</div><div class="rbox-mkt" id="ca-mkt">—</div><div class="rbox-verdict" id="ca-edge">—</div></div>
-<div class="rbox" id="comp-h"><div class="rbox-label" id="ch-lbl">Home ML</div><div class="rbox-val" id="ch-model">—</div><div class="rbox-mkt" id="ch-mkt">—</div><div class="rbox-verdict" id="ch-edge">—</div></div>
-<div class="rbox" id="comp-t"><div class="rbox-label">Over/Under</div><div class="rbox-val" id="ct-model">—</div><div class="rbox-mkt" id="ct-mkt">—</div><div class="rbox-verdict" id="ct-edge">—</div></div>
+<div class="rbox" id="comp-a"><div class="rbox-label" id="ca-lbl">Away ML</div><div class="rbox-val" id="ca-model">â</div><div class="rbox-mkt" id="ca-mkt">â</div><div class="rbox-verdict" id="ca-edge">â</div></div>
+<div class="rbox" id="comp-h"><div class="rbox-label" id="ch-lbl">Home ML</div><div class="rbox-val" id="ch-model">â</div><div class="rbox-mkt" id="ch-mkt">â</div><div class="rbox-verdict" id="ch-edge">â</div></div>
+<div class="rbox" id="comp-t"><div class="rbox-label">Over/Under</div><div class="rbox-val" id="ct-model">â</div><div class="rbox-mkt" id="ct-mkt">â</div><div class="rbox-verdict" id="ct-edge">â</div></div>
 </div>
 </div>
 <div class="card">
@@ -197,7 +197,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 </div>
 <div class="card">
 <div class="slabel">AI narrative</div>
-<button class="btn btn-primary" style="width:100%;margin-bottom:8px" id="ai-btn" onclick="runAI()">Generate analysis ↗</button>
+<button class="btn btn-primary" style="width:100%;margin-bottom:8px" id="ai-btn" onclick="runAI()">Generate analysis â</button>
 <div id="ai-out" style="font-size:13px;line-height:1.7;min-height:60px;color:var(--text2)">Click above to generate narrative analysis.</div>
 </div>
 </div>
@@ -218,7 +218,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div id="bt-results" style="display:none">
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
 <div class="card">
-<div class="slabel">P&L by category — $100/play</div>
+<div class="slabel">P&L by category â $100/play</div>
 <table class="cat-tbl"><thead><tr><th>Category</th><th>Plays</th><th>W-L-P</th><th>P&L</th><th>ROI</th></tr></thead><tbody id="bt-cat-body"></tbody></table>
 </div>
 </div>
@@ -231,22 +231,22 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 
 <!-- DATA IMPORT -->
 <div id="sec-data" class="sec">
-<div class="notice ok" style="margin-bottom:1rem">✓ <strong>Persistent storage active.</strong> Uploaded CSVs are stored in the database on Render's persistent disk.</div>
+<div class="notice ok" style="margin-bottom:1rem">â <strong>Persistent storage active.</strong> Uploaded CSVs are stored in the database on Render's persistent disk.</div>
 <div class="drop-zone" id="drop-zone" ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
 <input type="file" multiple accept=".csv" onchange="onFilePick(event)">
-<div style="font-size:32px;margin-bottom:8px">📂</div>
+<div style="font-size:32px;margin-bottom:8px">ð</div>
 <div style="font-size:14px;font-weight:500;margin-bottom:4px">Drop all 8 FanGraphs CSV files here</div>
-<div style="font-size:12px;color:var(--text2)">Auto-assigned by filename · Replaces only the files you upload</div>
+<div style="font-size:12px;color:var(--text2)">Auto-assigned by filename Â· Replaces only the files you upload</div>
 </div>
 <div class="file-grid" id="file-grid"></div>
 <div id="upload-status" class="notice" style="margin-top:10px"></div>
 <div class="card" style="margin-top:1rem">
 <div class="slabel">Expected filenames</div>
 <div class="grid-2" style="font-size:11px;color:var(--text2);gap:4px">
-<span>🏏 <code>bat_proj_vs_lhp.csv</code></span><span>🏏 <code>bat_proj_vs_rhp.csv</code></span>
-<span>⚾ <code>pit_proj_vs_lhb.csv</code></span><span>⚾ <code>pit_proj_vs_rhb.csv</code></span>
-<span>📊 <code>bat_actual_vs_lhp.csv</code></span><span>📊 <code>bat_actual_vs_rhp.csv</code></span>
-<span>📊 <code>pit_actual_vs_lhb.csv</code></span><span>📊 <code>pit_actual_vs_rhb.csv</code></span>
+<span>ð <code>bat_proj_vs_lhp.csv</code></span><span>ð <code>bat_proj_vs_rhp.csv</code></span>
+<span>â¾ <code>pit_proj_vs_lhb.csv</code></span><span>â¾ <code>pit_proj_vs_rhb.csv</code></span>
+<span>ð <code>bat_actual_vs_lhp.csv</code></span><span>ð <code>bat_actual_vs_rhp.csv</code></span>
+<span>ð <code>pit_actual_vs_lhb.csv</code></span><span>ð <code>pit_actual_vs_rhb.csv</code></span>
 </div>
 </div>
 </div>
@@ -256,13 +256,13 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div class="card">
 <div class="slabel">Model weights</div>
 <div class="grid-2" style="gap:8px;margin-bottom:12px">
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Run multiplier (×N)</label><input type="number" id="s-run-mult" step="1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Run multiplier (ÃN)</label><input type="number" id="s-run-mult" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">HFA boost (pp)</label><input type="number" id="s-hfa" step="0.01"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher weight</label><input type="number" id="s-w-pit" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter weight</label><input type="number" id="s-w-bat" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Steamer weight</label><input type="number" id="s-w-proj" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Actual weight</label><input type="number" id="s-w-act" step="0.05"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (−N)</label><input type="number" id="s-fav-adj" step="1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (âN)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
 <div class="slabel">Signal thresholds</div>
@@ -284,7 +284,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 const KEY_LABELS={'bat-proj-lhp':'Batters vs LHP (Steamer)','bat-proj-rhp':'Batters vs RHP (Steamer)','pit-proj-lhb':'Pitchers vs LHB (Steamer)','pit-proj-rhb':'Pitchers vs RHB (Steamer)','bat-act-lhp':'Batters vs LHP (actual)','bat-act-rhp':'Batters vs RHP (actual)','pit-act-lhb':'Pitchers vs LHB (actual)','pit-act-rhb':'Pitchers vs RHB (actual)'};
 const FILE_KEY_TESTS=[{key:'bat-proj-lhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-proj-rhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-proj-lhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-proj-rhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/rhb|_rh/i.test(n)},{key:'bat-act-lhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-act-rhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-act-lhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-act-rhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/rhb|_rh/i.test(n)}];
 function detectKey(fn){const n=fn.toLowerCase();for(const{key,t}of FILE_KEY_TESTS)if(t(n))return key;return null;}
-function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
+function fmtML(ml){if(ml==null)return'â';return ml>0?'+'+ml:''+ml;}
 function fmtDate(d){return d?d.slice(0,10):'';}
 function todayStr(){return new Date().toLocaleDateString('en-CA');}
 
@@ -332,7 +332,7 @@ async function fetchServerWoba(){
 
 async function api(path,opts={}){
   const r=await fetch('/api'+path,{headers:{'Content-Type':'application/json'},...opts});
-  if(!r.ok)throw new Error('API '+path+' → '+r.status);
+  if(!r.ok)throw new Error('API '+path+' â '+r.status);
   return r.json();
 }
 
@@ -342,14 +342,14 @@ async function refreshWobaStatus(){
     renderFileGrid();
     const loaded=Object.keys(wobaStatus).length;
     const blend=wobaStatus['bat-proj-lhp']&&wobaStatus['bat-act-lhp'];
-    document.getElementById('hdr-sub').textContent=blend?loaded+'/8 CSV files · 65/35 blend active · Persistent storage':loaded?loaded+'/8 CSV files loaded · Persistent storage':'No CSV data loaded — go to Data Import';
-  }catch(e){document.getElementById('hdr-sub').textContent='Server error — check connection';}
+    document.getElementById('hdr-sub').textContent=blend?loaded+'/8 CSV files Â· 65/35 blend active Â· Persistent storage':loaded?loaded+'/8 CSV files loaded Â· Persistent storage':'No CSV data loaded â go to Data Import';
+  }catch(e){document.getElementById('hdr-sub').textContent='Server error â check connection';}
 }
 
 function renderFileGrid(){
   document.getElementById('file-grid').innerHTML=Object.keys(KEY_LABELS).map(key=>{
     const s=wobaStatus[key];
-    return'<div class="file-item '+(s?'loaded':'')+'"><div class="file-dot '+(s?'ok':'')+'"></div><div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500">'+KEY_LABELS[key]+'</div><div style="white-space:nowrap;color:var(--text2);font-size:10px">'+(s?s.rows+' players · '+fmtDate(s.uploadedAt):'not loaded')+'</div></div>';
+    return'<div class="file-item '+(s?'loaded':'')+'"><div class="file-dot '+(s?'ok':'')+'"></div><div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500">'+KEY_LABELS[key]+'</div><div style="white-space:nowrap;color:var(--text2);font-size:10px">'+(s?s.rows+' players Â· '+fmtDate(s.uploadedAt):'not loaded')+'</div></div>';
   }).join('');
 }
 
@@ -362,7 +362,7 @@ async function processFiles(files){
   if(!csvs.length)return;
   document.getElementById('drop-zone').classList.add('has-files');
   const st=document.getElementById('upload-status');
-  st.className='notice info';st.textContent='Uploading '+csvs.length+' file(s)…';
+  st.className='notice info';st.textContent='Uploading '+csvs.length+' file(s)â¦';
   let ok=0,err=0;
   for(const file of csvs){
     const key=detectKey(file.name);
@@ -376,14 +376,14 @@ async function processFiles(files){
   }
   await refreshWobaStatus();
   st.className=err?'notice warn':'notice ok';
-  st.textContent='✓ '+ok+' file(s) uploaded'+( err?' · '+err+' failed':'')+'';
+  st.textContent='â '+ok+' file(s) uploaded'+( err?' Â· '+err+' failed':'')+'';
 }
 
-// Load games from DB only — no scraping
+// Load games from DB only â no scraping
 async function loadGamesFromDB(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Loading…';
+  st.innerHTML='<span class="spinner"></span>Loadingâ¦';
   try{
     const games=await api('/games/'+date);
     currentGames=games;
@@ -394,15 +394,15 @@ async function loadGamesFromDB(){
   }catch(e){st.textContent='Error: '+e.message;}
 }
 
-// Refresh lineups — explicitly triggers scraper
+// Refresh lineups â explicitly triggers scraper
 async function refreshLineups(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Pulling lineups from RotoWire…';
+  st.innerHTML='<span class="spinner"></span>Pulling lineups from RotoWireâ¦';
   try{
     const r=await api('/jobs/lineups',{method:'POST',body:JSON.stringify({date})});
     if(r.success){
-      st.textContent='✓ Pulled '+r.gamesUpdated+' games — reloading…';
+      st.textContent='â Pulled '+r.gamesUpdated+' games â reloadingâ¦';
       await loadGamesFromDB();
     } else {
       st.textContent='Error: '+r.error;
@@ -413,10 +413,10 @@ async function refreshLineups(){
 async function triggerScores(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Fetching scores…';
+  st.innerHTML='<span class="spinner"></span>Fetching scoresâ¦';
   try{
     const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date})});
-    st.textContent='✓ '+r.gamesUpdated+' games updated';
+    st.textContent='â '+r.gamesUpdated+' games updated';
     await loadGamesFromDB();
   }catch(e){st.textContent='Error: '+e.message;}
 }
@@ -434,9 +434,9 @@ function renderGameGrid(games,date){
       (sigs.length?' <span style="font-size:10px;color:var(--navy);margin-left:4px">'+sigs.length+' signal'+(sigs.length>1?'s':'')+'</span>':'')+
       '</div>'+
       '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP) vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)</div>'+
-      '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
+      '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'â')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
-      '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">⚡ Analyze</button>'+
+      '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">â¡ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
       '</div>'+
       '<div class="gresult '+(g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
@@ -451,13 +451,13 @@ function renderGameResult(g){
   const hEdge=sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML');
   const totEdge=sigs.find(s=>s.signal_type==='Total');
   const vc=sig=>sig&&sig.signal_label==='Value'?'value':'';
-  const vd=sig=>{if(!sig)return'<span style="color:var(--text2);font-size:9px">—</span>';const col=sig.signal_label==='Value'?'var(--green)':'var(--blue)';return'<span style="color:'+col+';font-size:9px;font-weight:500">'+sig.signal_label.toUpperCase()+'</span>';};
+  const vd=sig=>{if(!sig)return'<span style="color:var(--text2);font-size:9px">â</span>';const col=sig.signal_label==='Value'?'var(--green)':'var(--blue)';return'<span style="color:'+col+';font-size:9px;font-weight:500">'+sig.signal_label.toUpperCase()+'</span>';};
   return'<div class="result-grid">'+
     '<div class="rbox '+vc(aEdge)+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(g.model_away_ml)+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
-    '<div class="rbox '+vc(totEdge)+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(g.model_total?parseFloat(g.model_total).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
+    '<div class="rbox '+vc(totEdge)+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(g.model_total?parseFloat(g.model_total).toFixed(1):'â')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'â')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
     '<div class="rbox '+vc(hEdge)+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(g.model_home_ml)+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
     '</div>'+
-    (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
+    (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' Â· '+g.home_team+' '+g.home_score+'</div>':'');
 }
 
 function analyzeGame(gameId,date){
@@ -468,10 +468,10 @@ function analyzeGame(gameId,date){
   document.getElementById('analysis-content').style.display='block';
   document.getElementById('a-lbl').textContent=g.away_team;
   document.getElementById('h-lbl').textContent=g.home_team;
-  document.getElementById('a-ml').textContent=g.model_away_ml?fmtML(g.model_away_ml):'—';
-  document.getElementById('h-ml').textContent=g.model_home_ml?fmtML(g.model_home_ml):'—';
-  document.getElementById('a-tot').textContent=g.model_total?parseFloat(g.model_total).toFixed(1):'—';
-  document.getElementById('a-runs').textContent='Market: '+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' · O/U '+g.market_total;
+  document.getElementById('a-ml').textContent=g.model_away_ml?fmtML(g.model_away_ml):'â';
+  document.getElementById('h-ml').textContent=g.model_home_ml?fmtML(g.model_home_ml):'â';
+  document.getElementById('a-tot').textContent=g.model_total?parseFloat(g.model_total).toFixed(1):'â';
+  document.getElementById('a-runs').textContent='Market: '+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' Â· O/U '+g.market_total;
   const sigs=g.signals||[];
   function setComp(boxId,lId,mId,mktId,edgId,label,modelVal,mktVal,sig){
     document.getElementById(lId).textContent=label;
@@ -479,17 +479,17 @@ function analyzeGame(gameId,date){
     document.getElementById(mktId).textContent='Market: '+mktVal;
     const box=document.getElementById(boxId);
     if(sig){const col=sig.signal_label==='Value'?'var(--green)':'var(--blue)';document.getElementById(edgId).innerHTML='<span style="color:'+col+';font-weight:500">'+sig.signal_label+'</span>';box.className='rbox value';}
-    else{document.getElementById(edgId).textContent='—';box.className='rbox';}
+    else{document.getElementById(edgId).textContent='â';box.className='rbox';}
   }
-  setComp('comp-a','ca-lbl','ca-model','ca-mkt','ca-edge',g.away_team+' Moneyline',g.model_away_ml?fmtML(g.model_away_ml):'—',g.market_away_ml?fmtML(g.market_away_ml):'—',sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML'));
-  setComp('comp-h','ch-lbl','ch-model','ch-mkt','ch-edge',g.home_team+' Moneyline',g.model_home_ml?fmtML(g.model_home_ml):'—',g.market_home_ml?fmtML(g.market_home_ml):'—',sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML'));
-  setComp('comp-t','ct-lbl','ct-model','ct-mkt','ct-edge','Over/Under',g.model_total?parseFloat(g.model_total).toFixed(1):'—',g.market_total||'—',sigs.find(s=>s.signal_type==='Total'));
+  setComp('comp-a','ca-lbl','ca-model','ca-mkt','ca-edge',g.away_team+' Moneyline',g.model_away_ml?fmtML(g.model_away_ml):'â',g.market_away_ml?fmtML(g.market_away_ml):'â',sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML'));
+  setComp('comp-h','ch-lbl','ch-model','ch-mkt','ch-edge',g.home_team+' Moneyline',g.model_home_ml?fmtML(g.model_home_ml):'â',g.market_home_ml?fmtML(g.market_home_ml):'â',sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML'));
+  setComp('comp-t','ct-lbl','ct-model','ct-mkt','ct-edge','Over/Under',g.model_total?parseFloat(g.model_total).toFixed(1):'â',g.market_total||'â',sigs.find(s=>s.signal_type==='Total'));
   const mkBD=(lu,oppHand,el)=>{
     el.innerHTML=lu.map((b,i)=>{
       const eff=b.hand==='S'?(oppHand==='R'?'L':'R'):b.hand;
-      const woba=b.vsRHP||b.vsLHP?((oppHand==='R'?(b.vsRHP||0.310):(b.vsLHP||0.310)).toFixed(3)):'—';
+      const woba=b.vsRHP||b.vsLHP?((oppHand==='R'?(b.vsRHP||0.310):(b.vsLHP||0.310)).toFixed(3)):'â';
       return'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:.5px solid var(--border);font-size:12px">'+
-        '<span><span class="hbadge h'+eff+'" style="font-size:9px;width:18px;height:16px;line-height:16px">'+(b.hand==='S'?'S→'+eff:b.hand)+'</span> '+b.name+'</span>'+
+        '<span><span class="hbadge h'+eff+'" style="font-size:9px;width:18px;height:16px;line-height:16px">'+(b.hand==='S'?'Sâ'+eff:b.hand)+'</span> '+b.name+'</span>'+
         '<span style="color:var(--text2)">'+PA_WEIGHTS[i]+'</span></div>';
     }).join('');
   };
@@ -505,10 +505,10 @@ async function runAI(){
   if(!currentGame)return;
   const g=currentGame;
   const btn=document.getElementById('ai-btn'),out=document.getElementById('ai-out');
-  btn.disabled=true;out.innerHTML='<span class="spinner"></span>Generating…';
+  btn.disabled=true;out.innerHTML='<span class="spinner"></span>Generatingâ¦';
   const sigs=(g.signals||[]).map(s=>s.signal_label+' '+s.signal_side+' '+s.signal_type).join(', ')||'no signals';
   try{
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,messages:[{role:'user',content:'Sharp MLB analyst. 3 paragraphs on: 1) handedness matchup dynamics, 2) model vs market, 3) best bet.\n'+g.away_team+'@'+g.home_team+' · '+g.away_sp+'('+g.away_sp_hand+'HP) vs '+g.home_sp+'('+g.home_sp_hand+'HP)\nModel: '+g.away_team+fmtML(g.model_away_ml)+'/'+g.home_team+fmtML(g.model_home_ml)+' Tot:'+parseFloat(g.model_total||0).toFixed(1)+'\nMarket: '+fmtML(g.market_away_ml)+'/'+fmtML(g.market_home_ml)+' O/U:'+g.market_total+'\nSignals: '+sigs+'\nNo disclaimers.'}]})});
+    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,messages:[{role:'user',content:'Sharp MLB analyst. 3 paragraphs on: 1) handedness matchup dynamics, 2) model vs market, 3) best bet.\n'+g.away_team+'@'+g.home_team+' Â· '+g.away_sp+'('+g.away_sp_hand+'HP) vs '+g.home_sp+'('+g.home_sp_hand+'HP)\nModel: '+g.away_team+fmtML(g.model_away_ml)+'/'+g.home_team+fmtML(g.model_home_ml)+' Tot:'+parseFloat(g.model_total||0).toFixed(1)+'\nMarket: '+fmtML(g.market_away_ml)+'/'+fmtML(g.market_home_ml)+' O/U:'+g.market_total+'\nSignals: '+sigs+'\nNo disclaimers.'}]})});
     const d=await r.json();
     out.innerHTML=(d.content||[]).map(c=>c.text||'').join('').replace(/\n\n/g,'<br><br>');
   }catch(e){out.textContent='AI error.';}
@@ -591,7 +591,7 @@ function sw(name){
   if(name==='matchups'&&muSelectedGame)renderMatchupGame(muSelectedGame);
 }
 
-const CAT_LABELS={'val-fav':'Value — favorite','lean-fav':'Lean — favorite','val-dog':'Value — underdog','lean-dog':'Lean — underdog','val-over':'Value — over','lean-over':'Lean — over','val-under':'Value — under','lean-under':'Lean — under'};
+const CAT_LABELS={'val-fav':'Value â favorite','lean-fav':'Lean â favorite','val-dog':'Value â underdog','lean-dog':'Lean â underdog','val-over':'Value â over','lean-over':'Lean â over','val-under':'Value â under','lean-under':'Lean â under'};
 async function loadBacktest(){
   const from=document.getElementById('bt-from').value;
   const to=document.getElementById('bt-to').value;
@@ -603,12 +603,12 @@ async function loadBacktest(){
     document.getElementById('bt-summary').innerHTML=
       '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(( ov.total_pnl||0)>=0?'green':'red')+'">'+(( ov.total_pnl||0)>=0?'+':'')+'$'+(ov.total_pnl||0).toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
       '<div class="metric-card"><div class="metric-label">ROI</div><div class="metric-val '+((ov.roi||0)>=0?'green':'red')+'">'+((ov.roi||0)>=0?'+':'')+(ov.roi||0).toFixed(1)+'%</div><div class="metric-sub">'+(ov.plays||0)+' plays</div></div>'+
-      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'—')+'</div></div>'+
-      '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+((ov.plays||0)*100).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
+      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'â')+'</div></div>'+
+      '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+((ov.plays||0)*100).toFixed(0)+'</div><div class="metric-sub">'+from+' â '+to+'</div></div>';
     const cats=d.byCategory||[];
     document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
       const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
-      if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
+      if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">â</td><td class="muted">â</td><td class="muted">â</td></tr>';
       return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+c.plays+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
     }).join('');
   }catch(e){alert('Backtest error: '+e.message);}
@@ -617,7 +617,7 @@ function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getEl
 async function loadCronLog(){
   try{
     const rows=await api('/cron-log');
-    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+r.ran_at.slice(0,16).replace('T',' ')+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
+    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' Â· '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' Â· '+r.games_updated+' games Â· '+r.ran_at.slice(0,16).replace('T',' ')+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
   }catch(e){}
 }
 async function loadSettings(){
@@ -639,7 +639,7 @@ async function loadSettings(){
 }
 async function saveSettings(){
   const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value};
-  try{await api('/settings',{method:'POST',body:JSON.stringify(s)});document.getElementById('settings-status').textContent='✓ Saved';setTimeout(()=>document.getElementById('settings-status').textContent='',2000);}catch(e){document.getElementById('settings-status').textContent='Error saving';}
+  try{await api('/settings',{method:'POST',body:JSON.stringify(s)});document.getElementById('settings-status').textContent='â Saved';setTimeout(()=>document.getElementById('settings-status').textContent='',2000);}catch(e){document.getElementById('settings-status').textContent='Error saving';}
 }
 init();
 </script>
