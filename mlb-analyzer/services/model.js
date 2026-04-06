@@ -176,9 +176,14 @@ function impliedP(ml) {
  */
 function runModel(game, wobaIdx, settings) {
   const {
-    RUN_MULT = 48, HFA_BOOST = 0.02,
-    FAV_ADJ = 10, DOG_ADJ = 5,
-    W_PIT = 0.5, W_BAT = 0.5,
+    RUN_MULT = 48,
+    HFA_BOOST = 0.02,
+    FAV_ADJ = 10,
+    DOG_ADJ = 5,
+    W_PIT = 0.5,
+    W_BAT = 0.5,
+    W_PROJ = 0.65,
+    W_ACT = 0.35,
   } = settings;
 
   const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT);
