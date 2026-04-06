@@ -120,12 +120,14 @@ function rawToML(wp) {
 }
 
 function applySpread(aML, hML, FAV_ADJ, DOG_ADJ) {
-  // fav = more negative side; dog = fav*-1 - FAV_ADJ
-  // if dog result < 100 (2 digits), add DOG_ADJ and flip sign
+  // fav = more negative side
+  // dog = (fav * -1) - FAV_ADJ + DOG_ADJ
+  // FAV_ADJ: reduces dog payout (house edge on fav side)
+  // DOG_ADJ: increases dog payout (additional value buffer)
   const favIsAway = aML <= hML;
   const favML = favIsAway ? aML : hML;
-  let dog = (favML * -1) - FAV_ADJ;
-  if (Math.abs(dog) < 100) dog = -(dog + DOG_ADJ);
+  let dog = (favML * -1) - FAV_ADJ + DOG_ADJ;
+  if (Math.abs(dog) < 100) dog = Math.sign(dog) * 110; // floor at +/-110 for pick'ems
   return { adjA: favIsAway ? favML : dog, adjH: favIsAway ? dog : favML };
 }
 
