@@ -89,8 +89,8 @@ function fuzzyLookup(keyMap, name, teamHint) {
 function blendWoba(proj, act, minSample, W_PROJ, W_ACT) {
   const hp = proj && !isNaN(proj.woba);
   const ha = act && !isNaN(act.woba) && act.sample >= minSample;
-  const wp = W_PROJ || 0.65;
-  const wa = W_ACT || 0.35;
+  const wp = (typeof W_PROJ !== 'undefined' && W_PROJ) ? W_PROJ : 0.65;
+  const wa = (typeof W_ACT  !== 'undefined' && W_ACT)  ? W_ACT  : 0.35;
   if (hp && ha) return { woba: proj.woba * wp + act.woba * wa, source: 'blend' };
   if (hp) return { woba: proj.woba, source: 'steamer' };
   if (ha) return { woba: act.woba, source: 'actual' };
@@ -156,7 +156,8 @@ function rawToML(wp) {
 function applySpread(aML, hML, FAV_ADJ, DOG_ADJ) {
   const favIsAway = aML <= hML;
   const favML = favIsAway ? aML : hML;
-  let dog = (favML * -1) - (FAV_ADJ || 15);
+  const spread = (typeof FAV_ADJ !== 'undefined' && FAV_ADJ) ? FAV_ADJ : 15;
+  let dog = (favML * -1) - spread;
   if (Math.abs(dog) < 100) dog = -(dog + 10);
   return { adjA: favIsAway ? favML : dog, adjH: favIsAway ? dog : favML };
 }
