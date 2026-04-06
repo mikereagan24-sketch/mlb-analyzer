@@ -40,7 +40,10 @@ function parseCSV(buffer, isPitcher) {
     const name = r[nameCol];
     const woba = parseFloat(r[wobaCol]);
     const sample = sampleCol ? parseFloat(r[sampleCol]) || 0 : 0;
-    if (!name || isNaN(woba) || woba < 0.05 || woba > 0.8) continue;
+    // For batter CSVs: reject wOBA < 0.250 (filters pitchers accidentally in batter files)
+    // For pitcher CSVs: allow as low as 0.05 (elite starters can allow very low wOBA)
+    const minWoba = isPitcher ? 0.05 : 0.250;
+    if (!name || isNaN(woba) || woba < minWoba || woba > 0.8) continue;
     // Normalize FanGraphs team abbr (KCR->KC, SDP->SD, etc.)
     const fgTeam = teamCol ? (r[teamCol]||'').trim().toUpperCase() : null;
     const FG_MAP={'KCR':'KC','SDP':'SD','SFG':'SF','TBR':'TB','WSN':'WAS','CHW':'CWS'};
