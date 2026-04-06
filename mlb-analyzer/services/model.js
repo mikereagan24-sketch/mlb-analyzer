@@ -111,18 +111,20 @@ function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT) {
 }
 
 function rawToML(wp) {
-  return wp >= 0.5
-    ? -Math.round(wp / (1 - wp) * 100)
-    : Math.round((1 - wp) / wp * 100);
+  const clamped = Math.min(Math.max(wp, 0.25), 0.75);
+  return clamped >= 0.5
+    ? -Math.round(clamped / (1 - clamped) * 100)
+    : Math.round((1 - clamped) / clamped * 100);
 }
-
 function applySpread(aML, hML, FAV_ADJ, DOG_ADJ) {
-  let adjA = aML, adjH = hML;
-  if (aML < hML) { adjA = aML - FAV_ADJ; adjH = hML + DOG_ADJ; }
-  else if (hML < aML) { adjH = hML - FAV_ADJ; adjA = aML + DOG_ADJ; }
-  return { adjA, adjH };
+  // Fav is whichever ML is more negative (lower value)
+  const favIsAway = aML <= hML;
+  const favML = favIsAway ? aML : hML;
+  // Dog = fav * -1 - 15; if result < 100 (2 digits), add 10 and flip
+  let dog = (favML * -1) - 15;
+  if (Math.abs(dog) < 100) dog = -(dog + 10);
+  return { adjA: favIsAway ? favML : dog, adjH: favIsAway ? dog : favML };
 }
-
 function impliedP(ml) {
   ml = parseFloat(ml);
   if (!ml || isNaN(ml)) return 0.5;
