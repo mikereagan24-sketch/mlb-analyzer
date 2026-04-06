@@ -564,7 +564,8 @@ async function renderMatchupGame(id){
     return '<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+lbl+' vs '+sn+' ('+sh+'HP)</th><th>PA</th><th>Bat wOBA</th><th>Pit wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>Wtd avg</td><td style="text-align:center;font-size:10px">'+wT.toFixed(1)+'</td><td style="'+wc(rb)+';font-weight:500">'+rb.toFixed(3)+'</td><td style="'+wc(rp)+';font-weight:500">'+rp.toFixed(3)+'</td><td style="'+wc(ra)+';font-weight:500">'+ra.toFixed(3)+'</td></tr></tfoot></table>';
   }
   const sb=h=>'<span class="sp-hand-'+h+'">'+h+'HP</span>';
-  const nt=wd?'<div class="notice ok" style="margin-bottom:10px">CSV wOBA loaded — <strong>*</strong> = found in FanGraphs CSV  |  no * = name not matched in CSV (using split average default)</div>':'<div class="notice warn" style="margin-bottom:10px">No CSV wOBA data loaded — upload FanGraphs CSVs in Data Import tab</div>';
+  const srcBadge=g.lineup_source==='auto'?'<span style="background:var(--green-bg);color:var(--green);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">✓ Confirmed Lineup</span>':'<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">⚠ Projected Lineup</span>';
+  const nt=wd?'<div class="notice ok" style="margin-bottom:10px">CSV wOBA loaded — <strong>*</strong> = FanGraphs CSV match  |  no * = default'+srcBadge+'</div>':'<div class="notice warn" style="margin-bottom:10px">No CSV data — upload FanGraphs CSVs in Data Import'+srcBadge+'</div>';
   const aL=gw(pA,'vsLHB'),aR=gw(pA,'vsRHB'),hL=gw(pH,'vsLHB'),hR=gw(pH,'vsRHB');
   const gid=g.game_id;
   document.getElementById('mu-content').innerHTML=
@@ -639,7 +640,21 @@ async function loadSettings(){
 }
 async function saveSettings(){
   const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value};
-  try{await api('/settings',{method:'POST',body:JSON.stringify(s)});document.getElementById('settings-status').textContent='â Saved';setTimeout(()=>document.getElementById('settings-status').textContent='',2000);}catch(e){document.getElementById('settings-status').textContent='Error saving';}
+  const st=document.getElementById('settings-status');
+  try{
+    await api('/settings',{method:'POST',body:JSON.stringify(s)});
+    st.innerHTML='<span class="spinner"></span> Saved — updating model…';
+    // Rerun model on today + upcoming dates so ML lines reflect new settings immediately
+    try{
+      const dates=await api('/dates');
+      const today=todayStr();
+      const toRerun=dates.filter(d=>d>=today).slice(0,3);
+      for(const d of toRerun){try{await api('/games/'+d+'/rerun',{method:'POST'});}catch(e){}}
+      await loadGamesFromDB();
+    }catch(e){}
+    st.textContent='✓ Settings saved — model updated';
+    setTimeout(()=>st.textContent='',3000);
+  }catch(e){st.textContent='Error saving';}
 }
 init();
 </script>
