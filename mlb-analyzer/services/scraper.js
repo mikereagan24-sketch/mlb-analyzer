@@ -159,7 +159,7 @@ async function fetchLineups(dateStr) {
     if (idx > 0 && idx < sectionStart) sectionStart = idx;
   }
   const start = Math.max(0, sectionStart - 200);
-  const chunk = fullText.substring(start, start + 35000)
+  const chunk = fullText.substring(start, start + 50000)
     .replace(/'/g, '').replace(/\u2019/g, '').replace(/`/g, '');
 
   const prompt = `Extract ALL MLB games from this RotoWire lineup page for ${dateStr}. Include Confirmed AND Expected lineups. Never skip a game.
@@ -183,7 +183,7 @@ Raw JSON array only — no markdown, no explanation.
 PAGE TEXT:
 ${chunk}`;
 
-  const text = await callClaude(prompt, 4000);
+  const text = await callClaude(prompt, 8000);
   const games = parseJSONRobust(text);
 
   // Post-process: fix underdog moneylines that came back negative when they should be positive
