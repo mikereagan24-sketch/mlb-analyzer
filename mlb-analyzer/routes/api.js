@@ -233,14 +233,30 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
       const dfltV=oppSpHand==='R'?dflt.vsRHP:dflt.vsLHP;
       const key=normName(name);
-      // Also try last-name lookup for abbreviated names like "M. Busch" -> match "michael busch"
-      const lastName=key.split(' ').filter(w=>!w.match(/^[a-z]$/)).pop()||key;
+      // Smart lookup: exact match, then initial+lastname match for abbreviated names
+      // e.g. "m busch" -> finds "michael busch" but NOT "marcus busch" (wrong player)
+      // We require: same last name AND first initial matches
+      const keyParts=key.split(' ');
+      const keyLast=keyParts[keyParts.length-1];
+      const keyFirst=keyParts[0]||'';
+      const keyInitial=keyFirst.length===1?keyFirst:keyFirst[0]; // 'm' or first char of full name
       function findInIdx(idx,k){
         if(!idx)return null;
         if(idx[k])return idx[k].woba;
-        // Try matching by last name only
-        const entry=Object.entries(idx).find(([n])=>n.endsWith(' '+lastName)||n===lastName);
-        return entry?entry[1].woba:null;
+        // Try abbreviated name match: same last name + first initial matches
+        // e.g. "m busch" -> "michael busch": last="busch" matches, initial "m"==="m" ✓
+        // "jose ramirez" -> exact full name match required (no abbreviation)
+        if(keyFirst.length===1){
+          // Abbreviated: find entry where last name matches AND first char matches initial
+          const entry=Object.entries(idx).find(([n])=>{
+            const parts=n.split(' ');
+            const last=parts[parts.length-1];
+            const first=parts[0]||'';
+            return last===keyLast && first[0]===keyInitial;
+          });
+          return entry?entry[1].woba:null;
+        }
+        return null; // Full name given but not found - don't guess
       }
       const proj=findInIdx(wobaIdx[vsKey],key);
       const act=findInIdx(wobaIdx[actKey],key);
