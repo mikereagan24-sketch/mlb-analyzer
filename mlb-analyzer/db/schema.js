@@ -20,7 +20,6 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data_key TEXT NOT NULL,
     player_name TEXT NOT NULL,
-    team_abbr TEXT,
     woba REAL NOT NULL,
     sample_size REAL DEFAULT 0,
     uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -113,7 +112,6 @@ db.exec(`
 
 // Migrations for existing DBs
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}
-try { db.exec("ALTER TABLE woba_data ADD COLUMN team_abbr TEXT"); } catch(e) {}
 
 const q = {
   upsertWoba: db.prepare(`
@@ -199,7 +197,7 @@ const q = {
 };
 
 q.upsertWobaBatch = (key, rows) => {
-  const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.team||null, r.woba, r.sample || 0); });
+  const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0); });
   tx(key, rows);
 };
 
