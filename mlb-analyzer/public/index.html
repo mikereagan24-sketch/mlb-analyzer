@@ -564,7 +564,7 @@ async function renderMatchupGame(id){
     return '<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+lbl+' vs '+sn+' ('+sh+'HP)</th><th>PA</th><th>Bat wOBA</th><th>Pit wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>Wtd avg</td><td style="text-align:center;font-size:10px">'+wT.toFixed(1)+'</td><td style="'+wc(rb)+';font-weight:500">'+rb.toFixed(3)+'</td><td style="'+wc(rp)+';font-weight:500">'+rp.toFixed(3)+'</td><td style="'+wc(ra)+';font-weight:500">'+ra.toFixed(3)+'</td></tr></tfoot></table>';
   }
   const sb=h=>'<span class="sp-hand-'+h+'">'+h+'HP</span>';
-  const nt=wd?'<div class="notice ok" style="margin-bottom:10px">CSV wOBA loaded</div>':'<div class="notice warn" style="margin-bottom:10px">Default wOBA values</div>';
+  const nt=wd?'<div class="notice ok" style="margin-bottom:10px">CSV wOBA loaded — <strong>*</strong> = found in FanGraphs CSV  |  no * = name not matched in CSV (using split average default)</div>':'<div class="notice warn" style="margin-bottom:10px">No CSV wOBA data loaded — upload FanGraphs CSVs in Data Import tab</div>';
   const aL=gw(pA,'vsLHB'),aR=gw(pA,'vsRHB'),hL=gw(pH,'vsLHB'),hR=gw(pH,'vsRHB');
   const gid=g.game_id;
   document.getElementById('mu-content').innerHTML=
