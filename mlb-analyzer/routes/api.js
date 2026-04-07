@@ -298,15 +298,13 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
           if(act)  return +act.toFixed(3);
           return +dfltV.toFixed(3);
         }
-        // Raw splits
         const rawVsLHB = bs('pit-proj-lhb','pit-act-lhb',dflt.vsLHB);
         const rawVsRHB = bs('pit-proj-rhb','pit-act-rhb',dflt.vsRHB);
         const src = (wobaIdx['pit-proj-lhb']&&wobaIdx['pit-proj-lhb'][key])?'blend':'default';
-        // Blended: 80% vs primary hand batters, 20% vs opposite
-        // For RHP: primarily faces RHB? No — blend is about lineup composition
-        // LHP vsLHB=primary(bad), vsRHB=opposite(good) — 80% vsLHB, 20% vsRHB
-        const blendedVsLHB = +(rawVsLHB*SP_PIT_WT + rawVsRHB*REL_PIT_WT).toFixed(3);
-        const blendedVsRHB = +(rawVsRHB*SP_PIT_WT + rawVsLHB*REL_PIT_WT).toFixed(3);
+        // Blend: SP_PIT_WT% from SP split, RELIEF_PIT_WT% from league-avg bullpen (0.318)
+        const BULLPEN_AVG = 0.318;
+        const blendedVsLHB = +(rawVsLHB * SP_PIT_WT + BULLPEN_AVG * REL_PIT_WT).toFixed(3);
+        const blendedVsRHB = +(rawVsRHB * SP_PIT_WT + BULLPEN_AVG * REL_PIT_WT).toFixed(3);
         return {
           vsLHB: {woba: blendedVsLHB, rawWoba: rawVsLHB, source: src},
           vsRHB: {woba: blendedVsRHB, rawWoba: rawVsRHB, source: src}
