@@ -102,10 +102,10 @@ db.exec(`
   INSERT OR IGNORE INTO app_settings VALUES ('w_bat', '0.5');
   INSERT OR IGNORE INTO app_settings VALUES ('w_proj', '0.65');
   INSERT OR IGNORE INTO app_settings VALUES ('w_act', '0.35');
-  INSERT OR IGNORE INTO app_settings VALUES ('ml_value_edge', '0.05');
-  INSERT OR IGNORE INTO app_settings VALUES ('ml_lean_edge', '0.02');
-  INSERT OR IGNORE INTO app_settings VALUES ('tot_value_edge', '0.4');
-  INSERT OR IGNORE INTO app_settings VALUES ('tot_lean_edge', '0.2');
+  INSERT OR IGNORE INTO app_settings VALUES ('ml_value_edge', '40');
+  INSERT OR IGNORE INTO app_settings VALUES ('ml_lean_edge', '20');
+  INSERT OR IGNORE INTO app_settings VALUES ('tot_value_edge', '1.0');
+  INSERT OR IGNORE INTO app_settings VALUES ('tot_lean_edge', '0.5');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
 `);
