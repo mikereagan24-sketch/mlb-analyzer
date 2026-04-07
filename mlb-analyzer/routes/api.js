@@ -270,16 +270,31 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
         function findIn(idx,k,tHint){
           if(!idx)return null;
-          if(tHint&&idx[k+' '+tHint.toLowerCase()])return idx[k+' '+tHint.toLowerCase()].woba;
+          const tl=tHint?tHint.toLowerCase():null;
+          // 1. Exact team key: "bobby witt kc"
+          if(tl&&idx[k+' '+tl])return idx[k+' '+tl].woba;
+          // 2. Exact name
           if(idx[k])return idx[k].woba;
+          // 3. Search index entries where stripJr(indexKey w/o team) === k, same team
+          // Catches "bobby witt jr kc" when looking up "bobby witt" + "kc"
+          if(tl){
+            const jrEntry=Object.entries(idx).find(([n])=>{
+              if(!n.endsWith(' '+tl))return false;
+              const base=n.slice(0,n.length-tl.length-1).trim();
+              return stripJr(base)===k;
+            });
+            if(jrEntry)return jrEntry[1].woba;
+          }
+          // 4. Abbreviated name (M. Busch style)
           if(isAbbrev){
             const initial=parts[0],last=parts[parts.length-1];
-            if(tHint){const tl=tHint.toLowerCase();const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1].woba;}
+            if(tl){const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1].woba;}
             const matches=Object.entries(idx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripJr(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
             if(matches.length===1)return matches[0][1].woba;
           }
+          // 5. Jr-stripped exact key
           const sk=stripJr(k);
-          if(tHint&&idx[sk+' '+tHint.toLowerCase()])return idx[sk+' '+tHint.toLowerCase()].woba;
+          if(tl&&idx[sk+' '+tl])return idx[sk+' '+tl].woba;
           const e2=Object.entries(idx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
           return e2?e2[1].woba:null;
         }
@@ -351,6 +366,16 @@ router.delete('/backtest/reset', (req, res) => {
     }
     res.json({ success: true, message: 'All backtest signals wiped' });
   } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/debug/woba-keys', (req, res) => {
+  const q2 = req.query.q || '';
+  const idx = getWobaIndex();
+  const keys = {};
+  for (const [dataKey, players] of Object.entries(idx)) {
+    keys[dataKey] = Object.keys(players).filter(k => !q2 || k.includes(q2.toLowerCase())).slice(0,20);
+  }
+  res.json(keys);
 });
 
 module.exports = router;
