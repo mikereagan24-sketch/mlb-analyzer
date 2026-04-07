@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
-const { runLineupJob, runScoreJob, getWobaIndex, getSettings, processGameSignals } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -182,6 +182,12 @@ router.post('/jobs/lineups', async (req, res) => {
 router.post('/jobs/scores', async (req, res) => {
   const { date } = req.body;
   const result = await runScoreJob(date || null);
+  res.json(result);
+});
+
+router.post('/jobs/odds', async (req, res) => {
+  const { date } = req.body;
+  const result = await runOddsJob(date || null);
   res.json(result);
 });
 
