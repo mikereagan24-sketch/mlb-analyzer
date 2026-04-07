@@ -639,12 +639,14 @@ async function loadSettings(){
     document.getElementById('s-ml-lean').value=s.ml_lean_edge!==undefined?s.ml_lean_edge:20;
     document.getElementById('s-sp-weight').value=s.sp_weight!==undefined?s.sp_weight:0.77;
     document.getElementById('s-relief-weight').value=s.relief_weight!==undefined?s.relief_weight:0.23;
+    document.getElementById('s-sp-pit-weight').value=s.sp_pit_weight!==undefined?s.sp_pit_weight:0.80;
+    document.getElementById('s-relief-pit-weight').value=s.relief_pit_weight!==undefined?s.relief_pit_weight:0.20;
     document.getElementById('s-tot-val').value=s.tot_value_edge||0.4;
     document.getElementById('s-tot-lean').value=s.tot_lean_edge||0.2;
   }catch(e){}
 }
 async function saveSettings(){
-  const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value,sp_weight:document.getElementById('s-sp-weight').value,relief_weight:document.getElementById('s-relief-weight').value};
+  const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value,sp_weight:document.getElementById('s-sp-weight').value,relief_weight:document.getElementById('s-relief-weight').value,sp_pit_weight:document.getElementById('s-sp-pit-weight').value,relief_pit_weight:document.getElementById('s-relief-pit-weight').value};
   const st=document.getElementById('settings-status');
   try{
     await api('/settings',{method:'POST',body:JSON.stringify(s)});
