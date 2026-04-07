@@ -157,6 +157,7 @@ async function runLineupJob(dateStr) {
         model_home_ml: null,
         model_total: null,
         lineup_source: 'auto',
+          lineup_status: g.lineup_status || 'projected',
       });
       updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
