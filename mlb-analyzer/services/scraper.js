@@ -245,4 +245,66 @@ function makeGameId(awayTeam, homeTeam) {
   return (awayTeam + '-' + homeTeam).toLowerCase();
 }
 
-module.exports = { fetchLineups, fetchScores, makeGameId };
+// Team name -> our abbreviation mapping for The Odds API
+const ODDS_TEAM_MAP = {
+  'Arizona Diamondbacks':'ARI','Atlanta Braves':'ATL','Baltimore Orioles':'BAL',
+  'Boston Red Sox':'BOS','Chicago Cubs':'CHC','Chicago White Sox':'CWS',
+  'Cincinnati Reds':'CIN','Cleveland Guardians':'CLE','Colorado Rockies':'COL',
+  'Detroit Tigers':'DET','Houston Astros':'HOU','Kansas City Royals':'KC',
+  'Los Angeles Angels':'LAA','Los Angeles Dodgers':'LAD','Miami Marlins':'MIA',
+  'Milwaukee Brewers':'MIL','Minnesota Twins':'MIN','New York Mets':'NYM',
+  'New York Yankees':'NYY','Athletics':'ATH','Oakland Athletics':'ATH',
+  'Philadelphia Phillies':'PHI','Pittsburgh Pirates':'PIT','San Diego Padres':'SD',
+  'San Francisco Giants':'SF','Seattle Mariners':'SEA','St. Louis Cardinals':'STL',
+  'Tampa Bay Rays':'TB','Texas Rangers':'TEX','Toronto Blue Jays':'TOR',
+  'Washington Nationals':'WAS',
+};
+
+async function fetchOddsAPI(apiKey, dateStr) {
+  if (!apiKey) throw new Error('No Odds API key configured');
+  // Use DraftKings as primary book — sharp, fast to move, widely used
+  const url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds' +
+    '?apiKey='+apiKey+'&regions=us&markets=h2h,totals&oddsFormat=american&bookmakers=draftkings';
+  const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  if (!resp.ok) throw new Error('Odds API error '+resp.status+': '+await resp.text());
+  const games = await resp.json();
+  console.log('[odds-api] Remaining requests: '+resp.headers.get('x-requests-remaining'));
+
+  const results = [];
+  for (const g of games) {
+    // Only include games for the target date (ET)
+    const gameDate = new Date(g.commence_time).toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+    if (gameDate !== dateStr) continue;
+
+    const awayTeam = ODDS_TEAM_MAP[g.away_team];
+    const homeTeam = ODDS_TEAM_MAP[g.home_team];
+    if (!awayTeam || !homeTeam) continue;
+
+    const dk = g.bookmakers?.find(b=>b.key==='draftkings');
+    if (!dk) continue;
+
+    const h2h = dk.markets?.find(m=>m.key==='h2h');
+    const totals = dk.markets?.find(m=>m.key==='totals');
+
+    const awayOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===awayTeam||o.name===g.away_team);
+    const homeOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===homeTeam||o.name===g.home_team);
+    const overOdds  = totals?.outcomes?.find(o=>o.name==='Over');
+    const underOdds = totals?.outcomes?.find(o=>o.name==='Under');
+
+    results.push({
+      game_id: makeGameId(awayTeam, homeTeam),
+      away_team: awayTeam,
+      home_team: homeTeam,
+      market_away_ml: awayOdds?.price ?? null,
+      market_home_ml: homeOdds?.price ?? null,
+      market_total: overOdds?.point ?? null,
+      over_price: overOdds?.price ?? -110,
+      under_price: underOdds?.price ?? -110,
+      commence_time: g.commence_time,
+    });
+  }
+  console.log('[odds-api] Got '+results.length+' games for '+dateStr);
+  return results;
+}
+
+module.exports = { fetchLineups, fetchScores, fetchOddsAPI, makeGameId };
