@@ -237,6 +237,9 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const settings = getSettings();
     const W_PROJ = settings.W_PROJ || 0.65;
     const W_ACT  = settings.W_ACT  || 0.35;
+      const num = (v,d) => { const n=Number(v); return isNaN(n)?d:n; };
+      const SP_WT  = num(settings.SP_WEIGHT,   0.77);
+      const REL_WT = num(settings.RELIEF_WEIGHT, 0.23);
     const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
