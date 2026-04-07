@@ -106,6 +106,8 @@ db.exec(`
   INSERT OR IGNORE INTO app_settings VALUES ('ml_lean_edge', '20');
   INSERT OR IGNORE INTO app_settings VALUES ('tot_value_edge', '1.0');
   INSERT OR IGNORE INTO app_settings VALUES ('tot_lean_edge', '0.5');
+INSERT OR IGNORE INTO app_settings VALUES ('sp_weight', '0.77');
+INSERT OR IGNORE INTO app_settings VALUES ('relief_weight', '0.23');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
 `);
