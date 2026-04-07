@@ -200,27 +200,51 @@ function catKey(signalType, signalSide, signalLabel, marketLine) {
 function getSignals(game, modelResult, settings) {
   const ML_LEAN_EDGE  = typeof settings.ML_LEAN_EDGE  !== 'undefined' ? Number(settings.ML_LEAN_EDGE)  : 20;
   const ML_VALUE_EDGE = typeof settings.ML_VALUE_EDGE !== 'undefined' ? Number(settings.ML_VALUE_EDGE) : 40;
-  // Total thresholds are now % edge (e.g. 0.03 = 3%) based on juice-adjusted implied probability
   const TOT_LEAN_EDGE  = typeof settings.TOT_LEAN_EDGE  !== 'undefined' ? Number(settings.TOT_LEAN_EDGE)  : 0.03;
   const TOT_VALUE_EDGE = typeof settings.TOT_VALUE_EDGE !== 'undefined' ? Number(settings.TOT_VALUE_EDGE) : 0.06;
 
   const signals = [];
 
-  // ML signals: point difference, same-fav-direction only
-  const aModel = modelResult.aML;
-  const hModel = modelResult.hML;
+  const aModel  = modelResult.aML;
+  const hModel  = modelResult.hML;
   const aMarket = game.market_away_ml;
   const hMarket = game.market_home_ml;
-  const modelFavIsAway = aModel <= hModel;
-  const marketFavIsAway = aMarket <= hMarket;
 
-  if (modelFavIsAway === marketFavIsAway) {
-    const aDiff = aMarket - aModel;
-    const hDiff = hMarket - hModel;
-    if (aDiff >= ML_VALUE_EDGE) signals.push({type:'ML',side:'away',label:'Value',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
-    else if (aDiff >= ML_LEAN_EDGE) signals.push({type:'ML',side:'away',label:'Lean',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
-    if (hDiff >= ML_VALUE_EDGE) signals.push({type:'ML',side:'home',label:'Value',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
-    else if (hDiff >= ML_LEAN_EDGE) signals.push({type:'ML',side:'home',label:'Lean',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
+  // Convert any ML to a comparable price for the SAME side
+  // Key insight: if market has away at +115 and model has away at -120,
+  // the edge is the raw point difference in the away ML: -120 - 115 = -235 (model says away is much better)
+  // We fire a signal when model prices a team significantly better than market does
+  // regardless of whether either crosses the fav/dog line
+
+  // Edge = how much better the model prices each side vs market (from bettor's perspective)
+  // Positive edge on away = model says away should be CHEAPER (better value) than market offers
+  // e.g. market +115, model -120: you can get +115 when model says -120 → HUGE edge
+  // aDiff = aMarket - aModel: market +115, model -120 → 115 - (-120) = 235 pt edge ✅
+  const aDiff = aMarket - aModel;
+  const hDiff = hMarket - hModel;
+
+  // Only require same-direction agreement for MODERATE edges to avoid noise
+  // For large edges (>= value threshold * 2), fire regardless — the model is very confident
+  const modelFavIsAway  = aModel  <= hModel;
+  const marketFavIsAway = aMarket <= hMarket;
+  const sameDirection   = modelFavIsAway === marketFavIsAway;
+
+  // Away ML signal
+  if (aDiff >= ML_VALUE_EDGE) {
+    if (sameDirection || aDiff >= ML_VALUE_EDGE * 2) {
+      signals.push({type:'ML',side:'away',label:'Value',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
+    }
+  } else if (aDiff >= ML_LEAN_EDGE && sameDirection) {
+    signals.push({type:'ML',side:'away',label:'Lean',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
+  }
+
+  // Home ML signal
+  if (hDiff >= ML_VALUE_EDGE) {
+    if (sameDirection || hDiff >= ML_VALUE_EDGE * 2) {
+      signals.push({type:'ML',side:'home',label:'Value',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
+    }
+  } else if (hDiff >= ML_LEAN_EDGE && sameDirection) {
+    signals.push({type:'ML',side:'home',label:'Lean',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
   }
 
   // Total signals: juice-adjusted implied probability edge
