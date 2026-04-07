@@ -83,7 +83,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .gresult.show{display:block}
 .result-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
 .rbox{border-radius:var(--r-md);padding:7px 8px;text-align:center;background:var(--bg);border:.5px solid var(--border)}
-.rbox.value{background:var(--green-bg);border-color:var(--green-border)}
+.rbox.value{background:var(--green-bg);border-color:var(--green-border)}.rbox.lean{background:var(--yellow-bg);border-color:var(--yellow-border)}
 .rbox-label{font-size:9px;color:var(--text2);margin-bottom:2px}
 .rbox-val{font-size:16px;font-weight:500}
 .rbox-mkt{font-size:9px;color:var(--text2)}
@@ -453,7 +453,7 @@ function renderGameResult(g){
   const aEdge=sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML');
   const hEdge=sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML');
   const totEdge=sigs.find(s=>s.signal_type==='Total');
-  const vc=sig=>sig&&sig.signal_label==='Value'?'value':'';
+  const vc=sig=>sig&&sig.signal_label==='Value'?'value':sig&&sig.signal_label==='Lean'?'lean':'';
   const vd=sig=>{if(!sig)return'<span style="color:var(--text2);font-size:9px">â</span>';const col=sig.signal_label==='Value'?'var(--green)':'var(--yellow)';return'<span style="color:'+col+';font-size:9px;font-weight:500">'+sig.signal_label.toUpperCase()+'</span>';};
   return'<div class="result-grid">'+
     '<div class="rbox '+vc(aEdge)+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(g.model_away_ml)+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
