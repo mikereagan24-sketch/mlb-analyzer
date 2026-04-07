@@ -58,6 +58,7 @@ db.exec(`
     home_lineup_json TEXT,
     lineup_source TEXT DEFAULT 'auto',
     scores_source TEXT,
+  odds_locked_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -116,6 +117,7 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
 
 // Migrations for existing DBs
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}
 
 const q = {
   upsertWoba: db.prepare(`
