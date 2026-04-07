@@ -27,10 +27,10 @@ function getSettings() {
     W_BAT:          num('w_bat', 0.5),
     W_PROJ:         num('w_proj', 0.65),
     W_ACT:          num('w_act', 0.35),
-    ML_VALUE_EDGE:  num('ml_value_edge', 0.05),
-    ML_LEAN_EDGE:   num('ml_lean_edge', 0.02),
-    TOT_VALUE_EDGE: num('tot_value_edge', 0.4),
-    TOT_LEAN_EDGE:  num('tot_lean_edge', 0.2),
+    ML_VALUE_EDGE:  num('ml_value_edge', 40),
+    ML_LEAN_EDGE:   num('ml_lean_edge', 20),
+    TOT_VALUE_EDGE: num('tot_value_edge', 1.0),
+    TOT_LEAN_EDGE:  num('tot_lean_edge', 0.5),
   };
 }
 
