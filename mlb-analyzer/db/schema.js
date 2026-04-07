@@ -123,6 +123,8 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN over_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN lineup_status TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_lineup_status TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_lineup_status TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN under_price INTEGER"); } catch(e) {}
 
 const q = {
