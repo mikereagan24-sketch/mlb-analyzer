@@ -587,7 +587,7 @@ async function renderMatchupGame(id){
     return '<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+lbl+' vs '+sn+' ('+sh+'HP)</th><th>PA</th><th>Bat wOBA</th><th>Pit wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>Wtd avg</td><td style="text-align:center;font-size:10px">'+wT.toFixed(1)+'</td><td style="'+wc(rb)+';font-weight:500">'+rb.toFixed(3)+'</td><td style="'+wc(rp)+';font-weight:500">'+rp.toFixed(3)+'</td><td style="'+wc(ra)+';font-weight:500">'+ra.toFixed(3)+'</td></tr></tfoot></table>';
   }
   const sb=h=>'<span class="sp-hand-'+h+'">'+h+'HP</span>';
-  const srcBadge=g.lineup_source==='auto'?'<span style="background:var(--green-bg);color:var(--green);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">✓ Confirmed Lineup</span>':'<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">⚠ Projected Lineup</span>';
+  const srcBadge=g.lineup_status==='confirmed'?'<span style="background:var(--green-bg);color:var(--green);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">✓ Confirmed Lineup</span>':'<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">⚠ Projected Lineup</span>';
   const nt=wd?'<div class="notice ok" style="margin-bottom:10px">CSV wOBA loaded — <strong>*</strong> = FanGraphs CSV match  |  no * = default'+srcBadge+'</div>':'<div class="notice warn" style="margin-bottom:10px">No CSV data — upload FanGraphs CSVs in Data Import'+srcBadge+'</div>';
   const aL=gw(pA,'vsLHB'),aR=gw(pA,'vsRHB'),hL=gw(pH,'vsLHB'),hR=gw(pH,'vsRHB');
   const gid=g.game_id;
@@ -662,8 +662,8 @@ async function loadSettings(){
     document.getElementById('s-sp-pit-weight').value=s.sp_pit_weight!==undefined?s.sp_pit_weight:0.80;
     document.getElementById('s-relief-pit-weight').value=s.relief_pit_weight!==undefined?s.relief_pit_weight:0.20;
     if(s.odds_api_key) document.getElementById('s-odds-api-key').value=s.odds_api_key.length>8?'••••••••'+s.odds_api_key.slice(-4):s.odds_api_key;
-    document.getElementById('s-tot-val').value=s.tot_value_edge||0.4;
-    document.getElementById('s-tot-lean').value=s.tot_lean_edge||0.2;
+    document.getElementById('s-tot-val').value=s.tot_value_edge!==undefined?s.tot_value_edge:0.06;
+    document.getElementById('s-tot-lean').value=s.tot_lean_edge!==undefined?s.tot_lean_edge:0.03;
   }catch(e){}
 }
 async function saveOddsKey(){
