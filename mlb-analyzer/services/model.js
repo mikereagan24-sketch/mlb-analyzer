@@ -200,47 +200,54 @@ function catKey(signalType, signalSide, signalLabel, marketLine) {
 function getSignals(game, modelResult, settings) {
   const ML_LEAN_EDGE  = typeof settings.ML_LEAN_EDGE  !== 'undefined' ? Number(settings.ML_LEAN_EDGE)  : 20;
   const ML_VALUE_EDGE = typeof settings.ML_VALUE_EDGE !== 'undefined' ? Number(settings.ML_VALUE_EDGE) : 40;
-  const TOT_LEAN_EDGE  = typeof settings.TOT_LEAN_EDGE  !== 'undefined' ? Number(settings.TOT_LEAN_EDGE)  : 0.5;
-  const TOT_VALUE_EDGE = typeof settings.TOT_VALUE_EDGE !== 'undefined' ? Number(settings.TOT_VALUE_EDGE) : 1.0;
+  // Total thresholds are now % edge (e.g. 0.03 = 3%) based on juice-adjusted implied probability
+  const TOT_LEAN_EDGE  = typeof settings.TOT_LEAN_EDGE  !== 'undefined' ? Number(settings.TOT_LEAN_EDGE)  : 0.03;
+  const TOT_VALUE_EDGE = typeof settings.TOT_VALUE_EDGE !== 'undefined' ? Number(settings.TOT_VALUE_EDGE) : 0.06;
 
   const signals = [];
 
-  // ML signals: point difference between model ML and market ML for the same side
-  // Rule: only fire a signal if model and market agree on who the favorite is
-  // (avoids false signals when the model barely flips the fav due to HFA noise)
+  // ML signals: point difference, same-fav-direction only
   const aModel = modelResult.aML;
   const hModel = modelResult.hML;
   const aMarket = game.market_away_ml;
   const hMarket = game.market_home_ml;
+  const modelFavIsAway = aModel <= hModel;
+  const marketFavIsAway = aMarket <= hMarket;
 
-  const modelFavIsAway = aModel <= hModel;   // model thinks away is fav
-  const marketFavIsAway = aMarket <= hMarket; // market thinks away is fav
-
-  // Only compute signal if model and market agree on which team is the favorite
   if (modelFavIsAway === marketFavIsAway) {
-    // Away side: positive diff means model prices away better than market (model likes away more)
-    const aDiff = aMarket - aModel; // e.g. model=-150, market=-130 -> diff=20 (away value)
-    const hDiff = hMarket - hModel; // e.g. model=-150, market=-130 -> diff=20 (home value)
-
-    if (aDiff >= ML_VALUE_EDGE) {
-      signals.push({type:'ML',side:'away',label:'Value',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
-    } else if (aDiff >= ML_LEAN_EDGE) {
-      signals.push({type:'ML',side:'away',label:'Lean',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
-    }
-
-    if (hDiff >= ML_VALUE_EDGE) {
-      signals.push({type:'ML',side:'home',label:'Value',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
-    } else if (hDiff >= ML_LEAN_EDGE) {
-      signals.push({type:'ML',side:'home',label:'Lean',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
-    }
+    const aDiff = aMarket - aModel;
+    const hDiff = hMarket - hModel;
+    if (aDiff >= ML_VALUE_EDGE) signals.push({type:'ML',side:'away',label:'Value',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
+    else if (aDiff >= ML_LEAN_EDGE) signals.push({type:'ML',side:'away',label:'Lean',marketLine:aMarket,modelLine:aModel,edge:Math.round(aDiff)});
+    if (hDiff >= ML_VALUE_EDGE) signals.push({type:'ML',side:'home',label:'Value',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
+    else if (hDiff >= ML_LEAN_EDGE) signals.push({type:'ML',side:'home',label:'Lean',marketLine:hMarket,modelLine:hModel,edge:Math.round(hDiff)});
   }
 
-  // Total signals: run difference
-  const tEdge = modelResult.estTot - (game.market_total || 8.5);
-  if (tEdge >= TOT_VALUE_EDGE) signals.push({type:'Total',side:'over',label:'Value',marketLine:game.market_total,edge:parseFloat(tEdge.toFixed(2))});
-  else if (tEdge >= TOT_LEAN_EDGE) signals.push({type:'Total',side:'over',label:'Lean',marketLine:game.market_total,edge:parseFloat(tEdge.toFixed(2))});
-  if (tEdge <= -TOT_VALUE_EDGE) signals.push({type:'Total',side:'under',label:'Value',marketLine:game.market_total,edge:parseFloat(tEdge.toFixed(2))});
-  else if (tEdge <= -TOT_LEAN_EDGE) signals.push({type:'Total',side:'under',label:'Lean',marketLine:game.market_total,edge:parseFloat(tEdge.toFixed(2))});
+  // Total signals: juice-adjusted implied probability edge
+  // over_price/under_price are the actual ML prices on each side (e.g. -125, +105)
+  const mktTotal = game.market_total || 8.5;
+  const overPrice  = game.over_price  || -110;
+  const underPrice = game.under_price || -110;
+  const estTot = modelResult.estTot;
+
+  // Convert model run total to over/under win probability using normal approximation
+  // Simpler approach: use run diff vs line as signal, adjusted by juice
+  const overImplied  = overPrice  < 0 ? Math.abs(overPrice)/(Math.abs(overPrice)+100) : 100/(overPrice+100);
+  const underImplied = underPrice < 0 ? Math.abs(underPrice)/(Math.abs(underPrice)+100) : 100/(underPrice+100);
+
+  // Model over probability: use logistic-style conversion from run differential
+  // Each 0.5 run differential ≈ ~5% edge shift (empirically derived)
+  const runDiff = estTot - mktTotal;
+  const modelOverP = Math.min(Math.max(0.5 + runDiff * 0.08, 0.20), 0.80);
+  const modelUnderP = 1 - modelOverP;
+
+  const overEdge  = modelOverP  - overImplied;
+  const underEdge = modelUnderP - underImplied;
+
+  if (overEdge >= TOT_VALUE_EDGE) signals.push({type:'Total',side:'over',label:'Value',marketLine:mktTotal,overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4))});
+  else if (overEdge >= TOT_LEAN_EDGE) signals.push({type:'Total',side:'over',label:'Lean',marketLine:mktTotal,overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4))});
+  if (underEdge >= TOT_VALUE_EDGE) signals.push({type:'Total',side:'under',label:'Value',marketLine:mktTotal,overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4))});
+  else if (underEdge >= TOT_LEAN_EDGE) signals.push({type:'Total',side:'under',label:'Lean',marketLine:mktTotal,overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4))});
 
   return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
 }
