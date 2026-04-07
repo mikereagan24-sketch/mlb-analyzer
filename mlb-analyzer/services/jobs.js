@@ -157,9 +157,13 @@ async function runLineupJob(dateStr) {
         model_home_ml: null,
         model_total: null,
         lineup_source: 'auto',
-          lineup_status: g.lineup_status || 'projected',
+          away_lineup_status: g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
+      home_lineup_status: g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
+      lineup_status: g.lineup_status || 'projected',
       });
-      updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), dateStr, gameId);
+      const awayStatus = g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
+    const homeStatus = g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
+    updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), awayStatus, homeStatus, dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
       if (gameRow) {
         processGameSignals({
@@ -239,6 +243,18 @@ function startCronJobs() {
   console.log('[cron] Jobs scheduled — lineups at 17:00 UTC and 22:00 UTC, scores at 12:00 UTC');
 }
 
+function gameHasStarted(gameRow) {
+  // Returns true if game start time has passed (game is live or finished)
+  if (!gameRow || !gameRow.game_time) return false;
+  const tm = gameRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!tm) return false;
+  let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
+  if(ap==='PM'&&h!==12)h+=12; if(ap==='AM'&&h===12)h=0;
+  const nowET=new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
+  const minsToGame=(h*60+mn)-(nowET.getHours()*60+nowET.getMinutes());
+  return minsToGame < -5; // started more than 5 min ago
+}
+
 async function runOddsJob(dateStr) {
   dateStr = dateStr || todayET();
   try {
@@ -249,9 +265,15 @@ async function runOddsJob(dateStr) {
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
-      // Only update odds if not locked
+      // Skip if locked OR game has already started
       const existing = q.getGameById.get(dateStr, o.game_id);
-      if (existing && existing.odds_locked_at) continue;
+      if (existing && existing.odds_locked_at) { console.log('[odds] Skipping locked: '+o.game_id); continue; }
+      if (existing && gameHasStarted(existing)) {
+        // Lock it now to prevent future updates
+        db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
+        console.log('[odds] Skipping started game: '+o.game_id);
+        continue;
+      }
       db.prepare(`UPDATE game_log SET
         market_away_ml=?, market_home_ml=?, market_total=?,
         over_price=?, under_price=?, updated_at=datetime('now')
