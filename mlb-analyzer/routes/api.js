@@ -323,6 +323,25 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
 });
 
 
+// ── BACKTEST RESET ────────────────────────────────────────────────────
+router.delete('/backtest/reset', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (from && to) {
+      db.prepare('DELETE FROM bet_signals WHERE game_date BETWEEN ? AND ?').run(from, to);
+    } else {
+      db.prepare('DELETE FROM bet_signals').run();
+    }
+    // Also reset model lines so rerun regenerates fresh signals
+    if (from && to) {
+      db.prepare("UPDATE game_log SET model_away_ml=NULL,model_home_ml=NULL,model_total=NULL WHERE game_date BETWEEN ? AND ?").run(from, to);
+    } else {
+      db.prepare("UPDATE game_log SET model_away_ml=NULL,model_home_ml=NULL,model_total=NULL").run();
+    }
+    res.json({ success: true, message: 'All backtest signals wiped' });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 module.exports = router;
 
 
