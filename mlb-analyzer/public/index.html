@@ -152,6 +152,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="btn btn-primary btn-sm" onclick="loadGamesFromDB()">Load Games</button>
 <button class="btn btn-ghost btn-sm" onclick="refreshLineups()">â³ Refresh Lineups</button>
 <button class="btn btn-ghost btn-sm" onclick="triggerScores()">Pull Scores</button>
+        <button class="btn btn-ghost btn-sm" onclick="pullOdds()">🎲 Pull Odds</button>
 <span id="games-status" style="font-size:11px;color:var(--text2)"></span>
 </div>
 <div id="game-grid" class="game-grid"></div>
@@ -254,7 +255,12 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <!-- MODEL SETTINGS -->
 <div id="sec-model" class="sec">
 <div class="card">
-<div class="slabel">Model weights</div>
+<div class="slabel">Odds API</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+      <input type="text" id="s-odds-api-key" placeholder="Paste The Odds API key here" style="flex:1;font-family:monospace">
+      <button class="btn btn-ghost btn-sm" onclick="saveOddsKey()">Save Key</button>
+    </div>
+    <div class="slabel">Model weights</div>
 <div class="grid-2" style="gap:8px;margin-bottom:12px">
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Run multiplier (ÃN)</label><input type="number" id="s-run-mult" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">HFA boost (pp)</label><input type="number" id="s-hfa" step="0.01"></div>
@@ -414,6 +420,16 @@ async function refreshLineups(){
   }catch(e){st.textContent='Error: '+e.message;}
 }
 
+async function pullOdds(){
+  const date=document.getElementById('games-date').value||todayStr();
+  const st=document.getElementById('games-status');
+  st.innerHTML='<span class="spinner"></span>Pulling odds from DraftKings…';
+  try{
+    const r=await api('/jobs/odds',{method:'POST',body:JSON.stringify({date})});
+    if(r.success){st.textContent='✓ Odds updated for '+r.updated+' games';await loadGamesFromDB();}
+    else{st.textContent='Error: '+r.error;}
+  }catch(e){st.textContent='Error: '+e.message;}
+}
 async function triggerScores(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
@@ -645,9 +661,16 @@ async function loadSettings(){
     document.getElementById('s-relief-weight').value=s.relief_weight!==undefined?s.relief_weight:0.23;
     document.getElementById('s-sp-pit-weight').value=s.sp_pit_weight!==undefined?s.sp_pit_weight:0.80;
     document.getElementById('s-relief-pit-weight').value=s.relief_pit_weight!==undefined?s.relief_pit_weight:0.20;
+    if(s.odds_api_key) document.getElementById('s-odds-api-key').value=s.odds_api_key.length>8?'••••••••'+s.odds_api_key.slice(-4):s.odds_api_key;
     document.getElementById('s-tot-val').value=s.tot_value_edge||0.4;
     document.getElementById('s-tot-lean').value=s.tot_lean_edge||0.2;
   }catch(e){}
+}
+async function saveOddsKey(){
+  const key=document.getElementById('s-odds-api-key').value.trim();
+  if(!key)return;
+  await api('/settings',{method:'POST',body:JSON.stringify({odds_api_key:key})});
+  document.getElementById('s-odds-api-key').value='••••••••'+key.slice(-4);
 }
 async function saveSettings(){
   const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value,sp_weight:document.getElementById('s-sp-weight').value,relief_weight:document.getElementById('s-relief-weight').value,sp_pit_weight:document.getElementById('s-sp-pit-weight').value,relief_pit_weight:document.getElementById('s-relief-pit-weight').value};
