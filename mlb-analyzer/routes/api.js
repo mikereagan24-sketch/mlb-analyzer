@@ -71,7 +71,12 @@ router.post('/upload/:key?', upload.single('file'), (req, res) => {
     const expandedRows = [];
     for (const r of rows) {
       expandedRows.push(r); // plain name
-      if (r.team) expandedRows.push({...r, name: r.name+' '+r.team}); // "Jose Ramirez KC" -> stored as "jose ramirez kc" after normName
+      if (r.team) {
+        expandedRows.push({...r, name: r.name+' '+r.team}); // "Bobby Witt Jr. KC" -> "bobby witt jr kc"
+        // Also store Jr/Sr-stripped + team so "bobby witt kc" matches "Bobby Witt" in lineup
+        const stripped = r.name.replace(/\b(Jr\.|Sr\.|II|III|IV)\b/gi,'').replace(/\s+/g,' ').trim();
+        if (stripped !== r.name) expandedRows.push({...r, name: stripped+' '+r.team});
+      }
     }
     q.upsertWobaBatch(key, expandedRows);
     q.logUpload.run(key, file.originalname, rows.length);
