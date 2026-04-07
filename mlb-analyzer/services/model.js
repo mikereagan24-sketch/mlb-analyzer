@@ -147,6 +147,8 @@ function runModel(game, wobaIdx, settings) {
   const W_BAT     = num(settings.W_BAT,     0.5);
   const W_PROJ    = num(settings.W_PROJ,    0.65);
   const W_ACT     = num(settings.W_ACT,     0.35);
+  const SP_WEIGHT     = num(settings.SP_WEIGHT,     0.77);
+  const RELIEF_WEIGHT = num(settings.RELIEF_WEIGHT, 0.23);
 
   const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT);
   const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT);
