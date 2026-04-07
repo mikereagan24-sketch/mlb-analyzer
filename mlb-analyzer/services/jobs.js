@@ -32,7 +32,9 @@ function getSettings() {
     TOT_VALUE_EDGE: num('tot_value_edge', 1.0),
     TOT_LEAN_EDGE:  num('tot_lean_edge', 0.5),
     SP_WEIGHT:      num('sp_weight', 0.77),
-    RELIEF_WEIGHT:  num('relief_weight', 0.23),
+    RELIEF_WEIGHT:     num('relief_weight',     0.23),
+    SP_PIT_WEIGHT:     num('sp_pit_weight',     0.80),
+    RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
   };
 }
 
