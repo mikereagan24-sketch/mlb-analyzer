@@ -124,7 +124,22 @@ async function runLineupJob(dateStr) {
       const gameId = g.game_id || makeGameId(g.away_team, g.home_team);
       const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
-      q.upsertGame.run({
+      const existingRow = q.getGameById.get(dateStr, gameId);
+        // Lock odds 10min before game start — never overwrite with live odds
+        if (existingRow && !existingRow.odds_locked_at && existingRow.game_time) {
+          const tm = existingRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+          if (tm) {
+            let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
+            if(ap==='PM'&&h!==12)h+=12; if(ap==='AM'&&h===12)h=0;
+            const nowET=new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
+            const minsToGame=(h*60+mn)-(nowET.getHours()*60+nowET.getMinutes());
+            if(minsToGame<=10&&minsToGame>=-240){
+              db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
+              console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)');
+            }
+          }
+        }
+        q.upsertGame.run({
         game_date: dateStr,
         game_id: gameId,
         away_team: g.away_team,
@@ -134,9 +149,9 @@ async function runLineupJob(dateStr) {
         away_sp_hand: g.away_sp && g.away_sp.hand,
         home_sp: g.home_sp && g.home_sp.name,
         home_sp_hand: g.home_sp && g.home_sp.hand,
-        market_away_ml: g.market_away_ml,
-        market_home_ml: g.market_home_ml,
-        market_total: g.market_total,
+        market_away_ml: (existingRow && existingRow.odds_locked_at) ? existingRow.market_away_ml : g.market_away_ml,
+        market_home_ml: (existingRow && existingRow.odds_locked_at) ? existingRow.market_home_ml : g.market_home_ml,
+        market_total: (existingRow && existingRow.odds_locked_at) ? existingRow.market_total : g.market_total,
         park_factor: g.park_factor || 1.0,
         model_away_ml: null,
         model_home_ml: null,
