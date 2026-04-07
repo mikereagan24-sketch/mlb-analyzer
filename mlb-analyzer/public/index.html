@@ -457,7 +457,7 @@ function renderGameGrid(games,date){
       (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+s.signal_label.toLowerCase()+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
       '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP) vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)</div>'+
-      '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'â')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
+      '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">â¡ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
