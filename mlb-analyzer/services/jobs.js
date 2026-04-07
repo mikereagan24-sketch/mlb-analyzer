@@ -31,6 +31,8 @@ function getSettings() {
     ML_LEAN_EDGE:   num('ml_lean_edge', 20),
     TOT_VALUE_EDGE: num('tot_value_edge', 1.0),
     TOT_LEAN_EDGE:  num('tot_lean_edge', 0.5),
+    SP_WEIGHT:      num('sp_weight', 0.77),
+    RELIEF_WEIGHT:  num('relief_weight', 0.23),
   };
 }
 
