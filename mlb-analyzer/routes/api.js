@@ -241,72 +241,47 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
     function lookupBatter(name, hand, oppSpHand, teamHint) {
-      const vsKey=oppSpHand==='R'?'bat-proj-rhp':'bat-proj-lhp';
-      const actKey=oppSpHand==='R'?'bat-act-rhp':'bat-act-lhp';
-      const dflt=BAT_DFLT[hand]||BAT_DFLT['R'];
-      const dfltV=oppSpHand==='R'?dflt.vsRHP:dflt.vsLHP;
-      const key=normName(name);
-      const parts=key.split(' ');
-      const isAbbrev=parts.length>=2&&parts[0].length===1;
-      function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-      function findIn(idx,k,teamHint){
-        if(!idx)return null;
-        // 1. Try name+' '+team match first (stored as "jose ramirez cle" after normName)
-        const teamKey=k+' '+teamHint.toLowerCase();
-        if(teamHint&&idx[teamKey])return idx[teamKey].woba;
-        // 2. Exact name match
-        if(idx[k])return idx[k].woba;
-        // 3. Abbreviated name (e.g. "m busch"): find entries matching initial + last name + team
-        if(isAbbrev){
-          const initial=parts[0],last=parts[parts.length-1];
-          // Try with team first
-          if(teamHint){
-            const tl=teamHint.toLowerCase();
-            const te=Object.entries(idx).find(([n])=>{
-              if(!n.endsWith(' '+tl))return false;
-              const base=n.slice(0,n.length-tl.length-1).trim();
-              const p=stripJr(base).split(' ');
-              return p[p.length-1]===last&&p[0]&&p[0][0]===initial;
-            });
-            if(te)return te[1].woba;
+        const vsKey  = oppSpHand==='R' ? 'bat-proj-rhp' : 'bat-proj-lhp';
+        const actKey = oppSpHand==='R' ? 'bat-act-rhp'  : 'bat-act-lhp';
+        const oppKey    = oppSpHand==='R' ? 'bat-proj-lhp' : 'bat-proj-rhp';
+        const oppActKey = oppSpHand==='R' ? 'bat-act-lhp'  : 'bat-act-rhp';
+        const dflt = BAT_DFLT[hand]||BAT_DFLT['R'];
+        const dfltV    = oppSpHand==='R' ? dflt.vsRHP : dflt.vsLHP;
+        const dfltVOpp = oppSpHand==='R' ? dflt.vsLHP : dflt.vsRHP;
+        const key=normName(name);
+        const parts=key.split(' ');
+        const isAbbrev=parts.length>=2&&parts[0].length===1;
+        function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
+        function findIn(idx,k,tHint){
+          if(!idx)return null;
+          if(tHint&&idx[k+' '+tHint.toLowerCase()])return idx[k+' '+tHint.toLowerCase()].woba;
+          if(idx[k])return idx[k].woba;
+          if(isAbbrev){
+            const initial=parts[0],last=parts[parts.length-1];
+            if(tHint){const tl=tHint.toLowerCase();const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1].woba;}
+            const matches=Object.entries(idx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripJr(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
+            if(matches.length===1)return matches[0][1].woba;
           }
-          // Without team
-          const e=Object.entries(idx).filter(([n])=>{
-            // skip team-suffixed entries (end with 2-3 letter team code like " cle" " kc" etc)
-            if(/\s[a-z]{2,3}$/.test(n))return false;
-            const p=stripJr(n).split(' ');
-            return p[p.length-1]===last&&p[0]&&p[0][0]===initial;
-          });
-          if(e.length===1)return e[0][1].woba;
-          if(e.length>1){
-            // Multiple plain matches — try to pick by team via name|TEAM entries
-            for(const [,v] of e){
-              // We'll just return first match if no team disambiguation possible
-            }
-            return e[0][1].woba;
-          }
-          return null;
+          const sk=stripJr(k);
+          if(tHint&&idx[sk+' '+tHint.toLowerCase()])return idx[sk+' '+tHint.toLowerCase()].woba;
+          const e2=Object.entries(idx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
+          return e2?e2[1].woba:null;
         }
-        // 4. Full name: try stripping Jr/Sr suffixes
-        const sk=stripJr(k);
-        if(teamHint){
-          const tl=teamHint.toLowerCase();
-          const teamKey2=sk+' '+tl;
-          if(idx[teamKey2])return idx[teamKey2].woba;
-        }
-        // Plain name with suffix stripping
-        const e2=Object.entries(idx).filter(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
-        if(e2.length===1)return e2[0][1].woba;
-        if(e2.length>1)return e2[0][1].woba; // last resort
-        return null;
+        // Look up vs SP hand
+        const projV    = findIn(wobaIdx[vsKey],  key, teamHint);
+        const actV     = findIn(wobaIdx[actKey], key, teamHint);
+        const wobaVsSP = (projV&&actV) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
+                       : projV ? +projV.toFixed(3) : actV ? +actV.toFixed(3) : +dfltV.toFixed(3);
+        const srcVsSP  = (projV&&actV)?'blend':projV?'proj':actV?'act':'default';
+        // Look up vs opposite hand (for bullpen blend)
+        const projO    = findIn(wobaIdx[oppKey],    key, teamHint);
+        const actO     = findIn(wobaIdx[oppActKey], key, teamHint);
+        const wobaVsOpp = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
+                        : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : +dfltVOpp.toFixed(3);
+        // Blended wOBA: SP_WT% vs SP hand + REL_WT% vs opposite
+        const blended = +(wobaVsSP*SP_WT + wobaVsOpp*REL_WT).toFixed(3);
+        return {woba:blended, wobaVsSP, wobaVsOpp, source:srcVsSP};
       }
-      const proj=findIn(wobaIdx[vsKey],key,teamHint);
-      const act=findIn(wobaIdx[actKey],key,teamHint);
-      if(proj&&act)return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
-      if(proj)return{woba:+proj.toFixed(3),source:'proj'};
-      if(act)return{woba:+act.toFixed(3),source:'act'};
-      return{woba:+dfltV.toFixed(3),source:'default'};
-    }
     function lookupPitcher(name, hand) {
       const dflt=PIT_DFLT[hand]||PIT_DFLT['R'];
       const key=normName(name);
