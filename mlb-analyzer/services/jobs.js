@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchScores, makeGameId } = require('./scraper');
+const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
 const { runModel, getSignals, calcPnl } = require('./model');
 
 function todayET() {
@@ -238,4 +238,33 @@ function startCronJobs() {
   console.log('[cron] Jobs scheduled — lineups at 17:00 UTC and 22:00 UTC, scores at 12:00 UTC');
 }
 
-module.exports = { runLineupJob, runScoreJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
+async function runOddsJob(dateStr) {
+  dateStr = dateStr || todayET();
+  try {
+    const settings = getSettings();
+    const apiKey = q.getSetting.get('odds_api_key')?.value || process.env.ODDS_API_KEY || '';
+    if (!apiKey) return { success: false, error: 'No Odds API key. Add it in Model settings.' };
+    const odds = await fetchOddsAPI(apiKey, dateStr);
+    const wobaIdx = getWobaIndex();
+    let updated = 0;
+    for (const o of odds) {
+      // Only update odds if not locked
+      const existing = q.getGameById.get(dateStr, o.game_id);
+      if (existing && existing.odds_locked_at) continue;
+      db.prepare(`UPDATE game_log SET
+        market_away_ml=?, market_home_ml=?, market_total=?,
+        over_price=?, under_price=?, updated_at=datetime('now')
+        WHERE game_date=? AND game_id=?`)
+        .run(o.market_away_ml, o.market_home_ml, o.market_total,
+             o.over_price, o.under_price, dateStr, o.game_id);
+      const gameRow = q.getGameById.get(dateStr, o.game_id);
+      if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
+    }
+    return { success: true, updated, date: dateStr };
+  } catch(err) {
+    console.error('[odds-job]', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+module.exports = { runLineupJob, runScoreJob, runOddsJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
