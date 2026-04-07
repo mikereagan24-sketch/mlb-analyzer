@@ -239,7 +239,9 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const W_ACT  = settings.W_ACT  || 0.35;
       const num = (v,d) => { const n=Number(v); return isNaN(n)?d:n; };
       const SP_WT  = num(settings.SP_WEIGHT,   0.77);
-      const REL_WT = num(settings.RELIEF_WEIGHT, 0.23);
+      const REL_WT     = num(settings.RELIEF_WEIGHT,     0.23);
+      const SP_PIT_WT  = num(settings.SP_PIT_WEIGHT,     0.80);
+      const REL_PIT_WT = num(settings.RELIEF_PIT_WEIGHT, 0.20);
     const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
@@ -286,18 +288,30 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         return {woba:blended, wobaVsSP, wobaVsOpp, source:srcVsSP};
       }
     function lookupPitcher(name, hand) {
-      const dflt=PIT_DFLT[hand]||PIT_DFLT['R'];
-      const key=normName(name);
-      function bs(projKey,actKey,dfltV){
-        const proj=wobaIdx[projKey]&&wobaIdx[projKey][key]?wobaIdx[projKey][key].woba:null;
-        const act=wobaIdx[actKey]&&wobaIdx[actKey][key]?wobaIdx[actKey][key].woba:null;
-        if(proj&&act) return{woba:+(W_PROJ*proj+W_ACT*act).toFixed(3),source:'blend'};
-        if(proj) return{woba:+proj.toFixed(3),source:'proj'};
-        if(act) return{woba:+act.toFixed(3),source:'act'};
-        return{woba:+dfltV.toFixed(3),source:'default'};
+        const dflt = PIT_DFLT[hand]||PIT_DFLT['R'];
+        const key = normName(name);
+        function bs(projKey, actKey, dfltV){
+          const proj = wobaIdx[projKey]&&wobaIdx[projKey][key]?wobaIdx[projKey][key].woba:null;
+          const act  = wobaIdx[actKey] &&wobaIdx[actKey][key] ?wobaIdx[actKey][key].woba:null;
+          if(proj&&act) return +(W_PROJ*proj+W_ACT*act).toFixed(3);
+          if(proj) return +proj.toFixed(3);
+          if(act)  return +act.toFixed(3);
+          return +dfltV.toFixed(3);
+        }
+        // Raw splits
+        const rawVsLHB = bs('pit-proj-lhb','pit-act-lhb',dflt.vsLHB);
+        const rawVsRHB = bs('pit-proj-rhb','pit-act-rhb',dflt.vsRHB);
+        const src = (wobaIdx['pit-proj-lhb']&&wobaIdx['pit-proj-lhb'][key])?'blend':'default';
+        // Blended: 80% vs primary hand batters, 20% vs opposite
+        // For RHP: primarily faces RHB? No — blend is about lineup composition
+        // LHP vsLHB=primary(bad), vsRHB=opposite(good) — 80% vsLHB, 20% vsRHB
+        const blendedVsLHB = +(rawVsLHB*SP_PIT_WT + rawVsRHB*REL_PIT_WT).toFixed(3);
+        const blendedVsRHB = +(rawVsRHB*SP_PIT_WT + rawVsLHB*REL_PIT_WT).toFixed(3);
+        return {
+          vsLHB: {woba: blendedVsLHB, rawWoba: rawVsLHB, source: src},
+          vsRHB: {woba: blendedVsRHB, rawWoba: rawVsRHB, source: src}
+        };
       }
-      return{vsLHB:bs('pit-proj-lhb','pit-act-lhb',dflt.vsLHB),vsRHB:bs('pit-proj-rhb','pit-act-rhb',dflt.vsRHB)};
-    }
     const awayLineup=tryParse(game.away_lineup_json)||[];
     const homeLineup=tryParse(game.home_lineup_json)||[];
     res.json({
