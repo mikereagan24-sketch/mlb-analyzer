@@ -107,11 +107,22 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct) {
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 
-function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT) {
+function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT) {
   const eff = effHand(batter.hand, pitcherHand);
-  const pitW = eff==='L' ? pitWvsL : pitWvsR;
-  const batW = pitcherHand==='R' ? (batter.vsRHP??0.315) : (batter.vsLHP??0.315);
-  return pitW*W_PIT + batW*W_BAT;
+  // Pitcher wOBA: SP_PIT_WEIGHT% from SP split vs batter's hand,
+  // RELIEF_PIT_WEIGHT% from league-avg bullpen (0.318) — placeholder until real bullpen data
+  const BULLPEN_AVG = 0.318;
+  const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
+  const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
+  const pitWvsBatter = eff === 'L' ? pitWvsL : pitWvsR;
+  const pitW = pitWvsBatter * spPitW + BULLPEN_AVG * relPitW;
+  // Batter wOBA: SP_WEIGHT% vs SP hand, RELIEF_WEIGHT% vs opposite hand (bullpen blend)
+  const spW  = (SP_WEIGHT  != null) ? SP_WEIGHT  : 0.77;
+  const relW = (RELIEF_WEIGHT != null) ? RELIEF_WEIGHT : 0.23;
+  const vsStart = pitcherHand === 'R' ? (batter.vsRHP ?? 0.315) : (batter.vsLHP ?? 0.315);
+  const vsOpp   = pitcherHand === 'R' ? (batter.vsLHP ?? 0.325) : (batter.vsRHP ?? 0.305);
+  const batW = vsStart * spW + vsOpp * relW;
+  return pitW * W_PIT + batW * W_BAT;
 }
 
 function rawToML(wp) {
