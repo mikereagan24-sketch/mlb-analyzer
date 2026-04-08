@@ -300,6 +300,14 @@ function fmtDate(d){return d?d.slice(0,10):'';}
 function todayStr(){return new Date().toLocaleDateString('en-CA');}
 
 // Convert ET game time string to PT display
+function utcToPT(utcStr) {
+  if(!utcStr) return '';
+  try {
+    const d = new Date(utcStr.replace(' ','T')+'Z');
+    return d.toLocaleString('en-US',{timeZone:'America/Los_Angeles',
+      month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).replace(',','');
+  } catch(e) { return utcStr.slice(0,16); }
+}
 function etToPT(timeStr){
   if(!timeStr) return '';
   const m = timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
@@ -677,7 +685,7 @@ function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getEl
 async function loadCronLog(){
   try{
     const rows=await api('/cron-log');
-    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+r.ran_at.slice(0,16).replace('T',' ')+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
+    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
   }catch(e){}
 }
 async function loadSettings(){
