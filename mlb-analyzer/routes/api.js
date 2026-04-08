@@ -1,5 +1,4 @@
-const express = require('e
-   xpress');
+const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
@@ -157,6 +156,15 @@ router.post('/games/upsert', async (req, res) => {
         .run(g.over_price||null, g.under_price||null, g.game_date, gameId);
     }
     // If caller explicitly passes odds_locked_at: null, clear the lock
+    if ('odds_locked_at' in g && g.odds_locked_at === null) {
+      db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=? AND game_id=?").run(g.game_date, gameId);
+    }
+    // Update over/under prices if provided
+    if (g.over_price != null || g.under_price != null) {
+      db.prepare("UPDATE game_log SET over_price=?, under_price=? WHERE game_date=? AND game_id=?")
+        .run(g.over_price||null, g.under_price||null, g.game_date, gameId);
+    }
+    // Clear odds lock if explicitly passed as null
     if ('odds_locked_at' in g && g.odds_locked_at === null) {
       db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=? AND game_id=?").run(g.game_date, gameId);
     }
