@@ -273,6 +273,13 @@ async function fetchOddsAPI(apiKey, dateStr) {
   for (const g of games) {
     const gameDate = new Date(g.commence_time).toLocaleDateString('en-CA',{timeZone:'America/New_York'});
     if (gameDate !== dateStr) continue;
+    // Skip games that have already started — Odds API returns live lines for in-progress games
+    const commenceTime = new Date(g.commence_time);
+    const nowUTC = new Date();
+    if (commenceTime < nowUTC) {
+      console.log('[odds-api] Skipping started game: '+g.away_team+' @ '+g.home_team+' (commenced '+Math.round((nowUTC-commenceTime)/60000)+'min ago)');
+      continue;
+    }
     const awayTeam = ODDS_TEAM_MAP[g.away_team];
     const homeTeam = ODDS_TEAM_MAP[g.home_team];
     if (!awayTeam || !homeTeam) continue;
