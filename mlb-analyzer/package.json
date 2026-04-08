@@ -1,5 +1,5 @@
 {
-  "_deploy": "2026-04-08T15:47:39.003Z",
+  "_deploy": "2026-04-08T17:26:11.688Z",
   "name": "mlb-analyzer",
   "version": "1.0.0",
   "description": "MLB Betting Analyzer with persistent storage and automated nightly pulls",
