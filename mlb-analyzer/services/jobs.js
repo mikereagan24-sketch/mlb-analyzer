@@ -125,8 +125,9 @@ async function runLineupJob(dateStr) {
       const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const existingRow = q.getGameById.get(dateStr, gameId);
-        // Lock odds 10min before game start — never overwrite with live odds
-        if (existingRow && !existingRow.odds_locked_at && existingRow.game_time) {
+        // Lock odds 10min before game start — only for TODAY's games, never future dates
+        const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+        if (existingRow && !existingRow.odds_locked_at && existingRow.game_time && dateStr === todayForLock) {
           const tm = existingRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
           if (tm) {
             let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
@@ -243,9 +244,12 @@ function startCronJobs() {
   console.log('[cron] Jobs scheduled — lineups at 17:00 UTC and 22:00 UTC, scores at 12:00 UTC');
 }
 
-function gameHasStarted(gameRow) {
+function gameHasStarted(gameRow, gameDate) {
   // Returns true if game start time has passed (game is live or finished)
+  // Only games on TODAY's date can have started
+  const todayET = new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
   if (!gameRow || !gameRow.game_time) return false;
+  if (gameDate && gameDate !== todayET) return false; // future/past dates never "in progress"
   const tm = gameRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
   if (!tm) return false;
   let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
@@ -268,7 +272,7 @@ async function runOddsJob(dateStr) {
       // Skip if locked OR game has already started
       const existing = q.getGameById.get(dateStr, o.game_id);
       if (existing && existing.odds_locked_at) { console.log('[odds] Skipping locked: '+o.game_id); continue; }
-      if (existing && gameHasStarted(existing)) {
+      if (existing && gameHasStarted(existing, dateStr)) {
         // Lock it now to prevent future updates
         db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
         console.log('[odds] Skipping started game: '+o.game_id);
