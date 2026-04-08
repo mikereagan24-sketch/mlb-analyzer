@@ -1,4 +1,8 @@
-const express = require('express');
+const express = require('e
+    // Allow caller to explicitly clear the lock by passing odds_locked_at: null
+    if (req.body && req.body.odds_locked_at === null) {
+      db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=? AND game_id=?").run(gameData.game_date, gameData.game_id);
+    }xpress');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
@@ -350,6 +354,14 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
 
 
 // ── BACKTEST RESET ────────────────────────────────────────────────────
+// Unlock all odds for a date
+router.post('/games/:date/unlock', (req, res) => {
+  try {
+    const r = db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=?").run(req.params.date);
+    res.json({success:true, unlocked:r.changes});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
 router.delete('/backtest/reset-date', (req, res) => {
   try {
     const { date } = req.body;
