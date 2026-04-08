@@ -580,7 +580,7 @@ function renderModelOutput(g) {
       +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(g.proj_model_total ? parseFloat(g.proj_model_total).toFixed(1) : '—')+'</b></div>'
       +'</div>'
     : '<div style="font-size:11px;color:var(--text3);font-style:italic">No projected lineup pulled</div>';
-  var confirmed = (g.away_lineup_status==='confirmed' || g.home_lineup_status==='confirmed') && g.model_away_ml != null;
+  var confirmed = (g.away_lineup_status==='confirmed' || g.home_lineup_status==='confirmed' || g.lineup_status==='confirmed') && g.model_away_ml != null;
   var confRow = confirmed
     ? '<div style="display:flex;gap:20px;flex-wrap:wrap">'
       +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'+fmtML(g.model_away_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_away_ml)+'</span></div>'
@@ -621,7 +621,7 @@ async function renderMatchupGame(id){
     return '<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+lbl+' vs '+sn+' ('+sh+'HP)</th><th>PA</th><th>Bat wOBA</th><th>Pit wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>Wtd avg</td><td style="text-align:center;font-size:10px">'+wT.toFixed(1)+'</td><td style="'+wc(rb)+';font-weight:500">'+rb.toFixed(3)+'</td><td style="'+wc(rp)+';font-weight:500">'+rp.toFixed(3)+'</td><td style="'+wc(ra)+';font-weight:500">'+ra.toFixed(3)+'</td></tr></tfoot></table>';
   }
   const sb=h=>'<span class="sp-hand-'+h+'">'+h+'HP</span>';
-  const awayConfirmed=(g.away_lineup_status||g.lineup_status||'projected')==='confirmed'; const srcBadge=awayConfirmed||(g.home_lineup_status||g.lineup_status||'projected')==='confirmed'?'<span style="background:var(--green-bg);color:var(--green);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">✓ Confirmed Lineup</span>':'<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">⚠ Projected Lineup</span>';
+  const awayConfirmed=(g.away_lineup_status||g.lineup_status||'projected')==='confirmed'; const homeConfirmed=(g.home_lineup_status||g.lineup_status||'projected')==='confirmed'; const srcBadge=awayConfirmed||homeConfirmed?'<span style="background:var(--green-bg);color:var(--green);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">✓ Confirmed Lineup</span>':'<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">⚠ Projected Lineup</span>';
   const nt=wd?'<div class="notice ok" style="margin-bottom:10px">CSV wOBA loaded — <strong>*</strong> = FanGraphs CSV match  |  no * = default'+srcBadge+'</div>':'<div class="notice warn" style="margin-bottom:10px">No CSV data — upload FanGraphs CSVs in Data Import'+srcBadge+'</div>';
   const aL=gw(pA,'vsLHB'),aR=gw(pA,'vsRHB'),hL=gw(pH,'vsLHB'),hR=gw(pH,'vsRHB');
   const gid=g.game_id;
