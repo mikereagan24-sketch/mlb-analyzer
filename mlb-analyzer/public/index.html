@@ -273,15 +273,15 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter relief wt</label><input type="number" id="s-relief-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher SP hand wt</label><input type="number" id="s-sp-pit-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher relief wt</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1"></div>
-    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 3★ threshold (pts diff)</label><input type="number" id="s-ml-3star" step="1" min="0"></div><div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 3★ edge (%)</label><input type="number" id="s-tot-3star" step="0.01" min="0"></div><div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
 <div class="slabel">Signal thresholds</div>
 <div class="grid-2" style="gap:8px;margin-bottom:12px">
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 2★ threshold (pts diff)</label><input type="number" id="s-ml-val" step="0.01"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 3★ threshold (pts diff)</label><input type="number" id="s-ml-3star" step="1" min="0"></div><div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 2★ threshold (pts diff)</label><input type="number" id="s-ml-val" step="0.01"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 1★ threshold (pts diff)</label><input type="number" id="s-ml-lean" step="0.01"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total value edge (runs)</label><input type="number" id="s-tot-val" step="0.1"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total lean edge (runs)</label><input type="number" id="s-tot-lean" step="0.1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 3★ edge (%)</label><input type="number" id="s-tot-3star" step="0.01" min="0"></div><div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 2★ edge (%)</label><input type="number" id="s-tot-val" step="0.1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 1★ edge (%)</label><input type="number" id="s-tot-lean" step="0.1"></div>
 </div>
 <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
 <span id="settings-status" style="font-size:11px;color:var(--text2);margin-left:10px"></span>
