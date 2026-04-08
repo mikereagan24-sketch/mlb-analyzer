@@ -65,8 +65,18 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   };
   const model = runModel(game, wobaIdx, settings);
   const signals = getSignals(game, model, settings);
-  db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
-    .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
+  // If lineup is projected (not yet confirmed), save as proj_model snapshot
+  const isProjected = !gameRow.away_lineup_status || gameRow.away_lineup_status === 'projected';
+  const hasProjSnapshot = gameRow.proj_model_away_ml != null;
+  if (isProjected && !hasProjSnapshot) {
+    // First time running with projected lineup — save snapshot
+    db.prepare(`UPDATE game_log SET proj_model_away_ml=?, proj_model_home_ml=?, proj_model_total=?, model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
+      .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
+  } else {
+    // Confirmed lineup (or proj snapshot already saved) — update current model only
+    db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
+      .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
+  }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
   q.deleteSignalsForGame.run(gameRow.game_date, gameRow.game_id);
