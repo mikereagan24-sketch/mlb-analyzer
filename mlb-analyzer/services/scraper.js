@@ -262,26 +262,20 @@ const ODDS_TEAM_MAP = {
 
 async function fetchOddsAPI(apiKey, dateStr) {
   if (!apiKey) throw new Error('No Odds API key configured');
-  // Pull all major books — use priority: DraftKings → FanDuel → BetOnline → Bovada
   const url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds' +
     '?apiKey='+apiKey+'&regions=us&markets=h2h,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betonlineag,bovada';
   const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
   if (!resp.ok) throw new Error('Odds API error '+resp.status+': '+await resp.text());
   const games = await resp.json();
   console.log('[odds-api] Remaining requests: '+resp.headers.get('x-requests-remaining'));
-
+  const BOOK_PRIORITY = ['draftkings','fanduel','betonlineag','bovada'];
   const results = [];
   for (const g of games) {
-    // Only include games for the target date (ET)
     const gameDate = new Date(g.commence_time).toLocaleDateString('en-CA',{timeZone:'America/New_York'});
     if (gameDate !== dateStr) continue;
-
     const awayTeam = ODDS_TEAM_MAP[g.away_team];
     const homeTeam = ODDS_TEAM_MAP[g.home_team];
     if (!awayTeam || !homeTeam) continue;
-
-    // Priority: DraftKings → FanDuel → BetOnline → Bovada
-    const BOOK_PRIORITY = ['draftkings','fanduel','betonlineag','bovada'];
     const book = BOOK_PRIORITY.map(k=>g.bookmakers?.find(b=>b.key===k)).find(Boolean);
     if (!book) continue;
     console.log('[odds-api] '+awayTeam+'@'+homeTeam+' using: '+book.key);
@@ -289,9 +283,8 @@ async function fetchOddsAPI(apiKey, dateStr) {
     const totals = book.markets?.find(m=>m.key==='totals');
     const awayOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===awayTeam||o.name===g.away_team);
     const homeOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===homeTeam||o.name===g.home_team);
-    const overOdds  = totals?.outcomes?.find(o=>o.name==='Over')
+    const overOdds  = totals?.outcomes?.find(o=>o.name==='Over');
     const underOdds = totals?.outcomes?.find(o=>o.name==='Under');
-
     results.push({
       game_id: makeGameId(awayTeam, homeTeam),
       away_team: awayTeam,
