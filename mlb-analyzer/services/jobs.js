@@ -261,6 +261,16 @@ function startCronJobs() {
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
   // Scores: 7 AM ET (12:00 UTC)
+    // Odds: 4 automated pulls per day — track line movement throughout day
+  // 10 AM ET (14:00 UTC), 12 PM ET (16:00 UTC), 2 PM ET (18:00 UTC), 4 PM ET (20:00 UTC)
+  ['0 14 * * *','0 16 * * *','0 18 * * *','0 20 * * *'].forEach((schedule,i) => {
+    const labels = ['10AM ET','Noon ET','2PM ET','4PM ET'];
+    cron.schedule(schedule, () => {
+      console.log('[cron] '+labels[i]+' odds pull');
+      runOddsJob(todayET());
+    }, { timezone: 'UTC' });
+  });
+
   cron.schedule('0 11 * * *', () => {
     console.log('[cron] 4AM PT score pull');
     runScoreJob(yesterdayET());
