@@ -121,6 +121,17 @@ async function runLineupJob(dateStr) {
     }
 
     const games = Array.isArray(result) ? result : [];
+  // Normalize team codes — fix common scraper mistakes
+  const TEAM_NORM = {'WSH':'WAS','OAK':'ATH','CWS':'CWS'};
+  for (const g of games) {
+    if (TEAM_NORM[g.away_team]) g.away_team = TEAM_NORM[g.away_team];
+    if (TEAM_NORM[g.home_team]) g.home_team = TEAM_NORM[g.home_team];
+    // Recompute game_id after normalization
+    g.game_id = (g.away_team + '-' + g.home_team).toLowerCase();
+  }
+  // Deduplicate by game_id (keep last)
+  const seen = {}; for (const g of games) seen[g.game_id] = g;
+  games.length = 0; Object.values(seen).forEach(g => games.push(g));
     if (!games.length) {
       q.logCron.run('lineups', dateStr, 'error', 'No games returned from scraper', 0);
       return { success: false, error: 'No games returned', date: dateStr };
