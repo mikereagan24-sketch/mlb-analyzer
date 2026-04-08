@@ -632,7 +632,30 @@ async function renderMatchupGame(id){
       : '')
     +'</div>'
     +'</div>'
-    +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
+    +'<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 12px;margin-bottom:14px">'
+    +'<div style="font-size:10px;color:var(--text2);font-weight:600;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Model Output</div>'
+    +'<div style="margin-bottom:8px">'
+    +'<div style="font-size:10px;font-weight:500;color:var(--yellow);margin-bottom:4px">&#9888; Projected Lineup</div>'
+    +(g.proj_model_away_ml!=null
+      ?'<div style="display:flex;gap:20px;flex-wrap:wrap">'
+        +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'+fmtML(g.proj_model_away_ml)+'</b></div>'
+        +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'+fmtML(g.proj_model_home_ml)+'</b></div>'
+        +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(g.proj_model_total?parseFloat(g.proj_model_total).toFixed(1):'—')+'</b></div>'
+        +'</div>'
+      :'<div style="font-size:11px;color:var(--text3);font-style:italic">No projected lineup pulled</div>')
+    +'</div>'
+    +'<div style="border-top:1px solid var(--border);padding-top:8px">'
+    +'<div style="font-size:10px;font-weight:500;color:var(--green);margin-bottom:4px">&#10003; Confirmed Lineup</div>'
+    +((g.away_lineup_status==="confirmed"||g.home_lineup_status==="confirmed")&&g.model_away_ml!=null
+      ?'<div style="display:flex;gap:20px;flex-wrap:wrap">'
+        +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'+fmtML(g.model_away_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_away_ml)+'</span></div>'
+        +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'+fmtML(g.model_home_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_home_ml)+'</span></div>'
+        +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(g.model_total?parseFloat(g.model_total).toFixed(1):'—')+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+(g.market_total||'—')+(g.over_price?' ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')':'')+'</span></div>'
+        +'</div>'
+      :'<div style="font-size:11px;color:var(--text3);font-style:italic">No confirmed lineup yet</div>')
+    +'</div>'
+    +'</div>'
+    ++'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
     +'<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(\'' +gid+ '\')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(\'' +gid+ '\')">Rerun Model</button></div>';
 }
 
