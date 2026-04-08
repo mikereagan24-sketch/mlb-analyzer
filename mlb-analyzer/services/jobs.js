@@ -244,8 +244,8 @@ function startCronJobs() {
     console.log('[cron] Noon ET lineup pull');
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
-  cron.schedule('0 22 * * *', () => {
-    console.log('[cron] 5PM ET lineup pull');
+  cron.schedule('0 4 * * *', () => {
+    console.log('[cron] 11PM ET lineup pull');
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
   // Scores: 7 AM ET (12:00 UTC)
