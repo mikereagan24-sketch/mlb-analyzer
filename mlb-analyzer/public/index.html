@@ -153,6 +153,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="btn btn-ghost btn-sm" onclick="refreshLineups()">→³ Refresh Lineups</button>
 <button class="btn btn-ghost btn-sm" onclick="triggerScores()">Pull Scores</button>
         <button class="btn btn-ghost btn-sm" onclick="pullOdds()">🎲 Pull Odds</button>
+        <button class="btn btn-ghost btn-sm" onclick="rerunDate()">⟳ Rerun Model</button>
 <span id="games-status" style="font-size:11px;color:var(--text2)"></span>
 </div>
 <div id="game-grid" class="game-grid"></div>
@@ -420,6 +421,16 @@ async function refreshLineups(){
   }catch(e){st.textContent='Error: '+e.message;}
 }
 
+async function rerunDate(){
+  const date=document.getElementById('games-date').value||todayStr();
+  const st=document.getElementById('games-status');
+  st.innerHTML='<span class="spinner"></span>Rerunning model…';
+  try{
+    const r=await api('/games/'+date+'/rerun',{method:'POST'});
+    st.textContent='✓ Model rerun — '+r.updated+' games updated';
+    await loadGamesFromDB();
+  }catch(e){st.textContent='Error: '+e.message;}
+}
 async function pullOdds(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
