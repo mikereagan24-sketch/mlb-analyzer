@@ -119,8 +119,8 @@ async function runLineupJob(dateStr) {
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
     const updateLineup = db.prepare(
-      `UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`
-    );
+    `UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, away_lineup_status=?, home_lineup_status=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`
+  );
 
     for (const g of games) {
       const gameId = g.game_id || makeGameId(g.away_team, g.home_team);
