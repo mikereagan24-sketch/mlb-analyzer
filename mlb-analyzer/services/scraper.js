@@ -262,9 +262,9 @@ const ODDS_TEAM_MAP = {
 
 async function fetchOddsAPI(apiKey, dateStr) {
   if (!apiKey) throw new Error('No Odds API key configured');
-  // Use DraftKings as primary book — sharp, fast to move, widely used
+  // Pull all major books — use priority: DraftKings → FanDuel → BetOnline → Bovada
   const url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds' +
-    '?apiKey='+apiKey+'&regions=us&markets=h2h,totals&oddsFormat=american&bookmakers=draftkings';
+    '?apiKey='+apiKey+'&regions=us&markets=h2h,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betonlineag,bovada';
   const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
   if (!resp.ok) throw new Error('Odds API error '+resp.status+': '+await resp.text());
   const games = await resp.json();
@@ -288,6 +288,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
 
     const awayOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===awayTeam||o.name===g.away_team);
     const homeOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===homeTeam||o.name===g.home_team);
+    const bookUsed = book.key;
     const overOdds  = totals?.outcomes?.find(o=>o.name==='Over');
     const underOdds = totals?.outcomes?.find(o=>o.name==='Under');
 
