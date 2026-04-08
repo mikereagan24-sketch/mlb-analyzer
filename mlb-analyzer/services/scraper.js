@@ -280,16 +280,16 @@ async function fetchOddsAPI(apiKey, dateStr) {
     const homeTeam = ODDS_TEAM_MAP[g.home_team];
     if (!awayTeam || !homeTeam) continue;
 
-    const dk = g.bookmakers?.find(b=>b.key==='draftkings');
-    if (!dk) continue;
-
-    const h2h = dk.markets?.find(m=>m.key==='h2h');
-    const totals = dk.markets?.find(m=>m.key==='totals');
-
+    // Priority: DraftKings → FanDuel → BetOnline → Bovada
+    const BOOK_PRIORITY = ['draftkings','fanduel','betonlineag','bovada'];
+    const book = BOOK_PRIORITY.map(k=>g.bookmakers?.find(b=>b.key===k)).find(Boolean);
+    if (!book) continue;
+    console.log('[odds-api] '+awayTeam+'@'+homeTeam+' using: '+book.key);
+    const h2h    = book.markets?.find(m=>m.key==='h2h');
+    const totals = book.markets?.find(m=>m.key==='totals');
     const awayOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===awayTeam||o.name===g.away_team);
     const homeOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===homeTeam||o.name===g.home_team);
-    const bookUsed = book.key;
-    const overOdds  = totals?.outcomes?.find(o=>o.name==='Over');
+    const overOdds  = totals?.outcomes?.find(o=>o.name==='Over')
     const underOdds = totals?.outcomes?.find(o=>o.name==='Under');
 
     results.push({
