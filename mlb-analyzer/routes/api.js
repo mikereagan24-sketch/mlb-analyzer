@@ -350,6 +350,15 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
 
 
 // ── BACKTEST RESET ────────────────────────────────────────────────────
+router.delete('/backtest/reset-date', (req, res) => {
+  try {
+    const { date } = req.body;
+    if (!date) return res.status(400).json({error:'date required'});
+    const r = db.prepare("DELETE FROM bet_signals WHERE game_date=?").run(date);
+    res.json({success:true, deleted:r.changes, date});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
 router.delete('/backtest/reset', (req, res) => {
   try {
     const { from, to } = req.query;
