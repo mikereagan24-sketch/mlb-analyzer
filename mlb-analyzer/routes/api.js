@@ -1,8 +1,5 @@
 const express = require('e
-    // Allow caller to explicitly clear the lock by passing odds_locked_at: null
-    if (req.body && req.body.odds_locked_at === null) {
-      db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=? AND game_id=?").run(gameData.game_date, gameData.game_id);
-    }xpress');
+   xpress');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
@@ -153,6 +150,15 @@ router.post('/games/upsert', async (req, res) => {
       .run(JSON.stringify(g.away_lineup || []), JSON.stringify(g.home_lineup || []), g.game_date, gameId);
     if (g.away_score != null && g.home_score != null) {
       q.updateScores.run({ game_date: g.game_date, game_id: gameId, away_score: g.away_score, home_score: g.home_score, scores_source: 'manual' });
+    }
+    // Update over/under prices if provided
+    if (g.over_price != null || g.under_price != null) {
+      db.prepare("UPDATE game_log SET over_price=?, under_price=? WHERE game_date=? AND game_id=?")
+        .run(g.over_price||null, g.under_price||null, g.game_date, gameId);
+    }
+    // If caller explicitly passes odds_locked_at: null, clear the lock
+    if ('odds_locked_at' in g && g.odds_locked_at === null) {
+      db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=? AND game_id=?").run(g.game_date, gameId);
     }
     const gameRow = q.getGameById.get(g.game_date, gameId);
     if (gameRow) processGameSignals(gameRow, getWobaIndex(), getSettings());
