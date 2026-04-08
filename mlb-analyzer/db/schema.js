@@ -48,7 +48,10 @@ db.exec(`
     market_home_ml INTEGER,
     market_total REAL,
     park_factor REAL DEFAULT 1.0,
-    model_away_ml INTEGER,
+    proj_model_away_ml INTEGER,
+  proj_model_home_ml INTEGER,
+  proj_model_total REAL,
+  model_away_ml INTEGER,
     model_home_ml INTEGER,
     model_total REAL,
     away_score INTEGER,
@@ -127,6 +130,9 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN over_price INTEGER"); } catch(e) 
 try { db.exec("ALTER TABLE game_log ADD COLUMN lineup_status TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_lineup_status TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_lineup_status TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_away_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_home_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_total REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN under_price INTEGER"); } catch(e) {}
 
 const q = {
