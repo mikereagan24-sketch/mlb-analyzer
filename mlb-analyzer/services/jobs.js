@@ -260,8 +260,8 @@ function startCronJobs() {
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
   // Scores: 7 AM ET (12:00 UTC)
-  cron.schedule('0 12 * * *', () => {
-    console.log('[cron] 7AM ET score pull');
+  cron.schedule('0 11 * * *', () => {
+    console.log('[cron] 4AM PT score pull');
     runScoreJob(yesterdayET());
   }, { timezone: 'UTC' });
   console.log('[cron] Jobs scheduled — lineups at 17:00 UTC and 22:00 UTC, scores at 12:00 UTC');
