@@ -517,6 +517,28 @@ router.post('/signals/closing-lines', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
+// ── LOOKUP DEBUG ───────────────────────────────────────────────────
+router.get('/debug/lookup', (req, res) => {
+  try {
+    const name = req.query.name || 'S. Woods Richardson';
+    const team = req.query.team || 'MIN';
+    const { normName, getPitcherWoba } = require('../services/model');
+    const wobaIdx = getWobaIndex();
+    // Check what's in the index for this name
+    const k = normName(name);
+    const kTeam = k + ' ' + team.toLowerCase();
+    const pitLhb = wobaIdx['pit-proj-lhb'] || {};
+    const directHit = pitLhb[k];
+    const teamHit = pitLhb[kTeam];
+    // Run actual getPitcherWoba
+    const result = getPitcherWoba(wobaIdx, name, 'R', team, 0.7, 0.3);
+    // Count keys in index
+    const allKeys = Object.keys(pitLhb).filter(k2=>k2.includes(k.split(' ').pop()));
+    res.json({name, k, kTeam, directHit:!!directHit, teamHit:!!teamHit,
+      matchingKeys:allKeys.slice(0,10), result});
+  } catch(err) { res.status(500).json({error:err.message, stack:err.stack?.split('\n').slice(0,5)}); }
+});
+
 // ── SCORE DEBUG ENDPOINT ──────────────────────────────────────────────
 router.get('/debug/scores', async (req, res) => {
   try {
