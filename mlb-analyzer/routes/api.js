@@ -413,6 +413,44 @@ router.get('/debug/woba-keys', (req, res) => {
   res.json(keys);
 });
 
+// ── KALSHI TEST ENDPOINT (sandbox/debug) ─────────────────────────
+router.get('/debug/kalshi', async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+    const fetch2 = require('node-fetch');
+
+    // Step 1: Get MLB game winner events
+    const eventsUrl = 'https://api.elections.kalshi.com/trade-api/v2/events?series_ticker=KXMLBMW&status=open&limit=50';
+    const eventsResp = await fetch2(eventsUrl, {headers:{'Accept':'application/json'}});
+    const eventsData = await eventsResp.json();
+    const events = eventsData.events || [];
+
+    // Step 2: For each event, get its markets (yes_ask = price to buy)
+    const results = [];
+    for (const ev of events.slice(0, 5)) { // limit to 5 for test
+      const mUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker='+ev.event_ticker+'&limit=10';
+      const mResp = await fetch2(mUrl, {headers:{'Accept':'application/json'}});
+      const mData = await mResp.json();
+      results.push({
+        event: ev.event_ticker,
+        title: ev.title,
+        markets: (mData.markets||[]).map(m=>({
+          ticker: m.ticker,
+          title: m.title || m.subtitle,
+          yes_ask: m.yes_ask,   // price to buy YES (e.g. 0.64 = 64¢)
+          yes_bid: m.yes_bid,
+          no_ask: m.no_ask,
+          last_price: m.last_price,
+          volume: m.volume,
+        }))
+      });
+    }
+    res.json({date, events_found: events.length, sample: results});
+  } catch(err) {
+    res.status(500).json({error: err.message});
+  }
+});
+
 module.exports = router;
 
 
