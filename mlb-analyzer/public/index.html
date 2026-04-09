@@ -446,6 +446,7 @@ async function loadGamesFromDB(){
     const games=await api('/games/'+date);
     currentGames=games;
     renderGameGrid(games,date);
+    injectEditButtons(games,date);
     if(games&&games.length) loadDataQuality(date, games, 'dq-games');
     renderMuSelector(games,date);
     st.textContent=games.length?games.length+' games loaded':'No games found for '+date;
@@ -516,11 +517,11 @@ function renderGameGrid(games,date){
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
-      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+'<button class="edit-btn" onclick="showSPEdit(\''+(g.game_id)+'\',\''+(date)+'\',\'away\')">✎</button>'+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+'<button class="edit-btn" onclick="showSPEdit(\''+(g.game_id)+'\',\''+(date)+'\',\'home\')">✎</button>'+'</div>'+
+      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP) vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)</div>'+
       '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
-      '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+'<button class="gcard-btn" style="background:var(--border);color:var(--text2)" onclick="showLineupEdit(\''+g.game_id+'\',\''+date+'\')">✎ Lineup</button>'+
+      '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
       '</div>'+
       '<div class="gresult '+(g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
       (g.model_away_ml?renderGameResult(g):'')+
@@ -754,6 +755,37 @@ async function loadDataQuality(date, games, containerId) {
     +rows+'</div>';
 }
 // ── SP / Lineup Edit ─────────────────────────────────────────────────
+function injectEditButtons(games, date) {
+  games.forEach(function(g) {
+    var card = document.getElementById('gc-'+g.game_id);
+    if (!card) return;
+    // Add SP edit buttons to .gsp if not already there
+    var gsp = card.querySelector('.gsp');
+    if (gsp && !gsp.querySelector('.edit-btn')) {
+      var ba = document.createElement('button');
+      ba.className='edit-btn'; ba.title='Edit away SP'; ba.textContent='✎';
+      ba.onclick = function(){showSPEdit(g.game_id,date,'away');};
+      var bh = document.createElement('button');
+      bh.className='edit-btn'; bh.title='Edit home SP'; bh.textContent='✎';
+      bh.onclick = function(){showSPEdit(g.game_id,date,'home');};
+      // Insert after away SP text — find the " vs " text node
+      var txt = gsp.innerHTML;
+      gsp.innerHTML = txt.replace(' vs ',
+        ' <button class="edit-btn" title="Edit away SP" onclick="showSPEdit(''+g.game_id+'',''+date+'','away')">✎</button> vs ');
+      gsp.innerHTML += ' <button class="edit-btn" title="Edit home SP" onclick="showSPEdit(''+g.game_id+'',''+date+'','home')">✎</button>';
+    }
+    // Add Edit Lineup button to gactions if not already there
+    var gact = card.querySelector('.gactions');
+    if (gact && !gact.querySelector('.ga-lineup')) {
+      var bl = document.createElement('button');
+      bl.className='gcard-btn ga-lineup';
+      bl.style.cssText='background:var(--border);color:var(--text2)';
+      bl.textContent='✎ Lineup';
+      bl.onclick = function(){showLineupEdit(g.game_id, date);};
+      gact.appendChild(bl);
+    }
+  });
+}
 var _luState = {gameId:'',date:'',awayTeam:'',homeTeam:''};
 
 function showSPEdit(gameId, date, side) {
