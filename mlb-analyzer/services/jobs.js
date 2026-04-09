@@ -160,6 +160,20 @@ async function runLineupJob(dateStr) {
             if(minsToGame<=10&&minsToGame>=-240){
               db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
               console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)');
+              // Auto-set closing lines on any ML signals for this game
+              const gameForClose = q.getGameById.get(dateStr, gameId);
+              if (gameForClose) {
+                const mlSigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, gameId);
+                for (const sig of mlSigs) {
+                  const closingLine = sig.signal_side === 'away' ? gameForClose.market_away_ml : gameForClose.market_home_ml;
+                  let clv = null;
+                  if (sig.bet_line != null && closingLine != null) {
+                    const isFav = sig.bet_line < 0;
+                    clv = isFav ? (closingLine - sig.bet_line) : (sig.bet_line - closingLine);
+                  }
+                  db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+                }
+              }
             }
           }
         }
@@ -310,6 +324,17 @@ async function runOddsJob(dateStr) {
         // Lock it now to prevent future updates
         db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
         console.log('[odds] Skipping started game: '+o.game_id);
+        // Auto-set closing lines on ML signals
+        const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, o.game_id);
+        for (const sig of mlSigsO) {
+          const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
+          let clv = null;
+          if (sig.bet_line != null && closingLine != null) {
+            const isFav = sig.bet_line < 0;
+            clv = isFav ? (closingLine - sig.bet_line) : (sig.bet_line - closingLine);
+          }
+          db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+        }
         continue;
       }
       db.prepare(`UPDATE game_log SET
