@@ -189,7 +189,7 @@ router.get('/backtest', (req, res) => {
     const toDate = to || '2099-12-31';
     const byCategory = q.getSummaryByCategory.all(fromDate, toDate);
     const overall = q.getOverallSummary.get(fromDate, toDate);
-    const signals = q.getSignalsByDateRange.all(fromDate, toDate);
+    const signals = db.prepare("SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, id").all(fromDate, toDate);
     res.json({ overall, byCategory, signals });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -411,6 +411,74 @@ router.get('/debug/woba-keys', (req, res) => {
     keys[dataKey] = Object.keys(players).filter(k => !q2 || k.includes(q2.toLowerCase())).slice(0,20);
   }
   res.json(keys);
+});
+
+// ── BET LINE TRACKING ─────────────────────────────────────────────────
+// Lock your actual bet line for a signal
+router.post('/signals/:id/bet-line', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { bet_line } = req.body;
+    if (bet_line == null) return res.status(400).json({error:'bet_line required'});
+    // Recalculate CLV if closing_line already exists
+    const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
+    if (!sig) return res.status(404).json({error:'Signal not found'});
+    let clv = null;
+    if (sig.closing_line != null) {
+      // CLV = how much better your line is vs closing
+      // For ML: positive = you got a better price than closing
+      const isFav = bet_line < 0;
+      if (isFav) {
+        // Less negative = better for favorite bettors
+        clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 → clv = +20
+      } else {
+        // More positive = better for underdog bettors
+        clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 → clv = +15
+      }
+    }
+    db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
+      .run(bet_line, clv, id);
+    res.json({success:true, id, bet_line, clv});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
+// Set closing line for a signal (called when odds lock fires)
+router.post('/signals/:id/closing-line', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { closing_line } = req.body;
+    if (closing_line == null) return res.status(400).json({error:'closing_line required'});
+    const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
+    if (!sig) return res.status(404).json({error:'Signal not found'});
+    // Recalculate CLV if bet_line exists
+    let clv = null;
+    if (sig.bet_line != null) {
+      const isFav = sig.bet_line < 0;
+      clv = isFav ? (closing_line - sig.bet_line) : (sig.bet_line - closing_line);
+    }
+    db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?")
+      .run(closing_line, clv, id);
+    res.json({success:true, id, closing_line, clv});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
+// Bulk-set closing lines when odds lock fires (called from jobs.js)
+router.post('/signals/closing-lines', (req, res) => {
+  try {
+    const { game_date, game_id, closing_line } = req.body;
+    const sigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL AND signal_type='ML'").all(game_date, game_id);
+    let updated = 0;
+    for (const sig of sigs) {
+      let clv = null;
+      if (sig.bet_line != null) {
+        const isFav = sig.bet_line < 0;
+        clv = isFav ? (closing_line - sig.bet_line) : (sig.bet_line - closing_line);
+      }
+      db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closing_line, clv, sig.id);
+      updated++;
+    }
+    res.json({success:true, updated});
+  } catch(err) { res.status(500).json({error:err.message}); }
 });
 
 // ── KALSHI TEST ENDPOINT (sandbox/debug) ─────────────────────────
