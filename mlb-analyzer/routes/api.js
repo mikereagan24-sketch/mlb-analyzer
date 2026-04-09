@@ -189,7 +189,19 @@ router.get('/backtest', (req, res) => {
     const toDate = to || '2099-12-31';
     const byCategory = q.getSummaryByCategory.all(fromDate, toDate);
     const overall = q.getOverallSummary.get(fromDate, toDate);
-    const signals = db.prepare("SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, id").all(fromDate, toDate);
+    const signals = db.prepare(`
+      SELECT bs.*,
+        COALESCE(bs.market_line,
+          CASE WHEN bs.signal_side='away' THEN gl.market_away_ml
+               WHEN bs.signal_side='home' THEN gl.market_home_ml
+               ELSE NULL END
+        ) as market_line,
+        gl.market_total, gl.away_score, gl.home_score
+      FROM bet_signals bs
+      LEFT JOIN game_log gl ON gl.game_date=bs.game_date AND gl.game_id=bs.game_id
+      WHERE bs.game_date BETWEEN ? AND ?
+      ORDER BY bs.game_date, bs.id
+    `).all(fromDate, toDate);
     res.json({ overall, byCategory, signals });
   } catch (err) {
     res.status(500).json({ error: err.message });
