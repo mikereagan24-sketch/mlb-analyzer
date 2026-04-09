@@ -810,23 +810,30 @@ function showSPEdit(gameId, date, side) {
     if (!g) return;
     var name = side==='away' ? (g.away_sp||'') : (g.home_sp||'');
     var hand = side==='away' ? (g.away_sp_hand||'R') : (g.home_sp_hand||'R');
+    // Build row using DOM — no innerHTML with onclick strings
     var row = document.createElement('div');
     row.id = rowId; row.className = 'sp-edit-row';
-    row.innerHTML =
-      '<input id="spi-'+rowId+'" value="'+name.replace(/"/g,'&quot;')+'" placeholder="SP name">'+
-      '<select id="sph-'+rowId+'">'+
-        '<option value="R"'+(hand==='R'?' selected':'')+'>R</option>'+
-        '<option value="L"'+(hand==='L'?' selected':'')+'>L</option>'+
-        '<option value="S"'+(hand==='S'?' selected':'')+'>S</option>'+
-      '</select>'+
-      '<button class="sp-save-btn" onclick="saveSP(''+gameId+'',''+date+'',''+side+'',''+rowId+'')">Save</button>'+
-      '<button class="sp-cancel-btn" onclick="document.getElementById(''+rowId+'').remove()">Cancel</button>';
+    var inp = document.createElement('input');
+    inp.id = 'spi-'+rowId; inp.value = name; inp.placeholder = 'SP name';
+    var sel = document.createElement('select');
+    sel.id = 'sph-'+rowId;
+    ['R','L','S'].forEach(function(v){
+      var o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      if (v===hand) o.selected = true;
+      sel.appendChild(o);
+    });
+    var saveBtn = document.createElement('button');
+    saveBtn.className = 'sp-save-btn'; saveBtn.textContent = 'Save';
+    (function(gid,dt,sd,rid){saveBtn.addEventListener('click',function(){saveSP(gid,dt,sd,rid);});})(gameId,date,side,rowId);
+    var cancelBtn = document.createElement('button');
+    cancelBtn.className = 'sp-cancel-btn'; cancelBtn.textContent = 'Cancel';
+    (function(rid){cancelBtn.addEventListener('click',function(){var el=document.getElementById(rid);if(el)el.remove();});})(rowId);
+    row.appendChild(inp); row.appendChild(sel); row.appendChild(saveBtn); row.appendChild(cancelBtn);
     card.querySelector('.gsp').after(row);
-    var inp = document.getElementById('spi-'+rowId);
     inp.focus(); inp.select();
   });
 }
-
 async function saveSP(gameId, date, side, rowId) {
   var name = (document.getElementById('spi-'+rowId)||{}).value||'';
   var hand = (document.getElementById('sph-'+rowId)||{}).value||'R';
