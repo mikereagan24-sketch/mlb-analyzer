@@ -192,9 +192,9 @@ async function runLineupJob(dateStr) {
       market_home_ml: existingRow ? existingRow.market_home_ml : g.market_home_ml,
       market_total:   existingRow ? existingRow.market_total   : g.market_total,
       park_factor: g.park_factor || 1.0,
-        model_away_ml: null,
-        model_home_ml: null,
-        model_total: null,
+        model_away_ml: existingRow ? existingRow.model_away_ml : null,
+        model_home_ml: existingRow ? existingRow.model_home_ml : null,
+        model_total:   existingRow ? existingRow.model_total   : null,
         lineup_source: 'auto',
           away_lineup_status: g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
       home_lineup_status: g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
@@ -232,13 +232,13 @@ async function runScoreJob(dateStr) {
   try {
     const scores = await fetchScores(dateStr);
     for (const s of scores) {
-      const gameId = makeGameId(s.away_team, s.home_team);
+      const gameId = s.gameId || makeGameId(s.away || s.away_team, s.home || s.home_team);
       q.updateScores.run({
         game_date: dateStr,
         game_id: gameId,
-        away_score: s.away_score,
-        home_score: s.home_score,
-        scores_source: 'bref',
+        away_score: s.awayScore ?? s.away_score,
+        home_score: s.homeScore ?? s.home_score,
+        scores_source: 'mlb-api',
       });
       const gameRow = db.prepare(`SELECT * FROM game_log WHERE game_date=? AND game_id=?`).get(dateStr, gameId);
       if (gameRow) {
@@ -247,7 +247,7 @@ async function runScoreJob(dateStr) {
         for (const sig of signals) {
           const { outcome, pnl } = calcPnl(
             { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line },
-            s.away_score, s.home_score, gameRow.market_total
+            s.awayScore ?? s.away_score, s.homeScore ?? s.home_score, gameRow.market_total
           );
           updateSignal.run(outcome, pnl, sig.id);
         }
