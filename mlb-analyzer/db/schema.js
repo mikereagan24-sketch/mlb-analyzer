@@ -83,6 +83,10 @@ db.exec(`
     edge_pct REAL,
     outcome TEXT,
     pnl REAL DEFAULT 0,
+  bet_line INTEGER,          -- the line you actually bet (manually entered)
+  bet_locked_at TEXT,        -- when you locked your bet line
+  closing_line INTEGER,      -- final pregame locked line (auto-set when odds lock)
+  clv REAL                   -- closing line value: how much better your line was,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_signals_date ON bet_signals(game_date);
@@ -133,6 +137,10 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN home_lineup_status TEXT"); } catc
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_away_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_home_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_total REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_line INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_locked_at TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_line INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN clv REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN under_price INTEGER"); } catch(e) {}
 
 const q = {
