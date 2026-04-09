@@ -225,9 +225,10 @@ async function fetchScores(dateStr) {
   const teamNames = Object.keys(BREF_TEAM_MAP);
   teamNames.sort((a, b) => b.length - a.length);
   const escaped = teamNames.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // BREF format: "Away Team Score Final Home Team Score"
   const pat = new RegExp(
     '(' + escaped.join('|') + ')\\s+(\\d+)\\s+Final\\s+(' + escaped.join('|') + ')\\s+(\\d+)',
-    'g'
+    'gi'  // case-insensitive flag added
   );
   let m;
   while ((m = pat.exec(text)) !== null) {
