@@ -270,7 +270,9 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     if(awayScore===homeScore) return {outcome:'push',pnl:0};
     const betTeamWon=signal.side==='away'?awayScore>homeScore:homeScore>awayScore;
     const ml=parseInt(signal.marketLine);
-    const pnl=betTeamWon?(ml>0?ml:100/Math.abs(ml)*100):-100;
+    // If marketLine is missing/null, still record outcome but pnl is null
+    if(isNaN(ml)||ml===0) return {outcome:betTeamWon?'win':'loss',pnl:null};
+    const pnl=betTeamWon?(ml>0?ml:parseFloat((100/Math.abs(ml)*100).toFixed(2))):-100;
     return {outcome:betTeamWon?'win':'loss',pnl:parseFloat(pnl.toFixed(2))};
   } else {
     const line=parseFloat(marketTotal);
