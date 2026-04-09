@@ -344,28 +344,14 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         return {woba:blended, wobaVsSP, wobaVsOpp, source:srcVsSP};
       }
     function lookupPitcher(name, hand) {
-        const dflt = PIT_DFLT[hand]||PIT_DFLT['R'];
-        const key = normName(name);
-        function bs(projKey, actKey, dfltV){
-          const proj = wobaIdx[projKey]&&wobaIdx[projKey][key]?wobaIdx[projKey][key].woba:null;
-          const act  = wobaIdx[actKey] &&wobaIdx[actKey][key] ?wobaIdx[actKey][key].woba:null;
-          if(proj&&act) return +(W_PROJ*proj+W_ACT*act).toFixed(3);
-          if(proj) return +proj.toFixed(3);
-          if(act)  return +act.toFixed(3);
-          return +dfltV.toFixed(3);
-        }
-        const rawVsLHB = bs('pit-proj-lhb','pit-act-lhb',dflt.vsLHB);
-        const rawVsRHB = bs('pit-proj-rhb','pit-act-rhb',dflt.vsRHB);
-        const src = (wobaIdx['pit-proj-lhb']&&wobaIdx['pit-proj-lhb'][key])?'blend':'default';
-        // Blend: SP_PIT_WT% from SP split, RELIEF_PIT_WT% from league-avg bullpen (0.318)
-        const BULLPEN_AVG = 0.318;
-        const blendedVsLHB = +(rawVsLHB * SP_PIT_WT + BULLPEN_AVG * REL_PIT_WT).toFixed(3);
-        const blendedVsRHB = +(rawVsRHB * SP_PIT_WT + BULLPEN_AVG * REL_PIT_WT).toFixed(3);
-        return {
-          vsLHB: {woba: blendedVsLHB, rawWoba: rawVsLHB, source: src},
-          vsRHB: {woba: blendedVsRHB, rawWoba: rawVsRHB, source: src}
-        };
-      }
+      // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback
+      const { getPitcherWoba } = require('../services/model');
+      const result = getPitcherWoba(wobaIdx, name, hand||'R', null, W_PROJ, W_ACT);
+      return {
+        vsLHB: { woba: result.vsLHB, rawWoba: result.vsLHB, source: result.source },
+        vsRHB: { woba: result.vsRHB, rawWoba: result.vsRHB, source: result.source },
+      };
+    }
     const awayLineup=tryParse(game.away_lineup_json)||[];
     const homeLineup=tryParse(game.home_lineup_json)||[];
     res.json({
