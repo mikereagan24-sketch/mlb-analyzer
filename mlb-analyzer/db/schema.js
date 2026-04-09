@@ -183,7 +183,17 @@ const q = {
       scores_source = @scores_source, updated_at = datetime('now')
     WHERE game_date = @game_date AND game_id = @game_id
   `),
-  getGamesByDate: db.prepare(`SELECT * FROM game_log WHERE game_date = ? ORDER BY game_time, game_id`),
+  getGamesByDate: db.prepare(`SELECT * FROM game_log WHERE game_date = ?
+      ORDER BY
+        CASE
+          WHEN game_time IS NULL THEN 9999
+          WHEN game_time LIKE '%AM%' THEN
+            (CAST(SUBSTR(game_time,1,INSTR(game_time,':')-1) AS INT)%12)*60 +
+            CAST(TRIM(SUBSTR(game_time,INSTR(game_time,':')+1,2)) AS INT)
+          ELSE
+            ((CAST(SUBSTR(game_time,1,INSTR(game_time,':')-1) AS INT)%12)+12)*60 +
+            CAST(TRIM(SUBSTR(game_time,INSTR(game_time,':')+1,2)) AS INT)
+        END, game_id`),
   getGameById: db.prepare(`SELECT * FROM game_log WHERE game_date = ? AND game_id = ?`),
   getDates: db.prepare(`SELECT DISTINCT game_date FROM game_log ORDER BY game_date DESC LIMIT 60`),
   deleteSignalsForGame: db.prepare(`DELETE FROM bet_signals WHERE game_date = ? AND game_id = ?`),
