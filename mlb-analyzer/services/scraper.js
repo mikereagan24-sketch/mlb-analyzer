@@ -208,58 +208,44 @@ ${chunk}`;
 }
 
 async function fetchScores(dateStr) {
-  console.log('[scraper] Fetching Baseball Reference for ' + dateStr);
+  // Uses MLB Stats API — free, no auth, returns final scores as JSON
+  const TEAM_MAP = {
+    'San Diego Padres':'SD','Boston Red Sox':'BOS','Pittsburgh Pirates':'PIT',
+    'Kansas City Royals':'KC','Cleveland Guardians':'CLE','Milwaukee Brewers':'MIL',
+    'Baltimore Orioles':'BAL','Chicago White Sox':'CWS','Seattle Mariners':'SEA',
+    'Texas Rangers':'TEX','Los Angeles Dodgers':'LAD','Toronto Blue Jays':'TOR',
+    'Houston Astros':'HOU','Colorado Rockies':'COL','Philadelphia Phillies':'PHI',
+    'San Francisco Giants':'SF','St. Louis Cardinals':'STL','Washington Nationals':'WAS',
+    'Atlanta Braves':'ATL','Los Angeles Angels':'LAA','Arizona Diamondbacks':'ARI',
+    'New York Mets':'NYM','Cincinnati Reds':'CIN','Miami Marlins':'MIA',
+    'Chicago Cubs':'CHC','Tampa Bay Rays':'TB','Athletics':'ATH',
+    'New York Yankees':'NYY','Detroit Tigers':'DET','Minnesota Twins':'MIN',
+  };
   const [year, month, day] = dateStr.split('-');
-  const url = 'https://www.baseball-reference.com/boxes/index.fcgi?month=' + parseInt(month) + '&day=' + parseInt(day) + '&year=' + year;
-  console.log('[scraper] BREF URL: ' + url);
-  const resp = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html',
-    },
-  });
-  if (!resp.ok) throw new Error('Baseball Reference fetch failed: ' + resp.status);
-  const html = await resp.text();
-  const text = htmlToText(html);
-  const scores = [];
-  const teamNames = Object.keys(BREF_TEAM_MAP);
-  teamNames.sort((a, b) => b.length - a.length);
-  const escaped = teamNames.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  // BREF format: "Away Team Score Final Home Team Score"
-  const pat = new RegExp(
-    '(' + escaped.join('|') + ')\\s+(\\d+)\\s+Final\\s+(' + escaped.join('|') + ')\\s+(\\d+)',
-    'gi'  // case-insensitive flag added
-  );
-  let m;
-  while ((m = pat.exec(text)) !== null) {
-    const at = BREF_TEAM_MAP[m[1]];
-    const ht = BREF_TEAM_MAP[m[3]];
-    if (at && ht && at !== ht) {
-      scores.push({ away_team: at, home_team: ht, away_score: parseInt(m[2]), home_score: parseInt(m[4]), final: true });
+  const mmdd = month.padStart(2,'0')+'/'+day.padStart(2,'0')+'/'+year;
+  const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date='+mmdd+'&hydrate=linescore';
+  const resp = await fetch(url, {headers:{'Accept':'application/json'}});
+  if (!resp.ok) throw new Error('MLB API error: '+resp.status);
+  const data = await resp.json();
+  const games = (data.dates||[])[0]?.games || [];
+  const results = [];
+  for (const g of games) {
+    if (g.status?.detailedState !== 'Final') continue;
+    const awayName = g.teams?.away?.team?.name;
+    const homeName = g.teams?.home?.team?.name;
+    const awayScore = g.teams?.away?.score;
+    const homeScore = g.teams?.home?.score;
+    const away = TEAM_MAP[awayName];
+    const home = TEAM_MAP[homeName];
+    if (!away || !home || awayScore == null || homeScore == null) {
+      console.log('[scores] Skipping unmapped: '+awayName+' @ '+homeName);
+      continue;
     }
+    results.push({away, home, awayScore, homeScore, gameId: (away+'-'+home).toLowerCase()});
   }
-  console.log('[scraper] Parsed ' + scores.length + ' scores from Baseball Reference');
-  return scores;
+  return results;
 }
 
-function makeGameId(awayTeam, homeTeam) {
-  return (awayTeam + '-' + homeTeam).toLowerCase();
-}
-
-// Team name -> our abbreviation mapping for The Odds API
-const ODDS_TEAM_MAP = {
-  'Arizona Diamondbacks':'ARI','Atlanta Braves':'ATL','Baltimore Orioles':'BAL',
-  'Boston Red Sox':'BOS','Chicago Cubs':'CHC','Chicago White Sox':'CWS',
-  'Cincinnati Reds':'CIN','Cleveland Guardians':'CLE','Colorado Rockies':'COL',
-  'Detroit Tigers':'DET','Houston Astros':'HOU','Kansas City Royals':'KC',
-  'Los Angeles Angels':'LAA','Los Angeles Dodgers':'LAD','Miami Marlins':'MIA',
-  'Milwaukee Brewers':'MIL','Minnesota Twins':'MIN','New York Mets':'NYM',
-  'New York Yankees':'NYY','Athletics':'ATH','Oakland Athletics':'ATH',
-  'Philadelphia Phillies':'PHI','Pittsburgh Pirates':'PIT','San Diego Padres':'SD',
-  'San Francisco Giants':'SF','Seattle Mariners':'SEA','St. Louis Cardinals':'STL',
-  'Tampa Bay Rays':'TB','Texas Rangers':'TEX','Toronto Blue Jays':'TOR',
-  'Washington Nationals':'WAS',
-};
 
 async function fetchOddsAPI(apiKey, dateStr) {
   if (!apiKey) throw new Error('No Odds API key configured');
