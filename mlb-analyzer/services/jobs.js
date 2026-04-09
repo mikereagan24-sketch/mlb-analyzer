@@ -97,7 +97,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         : gl.market_total,
       model_line: sig.type === 'ML'
         ? (sig.side === 'away' ? model.aML : model.hML)
-        : Math.round(model.estTot * 10),
+        : parseFloat(model.estTot.toFixed(2)),
       edge_pct: sig.edge,
       outcome,
       pnl,
