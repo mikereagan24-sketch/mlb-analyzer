@@ -115,6 +115,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .metric-val{font-size:22px;font-weight:500}
 .metric-sub{font-size:10px;color:var(--text2);margin-top:2px}
 .green{color:var(--green)}.red{color:var(--red)}.muted{color:var(--text2)}
+.sig-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:.5px solid var(--border);font-size:12px}
+.sig-betline{display:flex;align-items:center;gap:4px}
+.sig-betline input{width:60px;padding:2px 6px;border:1px solid var(--border);border-radius:4px;font-size:11px;background:var(--bg)}
+.clv-pos{color:var(--green);font-weight:500}
+.clv-neg{color:#e05;font-weight:500}
+.clv-neu{color:var(--text2)}
 .cron-row{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:.5px solid var(--border);font-size:12px}
 .cron-row:last-child{border-bottom:none}
 .cron-badge{padding:2px 8px;border-radius:10px;font-size:10px;font-weight:500;flex-shrink:0;margin-top:2px}
@@ -660,6 +666,19 @@ function sw(name){
 }
 
 const CAT_LABELS={'3star-fav':'3★ — favorite','2star-fav':'2★ — favorite','1star-fav':'1★ — favorite','3star-dog':'3★ — underdog','2star-dog':'2★ — underdog','1star-dog':'1★ — underdog','3star-over':'3★ — over','2star-over':'2★ — over','1star-over':'1★ — over','3star-under':'3★ — under','2star-under':'2★ — under','1star-under':'1★ — under'};
+async function lockBetLine(sigId, inputId) {
+  const line = parseInt(document.getElementById(inputId)?.value);
+  if (isNaN(line)) return alert('Enter a valid moneyline (e.g. -156 or +113)');
+  try {
+    const r = await api('/signals/'+sigId+'/bet-line',{method:'POST',body:JSON.stringify({bet_line:line})});
+    if(r.success){
+      const clv = r.clv != null ? ' CLV: '+(r.clv>=0?'+':'')+r.clv : '';
+      document.getElementById(inputId).style.borderColor='var(--green)';
+      alert('Locked! Bet line: '+(line>0?'+':'')+line+clv);
+      loadBacktest(); // refresh
+    }
+  } catch(e){ alert('Error: '+e.message); }
+}
 async function loadBacktest(){
   const from=document.getElementById('bt-from').value;
   const to=document.getElementById('bt-to').value;
@@ -674,7 +693,168 @@ async function loadBacktest(){
       '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'—')+'</div></div>'+
       '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+((ov.plays||0)*100).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     const cats=d.byCategory||[];
-    document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
+    // Render signal-level rows with bet line locking
+  const sigRows = (d.signals||[]).filter(s=>s.signal_type==='ML').map(s=>{
+    const clvVal = s.clv != null ? (s.clv >= 0 ? '<span class="clv-pos">+'+s.clv+'</span>' : '<span class="clv-neg">'+s.clv+'</span>') : '<span class="clv-neu">—</span>';
+    const betLineVal = s.bet_line != null ? fmtML(s.bet_line) : '';
+    const closingVal = s.closing_line != null ? fmtML(s.closing_line) : '—';
+    const modelVal = s.model_line != null ? fmtML(s.model_line) : '—';
+    const inputId = 'bl-'+s.id;
+    return '<div class="sig-row">'+
+      '<span style="width:90px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'+
+      '<span style="width:80px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'+
+      '<span style="width:60px"><span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label+'</span></span>'+
+      '<span style="width:80px">'+s.signal_side.toUpperCase()+' ML</span>'+
+      '<span style="width:55px;color:var(--text2)" title="Model line">Mdl: '+modelVal+'</span>'+
+      '<span style="width:55px" title="Signal market line">Mkt: '+fmtML(s.market_line)+'</span>'+
+      '<span style="width:65px" title="Closing line">Close: '+closingVal+'</span>'+
+      '<span class="sig-betline">'+
+        '<input type="number" id="'+inputId+'" placeholder="your line" value="'+betLineVal+'" step="1">'+
+        '<button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:10px" onclick="lockBetLine('+s.id+',''+inputId+'')">Lock</button>'+
+      '</span>'+
+      '<span style="width:55px;text-align:right" title="CLV vs closing">CLV: '+clvVal+'</span>'+
+      '<span style="width:50px;color:'+(s.outcome==='win'?'var(--green)':s.outcome==='loss'?'#e05':'var(--text2)')+';text-align:right">'+
+        (s.outcome==='pending'?'—':(s.outcome==='win'?'+
+      const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
+      if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
+      return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+c.plays+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
+    }).join('');
+  }catch(e){alert('Backtest error: '+e.message);}
+}
+function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getElementById('bt-from').value)+'&to='+(btTo||document.getElementById('bt-to').value),'_blank');}
+async function loadCronLog(){
+  try{
+    const rows=await api('/cron-log');
+    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
+  }catch(e){}
+}
+async function loadSettings(){
+  try{
+    const s=await api('/settings');
+    document.getElementById('s-run-mult').value=s.run_mult||48;
+    document.getElementById('s-hfa').value=s.hfa_boost||0.02;
+    document.getElementById('s-w-pit').value=s.w_pit||0.5;
+    document.getElementById('s-w-bat').value=s.w_bat||0.5;
+    document.getElementById('s-w-proj').value=s.w_proj||0.65;
+    document.getElementById('s-w-act').value=s.w_act||0.35;
+    document.getElementById('s-fav-adj').value=s.fav_adj!==undefined?s.fav_adj:0;
+    document.getElementById('s-dog-adj').value=s.dog_adj!==undefined?s.dog_adj:0;
+    document.getElementById('s-ml-val').value=s.ml_value_edge!==undefined?s.ml_value_edge:40;
+    document.getElementById('s-ml-lean').value=s.ml_lean_edge!==undefined?s.ml_lean_edge:20;
+    document.getElementById('s-sp-weight').value=s.sp_weight!==undefined?s.sp_weight:0.77;
+    document.getElementById('s-relief-weight').value=s.relief_weight!==undefined?s.relief_weight:0.23;
+    document.getElementById('s-sp-pit-weight').value=s.sp_pit_weight!==undefined?s.sp_pit_weight:0.80;
+    document.getElementById('s-relief-pit-weight').value=s.relief_pit_weight!==undefined?s.relief_pit_weight:0.20;
+    document.getElementById('s-ml-3star').value=s.ml_3star_edge!==undefined?s.ml_3star_edge:60;
+    document.getElementById('s-tot-3star').value=s.tot_3star_edge!==undefined?s.tot_3star_edge:0.12;
+    if(s.odds_api_key) document.getElementById('s-odds-api-key').value=s.odds_api_key.length>8?'••••••••'+s.odds_api_key.slice(-4):s.odds_api_key;
+    document.getElementById('s-tot-val').value=s.tot_value_edge!==undefined?s.tot_value_edge:0.06;
+    document.getElementById('s-tot-lean').value=s.tot_lean_edge!==undefined?s.tot_lean_edge:0.03;
+  }catch(e){}
+}
+async function saveOddsKey(){
+  const key=document.getElementById('s-odds-api-key').value.trim();
+  if(!key)return;
+  await api('/settings',{method:'POST',body:JSON.stringify({odds_api_key:key})});
+  document.getElementById('s-odds-api-key').value='••••••••'+key.slice(-4);
+}
+async function saveSettings(){
+  const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value,sp_weight:document.getElementById('s-sp-weight').value,relief_weight:document.getElementById('s-relief-weight').value,sp_pit_weight:document.getElementById('s-sp-pit-weight').value,relief_pit_weight:document.getElementById('s-relief-pit-weight').value,ml_3star_edge:document.getElementById('s-ml-3star').value,tot_3star_edge:document.getElementById('s-tot-3star').value};
+  const st=document.getElementById('settings-status');
+  try{
+    await api('/settings',{method:'POST',body:JSON.stringify(s)});
+    st.innerHTML='<span class="spinner"></span> Saved — updating model…';
+    // Rerun model on today + upcoming dates so ML lines reflect new settings immediately
+    try{
+      const dates=await api('/dates');
+      const today=todayStr();
+      const toRerun=dates.filter(d=>d>=today).slice(0,3);
+      for(const d of toRerun){try{await api('/games/'+d+'/rerun',{method:'POST'});}catch(e){}}
+      await loadGamesFromDB();
+    }catch(e){}
+    st.textContent='✓ Settings saved — model updated';
+    setTimeout(()=>st.textContent='',3000);
+  }catch(e){st.textContent='Error saving';}
+}
+init();
+</script>
+</body>
+</html>
++s.pnl.toFixed(0):'
+      const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
+      if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
+      return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+c.plays+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
+    }).join('');
+  }catch(e){alert('Backtest error: '+e.message);}
+}
+function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getElementById('bt-from').value)+'&to='+(btTo||document.getElementById('bt-to').value),'_blank');}
+async function loadCronLog(){
+  try{
+    const rows=await api('/cron-log');
+    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
+  }catch(e){}
+}
+async function loadSettings(){
+  try{
+    const s=await api('/settings');
+    document.getElementById('s-run-mult').value=s.run_mult||48;
+    document.getElementById('s-hfa').value=s.hfa_boost||0.02;
+    document.getElementById('s-w-pit').value=s.w_pit||0.5;
+    document.getElementById('s-w-bat').value=s.w_bat||0.5;
+    document.getElementById('s-w-proj').value=s.w_proj||0.65;
+    document.getElementById('s-w-act').value=s.w_act||0.35;
+    document.getElementById('s-fav-adj').value=s.fav_adj!==undefined?s.fav_adj:0;
+    document.getElementById('s-dog-adj').value=s.dog_adj!==undefined?s.dog_adj:0;
+    document.getElementById('s-ml-val').value=s.ml_value_edge!==undefined?s.ml_value_edge:40;
+    document.getElementById('s-ml-lean').value=s.ml_lean_edge!==undefined?s.ml_lean_edge:20;
+    document.getElementById('s-sp-weight').value=s.sp_weight!==undefined?s.sp_weight:0.77;
+    document.getElementById('s-relief-weight').value=s.relief_weight!==undefined?s.relief_weight:0.23;
+    document.getElementById('s-sp-pit-weight').value=s.sp_pit_weight!==undefined?s.sp_pit_weight:0.80;
+    document.getElementById('s-relief-pit-weight').value=s.relief_pit_weight!==undefined?s.relief_pit_weight:0.20;
+    document.getElementById('s-ml-3star').value=s.ml_3star_edge!==undefined?s.ml_3star_edge:60;
+    document.getElementById('s-tot-3star').value=s.tot_3star_edge!==undefined?s.tot_3star_edge:0.12;
+    if(s.odds_api_key) document.getElementById('s-odds-api-key').value=s.odds_api_key.length>8?'••••••••'+s.odds_api_key.slice(-4):s.odds_api_key;
+    document.getElementById('s-tot-val').value=s.tot_value_edge!==undefined?s.tot_value_edge:0.06;
+    document.getElementById('s-tot-lean').value=s.tot_lean_edge!==undefined?s.tot_lean_edge:0.03;
+  }catch(e){}
+}
+async function saveOddsKey(){
+  const key=document.getElementById('s-odds-api-key').value.trim();
+  if(!key)return;
+  await api('/settings',{method:'POST',body:JSON.stringify({odds_api_key:key})});
+  document.getElementById('s-odds-api-key').value='••••••••'+key.slice(-4);
+}
+async function saveSettings(){
+  const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value,sp_weight:document.getElementById('s-sp-weight').value,relief_weight:document.getElementById('s-relief-weight').value,sp_pit_weight:document.getElementById('s-sp-pit-weight').value,relief_pit_weight:document.getElementById('s-relief-pit-weight').value,ml_3star_edge:document.getElementById('s-ml-3star').value,tot_3star_edge:document.getElementById('s-tot-3star').value};
+  const st=document.getElementById('settings-status');
+  try{
+    await api('/settings',{method:'POST',body:JSON.stringify(s)});
+    st.innerHTML='<span class="spinner"></span> Saved — updating model…';
+    // Rerun model on today + upcoming dates so ML lines reflect new settings immediately
+    try{
+      const dates=await api('/dates');
+      const today=todayStr();
+      const toRerun=dates.filter(d=>d>=today).slice(0,3);
+      for(const d of toRerun){try{await api('/games/'+d+'/rerun',{method:'POST'});}catch(e){}}
+      await loadGamesFromDB();
+    }catch(e){}
+    st.textContent='✓ Settings saved — model updated';
+    setTimeout(()=>st.textContent='',3000);
+  }catch(e){st.textContent='Error saving';}
+}
+init();
+</script>
+</body>
+</html>
++s.pnl.toFixed(0)))+
+      '</span>'+
+    '</div>';
+  }).join('');
+
+  const sigSection = sigRows ? '<div style="margin-top:20px"><div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">ML Signals — Line Tracking</div><div style="font-size:10px;color:var(--text3);margin-bottom:6px">Lock your actual bet line to track CLV vs closing line. Closing line is set automatically when odds lock.</div>'+sigRows+'</div>' : '';
+  document.getElementById('bt-signals').innerHTML = sigSection;
+
+  document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
       const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
       if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
       return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+c.plays+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
