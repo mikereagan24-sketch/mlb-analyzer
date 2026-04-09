@@ -257,8 +257,8 @@ function getSignals(game, modelResult, settings) {
 
   const oLabel = totLabel(overEdge);
   const uLabel = totLabel(underEdge);
-  if (oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4))});
-  if (uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4))});
+  if (oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4))});
+  if (uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4))});
 
   return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
 }
@@ -275,11 +275,16 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     const pnl=betTeamWon?(ml>0?ml:parseFloat((100/Math.abs(ml)*100).toFixed(2))):-100;
     return {outcome:betTeamWon?'win':'loss',pnl:parseFloat(pnl.toFixed(2))};
   } else {
-    const line=parseFloat(marketTotal);
+    // marketTotal param comes from game_log.market_total; fall back to signal.marketLine
+    const line = parseFloat(marketTotal ?? signal.marketLine);
+    if(isNaN(line) || line === 0) return {outcome:'pending',pnl:null}; // no total — can't score
     if(actualTotal===line) return {outcome:'push',pnl:0};
     const hitOver=actualTotal>line;
     const betWon=signal.side==='over'?hitOver:!hitOver;
-    return {outcome:betWon?'win':'loss',pnl:betWon?90.91:-100};
+    // Use over/under price if available, else default -110
+    const price = signal.side==='over' ? (signal.overPrice||-110) : (signal.underPrice||-110);
+    const payout = price>0 ? price : parseFloat((10000/Math.abs(price)).toFixed(2));
+    return {outcome:betWon?'win':'loss',pnl:betWon?parseFloat(payout.toFixed(2)):-100};
   }
 }
 
