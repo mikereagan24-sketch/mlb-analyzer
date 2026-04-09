@@ -531,11 +531,23 @@ router.get('/debug/lookup', (req, res) => {
     const directHit = pitLhb[k];
     const teamHit = pitLhb[kTeam];
     // Run actual getPitcherWoba
+    const { runModel } = require('../services/model');
     const result = getPitcherWoba(wobaIdx, name, 'R', team, 0.7, 0.3);
+    // Also run full model for min-tor
+    const gameRow = q.getGameById.get('2026-04-10', 'min-tor');
+    let modelResult = null;
+    if (gameRow) {
+      const settings = getSettings();
+      const gameObj = {...gameRow,
+        awayLineup: gameRow.away_lineup_json ? JSON.parse(gameRow.away_lineup_json) : [],
+        homeLineup: gameRow.home_lineup_json ? JSON.parse(gameRow.home_lineup_json) : [],
+      };
+      try { modelResult = runModel(gameObj, wobaIdx, settings); } catch(e) { modelResult = {error:e.message}; }
+    }
     // Count keys in index
     const allKeys = Object.keys(pitLhb).filter(k2=>k2.includes(k.split(' ').pop()));
     res.json({name, k, kTeam, directHit:!!directHit, teamHit:!!teamHit,
-      matchingKeys:allKeys.slice(0,10), result});
+      matchingKeys:allKeys.slice(0,10), result, modelResult});
   } catch(err) { res.status(500).json({error:err.message, stack:err.stack?.split('\n').slice(0,5)}); }
 });
 
