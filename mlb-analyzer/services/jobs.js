@@ -188,8 +188,8 @@ async function runLineupJob(dateStr) {
         home_sp: g.home_sp && g.home_sp.name,
         home_sp_hand: g.home_sp && g.home_sp.hand,
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
-      market_away_ml: existingRow ? existingRow.market_away_ml : g.market_away_ml,
-      market_home_ml: existingRow ? existingRow.market_home_ml : g.market_home_ml,
+      market_away_ml: existingRow ? (existingRow.market_away_ml||null) : (g.market_away_ml||null),
+      market_home_ml: existingRow ? (existingRow.market_home_ml||null) : (g.market_home_ml||null),
       market_total:   existingRow ? existingRow.market_total   : g.market_total,
       park_factor: g.park_factor || 1.0,
         model_away_ml: existingRow ? existingRow.model_away_ml : null,
@@ -203,6 +203,8 @@ async function runLineupJob(dateStr) {
       const awayStatus = g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     const homeStatus = g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), awayStatus, homeStatus, dateStr, gameId);
+      // Clear zeros — treat 0 same as null for market odds
+      db.prepare("UPDATE game_log SET market_away_ml=CASE WHEN market_away_ml=0 THEN NULL ELSE market_away_ml END, market_home_ml=CASE WHEN market_home_ml=0 THEN NULL ELSE market_home_ml END, market_total=CASE WHEN market_total=0 THEN NULL ELSE market_total END WHERE game_date=? AND game_id=?").run(dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
       if (gameRow) {
         processGameSignals({
