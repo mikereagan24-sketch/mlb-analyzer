@@ -423,6 +423,7 @@ async function loadGamesFromDB(){
     const games=await api('/games/'+date);
     currentGames=games;
     renderGameGrid(games,date);
+    if(games&&games.length) loadDataQuality(date, games, 'dq-games');
     renderMuSelector(games,date);
     st.textContent=games.length?games.length+' games loaded':'No games found for '+date;
     document.getElementById('games-warn').style.display=games.length?'none':'block';
@@ -477,9 +478,7 @@ async function triggerScores(){
 }
 
 function renderGameGrid(games,date){
-  if(!games.length){document.window._currentGames = allGames || games || [];
-  getElementById('game-grid').innerHTML='';
-  var _dqGames=window._currentGames||[]; if(_dqGames.length) loadDataQuality(document.getElementById('games-date').value, _dqGames, 'dq-games');return;}
+  if(!games.length){document.getElementById('game-grid').innerHTML='';return;}
   document.getElementById('game-grid').innerHTML=games.map(g=>{
     const sigs=g.signals||[];
     const score=g.away_score!=null?g.away_score+'-'+g.home_score:'';
@@ -623,6 +622,7 @@ function renderModelOutput(g) {
 async function renderMatchupGame(id){
   const g=currentGames.find(x=>x.game_id===id);
   if(!g){document.getElementById('mu-content').innerHTML='<div class="notice">Select a game above</div>';
+    if(typeof gDate!=='undefined'&&typeof id!=='undefined') loadDataQuality(gDate,[{game_id:id,away_team:id.split('-')[0]?.toUpperCase()||'',home_team:id.split('-')[1]?.toUpperCase()||''}],'dq-matchup');
   var _gid=document.getElementById('mu-selector')?.value||''; var _gdate=document.getElementById('games-date')?.value||''; if(_gid) loadDataQuality(_gdate,[{game_id:_gid,away_team:(_gid.split('-')[0]||'').toUpperCase(),home_team:(_gid.split('-')[1]||'').toUpperCase()}],'dq-matchup');return;}
   const date=document.getElementById('games-date').value||todayStr();
   document.getElementById('mu-content').innerHTML='<div class="notice"><span class="spinner"></span>Loading...</div>';
