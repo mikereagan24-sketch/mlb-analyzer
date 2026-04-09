@@ -48,6 +48,19 @@ function fuzzyLookup(keyMap, name, teamHint) {
       return p[p.length-1]===last && p[0] && p[0][0]===initial;
     });
     if (matches.length===1) return matches[0][1];
+    // Compound surname fallback: try each word in lookup key as last name
+    // e.g. "s woods richardson" — try last="woods" matching "simeon woods"
+    if (matches.length===0 && parts.length>2) {
+      for (let wi=1;wi<parts.length;wi++) {
+        const altLast=parts[wi];
+        const altMatches=Object.entries(keyMap).filter(([n])=>{
+          if(/\s[a-z]{2,3}$/.test(n)) return false;
+          const p=stripSfx(n).split(' ');
+          return p[p.length-1]===altLast && p[0] && p[0][0]===initial;
+        });
+        if(altMatches.length===1) return altMatches[0][1];
+      }
+    }
   }
   const sk = stripSfx(k);
   if (teamHint) {
