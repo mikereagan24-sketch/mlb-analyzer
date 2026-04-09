@@ -481,6 +481,28 @@ router.post('/signals/closing-lines', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
+// ── SCORE DEBUG ENDPOINT ──────────────────────────────────────────────
+router.get('/debug/scores', async (req, res) => {
+  try {
+    const date = req.query.date || '2026-04-08';
+    const [year,month,day] = date.split('-');
+    const fetch2 = require('node-fetch');
+    const url = 'https://www.baseball-reference.com/boxes/index.fcgi?month='+parseInt(month)+'&day='+parseInt(day)+'&year='+year;
+    const resp = await fetch2(url, {headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36','Accept':'text/html'}});
+    const html = await resp.text();
+    const status = resp.status;
+    // Check if Final appears in text
+    const hasFinal = html.includes('Final');
+    const finalCount = (html.match(/Final/g)||[]).length;
+    // Try to find team names
+    const hasPadres = html.includes('San Diego Padres');
+    // Get a 500 char snippet around first Final
+    const finalIdx = html.indexOf('Final');
+    const snippet = finalIdx > 0 ? html.substring(finalIdx-100, finalIdx+200) : 'Final not found';
+    res.json({date, status, hasFinal, finalCount, hasPadres, textLength:html.length, snippet});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
 // ── KALSHI TEST ENDPOINT (sandbox/debug) ─────────────────────────
 router.get('/debug/kalshi', async (req, res) => {
   try {
