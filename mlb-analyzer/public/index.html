@@ -759,29 +759,40 @@ function injectEditButtons(games, date) {
   games.forEach(function(g) {
     var card = document.getElementById('gc-'+g.game_id);
     if (!card) return;
-    // Add SP edit buttons to .gsp if not already there
+    // SP edit buttons
     var gsp = card.querySelector('.gsp');
     if (gsp && !gsp.querySelector('.edit-btn')) {
       var ba = document.createElement('button');
-      ba.className='edit-btn'; ba.title='Edit away SP'; ba.textContent='✎';
-      ba.onclick = function(){showSPEdit(g.game_id,date,'away');};
+      ba.className = 'edit-btn'; ba.title = 'Edit away SP'; ba.textContent = '✎';
+      (function(id,dt){ba.addEventListener('click',function(){showSPEdit(id,dt,'away');});})(g.game_id,date);
       var bh = document.createElement('button');
-      bh.className='edit-btn'; bh.title='Edit home SP'; bh.textContent='✎';
-      bh.onclick = function(){showSPEdit(g.game_id,date,'home');};
-      // Insert after away SP text — find the " vs " text node
-      var txt = gsp.innerHTML;
-      gsp.innerHTML = txt.replace(' vs ',
-        ' <button class="edit-btn" title="Edit away SP" onclick="showSPEdit(''+g.game_id+'',''+date+'','away')">✎</button> vs ');
-      gsp.innerHTML += ' <button class="edit-btn" title="Edit home SP" onclick="showSPEdit(''+g.game_id+'',''+date+'','home')">✎</button>';
+      bh.className = 'edit-btn'; bh.title = 'Edit home SP'; bh.textContent = '✎';
+      (function(id,dt){bh.addEventListener('click',function(){showSPEdit(id,dt,'home');});})(g.game_id,date);
+      // Find " vs " inside gsp and insert buttons around it
+      var html2 = gsp.innerHTML;
+      var vsIdx = html2.indexOf(' vs ');
+      if (vsIdx > -1) {
+        var before = html2.substring(0, vsIdx);
+        var after = html2.substring(vsIdx + 4);
+        gsp.innerHTML = '';
+        gsp.appendChild(document.createTextNode(before + ' '));
+        gsp.appendChild(ba);
+        gsp.appendChild(document.createTextNode(' vs '));
+        gsp.appendChild(bh);
+        gsp.appendChild(document.createTextNode(' ' + after));
+      } else {
+        gsp.appendChild(ba);
+        gsp.appendChild(bh);
+      }
     }
-    // Add Edit Lineup button to gactions if not already there
+    // Edit Lineup button in gactions
     var gact = card.querySelector('.gactions');
     if (gact && !gact.querySelector('.ga-lineup')) {
       var bl = document.createElement('button');
-      bl.className='gcard-btn ga-lineup';
-      bl.style.cssText='background:var(--border);color:var(--text2)';
-      bl.textContent='✎ Lineup';
-      bl.onclick = function(){showLineupEdit(g.game_id, date);};
+      bl.className = 'gcard-btn ga-lineup';
+      bl.style.cssText = 'background:var(--border);color:var(--text2)';
+      bl.textContent = '✎ Lineup';
+      (function(id,dt){bl.addEventListener('click',function(){showLineupEdit(id,dt);});})(g.game_id,date);
       gact.appendChild(bl);
     }
   });
