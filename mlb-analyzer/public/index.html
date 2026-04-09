@@ -666,8 +666,9 @@ function sw(name){
 }
 
 const CAT_LABELS={'3star-fav':'3★ — favorite','2star-fav':'2★ — favorite','1star-fav':'1★ — favorite','3star-dog':'3★ — underdog','2star-dog':'2★ — underdog','1star-dog':'1★ — underdog','3star-over':'3★ — over','2star-over':'2★ — over','1star-over':'1★ — over','3star-under':'3★ — under','2star-under':'2★ — under','1star-under':'1★ — under'};
-async function lockBetLine(sigId, inputId) {
-  const line = parseInt(document.getElementById(inputId)?.value);
+async function lockBetLine(sigId, inputEl) {
+  const el = typeof inputEl === 'string' ? document.getElementById(inputEl) : inputEl;
+  const line = parseInt(el?.value);
   if (isNaN(line)) return alert('Enter a valid moneyline (e.g. -156 or +113)');
   try {
     const r = await api('/signals/'+sigId+'/bet-line',{method:'POST',body:JSON.stringify({bet_line:line})});
@@ -678,6 +679,42 @@ async function lockBetLine(sigId, inputId) {
       loadBacktest(); // refresh
     }
   } catch(e){ alert('Error: '+e.message); }
+}
+function renderSignalTracking(signals) {
+  var mlSigs = signals.filter(function(s){ return s.signal_type==='ML'; });
+  if (!mlSigs.length) { document.getElementById('bt-signals').innerHTML=''; return; }
+  var rows = mlSigs.map(function(s) {
+    var label = s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1';
+    var modelML = s.model_line!=null ? fmtML(s.model_line) : '—';
+    var closingML = s.closing_line!=null ? fmtML(s.closing_line) : '—';
+    var betVal = s.bet_line!=null ? s.bet_line : '';
+    var clvTxt = s.clv!=null ? (s.clv>=0?'+':'')+s.clv : '—';
+    var clvCls = s.clv!=null ? (s.clv>=0?'clv-pos':'clv-neg') : 'clv-neu';
+    var pnlTxt = s.outcome==='pending' ? '—' : (s.outcome==='win' ? '+$'+s.pnl.toFixed(0) : '$'+s.pnl.toFixed(0));
+    var pnlClr = s.outcome==='win'?'var(--green)':s.outcome==='loss'?'#e05':'var(--text2)';
+    var inputId = 'bl'+s.id;
+    return '<div class="sig-row">'
+      +'<span style="width:80px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'
+      +'<span style="width:75px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'
+      +'<span style="width:50px"><span class="sig-pill '+label+'">'+s.signal_label+'</span></span>'
+      +'<span style="width:75px">'+s.signal_side.toUpperCase()+' ML</span>'
+      +'<span style="width:50px;color:var(--text2)">Mdl: '+modelML+'</span>'
+      +'<span style="width:55px">Mkt: '+fmtML(s.market_line)+'</span>'
+      +'<span style="width:65px">Close: '+closingML+'</span>'
+      +'<span class="sig-betline">'
+        +'<input type="number" id="'+inputId+'" placeholder="line" value="'+betVal+'" step="1">'
+        +'<button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:10px" '
+        +'onclick="lockBetLine('+s.id+',this.previousElementSibling)">Lock</button>'
+      +'</span>'
+      +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
+      +'<span style="width:50px;color:'+pnlClr+';text-align:right">'+pnlTxt+'</span>'
+      +'</div>';
+  }).join('');
+  document.getElementById('bt-signals').innerHTML =
+    '<div style="margin-top:20px">'
+    +'<div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">ML Signals — Line Tracking</div>'
+    +'<div style="font-size:10px;color:var(--text3);margin-bottom:8px">Enter the line you actually bet and click Lock. Closing line auto-sets at game time. CLV = your line vs closing.</div>'
+    +rows+'</div>';
 }
 async function loadBacktest(){
   const from=document.getElementById('bt-from').value;
@@ -693,35 +730,7 @@ async function loadBacktest(){
       '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'—')+'</div></div>'+
       '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+((ov.plays||0)*100).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     const cats=d.byCategory||[];
-    // Render signal-level line tracking rows
-  function renderSigRow(s) {
-    const label = s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1';
-    const modelML = s.model_line!=null ? fmtML(s.model_line) : '—';
-    const closingML = s.closing_line!=null ? fmtML(s.closing_line) : '—';
-    const betVal = s.bet_line!=null ? s.bet_line : '';
-    const clvHtml = s.clv!=null ? '<span class="'+(s.clv>=0?'clv-pos':'clv-neg')+'">'+(s.clv>=0?'+':'')+s.clv+'</span>' : '<span class="clv-neu">—</span>';
-    const pnlHtml = s.outcome==='pending' ? '—' : (s.outcome==='win' ? '+$'+s.pnl.toFixed(0) : '$'+s.pnl.toFixed(0));
-    const pnlColor = s.outcome==='win'?'var(--green)':s.outcome==='loss'?'#e05':'var(--text2)';
-    return '<div class="sig-row">'
-      +'<span style="width:80px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'
-      +'<span style="width:75px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'
-      +'<span style="width:50px"><span class="sig-pill '+label+'">'+s.signal_label+'</span></span>'
-      +'<span style="width:75px">'+s.signal_side.toUpperCase()+' ML</span>'
-      +'<span style="width:50px;color:var(--text2)">Mdl: '+modelML+'</span>'
-      +'<span style="width:50px">Mkt: '+fmtML(s.market_line)+'</span>'
-      +'<span style="width:65px">Close: '+closingML+'</span>'
-      +'<span class="sig-betline">'
-        +'<input type="number" id="bl-'+s.id+'" placeholder="your line" value="'+betVal+'" step="1">'
-        +'<button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:10px" onclick="lockBetLine('+s.id+','+JSON.stringify('bl-'+s.id)+')">Lock</button>'
-      +'</span>'
-      +'<span style="width:55px;text-align:right">CLV: '+clvHtml+'</span>'
-      +'<span style="width:50px;color:'+pnlColor+';text-align:right">'+pnlHtml+'</span>'
-      +'</div>';
-  }
-  const mlSigs = (d.signals||[]).filter(s=>s.signal_type==='ML');
-  const sigRows = mlSigs.map(renderSigRow).join('');
-  const sigSection = sigRows ? '<div style="margin-top:20px"><div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">ML Signals — Line Tracking</div><div style="font-size:10px;color:var(--text3);margin-bottom:8px">Enter the line you bet and click Lock. Closing line auto-sets at game time. CLV = your line vs closing.</div>'+sigRows+'</div>' : '';
-  document.getElementById('bt-signals').innerHTML = sigSection;
+    renderSignalTracking(d.signals||[]);
 
   document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
       const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
