@@ -145,7 +145,7 @@ router.post('/games/upsert', async (req, res) => {
       model_away_ml: null, model_home_ml: null, model_total: null,
       lineup_source: 'manual',
     });
-    db.prepare(`UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
+    db.prepare(`UPDATE game_log SET away_lineup_json=?, home_lineup_json=? WHERE game_date=? AND game_id=?`)
       .run(JSON.stringify(g.away_lineup || []), JSON.stringify(g.home_lineup || []), g.game_date, gameId);
     if (g.away_score != null && g.home_score != null) {
       q.updateScores.run({ game_date: g.game_date, game_id: gameId, away_score: g.away_score, home_score: g.home_score, scores_source: 'manual' });
@@ -379,7 +379,7 @@ router.patch('/games/:date/:gameId/lineup', (req, res) => {
     if (home_lineup  !== undefined) { sets.push('home_lineup_json=?'); vals.push(JSON.stringify(home_lineup)); }
     if (!sets.length) return res.status(400).json({error:'No fields to update'});
     vals.push(date, gameId);
-    db.prepare('UPDATE game_log SET '+sets.join(',')+', updated_at=datetime("now") WHERE game_date=? AND game_id=?').run(...vals);
+    db.prepare('UPDATE game_log SET '+sets.join(',')+' WHERE game_date=? AND game_id=?').run(...vals);
     const gameRow = q.getGameById.get(date, gameId);
     if (gameRow) processGameSignals(gameRow, getWobaIndex(), getSettings());
     res.json({success:true});
