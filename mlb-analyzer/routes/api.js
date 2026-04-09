@@ -419,33 +419,44 @@ router.get('/debug/kalshi', async (req, res) => {
     const date = req.query.date || new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
     const fetch2 = require('node-fetch');
 
-    // Step 1: Get MLB game winner events
-    const eventsUrl = 'https://api.elections.kalshi.com/trade-api/v2/events?series_ticker=KXMLBMW&status=open&limit=50';
-    const eventsResp = await fetch2(eventsUrl, {headers:{'Accept':'application/json'}});
-    const eventsData = await eventsResp.json();
-    const events = eventsData.events || [];
-
-    // Step 2: For each event, get its markets (yes_ask = price to buy)
-    const results = [];
-    for (const ev of events.slice(0, 5)) { // limit to 5 for test
-      const mUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker='+ev.event_ticker+'&limit=10';
-      const mResp = await fetch2(mUrl, {headers:{'Accept':'application/json'}});
-      const mData = await mResp.json();
-      results.push({
-        event: ev.event_ticker,
-        title: ev.title,
-        markets: (mData.markets||[]).map(m=>({
-          ticker: m.ticker,
-          title: m.title || m.subtitle,
-          yes_ask: m.yes_ask,   // price to buy YES (e.g. 0.64 = 64¢)
-          yes_bid: m.yes_bid,
-          no_ask: m.no_ask,
-          last_price: m.last_price,
-          volume: m.volume,
-        }))
-      });
+    // Try multiple MLB series tickers — probe which one Kalshi uses
+    const tickers = ['KXMLBMW','KXMLB','MLB','MLBWINNER','KXMLBGW','BASEBALL'];
+    const probeResults = {};
+    for (const ticker of tickers) {
+      const url = 'https://api.elections.kalshi.com/trade-api/v2/events?series_ticker='+ticker+'&limit=5';
+      const resp = await fetch2(url, {headers:{'Accept':'application/json'}});
+      const data = await resp.json();
+      probeResults[ticker] = {found: (data.events||[]).length, sample: (data.events||[]).slice(0,2).map(e=>e.event_ticker)};
     }
-    res.json({date, events_found: events.length, sample: results});
+
+    // Also search markets directly for baseball
+    const mSearchUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets?category=Sports&limit=20&status=open';
+    const mSearchResp = await fetch2(mSearchUrl, {headers:{'Accept':'application/json'}});
+    const mSearchData = await mSearchResp.json();
+    const mlbMarkets = (mSearchData.markets||[]).filter(m=>
+      (m.title||'').toLowerCase().includes('baseball')||
+      (m.title||'').toLowerCase().includes('mlb')||
+      (m.event_ticker||'').includes('MLB')
+    );
+
+    // Also try events search
+    const eSearchUrl = 'https://api.elections.kalshi.com/trade-api/v2/events?status=open&limit=50&category=Sports';
+    const eSearchResp = await fetch2(eSearchUrl, {headers:{'Accept':'application/json'}});
+    const eSearchData = await eSearchResp.json();
+    const mlbEvents = (eSearchData.events||[]).filter(e=>
+      (e.title||'').toLowerCase().includes('baseball')||
+      (e.title||'').toLowerCase().includes('mlb')||
+      (e.event_ticker||'').toUpperCase().includes('MLB')
+    );
+
+    res.json({
+      date,
+      ticker_probe: probeResults,
+      sports_markets_total: (mSearchData.markets||[]).length,
+      mlb_markets_found: mlbMarkets.slice(0,5).map(m=>({ticker:m.ticker,title:m.title,yes_ask:m.yes_ask})),
+      sports_events_total: (eSearchData.events||[]).length,
+      mlb_events_found: mlbEvents.slice(0,5).map(e=>({ticker:e.event_ticker,title:e.title})),
+    });
   } catch(err) {
     res.status(500).json({error: err.message});
   }
