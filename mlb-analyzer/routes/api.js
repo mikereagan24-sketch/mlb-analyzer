@@ -379,6 +379,30 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
 });
 
 
+// ── PATCH GAME ODDS (safe update — only touches columns provided) ─────
+router.patch('/games/:date/:gameId/odds', (req, res) => {
+  try {
+    const { date, gameId } = req.params;
+    const g = req.body;
+    const sets = [];
+    const vals = [];
+    if (g.market_away_ml !== undefined) { sets.push('market_away_ml=?'); vals.push(g.market_away_ml); }
+    if (g.market_home_ml !== undefined) { sets.push('market_home_ml=?'); vals.push(g.market_home_ml); }
+    if (g.market_total    !== undefined) { sets.push('market_total=?');    vals.push(g.market_total); }
+    if (g.over_price      !== undefined) { sets.push('over_price=?');      vals.push(g.over_price); }
+    if (g.under_price     !== undefined) { sets.push('under_price=?');     vals.push(g.under_price); }
+    if (g.away_score      !== undefined) { sets.push('away_score=?');      vals.push(g.away_score); }
+    if (g.home_score      !== undefined) { sets.push('home_score=?');      vals.push(g.home_score); }
+    if (!sets.length) return res.status(400).json({error:'No fields to update'});
+    vals.push(date, gameId);
+    db.prepare('UPDATE game_log SET '+sets.join(',')+' WHERE game_date=? AND game_id=?').run(...vals);
+    // Rerun signals for this game
+    const gameRow = q.getGameById.get(date, gameId);
+    if (gameRow) processGameSignals(gameRow, getWobaIndex(), getSettings());
+    res.json({success:true});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
 // ── BACKTEST RESET ────────────────────────────────────────────────────
 // Unlock all odds for a date
 router.post('/games/:date/unlock', (req, res) => {
