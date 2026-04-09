@@ -131,6 +131,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .dq-badge{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin:1px 2px}
 .dq-sp{background:rgba(220,38,38,.12);color:#dc2626}
 .dq-bat{background:rgba(217,119,6,.12);color:#d97706}
+.edit-btn{padding:2px 7px;font-size:10px;border:1px solid var(--border);border-radius:3px;background:var(--card);color:var(--text2);cursor:pointer;margin-left:4px}
+.edit-btn:hover{border-color:var(--accent);color:var(--accent)}
+.sp-edit-row{display:flex;align-items:center;gap:4px;margin-top:5px;flex-wrap:wrap}
+.sp-edit-row input{flex:1;min-width:120px;padding:3px 6px;border:1px solid var(--accent);border-radius:4px;font-size:11px;background:var(--bg);color:var(--text)}
+.sp-edit-row select{padding:3px 4px;border:1px solid var(--border);border-radius:4px;font-size:11px;background:var(--bg);color:var(--text);width:46px}
+.sp-save-btn{padding:3px 9px;font-size:10px;border-radius:4px;background:var(--accent);color:#fff;border:none;cursor:pointer;font-weight:600}
+.sp-cancel-btn{padding:3px 7px;font-size:10px;border-radius:4px;background:var(--border);color:var(--text2);border:none;cursor:pointer}
+.lu-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center}
+.lu-modal.open{display:flex}
+.lu-box{background:var(--card);border-radius:10px;padding:20px 24px;width:580px;max-width:96vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.4)}
+.lu-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.lu-hdr-title{font-size:14px;font-weight:700}
+.lu-close{cursor:pointer;font-size:20px;color:var(--text3);line-height:1;padding:2px 6px}
+.lu-close:hover{color:var(--text)}
+.lu-cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.lu-team-lbl{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:6px}
+.lu-row{display:flex;align-items:center;gap:3px;margin-bottom:3px}
+.lu-num{width:18px;font-size:10px;color:var(--text3);text-align:right;flex-shrink:0}
+.lu-row input{flex:1;padding:3px 5px;border:1px solid var(--border);border-radius:3px;font-size:11px;background:var(--bg);color:var(--text)}
+.lu-row input:focus{border-color:var(--accent);outline:none}
+.lu-row select{width:44px;padding:3px 2px;border:1px solid var(--border);border-radius:3px;font-size:11px;background:var(--bg);color:var(--text)}
+.lu-save{margin-top:14px;width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
+.lu-save:hover{opacity:.9}
 .cron-row{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:.5px solid var(--border);font-size:12px}
 .cron-row:last-child{border-bottom:none}
 .cron-badge{padding:2px 8px;border-radius:10px;font-size:10px;font-weight:500;flex-shrink:0;margin-top:2px}
@@ -493,11 +516,11 @@ function renderGameGrid(games,date){
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
-      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP) vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)</div>'+
+      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+'<button class="edit-btn" onclick="showSPEdit(\''+(g.game_id)+'\',\''+(date)+'\',\'away\')">✎</button>'+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+'<button class="edit-btn" onclick="showSPEdit(\''+(g.game_id)+'\',\''+(date)+'\',\'home\')">✎</button>'+'</div>'+
       '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
-      '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
+      '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+'<button class="gcard-btn" style="background:var(--border);color:var(--text2)" onclick="showLineupEdit(\''+g.game_id+'\',\''+date+'\')">✎ Lineup</button>'+
       '</div>'+
       '<div class="gresult '+(g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
       (g.model_away_ml?renderGameResult(g):'')+
@@ -730,6 +753,103 @@ async function loadDataQuality(date, games, containerId) {
     +'<span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:4px">(not found in wOBA CSVs — upload missing files to improve accuracy)</span></div>'
     +rows+'</div>';
 }
+// ── SP / Lineup Edit ─────────────────────────────────────────────────
+var _luState = {gameId:'',date:'',awayTeam:'',homeTeam:''};
+
+function showSPEdit(gameId, date, side) {
+  var rowId = 'sp-erow-'+side+'-'+gameId;
+  var existing = document.getElementById(rowId);
+  if (existing) { existing.remove(); return; }
+  var card = document.getElementById('gc-'+gameId);
+  if (!card) return;
+  fetch('/api/games/'+date).then(function(r){return r.json();}).then(function(games){
+    var g = games.find(function(x){return x.game_id===gameId;});
+    if (!g) return;
+    var name = side==='away' ? (g.away_sp||'') : (g.home_sp||'');
+    var hand = side==='away' ? (g.away_sp_hand||'R') : (g.home_sp_hand||'R');
+    var row = document.createElement('div');
+    row.id = rowId; row.className = 'sp-edit-row';
+    row.innerHTML =
+      '<input id="spi-'+rowId+'" value="'+name.replace(/"/g,'&quot;')+'" placeholder="SP name">'+
+      '<select id="sph-'+rowId+'">'+
+        '<option value="R"'+(hand==='R'?' selected':'')+'>R</option>'+
+        '<option value="L"'+(hand==='L'?' selected':'')+'>L</option>'+
+        '<option value="S"'+(hand==='S'?' selected':'')+'>S</option>'+
+      '</select>'+
+      '<button class="sp-save-btn" onclick="saveSP(''+gameId+'',''+date+'',''+side+'',''+rowId+'')">Save</button>'+
+      '<button class="sp-cancel-btn" onclick="document.getElementById(''+rowId+'').remove()">Cancel</button>';
+    card.querySelector('.gsp').after(row);
+    var inp = document.getElementById('spi-'+rowId);
+    inp.focus(); inp.select();
+  });
+}
+
+async function saveSP(gameId, date, side, rowId) {
+  var name = (document.getElementById('spi-'+rowId)||{}).value||'';
+  var hand = (document.getElementById('sph-'+rowId)||{}).value||'R';
+  name = name.trim();
+  if (!name) return;
+  var body = {}; body[side+'_sp']=name; body[side+'_sp_hand']=hand;
+  var r = await fetch('/api/games/'+date+'/'+gameId+'/lineup',{
+    method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)
+  }).then(function(r){return r.json();});
+  if (r.success) { var el=document.getElementById(rowId); if(el) el.remove(); loadGamesFromDB(); }
+  else alert('Save failed: '+r.error);
+}
+
+function showLineupEdit(gameId, date) {
+  _luState.gameId=gameId; _luState.date=date;
+  fetch('/api/games/'+date).then(function(r){return r.json();}).then(function(games){
+    var g = games.find(function(x){return x.game_id===gameId;});
+    if (!g) return;
+    _luState.awayTeam=g.away_team; _luState.homeTeam=g.home_team;
+    var aLU = JSON.parse(g.away_lineup_json||'[]');
+    var hLU = JSON.parse(g.home_lineup_json||'[]');
+    while(aLU.length<9) aLU.push({name:'',hand:'R'});
+    while(hLU.length<9) hLU.push({name:'',hand:'R'});
+    function mkRow(pfx, idx, arr) {
+      var b=arr[idx]||{name:'',hand:'R'};
+      var h=b.hand||'R';
+      return '<div class="lu-row">'+
+        '<span class="lu-num">'+(idx+1)+'</span>'+
+        '<input id="'+pfx+idx+'n" value="'+(b.name||'').replace(/"/g,'&quot;')+'">'+
+        '<select id="'+pfx+idx+'h">'+
+          '<option value="R"'+(h==='R'?' selected':'')+'>R</option>'+
+          '<option value="L"'+(h==='L'?' selected':'')+'>L</option>'+
+          '<option value="S"'+(h==='S'?' selected':'')+'>S</option>'+
+        '</select></div>';
+    }
+    document.getElementById('lu-title').textContent = g.away_team+' @ '+g.home_team;
+    document.getElementById('lu-away-lbl').textContent = g.away_team+' Lineup';
+    document.getElementById('lu-home-lbl').textContent = g.home_team+' Lineup';
+    var aSlots='', hSlots='';
+    for(var i=0;i<9;i++){aSlots+=mkRow('lua',i,aLU); hSlots+=mkRow('luh',i,hLU);}
+    document.getElementById('lu-away-rows').innerHTML=aSlots;
+    document.getElementById('lu-home-rows').innerHTML=hSlots;
+    document.getElementById('lu-modal').classList.add('open');
+  });
+}
+
+async function saveLineup() {
+  var aLU=[], hLU=[];
+  for(var i=0;i<9;i++){
+    var an=(document.getElementById('lua'+i+'n')||{}).value||'';
+    var ah=(document.getElementById('lua'+i+'h')||{}).value||'R';
+    if(an.trim()) aLU.push({name:an.trim(),hand:ah});
+    var hn=(document.getElementById('luh'+i+'n')||{}).value||'';
+    var hh=(document.getElementById('luh'+i+'h')||{}).value||'R';
+    if(hn.trim()) hLU.push({name:hn.trim(),hand:hh});
+  }
+  var r = await fetch('/api/games/'+_luState.date+'/'+_luState.gameId+'/lineup',{
+    method:'PATCH',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({away_lineup:aLU,home_lineup:hLU})
+  }).then(function(r){return r.json();});
+  if(r.success){
+    document.getElementById('lu-modal').classList.remove('open');
+    loadGamesFromDB();
+  } else alert('Save failed: '+r.error);
+}
+
 function renderSignalTracking(signals) {
   var mlSigs = signals.filter(function(s){ return s.signal_type==='ML'; });
   if (!mlSigs.length) { document.getElementById('bt-signals').innerHTML=''; return; }
@@ -846,5 +966,24 @@ async function saveSettings(){
 }
 init();
 </script>
+<div id="lu-modal" class="lu-modal" onclick="if(event.target.id==='lu-modal')this.classList.remove('open')">
+  <div class="lu-box">
+    <div class="lu-hdr">
+      <span class="lu-hdr-title" id="lu-title">Edit Lineup</span>
+      <span class="lu-close" onclick="document.getElementById('lu-modal').classList.remove('open')">×</span>
+    </div>
+    <div class="lu-cols">
+      <div>
+        <div class="lu-team-lbl" id="lu-away-lbl">Away Lineup</div>
+        <div id="lu-away-rows"></div>
+      </div>
+      <div>
+        <div class="lu-team-lbl" id="lu-home-lbl">Home Lineup</div>
+        <div id="lu-home-rows"></div>
+      </div>
+    </div>
+    <button class="lu-save" onclick="saveLineup()">Save & Rerun Model</button>
+  </div>
+</div>
 </body>
 </html>
