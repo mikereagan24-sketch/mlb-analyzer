@@ -1041,7 +1041,6 @@ async function loadBacktest(){
   btFrom=from;btTo=to;
   try{
     const d=await api('/backtest?from='+from+'&to='+to);
-    
     const ov=d.overall||{};
     document.getElementById('bt-summary').innerHTML=
       '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(( ov.total_pnl||0)>=0?'green':'red')+'">'+(( ov.total_pnl||0)>=0?'+':'')+'$'+(ov.total_pnl||0).toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
@@ -1050,10 +1049,17 @@ async function loadBacktest(){
       '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+((ov.plays||0)*100).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     const cats=d.byCategory||[];
     renderSignalTracking(d.signals||[]);
-
-  document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(function(key){var c=cats.find(function(x){return x.category===key;})||{plays:0,wins:0,losses:0,pushes:0,pending:0,total_pnl:0,roi:null};var res=(c.wins||0)+(c.losses||0)+(c.pushes||0);if(!res&&!c.pending)return'<tr><td>'+CAT_LABELS[key]+'</td><td class=\'muted\'>0</td><td class=\'muted\'>—</td><td class=\'muted\'>—</td><td class=\'muted\'>—</td></tr>';var pd=c.pending?' (+'+c.pending+' pend)':'';var pnl=(c.total_pnl>=0?'+':'')+c.total_pnl;var roi=c.roi!=null?c.roi+'%':'—';return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+res+pd+'</td><td>'+c.wins+'-'+c.losses+'-'+c.pushes+'</td><td>'+pnl+'</td><td>'+roi+'</td></tr>';}).join('');
+    document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(function(key){
+      var c=cats.find(function(x){return x.category===key;})||{plays:0,wins:0,losses:0,pushes:0,pending:0,total_pnl:0,roi:null};
+      var res=(c.wins||0)+(c.losses||0)+(c.pushes||0);
+      if(!res&&!c.pending)return'<tr><td>'+CAT_LABELS[key]+'</td><td class=\'muted\'>0</td><td class=\'muted\'>—</td><td class=\'muted\'>—</td><td class=\'muted\'>—</td></tr>';
+      var pd=c.pending?' (+'+c.pending+' pend)':'';
+      var pnl=(c.total_pnl>=0?'+':'')+c.total_pnl;
+      var roi=c.roi!=null?c.roi+'%':'—';
+      return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+res+pd+'</td><td>'+c.wins+'-'+c.losses+'-'+c.pushes+'</td><td>'+pnl+'</td><td>'+roi+'</td></tr>';
+    }).join('');
+  }catch(e){console.error('Backtest error:',e.message,e);}
 }
-
 function onDragOver(e){e.preventDefault();document.getElementById('drop-zone').classList.add('over');}
 function onDragLeave(e){document.getElementById('drop-zone').classList.remove('over');}
 function onDrop(e){e.preventDefault();document.getElementById('drop-zone').classList.remove('over');processFiles(Array.from(e.dataTransfer.files));}
