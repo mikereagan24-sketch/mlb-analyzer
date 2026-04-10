@@ -458,6 +458,42 @@ router.get('/debug/woba-keys', (req, res) => {
 
 // ── BET LINE TRACKING ─────────────────────────────────────────────────
 // Lock your actual bet line for a signal
+router.post('/signals/manual', (req, res) => {
+  try {
+    const { game_date, game_id, signal_type, signal_side, signal_label, market_line, bet_line } = req.body;
+    if (!game_date||!game_id||!signal_type||!signal_side||!signal_label||market_line==null)
+      return res.status(400).json({error:'Missing required fields'});
+    const gl = q.getGameById.get(game_date, game_id);
+    if (!gl) return res.status(404).json({error:'Game not found: '+game_date+'/'+game_id});
+    // category e.g. "2star-dog", "1star-over"
+    const stars = {'1★':'1star','2★':'2star','3★':'3star'}[signal_label]||'1star';
+    const sideKey = signal_type==='ML' ? (Number(market_line)>0?'dog':'fav') : signal_side;
+    const category = stars+'-'+sideKey;
+    // model line from current DB
+    const model_line = signal_type==='ML'
+      ? (signal_side==='away' ? gl.model_away_ml : gl.model_home_ml)
+      : gl.model_total;
+    // edge
+    function iP(ml){ml=Number(ml);return ml<0?Math.abs(ml)/(Math.abs(ml)+100):100/(ml+100);}
+    const edge_pct = model_line ? Math.round(Math.abs(iP(Number(market_line))-iP(Number(model_line)))*100) : null;
+    // outcome if already scored
+    const { calcPnl } = require('../services/model');
+    let outcome='pending', pnl=0;
+    if (gl.away_score!=null){
+      const r=calcPnl({type:signal_type,side:signal_side,marketLine:Number(market_line)},gl.away_score,gl.home_score,gl.market_total);
+      outcome=r.outcome; pnl=r.pnl;
+    }
+    const info = db.prepare(`INSERT INTO bet_signals
+      (game_log_id,game_date,game_id,signal_type,signal_side,signal_label,category,
+       market_line,model_line,edge_pct,outcome,pnl,bet_line,bet_locked_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+      .run(gl.id,game_date,game_id,signal_type,signal_side,signal_label,category,
+           Number(market_line),model_line,edge_pct,outcome,pnl,
+           bet_line!=null?Number(bet_line):null);
+    res.json({success:true,id:info.lastInsertRowid,outcome,pnl,category});
+  } catch(e){res.status(500).json({error:e.message});}
+});
+
 router.post('/signals/:id/bet-line', (req, res) => {
   try {
     const { id } = req.params;
