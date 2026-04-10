@@ -30,6 +30,17 @@ function fuzzyLookup(keyMap, name, teamHint) {
     if (keyMap[tk]) return keyMap[tk];
   }
   if (keyMap[k]) return keyMap[k];
+  // Strip generational suffixes from lookup key (e.g. "lance mccullers jr" → "lance mccullers")
+  const kStripped = stripSfx(k);
+  if (kStripped !== k) {
+    if (teamHint && keyMap[kStripped + ' ' + teamHint.toLowerCase()]) return keyMap[kStripped + ' ' + teamHint.toLowerCase()];
+    if (keyMap[kStripped]) return keyMap[kStripped];
+  }
+  // Add common suffixes in case index has them but name lookup doesn't (e.g. lookup "lance mccullers" → index has "lance mccullers jr")
+  for (const sfx of ['jr','sr','ii','iii','iv']) {
+    if (teamHint && keyMap[k+' '+sfx+' '+teamHint.toLowerCase()]) return keyMap[k+' '+sfx+' '+teamHint.toLowerCase()];
+    if (keyMap[k+' '+sfx]) return keyMap[k+' '+sfx];
+  }
   if (isAbbrev && teamHint) {
     const initial=parts[0], last=parts[parts.length-1], tl=teamHint.toLowerCase();
     const e = Object.entries(keyMap).find(([n]) => {
