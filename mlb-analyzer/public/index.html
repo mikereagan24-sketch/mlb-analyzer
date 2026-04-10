@@ -1164,33 +1164,6 @@ async function triggerScores(){
   }catch(e){st.textContent='Error: '+e.message;}
 }
 
-function renderGameGrid(games,date){
-  if(!games.length){document.getElementById('game-grid').innerHTML='';return;}
-  document.getElementById('game-grid').innerHTML=games.map(g=>{
-    const sigs=g.signals||[];
-    const score=g.away_score!=null?g.away_score+'-'+g.home_score:'';
-    const ptTime=etToPT(g.game_time||'');
-    const star3=sigs.some(s=>s.signal_label==='3★');
-    const star2=sigs.some(s=>s.signal_label==='2★');
-    const star1=sigs.some(s=>s.signal_label==='1★');
-    const cardClass='gcard'+(star3?' sig-s3':star2?' sig-s2':star1?' sig-s1':'');
-    return'<div class="'+cardClass+'" id="gc-'+g.game_id+'">'+
-      (ptTime?'<div class="gtime">'+ptTime+'</div>':'')+
-      '<div class="gteams">'+g.away_team+' @ '+g.home_team+
-      (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
-      (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
-      '</div>'+
-      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP) vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)</div>'+
-      '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
-      '<div class="gactions">'+
-      '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
-      '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
-      '</div>'+
-      '<div class="gresult '+(g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
-      (g.model_away_ml?renderGameResult(g):'')+
-      '</div></div>';
-  }).join('');
-}
 
 function renderGameResult(g){
   const sigs=g.signals||[];
