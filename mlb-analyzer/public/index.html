@@ -154,6 +154,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .lu-row select{width:44px;padding:3px 2px;border:1px solid var(--border);border-radius:3px;font-size:11px;background:var(--bg);color:var(--text)}
 .lu-save{margin-top:14px;width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
 .lu-save:hover{opacity:.9}
+.pois-section{margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+.pois-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:10px}
+.pois-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-bottom:12px}
+.pois-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px}
+.pois-card-title{font-size:11px;color:var(--text2);margin-bottom:6px}
+.pois-card-val{font-size:18px;font-weight:600}
+.pois-card-sub{font-size:11px;color:var(--text3);margin-top:2px}
+.pois-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.pois-tbl th{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text2);padding:4px 8px;border-bottom:1px solid var(--border);text-align:left}
+.pois-tbl td{padding:5px 8px;border-bottom:.5px solid var(--border);color:var(--text)}
+.pois-tbl tr:last-child td{border-bottom:none}
+.pois-agree{color:var(--green);font-size:10px}
+.pois-disagree{color:#f59e0b;font-size:10px;font-weight:600}
+.pois-win{color:var(--green)}
+.pois-loss{color:#e05}
 .cron-row{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:.5px solid var(--border);font-size:12px}
 .cron-row:last-child{border-bottom:none}
 .cron-badge{padding:2px 8px;border-radius:10px;font-size:10px;font-weight:500;flex-shrink:0;margin-top:2px}
@@ -265,6 +280,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 </div>
 <div class="card">
 <div class="slabel">Job history</div>
+<div id="bt-poisson"></div>
 <div id="cron-log"></div>
 <button class="btn btn-ghost btn-sm" onclick="loadCronLog()" style="margin-top:8px">Refresh log</button>
 </div>
@@ -898,6 +914,88 @@ async function saveLineup() {
     document.getElementById('lu-modal').classList.remove('open');
     loadGamesFromDB();
   } else alert('Save failed: '+r.error);
+}
+
+function poissonOverP(line, lambda) {
+  if (!lambda || lambda<=0) return 0.5;
+  var cap=Math.floor(line), cum=0, logP=-lambda;
+  cum+=Math.exp(logP);
+  for(var k=1;k<=cap;k++){logP+=Math.log(lambda)-Math.log(k);cum+=Math.exp(logP);}
+  return Math.max(0.01,Math.min(0.99,1-cum));
+}
+
+function renderPoissonTracking(signals) {
+  var el = document.getElementById('bt-poisson');
+  if (!el) return;
+  var tots = signals.filter(function(s){return s.signal_type==='Total' && s.model_line && s.market_line && s.outcome && s.outcome!=='pending' && s.outcome!=='push';});
+  if (!tots.length) { el.innerHTML=''; return; }
+
+  var TOT1=0.04, TOT2=0.08, TOT3=0.12;
+  function impliedP(price){price=parseFloat(price); if(!price)return 0.524; return price<0?Math.abs(price)/(Math.abs(price)+100):100/(price+100);}
+  function linEdge(s){var mkt=parseFloat(s.market_line),est=parseFloat(s.model_line),rd=est-mkt; var p=Math.min(Math.max(0.5+rd*0.08,0.2),0.8); return s.signal_side==='over'?p-impliedP(s.over_price||-110):(1-p)-impliedP(s.under_price||-110);}
+  function poisEdge(s){var mkt=parseFloat(s.market_line),est=parseFloat(s.model_line); var p=poissonOverP(mkt,est); return s.signal_side==='over'?p-impliedP(s.over_price||-110):(1-p)-impliedP(s.under_price||-110);}
+  function starLabel(e){return e>=TOT3?'3★':e>=TOT2?'2★':e>=TOT1?'1★':null;}
+
+  // Compute for each signal
+  var rows = tots.map(function(s){
+    var le=linEdge(s), pe=poisEdge(s);
+    var lLbl=starLabel(le), pLbl=starLabel(pe);
+    var won = s.outcome==='win';
+    return {s:s, le:le, pe:pe, lLbl:lLbl, pLbl:pLbl, won:won, agree:lLbl===pLbl};
+  });
+
+  // Summary stats
+  var linFired=rows.filter(function(r){return r.lLbl;}), poisFired=rows.filter(function(r){return r.pLbl;});
+  var linOnly=rows.filter(function(r){return r.lLbl&&!r.pLbl;}), poisOnly=rows.filter(function(r){return r.pLbl&&!r.lLbl;});
+  var bothFired=rows.filter(function(r){return r.lLbl&&r.pLbl;});
+  var linWR=linFired.length?linFired.filter(function(r){return r.won;}).length/linFired.length:null;
+  var poisWR=poisFired.length?poisFired.filter(function(r){return r.won;}).length/poisFired.length:null;
+  var linOnlyWR=linOnly.length?linOnly.filter(function(r){return r.won;}).length/linOnly.length:null;
+  var poisOnlyWR=poisOnly.length?poisOnly.filter(function(r){return r.won;}).length/poisOnly.length:null;
+
+  function pct(v){return v===null?'—':(v*100).toFixed(0)+'%';}
+  function wr(wins,total){return total?wins+'/'+total+' ('+pct(wins/total)+')':'—';}
+
+  var summaryCards = [
+    {title:'Linear signals fired',val:linFired.length,sub:'Win rate: '+pct(linWR)},
+    {title:'Poisson signals fired',val:poisFired.length,sub:'Win rate: '+pct(poisWR)},
+    {title:'Linear only (Poisson misses)',val:linOnly.length,sub:'Win rate: '+pct(linOnlyWR)},
+    {title:'Poisson only (Linear misses)',val:poisOnly.length,sub:'Win rate: '+pct(poisOnlyWR)},
+  ];
+
+  var cardsHtml = summaryCards.map(function(c){
+    return '<div class="pois-card"><div class="pois-card-title">'+c.title+'</div>'+
+      '<div class="pois-card-val">'+c.val+'</div>'+
+      '<div class="pois-card-sub">'+c.sub+'</div></div>';
+  }).join('');
+
+  // Row table
+  var tblRows = rows.map(function(r){
+    var s=r.s;
+    var outcome = r.won?'<span class="pois-win">win</span>':'<span class="pois-loss">loss</span>';
+    var agree = r.agree?'<span class="pois-agree">agree</span>':'<span class="pois-disagree">differ</span>';
+    return '<tr>'+
+      '<td>'+s.game_date+'</td>'+
+      '<td>'+s.game_id.toUpperCase()+'</td>'+
+      '<td>'+s.signal_side+'</td>'+
+      '<td>'+s.market_line+'</td>'+
+      '<td>'+parseFloat(s.model_line).toFixed(2)+'</td>'+
+      '<td>'+(r.lLbl||'—')+' <span style="font-size:10px;color:var(--text3)">('+((r.le)*100).toFixed(1)+'%)</span></td>'+
+      '<td>'+(r.pLbl||'—')+' <span style="font-size:10px;color:var(--text3)">('+((r.pe)*100).toFixed(1)+'%)</span></td>'+
+      '<td>'+agree+'</td>'+
+      '<td>'+outcome+'</td>'+
+      '</tr>';
+  }).join('');
+
+  el.innerHTML = '<div class="pois-section">'+
+    '<div class="pois-title">Poisson model comparison — Total signals ('+tots.length+' resolved)</div>'+
+    '<div class="pois-grid">'+cardsHtml+'</div>'+
+    '<table class="pois-tbl"><thead><tr>'+
+    '<th>Date</th><th>Game</th><th>Side</th><th>Line</th><th>Model est</th>'+
+    '<th>Linear</th><th>Poisson</th><th>Agreement</th><th>Result</th>'+
+    '</tr></thead><tbody>'+tblRows+'</tbody></table>'+
+    '<div style="font-size:10px;color:var(--text3);margin-top:8px">Linear uses 0.08 multiplier (current model). Poisson uses Poisson CDF. Agreement = both models fire same signal.</div>'+
+    '</div>';
 }
 
 function renderSignalTracking(signals) {
