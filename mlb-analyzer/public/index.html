@@ -1351,7 +1351,7 @@ function sw(name){
   if(name==='matchups'&&muSelectedGame)renderMatchupGame(muSelectedGame);
 }
 
-const CAT_LABELS={'3star-fav':'3★ — favorite','2star-fav':'2★ — favorite','1star-fav':'1★ — favorite','3star-dog':'3★ — underdog','2star-dog':'2★ — underdog','1star-dog':'1★ — underdog','3star-over':'3★ — over','2star-over':'2★ — over','1star-over':'1★ — over','3star-under':'3★ — under','2star-under':'2★ — under','1star-under':'1★ — under'};
+
 async function lockBetLine(sigId, inputEl) {
   const el = typeof inputEl === 'string' ? document.getElementById(inputEl) : inputEl;
   const line = parseInt(el?.value);
