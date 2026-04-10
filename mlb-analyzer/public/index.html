@@ -778,56 +778,31 @@ function injectEditButtons(games, date) {
   games.forEach(function(g) {
     var card = document.getElementById('gc-'+g.game_id);
     if (!card) return;
-    // SP edit buttons
     var gsp = card.querySelector('.gsp');
-    if (gsp && !gsp.querySelector('.edit-btn')) {
-      var ba = document.createElement('button');
-      ba.className = 'edit-btn'; ba.title = 'Edit away SP'; ba.textContent = '✎';
-      (function(id,dt){ba.addEventListener('click',function(){showSPEdit(id,dt,'away');});})(g.game_id,date);
-      var bh = document.createElement('button');
-      bh.className = 'edit-btn'; bh.title = 'Edit home SP'; bh.textContent = '✎';
-      (function(id,dt){bh.addEventListener('click',function(){showSPEdit(id,dt,'home');});})(g.game_id,date);
-      // Inject pencil buttons using innerHTML — avoids createTextNode escaping HTML
-      // Insert after each status badge using a placeholder swap
-      var gspHtml = gsp.innerHTML;
-      // Insert away pencil after first status span closing tag
-      var awayClose = gspHtml.indexOf('</span>');
-      if (awayClose > -1) {
-        gspHtml = gspHtml.substring(0, awayClose+7) + '___AWAY___' + gspHtml.substring(awayClose+7);
-        // Insert home pencil after second status span closing tag
-        var homeClose = gspHtml.indexOf('</span>', awayClose+14);
-        if (homeClose > -1) {
-          gspHtml = gspHtml.substring(0, homeClose+7) + '___HOME___' + gspHtml.substring(homeClose+7);
-        }
-        gsp.innerHTML = gspHtml;
-        var awaySlot = gsp.innerHTML.indexOf('___AWAY___');
-        var homeSlot = gsp.innerHTML.indexOf('___HOME___');
-      }
-      // Now insert the actual button elements
-      var allText = gsp.innerHTML;
-      allText = allText.replace('___AWAY___', '');
-      allText = allText.replace('___HOME___', '');
-      gsp.innerHTML = allText;
-      // Find insertion points and insert buttons as DOM nodes
-      var spans = gsp.querySelectorAll('.lu-confirmed,.lu-projected');
-      if (spans.length >= 1) spans[0].after(ba);
-      if (spans.length >= 2) spans[1].after(bh);
-      else gsp.appendChild(bh);
-    }
-    // Edit Lineup button in gactions
-    var gact = card.querySelector('.gactions');
-    if (gact && !gact.querySelector('.ga-lineup')) {
-      var bl = document.createElement('button');
-      bl.className = 'gcard-btn ga-lineup';
-      bl.style.cssText = 'background:var(--border);color:var(--text2)';
-      bl.textContent = '✎ Lineup';
-      (function(id,dt){bl.addEventListener('click',function(){showLineupEdit(id,dt);});})(g.game_id,date);
-      gact.appendChild(bl);
+    if (!gsp) return;
+
+    var ba = document.createElement('button');
+    ba.className = 'edit-btn'; ba.title = 'Edit away SP'; ba.textContent = '✎';
+    ba.onclick = function(){ showSPEdit(g.game_id, date, 'away', g.away_sp, g.away_sp_hand, 'spe-'+g.game_id+'-away'); };
+
+    var bh = document.createElement('button');
+    bh.className = 'edit-btn'; bh.title = 'Edit home SP'; bh.textContent = '✎';
+    bh.onclick = function(){ showSPEdit(g.game_id, date, 'home', g.home_sp, g.home_sp_hand, 'spe-'+g.game_id+'-home'); };
+
+    var spans = gsp.querySelectorAll('.lu-confirmed,.lu-projected');
+    if (spans.length >= 1) spans[0].after(ba); else gsp.prepend(ba);
+    if (spans.length >= 2) spans[1].after(bh); else gsp.appendChild(bh);
+
+    if (!card.querySelector('.lu-edit-btn')) {
+      var blu = document.createElement('button');
+      blu.className = 'btn btn-sm lu-edit-btn'; blu.style.marginLeft='6px';
+      blu.textContent = '✎ Lineup';
+      blu.onclick = function(){ showLineupEdit(g.game_id, date, g); };
+      var gspEl = card.querySelector('.gsp');
+      if (gspEl) gspEl.after(blu); else card.appendChild(blu);
     }
   });
 }
-var _luState = {gameId:'',date:'',awayTeam:'',homeTeam:''};
-
 function showSPEdit(gameId, date, side) {
   var rowId = 'sp-erow-'+side+'-'+gameId;
   var existing = document.getElementById(rowId);
@@ -1389,49 +1364,6 @@ async function loadDataQuality(date, games, containerId) {
     +rows+'</div>';
 }
 // ── SP / Lineup Edit ─────────────────────────────────────────────────
-function injectEditButtons(games, date) {
-  games.forEach(function(g) {
-    var card = document.getElementById('gc-'+g.game_id);
-    if (!card) return;
-    // SP edit buttons
-    var gsp = card.querySelector('.gsp');
-    if (gsp && !gsp.querySelector('.edit-btn')) {
-      var ba = document.createElement('button');
-      ba.className = 'edit-btn'; ba.title = 'Edit away SP'; ba.textContent = '✎';
-      (function(id,dt){ba.addEventListener('click',function(){showSPEdit(id,dt,'away');});})(g.game_id,date);
-      var bh = document.createElement('button');
-      bh.className = 'edit-btn'; bh.title = 'Edit home SP'; bh.textContent = '✎';
-      (function(id,dt){bh.addEventListener('click',function(){showSPEdit(id,dt,'home');});})(g.game_id,date);
-      // Find " vs " inside gsp and insert buttons around it
-      var html2 = gsp.innerHTML;
-      var vsIdx = html2.indexOf(' vs ');
-      if (vsIdx > -1) {
-        var before = html2.substring(0, vsIdx);
-        var after = html2.substring(vsIdx + 4);
-        gsp.innerHTML = '';
-        gsp.appendChild(document.createTextNode(before + ' '));
-        gsp.appendChild(ba);
-        gsp.appendChild(document.createTextNode(' vs '));
-        gsp.appendChild(bh);
-        gsp.appendChild(document.createTextNode(' ' + after));
-      } else {
-        gsp.appendChild(ba);
-        gsp.appendChild(bh);
-      }
-    }
-    // Edit Lineup button in gactions
-    var gact = card.querySelector('.gactions');
-    if (gact && !gact.querySelector('.ga-lineup')) {
-      var bl = document.createElement('button');
-      bl.className = 'gcard-btn ga-lineup';
-      bl.style.cssText = 'background:var(--border);color:var(--text2)';
-      bl.textContent = '✎ Lineup';
-      (function(id,dt){bl.addEventListener('click',function(){showLineupEdit(id,dt);});})(g.game_id,date);
-      gact.appendChild(bl);
-    }
-  });
-}
-var _luState = {gameId:'',date:'',awayTeam:'',homeTeam:''};
 
 function showSPEdit(gameId, date, side) {
   var rowId = 'sp-erow-'+side+'-'+gameId;
