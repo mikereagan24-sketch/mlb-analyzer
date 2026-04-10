@@ -193,7 +193,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="tab active" onclick="sw('games')">Today's Games</button>
 <button class="tab" onclick="sw('matchups')">Matchups</button>
 <button class="tab" onclick="sw('analysis')">Analysis</button>
-<button class="tab" onclick="sw('backtest')">Backtest</button>
+<button class="tab" onclick="sw('backtest');loadBacktest()">Backtest</button>
 <button class="tab" onclick="sw('data')">Data Import</button>
 <button class="tab" onclick="sw('model')">Model</button>
 </div>
@@ -271,7 +271,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="btn btn-ghost btn-sm" onclick="exportCSV()">Export CSV</button>
 </div>
 </div>
-<div id="bt-results" style="display:none">
+<div id="bt-results">
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
 <div class="card">
 <div class="slabel">P&L by category — $100/play</div>
@@ -1041,7 +1041,7 @@ async function loadBacktest(){
   btFrom=from;btTo=to;
   try{
     const d=await api('/backtest?from='+from+'&to='+to);
-    document.getElementById('bt-results').style.display='block';
+    
     const ov=d.overall||{};
     document.getElementById('bt-summary').innerHTML=
       '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(( ov.total_pnl||0)>=0?'green':'red')+'">'+(( ov.total_pnl||0)>=0?'+':'')+'$'+(ov.total_pnl||0).toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
@@ -1054,7 +1054,7 @@ async function loadBacktest(){
   document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
       const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
       if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
-      return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+c.plays+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
+      var _r=(c.wins||0)+(c.losses||0)+(c.pushes||0);var _p=c.pending>0?_r+'<span style="font-size:10px;color:var(--text3)"> (+'+c.pending+' pending)</span>':String(_r);return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+_p+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
     }).join('');
   }catch(e){alert('Backtest error: '+e.message);}
 }
