@@ -215,8 +215,9 @@ const q = {
       SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses,
       SUM(CASE WHEN outcome='push' THEN 1 ELSE 0 END) as pushes,
       SUM(CASE WHEN outcome='pending' THEN 1 ELSE 0 END) as pending,
-      ROUND(SUM(pnl), 2) as total_pnl,
-      ROUND(SUM(pnl) / NULLIF(COUNT(*) * 100.0, 0) * 100, 2) as roi
+      ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END), 2) as total_pnl,
+      ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END)
+        / NULLIF(SUM(CASE WHEN outcome NOT IN ('pending','push') THEN 1 ELSE 0 END) * 100.0, 0) * 100, 2) as roi
     FROM bet_signals WHERE game_date BETWEEN ? AND ?
     GROUP BY category ORDER BY category
   `),
