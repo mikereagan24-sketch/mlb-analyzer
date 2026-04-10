@@ -267,11 +267,17 @@ async function runScoreJob(dateStr) {
 }
 
 function startCronJobs() {
-  // Lineups: noon ET (17:00 UTC) and 5 PM ET (22:00 UTC)
-  cron.schedule('0 17 * * *', () => {
-    console.log('[cron] Noon ET lineup pull');
-    runLineupJob(todayET());
-  }, { timezone: 'UTC' });
+  // Lineups: 8AM ET, hourly noon-6PM ET, 11PM ET (all free RotoWire scrapes)
+  // UTC: 8AM ET=13:00, noon=17:00, 1PM=18:00, 2PM=19:00, 3PM=20:00, 4PM=21:00, 5PM=22:00, 6PM=23:00, 11PM=04:00
+  [
+    [13,'8AM ET'],[17,'Noon ET'],[18,'1PM ET'],[19,'2PM ET'],
+    [20,'3PM ET'],[21,'4PM ET'],[22,'5PM ET'],[23,'6PM ET']
+  ].forEach(([h,label]) => {
+    cron.schedule('0 '+h+' * * *', () => {
+      console.log('[cron] '+label+' lineup pull');
+      runLineupJob(todayET());
+    }, { timezone: 'UTC' });
+  });
   cron.schedule('0 4 * * *', () => {
     console.log('[cron] 11PM ET lineup pull');
     runLineupJob(todayET());
@@ -291,7 +297,7 @@ function startCronJobs() {
     console.log('[cron] 4AM PT score pull');
     runScoreJob(yesterdayET());
   }, { timezone: 'UTC' });
-  console.log('[cron] Jobs scheduled — lineups at 17:00 UTC and 22:00 UTC, scores at 12:00 UTC');
+  console.log('[cron] Jobs scheduled — lineups 8AM ET + hourly noon-6PM ET + 11PM ET');
 }
 
 function gameHasStarted(gameRow, gameDate) {
