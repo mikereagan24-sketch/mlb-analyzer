@@ -157,6 +157,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .lu-row select{width:44px;padding:3px 2px;border:1px solid var(--border);border-radius:3px;font-size:11px;background:var(--bg);color:var(--text)}
 .lu-save{margin-top:14px;width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
 .lu-save:hover{opacity:.9}
+.manual-modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center}
+.manual-modal-bg.open{display:flex}
+.manual-modal{background:var(--bg);border-radius:12px;padding:24px;width:420px;max-width:95vw;box-shadow:0 8px 40px rgba(0,0,0,.18)}
+.manual-modal h3{font-size:14px;font-weight:600;margin-bottom:16px}
+.manual-row{display:flex;flex-direction:column;gap:4px;margin-bottom:12px}
+.manual-row label{font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.4px}
+.manual-row select,.manual-row input{padding:7px 10px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text)}
+.manual-actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 .pois-section{margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
 .pois-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:10px}
 .pois-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-bottom:12px}
@@ -1700,5 +1708,114 @@ init();
     <button class="lu-save" onclick="saveLineup()">Save & Rerun Model</button>
   </div>
 </div>
+
+<div class="manual-modal-bg" id="manual-modal-bg" onclick="if(event.target===this)closeManualModal()">
+  <div class="manual-modal">
+    <h3>Log Manual Bet</h3>
+    <div class="manual-row">
+      <label>Date</label>
+      <input type="date" id="mb-date">
+    </div>
+    <div class="manual-row">
+      <label>Game</label>
+      <select id="mb-game"><option value="">— select —</option></select>
+    </div>
+    <div class="manual-row">
+      <label>Type</label>
+      <select id="mb-type" onchange="updateMbSide()">
+        <option value="ML">ML (Moneyline)</option>
+        <option value="Total">Total (Over/Under)</option>
+      </select>
+    </div>
+    <div class="manual-row">
+      <label>Side</label>
+      <select id="mb-side">
+        <option value="away">Away</option>
+        <option value="home">Home</option>
+      </select>
+    </div>
+    <div class="manual-row">
+      <label>Star Rating</label>
+      <select id="mb-stars">
+        <option value="1★">1★</option>
+        <option value="2★">2★</option>
+        <option value="3★">3★</option>
+      </select>
+    </div>
+    <div class="manual-row">
+      <label>Market Line (e.g. +153 or 6.5)</label>
+      <input type="number" id="mb-mktline" step="0.5" placeholder="e.g. +153 or 6.5">
+    </div>
+    <div class="manual-row">
+      <label>Line I Got (your actual bet line)</label>
+      <input type="number" id="mb-betline" step="0.5" placeholder="e.g. +155">
+    </div>
+    <div class="manual-actions">
+      <button class="btn" onclick="closeManualModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitManualBet()">Log Bet</button>
+    </div>
+    <div id="mb-status" style="font-size:12px;color:var(--text2);margin-top:10px;text-align:center"></div>
+  </div>
+</div>
+<script>
+function openManualModal(){
+  var bg=document.getElementById('manual-modal-bg');
+  // Pre-fill date from backtest from-date
+  document.getElementById('mb-date').value=document.getElementById('bt-from').value||new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+  loadManualGames();
+  bg.classList.add('open');
+}
+function closeManualModal(){
+  document.getElementById('manual-modal-bg').classList.remove('open');
+  document.getElementById('mb-status').textContent='';
+}
+function updateMbSide(){
+  var type=document.getElementById('mb-type').value;
+  var sel=document.getElementById('mb-side');
+  if(type==='Total'){
+    sel.innerHTML='<option value="over">Over</option><option value="under">Under</option>';
+  } else {
+    sel.innerHTML='<option value="away">Away</option><option value="home">Home</option>';
+  }
+}
+async function loadManualGames(){
+  var date=document.getElementById('mb-date').value;
+  if(!date)return;
+  var games=await api('/games/'+date).catch(()=>[]);
+  var sel=document.getElementById('mb-game');
+  sel.innerHTML='<option value="">— select —</option>';
+  (games||[]).forEach(function(g){
+    var opt=document.createElement('option');
+    opt.value=g.game_id;
+    opt.textContent=g.game_id.toUpperCase()+' ('+g.game_time+')';
+    sel.appendChild(opt);
+  });
+}
+document.getElementById('mb-date').addEventListener('change',loadManualGames);
+async function submitManualBet(){
+  var date=document.getElementById('mb-date').value;
+  var game=document.getElementById('mb-game').value;
+  var type=document.getElementById('mb-type').value;
+  var side=document.getElementById('mb-side').value;
+  var stars=document.getElementById('mb-stars').value;
+  var mkt=document.getElementById('mb-mktline').value;
+  var bet=document.getElementById('mb-betline').value;
+  var st=document.getElementById('mb-status');
+  if(!date||!game||!mkt){st.textContent='Please fill in all required fields';st.style.color='#e05';return;}
+  st.textContent='Saving...';st.style.color='var(--text2)';
+  try{
+    var r=await api('/signals/manual',{method:'POST',body:JSON.stringify({
+      game_date:date,game_id:game,signal_type:type,signal_side:side,
+      signal_label:stars,market_line:Number(mkt),bet_line:bet?Number(bet):null
+    })});
+    if(r.success){
+      st.textContent='Logged! '+r.category+' outcome='+r.outcome;st.style.color='var(--green)';
+      setTimeout(function(){closeManualModal();loadBacktest();},1200);
+    } else {
+      st.textContent='Error: '+(r.error||'unknown');st.style.color='#e05';
+    }
+  }catch(e){st.textContent='Error: '+e.message;st.style.color='#e05';}
+}
+</script>
 </body>
 </html>
