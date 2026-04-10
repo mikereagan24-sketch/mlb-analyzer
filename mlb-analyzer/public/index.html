@@ -388,8 +388,7 @@ let serverWoba={};  // wOBA data fetched from server for matchup tab
 async function init(){
   const d=document.getElementById('games-date');
   d.value=todayStr();
-  const d30=new Date();d30.setDate(d30.getDate()-30);
-  document.getElementById('bt-from').value=d30.toLocaleDateString('en-CA');
+  document.getElementById('bt-from').value='2026-04-09';
   document.getElementById('bt-to').value=todayStr();
   await refreshWobaStatus();
   await loadGamesFromDB();
