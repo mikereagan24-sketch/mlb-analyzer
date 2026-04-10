@@ -730,7 +730,7 @@ async function lockBetLine(sigId, inputEl) {
     const r = await api('/signals/'+sigId+'/bet-line',{method:'POST',body:JSON.stringify({bet_line:line})});
     if(r.success){
       const clv = r.clv != null ? ' CLV: '+(r.clv>=0?'+':'')+r.clv : '';
-      document.getElementById(inputId).style.borderColor='var(--green)';
+      el.style.borderColor='var(--green)';
       alert('Locked! Bet line: '+(line>0?'+':'')+line+clv);
       loadBacktest(); // refresh
     }
@@ -1372,7 +1372,7 @@ async function lockBetLine(sigId, inputEl) {
     const r = await api('/signals/'+sigId+'/bet-line',{method:'POST',body:JSON.stringify({bet_line:line})});
     if(r.success){
       const clv = r.clv != null ? ' CLV: '+(r.clv>=0?'+':'')+r.clv : '';
-      document.getElementById(inputId).style.borderColor='var(--green)';
+      el.style.borderColor='var(--green)';
       alert('Locked! Bet line: '+(line>0?'+':'')+line+clv);
       loadBacktest(); // refresh
     }
