@@ -787,34 +787,32 @@ function injectEditButtons(games, date) {
       var bh = document.createElement('button');
       bh.className = 'edit-btn'; bh.title = 'Edit home SP'; bh.textContent = '✎';
       (function(id,dt){bh.addEventListener('click',function(){showSPEdit(id,dt,'home');});})(g.game_id,date);
-      // Insert pencil buttons after existing status badges
-      // Find the confirmed/projected spans and insert buttons after them
-      var awaySpan = gsp.querySelector('.lu-confirmed, .lu-projected');
-      if (awaySpan) {
-        // Insert away pencil after first status span
-        awaySpan.after(ba);
-        // Find the second status span (home) and insert home pencil after it
-        var allSpans = gsp.querySelectorAll('.lu-confirmed, .lu-projected');
-        if (allSpans.length > 1) allSpans[1].after(bh);
-        else gsp.appendChild(bh);
-      } else {
-        // No status spans — fall back to vs-split
-        var html2 = gsp.innerHTML;
-        var vsIdx = html2.indexOf(' vs ');
-        if (vsIdx > -1) {
-          var before = html2.substring(0, vsIdx);
-          var after = html2.substring(vsIdx + 4);
-          gsp.innerHTML = '';
-          gsp.appendChild(document.createTextNode(before + ' '));
-          gsp.appendChild(ba);
-          gsp.appendChild(document.createTextNode(' vs '));
-          gsp.appendChild(bh);
-          gsp.appendChild(document.createTextNode(' ' + after));
-        } else {
-          gsp.appendChild(ba);
-          gsp.appendChild(bh);
+      // Inject pencil buttons using innerHTML — avoids createTextNode escaping HTML
+      // Insert after each status badge using a placeholder swap
+      var gspHtml = gsp.innerHTML;
+      // Insert away pencil after first status span closing tag
+      var awayClose = gspHtml.indexOf('</span>');
+      if (awayClose > -1) {
+        gspHtml = gspHtml.substring(0, awayClose+7) + '___AWAY___' + gspHtml.substring(awayClose+7);
+        // Insert home pencil after second status span closing tag
+        var homeClose = gspHtml.indexOf('</span>', awayClose+14);
+        if (homeClose > -1) {
+          gspHtml = gspHtml.substring(0, homeClose+7) + '___HOME___' + gspHtml.substring(homeClose+7);
         }
+        gsp.innerHTML = gspHtml;
+        var awaySlot = gsp.innerHTML.indexOf('___AWAY___');
+        var homeSlot = gsp.innerHTML.indexOf('___HOME___');
       }
+      // Now insert the actual button elements
+      var allText = gsp.innerHTML;
+      allText = allText.replace('___AWAY___', '');
+      allText = allText.replace('___HOME___', '');
+      gsp.innerHTML = allText;
+      // Find insertion points and insert buttons as DOM nodes
+      var spans = gsp.querySelectorAll('.lu-confirmed,.lu-projected');
+      if (spans.length >= 1) spans[0].after(ba);
+      if (spans.length >= 2) spans[1].after(bh);
+      else gsp.appendChild(bh);
     }
     // Edit Lineup button in gactions
     var gact = card.querySelector('.gactions');
