@@ -1054,7 +1054,7 @@ async function loadBacktest(){
       var res=(c.wins||0)+(c.losses||0)+(c.pushes||0);
       if(!res&&!c.pending)return'<tr><td>'+CAT_LABELS[key]+'</td><td class=\'muted\'>0</td><td class=\'muted\'>—</td><td class=\'muted\'>—</td><td class=\'muted\'>—</td></tr>';
       var pd=c.pending?' (+'+c.pending+' pend)':'';
-      var pnl=(c.total_pnl>=0?'+':'')+c.total_pnl;
+      var pnl=((c.total_pnl||0)>=0?'+':'')+c.total_pnl;
       var roi=c.roi!=null?c.roi+'%':'—';
       return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+res+pd+'</td><td>'+c.wins+'-'+c.losses+'-'+c.pushes+'</td><td>'+pnl+'</td><td>'+roi+'</td></tr>';
     }).join('');
@@ -1686,7 +1686,7 @@ async function loadBacktest(){
   document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
       const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
       if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
-      var _r=(c.wins||0)+(c.losses||0)+(c.pushes||0);var _p=c.pending>0?_r+'<span style="font-size:10px;color:var(--text3)"> (+'+c.pending+' pending)</span>':String(_r);return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+_p+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+(c.total_pnl>=0?'green':'red')+'">'+(c.total_pnl>=0?'+':'')+'$'+c.total_pnl.toFixed(0)+'</td><td class="'+(c.roi>=0?'green':'red')+'">'+(c.roi>=0?'+':'')+c.roi.toFixed(1)+'%</td></tr>';
+      var _r=(c.wins||0)+(c.losses||0)+(c.pushes||0);var _p=c.pending>0?_r+'<span style="font-size:10px;color:var(--text3)"> (+'+c.pending+' pending)</span>':String(_r);return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+_p+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+((c.total_pnl||0)>=0?'green':'red')+'">'+((c.total_pnl||0)>=0?'+':'')+'$'+(+(c.total_pnl||0)).toFixed(0)+'</td><td class="'+((c.roi||0)>=0?'green':'red')+'">'+((c.roi||0)>=0?'+':'')+(+(c.roi||0)).toFixed(1)+'%</td></tr>';
     }).join('');
   }catch(e){console.error('Backtest error:',e.message,e.stack);}
 }
