@@ -617,23 +617,39 @@ async function pullWeather(btn){
         // Temp factor: research shows ~1 run per 50F from baseline of 65F
         // <55F=-0.5 runs, 55-70=neutral, 70-80=+0.3, 80+=+0.6
         const tempAdj=temp<55?-0.5:temp<70?0:temp<80?0.3:0.6;
-        // Roof status logic
+        // Roof status logic — behavior-profile based
         const precipProb=wd.hourly?.precipitation_probability?.[idx]||0;
+        const gameMonth=new Date(date).getMonth()+1;
         let roofClosed=false;
-        let roofNote='';
+        let roofStatus='open';
+        let roofConfidence='estimated';
         if(park.roofType==='fixed_dome'){
-          roofClosed=true; roofNote='dome';
+          roofClosed=true; roofStatus='closed'; roofConfidence='confirmed';
         } else if(park.roofType==='retractable'){
-          // Roof likely OPEN if temp below threshold AND low precip chance
-          const likelyOpen = temp < park.roofOpensAbove && precipProb < 30;
-          roofClosed = !likelyOpen;
-          roofNote = roofClosed ? 'roof closed (est.)' : 'roof open (est.)';
+          if(park.defaultClosed){
+            roofClosed=!(temp<park.tempClose&&precipProb<park.precipClose);
+          } else if(park.closedBehavior==='hot'){
+            if(park.aprilDefault==='open'&&gameMonth<=4&&precipProb<park.precipClose){
+              roofClosed=false;
+            } else {
+              roofClosed=temp>=park.tempClose||precipProb>=park.precipClose;
+            }
+          } else if(park.closedBehavior==='rain_only'){
+            roofClosed=precipProb>=park.precipClose;
+          } else {
+            if(park.aprilDefault==='closed'&&gameMonth<=4){
+              roofClosed=!(temp>=park.tempClose&&precipProb<park.precipClose);
+            } else {
+              roofClosed=temp<park.tempClose||precipProb>=park.precipClose;
+            }
+          }
+          roofStatus=roofClosed?'closed':'open';
+          if(park.partialEnclosure&&roofClosed) roofStatus='partial';
         }
-        // If roof is closed, zero out all weather effects
-        const effectiveWindFactor = roofClosed ? 0 : windFactor;
-        const effectiveTempAdj = roofClosed ? 0 : tempAdj;
-        await api('/games/'+date+'/'+g.game_id+'/odds',{method:'PATCH',
-          body:JSON.stringify({wind_speed:speed,wind_dir:dir,wind_factor:effectiveWindFactor,temp_f:temp,temp_run_adj:effectiveTempAdj})
+        const roofMult=roofStatus==='closed'?0:roofStatus==='partial'?0.5:1;
+        const effectiveWindFactor=windFactor*roofMult;
+        const effectiveTempAdj=roofStatus==='closed'?0:tempAdj*roofMult;        await api('/games/'+date+'/'+g.game_id+'/odds',{method:'PATCH',
+          body:JSON.stringify({wind_speed:speed,wind_dir:dir,wind_factor:effectiveWindFactor,temp_f:temp,temp_run_adj:effectiveTempAdj,roof_status:roofStatus,roof_confidence:roofConfidence})
         });
         const wLabel=windFactor>0.1?('OUT '+speed+'mph from '+dir+'deg'):windFactor<-0.1?('IN '+speed+'mph from '+dir+'deg'):('Cross/Calm '+speed+'mph');
         const tLabel=temp<55?'cold '+temp+'F':temp>80?'hot '+temp+'F':'mild '+temp+'F';
