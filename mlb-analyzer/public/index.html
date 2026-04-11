@@ -516,6 +516,17 @@ async function rerunDate(){
     await loadGamesFromDB();
   }catch(e){st.textContent='Error: '+e.message;}
 }
+async function pullWeather(){
+  const date = document.getElementById('games-date').value;
+  const btn = event.target; btn.disabled=true; btn.textContent='⏳ Weather...';
+  try {
+    const d = await api('/jobs/weather',{method:'POST',body:JSON.stringify({date})});
+    btn.textContent='🌬️ Pull Weather';
+    btn.disabled=false;
+    if (d.success) { loadGamesFromDB(); }
+    else alert('Weather error: '+(d.error||'unknown'));
+  } catch(e){ btn.textContent='🌬️ Pull Weather'; btn.disabled=false; alert(e.message); }
+}
 async function pullOdds(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
