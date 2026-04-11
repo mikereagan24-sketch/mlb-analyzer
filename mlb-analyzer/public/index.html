@@ -133,6 +133,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .dq-bat{background:rgba(217,119,6,.12);color:#d97706}
 .lu-confirmed{font-size:9px;font-weight:600;color:#16a34a;background:rgba(22,163,74,.1);border:1px solid rgba(22,163,74,.3);border-radius:3px;padding:1px 5px;margin-left:4px;vertical-align:middle}
 .lu-projected{font-size:9px;font-weight:500;color:var(--text3);background:var(--border);border-radius:3px;padding:1px 5px;margin-left:4px;vertical-align:middle}
+.wind-badge{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px}
+.wind-in{background:rgba(37,99,235,.12);color:#1d4ed8;border:1px solid rgba(37,99,235,.3)}
+.wind-out{background:rgba(220,38,38,.12);color:#b91c1c;border:1px solid rgba(220,38,38,.3)}
+.wind-calm{background:var(--bg2);color:var(--text3);border:1px solid var(--border)}
 .logbet-btn{font-size:10px;padding:3px 8px;border:1px solid var(--border2);border-radius:4px;cursor:pointer;background:var(--bg2);color:var(--text);margin-top:6px}
 .logbet-btn:hover{background:var(--border)}
 .mb-edge-preview{font-size:11px;color:var(--text2);margin-top:8px;padding:8px;background:var(--bg2);border-radius:6px;display:none}
@@ -549,7 +553,12 @@ function renderGameGrid(games,date){
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
-      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+'</div>'+
+      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+(g.wind_speed>0 ? (function(){
+        var spd=g.wind_speed, fac=g.wind_factor||0;
+        var cls=fac<=-0.15?'wind-in':fac>=0.15?'wind-out':'wind-calm';
+        var dir=fac<=-0.15?'↙ In':fac>=0.15?'↗ Out':'↔ Cross';
+        return '<span class="wind-badge '+cls+'">'+dir+' '+Math.round(spd)+'mph</span>';
+      })() : '')+'</div>'+
       '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
