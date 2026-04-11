@@ -1109,7 +1109,7 @@ async function loadBacktest(){
       '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(( ov.total_pnl||0)>=0?'green':'red')+'">'+(( ov.total_pnl||0)>=0?'+':'')+'$'+(ov.total_pnl||0).toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
       '<div class="metric-card"><div class="metric-label">ROI</div><div class="metric-val '+((ov.roi||0)>=0?'green':'red')+'">'+((ov.roi||0)>=0?'+':'')+(ov.roi||0).toFixed(1)+'%</div><div class="metric-sub">'+(ov.plays||0)+' plays</div></div>'+
       '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'—')+'</div></div>'+
-      '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+((ov.plays||0)*100).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
+      '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+(+(ov.wagered||0)).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     const cats=d.byCategory||[];
     renderSignalTracking(d.signals||[]);
 
