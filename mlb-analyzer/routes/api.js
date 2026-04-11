@@ -498,10 +498,14 @@ router.post('/signals/manual', (req, res) => {
         if (isNaN(ml) || ml === 0) continue;
         let pnl;
         if (sig.signal_type === 'ML') {
-          const stake = ml > 0 ? parseFloat((10000/ml).toFixed(2)) : Math.abs(ml);
-          pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
+          const ml2 = parseFloat(sig.bet_line || sig.market_line);
+          if (!isNaN(ml2) && ml2 !== 0) {
+            const stake = ml2 > 0 ? parseFloat((10000/ml2).toFixed(2)) : Math.abs(ml2);
+            pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
+          }
         } else {
-          const price = parseFloat(sig.bet_line) || -110;
+          // Total: bet_line is the line number not the price — use closing_line as price or -110
+          const price = parseFloat(sig.closing_line) || -110;
           const stake = price < 0 ? Math.abs(price) : parseFloat((10000/price).toFixed(2));
           pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
         }
