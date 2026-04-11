@@ -458,6 +458,34 @@ router.get('/debug/woba-keys', (req, res) => {
 
 // ── BET LINE TRACKING ─────────────────────────────────────────────────
 // Lock your actual bet line for a signal
+router.post('/signals/recalc', (req, res) => {
+  try {
+    // Recalculate pnl for all resolved signals using to-win-$100 logic
+    // Use bet_line if available, else market_line
+    const sigs = db.prepare(`SELECT * FROM bet_signals WHERE outcome IN ('win','loss')`).all();
+    let updated = 0;
+    const upd = db.prepare(`UPDATE bet_signals SET pnl=? WHERE id=?`);
+    for (const sig of sigs) {
+      const ml = parseFloat(sig.bet_line || sig.market_line);
+      if (isNaN(ml) || ml === 0) continue;
+      let pnl;
+      if (sig.signal_type === 'ML') {
+        // To win $100: +odds stake=10000/odds, -odds stake=abs(odds)
+        const stake = ml > 0 ? parseFloat((10000/ml).toFixed(2)) : Math.abs(ml);
+        pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
+      } else {
+        // Total: use bet_line as the vig price (e.g. -110), else -110
+        const price = parseFloat(sig.bet_line) || -110;
+        const stake = price > 0 ? parseFloat((10000/price).toFixed(2)) : Math.abs(price);
+        pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
+      }
+      upd.run(parseFloat(pnl.toFixed(2)), sig.id);
+      updated++;
+    }
+    res.json({success:true, updated});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
 router.post('/signals/manual', (req, res) => {
   try {
     const { game_date, game_id, signal_type, signal_side, signal_label, market_line, bet_line } = req.body;
