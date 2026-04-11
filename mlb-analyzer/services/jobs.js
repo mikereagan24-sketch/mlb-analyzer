@@ -247,11 +247,24 @@ async function runScoreJob(dateStr) {
         const signals = q.getSignalsByDate.all(dateStr).filter(sig => sig.game_id === gameId);
         const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
         for (const sig of signals) {
-          const { outcome, pnl } = calcPnl(
+          const { outcome } = calcPnl(
             { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line, bet_line: sig.bet_line },
             s.awayScore ?? s.away_score, s.homeScore ?? s.home_score, gameRow.market_total
           );
-          updateSignal.run(outcome, pnl, sig.id);
+          // To-win-100 P&L: use bet_line if locked, else market_line
+          const _ml = parseFloat(sig.bet_line || sig.market_line);
+          let _pnl = 0;
+          if (!isNaN(_ml) && _ml !== 0 && outcome !== 'pending' && outcome !== 'push') {
+            if (sig.signal_type === 'ML') {
+              const _stake = _ml > 0 ? parseFloat((10000/_ml).toFixed(2)) : Math.abs(_ml);
+              _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
+            } else {
+              const _price = parseFloat(sig.bet_line) || -110;
+              const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
+              _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
+            }
+          }
+          updateSignal.run(outcome, parseFloat(_pnl.toFixed(2)), sig.id);
         }
         gamesUpdated++;
       }
