@@ -82,7 +82,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   q.deleteSignalsForGame.run(gameRow.game_date, gameRow.game_id);
   for (const sig of signals) {
     const { outcome, pnl } = (gl.away_score != null)
-      ? calcPnl(sig, gl.away_score, gl.home_score, gl.market_total)
+      ? calcPnl({type:sig.type, side:sig.side, marketLine:sig.type==='ML'?(sig.side==='away'?gl.market_away_ml:gl.market_home_ml):gl.market_total, over_price:gl.over_price, under_price:gl.under_price}, gl.away_score, gl.home_score, gl.market_total)
       : { outcome: 'pending', pnl: 0 };
     q.insertSignal.run({
       game_log_id: gl.id,
@@ -248,7 +248,7 @@ async function runScoreJob(dateStr) {
         const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
         for (const sig of signals) {
           const { outcome, pnl } = calcPnl(
-            { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line },
+            { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line, bet_line: sig.bet_line },
             s.awayScore ?? s.away_score, s.homeScore ?? s.home_score, gameRow.market_total
           );
           updateSignal.run(outcome, pnl, sig.id);
