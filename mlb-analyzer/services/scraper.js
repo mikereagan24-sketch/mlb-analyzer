@@ -267,6 +267,25 @@ const ODDS_TEAM_MAP = {
 // Bookmaker keys: 'kalshi' | 'draftkings'
 // Regions: 'us_ex' for exchanges (Kalshi) | 'us' for sportsbooks (DK)
 
+
+const TEAM_NAME_MAP = {
+  'Arizona Diamondbacks':'ari','Atlanta Braves':'atl','Baltimore Orioles':'bal',
+  'Boston Red Sox':'bos','Chicago Cubs':'chc','Chicago White Sox':'cws',
+  'Cincinnati Reds':'cin','Cleveland Guardians':'cle','Colorado Rockies':'col',
+  'Detroit Tigers':'det','Houston Astros':'hou','Kansas City Royals':'kc',
+  'Los Angeles Angels':'laa','Los Angeles Dodgers':'lad','Miami Marlins':'mia',
+  'Milwaukee Brewers':'mil','Minnesota Twins':'min','New York Mets':'nym',
+  'New York Yankees':'nyy','Oakland Athletics':'ath','Philadelphia Phillies':'phi',
+  'Pittsburgh Pirates':'pit','San Diego Padres':'sd','San Francisco Giants':'sfg',
+  'Seattle Mariners':'sea','St. Louis Cardinals':'stl','Tampa Bay Rays':'tb',
+  'Texas Rangers':'tex','Toronto Blue Jays':'tor','Washington Nationals':'was',
+  'Athletics':'ath',
+};
+function teamToAbbr(name) {
+  if (!name) return null;
+  return TEAM_NAME_MAP[name] || null;
+}
+
 function parseOddsAPIResponse(games, bookmakerKey) {
   const results = [];
   for (const g of games) {
@@ -339,4 +358,4 @@ async function fetchOddsAPI(apiKey, dateStr) {
 }
 
 
-module.exports = { fetchDKOdds, fetchOddsWithFallback, fetchLineups, fetchScores, fetchKalshiOdds, makeGameId };
+module.exports = { fetchOddsAPI, fetchLineups, fetchScores, makeGameId };
