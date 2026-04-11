@@ -1,7 +1,7 @@
 {
   "name": "mlb-analyzer",
   "version": "1.0.0",
-  "description": "MLB Betting Analyzer 2026-04-11T17:25:51.558Z",
+  "description": "MLB Betting Analyzer 2026-04-11T20:14:12.074Z",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
