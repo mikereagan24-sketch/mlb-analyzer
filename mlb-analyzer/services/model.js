@@ -214,8 +214,9 @@ function runModel(game, wobaIdx, settings) {
   const { adjA:aML, adjH:hML } = applySpread(rawAML, rawHML, FAV_ADJ, DOG_ADJ);
 
   const windFactor = game.wind_factor || 0;
+  const tempRunAdj = game.temp_run_adj || 0;
   const windRunAdj = windFactor * 2.0; // factor=1.0 → +2 runs, -1.0 → -2 runs
-  const estTot = Math.max(0, aRuns + hRuns + windRunAdj);
+  const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
   return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj };
 }
 
