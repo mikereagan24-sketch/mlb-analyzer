@@ -429,6 +429,8 @@ router.patch('/games/:date/:gameId/odds', (req, res) => {
     if (g.wind_factor     !== undefined) { sets.push('wind_factor=?');     vals.push(g.wind_factor); }
     if (g.temp_f          !== undefined) { sets.push('temp_f=?');          vals.push(g.temp_f); }
     if (g.temp_run_adj    !== undefined) { sets.push('temp_run_adj=?');    vals.push(g.temp_run_adj); }
+    if (g.roof_status     !== undefined) { sets.push('roof_status=?');     vals.push(g.roof_status); }
+    if (g.roof_confidence !== undefined) { sets.push('roof_confidence=?'); vals.push(g.roof_confidence); }
     if (!sets.length) return res.status(400).json({error:'No fields to update'});
     vals.push(date, gameId);
     db.prepare('UPDATE game_log SET '+sets.join(',')+' WHERE game_date=? AND game_id=?').run(...vals);
