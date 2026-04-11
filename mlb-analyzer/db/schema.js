@@ -128,12 +128,14 @@ INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
 `);
 
 // Migrations for existing DBs
-try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}
-  try { db.prepare('ALTER TABLE game_log ADD COLUMN temp_f REAL DEFAULT NULL').run(); } catch(e) {}
-  try { db.prepare('ALTER TABLE game_log ADD COLUMN temp_run_adj REAL DEFAULT 0').run(); } catch(e) {}
-  try { db.prepare("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL").run(); } catch(e) {}
-  try { db.prepare("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'").run(); } catch(e) {}
-try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN temp_f REAL DEFAULT NULL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN temp_run_adj REAL DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN over_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN lineup_status TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_lineup_status TEXT"); } catch(e) {}
@@ -251,7 +253,7 @@ const q = {
   getRecentCronLogs: db.prepare(`SELECT * FROM cron_log ORDER BY ran_at DESC LIMIT 20`),
   getSetting: db.prepare(`SELECT value FROM app_settings WHERE key = ?`),
   setSetting: db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`),
-  updateWindData: db.prepare(`UPDATE game_log SET wind_speed=?, wind_dir=?, wind_factor=? WHERE game_date=? AND game_id=?`),
+  updateWindData: null, // initialized lazily after migrations
   getAllSettings: db.prepare(`SELECT key, value FROM app_settings`),
 };
 
@@ -259,5 +261,11 @@ q.upsertWobaBatch = (key, rows) => {
   const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0); });
   tx(key, rows);
 };
+
+
+// Initialize prepared statements that need new columns
+try {
+  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?, wind_dir=?, wind_factor=? WHERE game_date=? AND game_id=?`);
+} catch(e) { console.error('updateWindData init failed:', e.message); }
 
 module.exports = { db, q };
