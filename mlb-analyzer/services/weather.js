@@ -1,5 +1,4 @@
 'use strict';
-const fetch = require('node-fetch');
 
 // Ballpark data: lat, lng, outfield_dir (compass degrees FROM home plate TOWARD CF),
 // sensitivity (0-2 scale; Wrigley=2 most wind-sensitive, typical=1)
