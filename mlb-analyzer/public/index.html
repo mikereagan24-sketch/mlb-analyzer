@@ -708,7 +708,15 @@ function renderGameGrid(games,date){
         var spd=g.wind_speed, fac=g.wind_factor||0;
         var cls=fac<=-0.15?'wind-in':fac>=0.15?'wind-out':'wind-calm';
         var dir=fac<=-0.15?'↙ In':fac>=0.15?'↗ Out':'↔ Cross';
-        return '<span class="wind-badge '+cls+'">'+dir+' '+Math.round(spd)+'mph</span>';
+        var roofBadge='';
+        if(g.roof_status){
+          var rCls='roof-'+g.roof_status+(g.roof_confidence==='estimated'?' roof-est':' roof-confirmed');
+          var rIcon=g.roof_status==='closed'?'🔒':g.roof_status==='partial'?'🔓':'🌤️';
+          var rLabel=g.roof_status==='closed'?'Closed':g.roof_status==='partial'?'Partial':'Open';
+          var rConf=g.roof_confidence==='estimated'?' ⚠️':' ✅';
+          roofBadge='<span class="roof-badge '+rCls+'">' +rIcon+' '+rLabel+rConf+'</span>';
+        }
+        return '<span class="wind-badge '+cls+'">'+dir+' '+Math.round(spd)+'mph</span>'+roofBadge;
       })() : '')+'</div>'+
       '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
