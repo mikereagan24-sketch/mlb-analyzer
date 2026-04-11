@@ -573,7 +573,7 @@ async function pullWeather(btn){
         // Wind factor: positive=blowing out (more runs), negative=blowing in (fewer runs)
         const windTo=(dir+180)%360;
         const diff=windTo-park.cfDir;
-        const factor=parseFloat((Math.cos(diff*Math.PI/180)*(speed/20)*park.sens).toFixed(3));
+        const factor=speed<8?0:parseFloat((Math.cos(diff*Math.PI/180)*Math.min((speed-8)/24,0.75)*park.sens).toFixed(3));
         // Store wind data via patch endpoint
         await api('/games/'+date+'/'+g.game_id+'/odds',{method:'PATCH',body:JSON.stringify({wind_speed:speed,wind_dir:dir,wind_factor:factor})});
         updated++;
