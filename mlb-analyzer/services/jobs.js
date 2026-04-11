@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchScores, fetchKalshiOdds, makeGameId } = require('./scraper');
+const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
 
@@ -411,7 +411,7 @@ async function runOddsJob(dateStr) {
   cron.schedule('0 16 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
   cron.schedule('0 20 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
 };
-    const odds = await fetchKalshiOdds(dateStr);
+    const odds = await fetchOddsAPI(settings.oddsApiKey, dateStr);
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
