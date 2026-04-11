@@ -711,8 +711,12 @@ function renderGameGrid(games,date){
           var rConf=g.roof_confidence==='estimated'?' ⚠️':' ✅';
           roofBadge='<span class="roof-badge '+rCls+'">'+rIcon+' '+rLabel+rConf+'</span>';
         } else if(g.roof_status==='open' && roofSt){
-          // Only show open badge for retractable parks, not all parks
-          roofBadge='<span class="roof-badge roof-open roof-est">🌤️ Open ⚠️</span>';
+          // Only show Open badge for retractable-roof parks
+          var RETRACTABLE={'tor':1,'mil':1,'sea':1,'tex':1,'hou':1,'mia':1,'ari':1};
+          var homeTeam=(g.game_id||'').split('-')[1]||'';
+          if(RETRACTABLE[homeTeam]){
+            roofBadge='<span class="roof-badge roof-open roof-est">🌤️ Open ⚠️</span>';
+          }
         }
         return tempBadge+windBadge+roofBadge;
       })() : '')+'</div>'+
