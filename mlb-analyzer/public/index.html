@@ -672,18 +672,49 @@ function renderGameGrid(games,date){
       (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
       '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+(g.wind_speed>0 ? (function(){
-        var spd=g.wind_speed, fac=g.wind_factor||0;
-        var cls=fac<=-0.15?'wind-in':fac>=0.15?'wind-out':'wind-calm';
-        var dir=fac<=-0.15?'↙ In':fac>=0.15?'↗ Out':'↔ Cross';
-        var roofBadge='';
-        if(g.roof_status){
-          var rCls='roof-'+g.roof_status+(g.roof_confidence==='estimated'?' roof-est':' roof-confirmed');
-          var rIcon=g.roof_status==='closed'?'🔒':g.roof_status==='partial'?'🔓':'🌤️';
-          var rLabel=g.roof_status==='closed'?'Closed':g.roof_status==='partial'?'Partial':'Open';
-          var rConf=g.roof_confidence==='estimated'?' ⚠️':' ✅';
-          roofBadge='<span class="roof-badge '+rCls+'">' +rIcon+' '+rLabel+rConf+'</span>';
+        var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
+        var roofClosed=(roofSt==='closed');
+        var roofPartial=(roofSt==='partial');
+
+        // Temperature badge — always show for outdoor games
+        var tempBadge='';
+        if(tmp!=null && !roofClosed){
+          var tIcon=tmp<50?'🥶':tmp<65?'🌤️':tmp<80?'☀️':'🔥';
+          var tCls=tmp<50?'temp-cold':tmp<65?'temp-mild':tmp<80?'temp-warm':'temp-hot';
+          tempBadge='<span class="temp-badge '+tCls+'">'+tIcon+' '+Math.round(tmp)+'°F</span>';
         }
-        return '<span class="wind-badge '+cls+'">'+dir+' '+Math.round(spd)+'mph</span>'+roofBadge;
+
+        // Wind badge — hide for domes and closed roofs
+        var windBadge='';
+        if(spd>0 && !roofClosed){
+          // Use raw wind dir and speed for label — more intuitive than factor
+          var windDir=g.wind_dir||0;
+          var label, cls;
+          if(spd<8){
+            label='↔ Calm '+Math.round(spd)+'mph'; cls='wind-calm';
+          } else {
+            // fac>0 = blowing out, fac<0 = blowing in, near-0 = crosswind
+            if(fac>=0.08){label='↗ Out '+Math.round(spd)+'mph';cls='wind-out';}
+            else if(fac<=-0.08){label='↙ In '+Math.round(spd)+'mph';cls='wind-in';}
+            else{label='↔ Cross '+Math.round(spd)+'mph';cls='wind-calm';}
+          }
+          if(roofPartial) label+=' (partial)';
+          windBadge='<span class="wind-badge '+cls+'">'+label+'</span>';
+        }
+
+        // Roof badge — only for retractable roof parks
+        var roofBadge='';
+        if(g.roof_status && g.roof_status!=='open'){
+          var rCls='roof-'+g.roof_status+(g.roof_confidence==='estimated'?' roof-est':' roof-confirmed');
+          var rIcon=g.roof_status==='closed'?'🔒':'🔓';
+          var rLabel=g.roof_status==='closed'?'Roof Closed':'Roof Partial';
+          var rConf=g.roof_confidence==='estimated'?' ⚠️':' ✅';
+          roofBadge='<span class="roof-badge '+rCls+'">'+rIcon+' '+rLabel+rConf+'</span>';
+        } else if(g.roof_status==='open' && roofSt){
+          // Only show open badge for retractable parks, not all parks
+          roofBadge='<span class="roof-badge roof-open roof-est">🌤️ Open ⚠️</span>';
+        }
+        return tempBadge+windBadge+roofBadge;
       })() : '')+'</div>'+
       '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">O/U '+(g.market_total||'—')+(g.over_price?'<span style="font-size:10px;color:var(--text3)"> ('+fmtML(g.over_price)+'/'+fmtML(g.under_price)+')</span>':'')+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
       '<div class="gactions">'+
