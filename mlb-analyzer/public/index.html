@@ -635,13 +635,13 @@ async function pullWeather(btn){
     }
   })();
 }
-async function pullOdds(){
+async async function pullOdds(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Pulling odds from DraftKings…';
+  st.innerHTML='<span class="spinner"></span>Pulling odds from Kalshi…';
   try{
     const r=await api('/jobs/odds',{method:'POST',body:JSON.stringify({date})});
-    if(r.success){st.textContent='✓ Odds updated for '+r.updated+' games';await loadGamesFromDB();}
+    if(r.success){st.textContent='✓ '+r.updated+' games updated from '+(r.source||'Kalshi')+'/DK';await loadGamesFromDB();}
     else{st.textContent='Error: '+r.error;}
   }catch(e){st.textContent='Error: '+e.message;}
 }
