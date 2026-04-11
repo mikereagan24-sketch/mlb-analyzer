@@ -227,8 +227,21 @@ const q = {
       SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses,
       SUM(CASE WHEN outcome='push' THEN 1 ELSE 0 END) as pushes,
       ROUND(SUM(pnl), 2) as total_pnl,
-      ROUND(SUM(pnl) / NULLIF(COUNT(*) * 100.0, 0) * 100, 2) as roi
-    FROM bet_signals WHERE game_date BETWEEN ? AND ? AND outcome != 'pending'
+      ROUND(SUM(CASE
+        WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0
+          THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)
+        WHEN signal_type='ML'
+          THEN ABS(COALESCE(bet_line,market_line))
+        ELSE 110.0
+      END), 2) as wagered,
+      ROUND(SUM(pnl) / NULLIF(SUM(CASE
+        WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0
+          THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)
+        WHEN signal_type='ML'
+          THEN ABS(COALESCE(bet_line,market_line))
+        ELSE 110.0
+      END), 0) * 100, 2) as roi
+    FROM bet_signals WHERE game_date BETWEEN ? AND ? AND outcome NOT IN ('pending','push')
   `),
   logCron: db.prepare(`INSERT INTO cron_log (job_type, run_date, status, message, games_updated) VALUES (?, ?, ?, ?, ?)`),
   getRecentCronLogs: db.prepare(`SELECT * FROM cron_log ORDER BY ran_at DESC LIMIT 20`),
