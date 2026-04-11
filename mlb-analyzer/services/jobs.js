@@ -285,6 +285,74 @@ async function runScoreJob(dateStr) {
   }
 }
 
+
+// Run weather for all games on a given date
+async function runWeatherJob(date) {
+  console.log('[weather] running for '+date);
+  try {
+    const games = q.getGamesByDate.all(date);
+    if (!games.length) { console.log('[weather] no games for '+date); return; }
+    const { calcWindFactor, PARKS } = require('./weather');
+    const month = new Date(date).getMonth() + 1;
+    let updated = 0;
+    for (const game of games) {
+      const parts = game.game_id.split('-');
+      const homeKey = parts[1];
+      const park = PARKS[homeKey];
+      if (!park || park.dome) continue;
+      // Parse game hour from game_time (stored as "7:05 PM ET" etc)
+      let gameHour = 19;
+      if (game.game_time) {
+        const m = game.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+        if (m) {
+          let h = parseInt(m[1]), ap = m[3].toUpperCase();
+          if (ap === 'PM' && h !== 12) h += 12;
+          if (ap === 'AM' && h === 12) h = 0;
+          gameHour = h;
+        }
+      }
+      try {
+        const url = 'https://api.open-meteo.com/v1/forecast?latitude='+park.lat+'&longitude='+park.lng
+          +'&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability'
+          +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
+          +'&start_date='+date+'&end_date='+date;
+        const wd = await fetch(url).then(r => r.json());
+        const idx = Math.min(gameHour, (wd.hourly?.time || []).length - 1);
+        const speed = parseFloat((wd.hourly?.wind_speed_10m?.[idx] || 0).toFixed(1));
+        const dir   = Math.round(wd.hourly?.wind_direction_10m?.[idx] || 0);
+        const temp  = parseFloat((wd.hourly?.temperature_2m?.[idx] || 65).toFixed(1));
+        const precip = wd.hourly?.precipitation_probability?.[idx] || 0;
+        const windFactor = calcWindFactor(dir, speed, park);
+        const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
+        // Roof logic
+        let roofStatus = 'open', roofMult = 1;
+        if (park.roofType === 'retractable') {
+          let closed = false;
+          if (park.defaultClosed) closed = !(temp < park.tempClose && precip < park.precipClose);
+          else if (park.closedBehavior === 'rain_only') closed = precip >= park.precipClose;
+          else if (park.aprilDefault === 'closed' && month <= 4) closed = !(temp >= park.tempClose && precip < park.precipClose);
+          else if (park.closedBehavior === 'hot') closed = temp >= park.tempClose || precip >= park.precipClose;
+          else closed = temp < park.tempClose || precip >= park.precipClose;
+          roofStatus = closed ? 'closed' : 'open';
+          if (park.partialEnclosure && closed) roofStatus = 'partial';
+          roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
+        }
+        const effWind = windFactor * roofMult;
+        const effTemp = roofStatus === 'closed' ? 0 : tempAdj * roofMult;
+        if (q.updateWindData) {
+          q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
+        } else {
+          db.prepare('UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=? WHERE game_date=? AND game_id=?')
+            .run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
+        }
+        processGameSignals(game, q.getWobaIndex?.() || {}, {});
+        updated++;
+      } catch(e) { console.error('[weather] '+game.game_id+':', e.message); }
+    }
+    console.log('[weather] updated '+updated+' games for '+date);
+  } catch(e) { console.error('[weather] job error:', e.message); }
+}
+
 function startCronJobs() {
   // Lineups: 8AM ET, hourly noon-6PM ET, 11PM ET (all free RotoWire scrapes)
   // UTC: 8AM ET=13:00, noon=17:00, 1PM=18:00, 2PM=19:00, 3PM=20:00, 4PM=21:00, 5PM=22:00, 6PM=23:00, 11PM=04:00
@@ -339,7 +407,12 @@ async function runOddsJob(dateStr) {
   try {
     const settings = getSettings();
     const apiKey = q.getSetting.get('odds_api_key')?.value || process.env.ODDS_API_KEY || '';
-    if (!apiKey) return { success: false, error: 'No Odds API key. Add it in Model settings.' };
+    if (!apiKey) return { success: false, error: 'No Odds API key. Add it in Model settings.' 
+  // Weather: 8AM ET, 11AM ET, 3PM ET
+  cron.schedule('0 13 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
+  cron.schedule('0 16 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
+  cron.schedule('0 20 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
+};
     const odds = await fetchOddsAPI(apiKey, dateStr);
     const wobaIdx = getWobaIndex();
     let updated = 0;
