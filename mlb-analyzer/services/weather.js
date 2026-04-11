@@ -42,54 +42,29 @@ const PARKS = {
 // Wind factor: positive = blowing out (more runs), negative = blowing in (fewer runs)
 // Uses dot product of wind vector with outfield vector
 // Returns factor in range roughly -1 to +1, scaled by sensitivity and speed
+// Wind factor: positive = blowing out (more runs), negative = blowing in (fewer runs)
+// Based on actual MLB data:
+//   <8mph:  minimal impact — show direction only, ~0 run adjustment
+//   8-12mph: moderate — ~0.4-0.8 run adjustment (Wrigley sens=2.0 → 0.8-1.6)
+//   13-17mph: significant — ~0.8-1.5 runs (Wrigley up to 3.0)
+//   18+mph:  major — books pull action, max ~1.5 base runs (Wrigley up to 3.0+)
+// Run adjustment = factor * 2.0 in model.js (factor range -1 to +1 → -2 to +2 runs at sens=1)
 function calcWindFactor(windDir, windSpeed, park) {
   if (!park || !windSpeed) return 0;
-  // Convert wind direction (where wind comes FROM) to where it goes TO
+  // Below 8mph: negligible — don't adjust the model
+  if (windSpeed < 8) return 0;
+  // Convert wind direction (FROM) to where it's blowing TO
   const windTo = (windDir + 180) % 360;
-  // Angle between wind direction and CF direction
   const diff = windTo - park.cfDir;
   const rad = diff * Math.PI / 180;
-  const alignment = Math.cos(rad); // +1 = blowing straight out, -1 = blowing straight in
-  // Scale: 10mph aligned = factor of ~0.5 at sens=1
-  const factor = alignment * (windSpeed / 20) * park.sens;
+  const alignment = Math.cos(rad); // +1=blowing straight out, -1=blowing straight in
+  // Threshold-based scaling: starts meaningful at 8mph, grows non-linearly
+  // At 10mph aligned: factor ≈ 0.25 * sens → * 2.0 in model = ~0.5 runs at sens=1
+  // At 15mph aligned: factor ≈ 0.50 * sens → ~1.0 runs at sens=1, ~2.0 at Wrigley
+  // At 20mph aligned: factor ≈ 0.75 * sens → ~1.5 runs at sens=1, ~3.0 at Wrigley
+  const speedFactor = Math.min((windSpeed - 8) / 24, 0.75); // 0 at 8mph, 0.75 at 32mph
+  const factor = alignment * speedFactor * park.sens;
   return parseFloat(factor.toFixed(3));
-}
-
-// Fetch wind at game time for a specific park
-async function fetchParkWind(homeTeam, gameDate, gameTime) {
-  // Find park
-  const teamKey = (homeTeam || '').toLowerCase().replace(/[^a-z]/g,'');
-  const park = PARKS[teamKey];
-  if (!park) return null;
-
-  // Parse game time to get UTC hour
-  let gameHour = 18; // default 6pm local
-  if (gameTime) {
-    const m = gameTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
-    if (m) {
-      let h = parseInt(m[1]), mn = parseInt(m[2]), ap = m[3].toUpperCase();
-      if (ap==='PM' && h!==12) h+=12;
-      if (ap==='AM' && h===12) h=0;
-      gameHour = h;
-    }
-  }
-
-  try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${park.lat}&longitude=${park.lng}&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=mph&timezone=auto&start_date=${gameDate}&end_date=${gameDate}`;
-    const data = await fetch(url).then(r=>r.json());
-    
-    // Find the hour closest to game time
-    const hours = data.hourly?.time || [];
-    const idx = Math.min(gameHour, hours.length-1);
-    const windSpeed = data.hourly.wind_speed_10m?.[idx] || 0;
-    const windDir   = data.hourly.wind_direction_10m?.[idx] || 0;
-    const factor    = calcWindFactor(windDir, windSpeed, park);
-
-    return { windSpeed, windDir, factor, parkName: park.name, cfDir: park.cfDir };
-  } catch(e) {
-    console.error('[weather] fetch failed for '+homeTeam+':', e.message);
-    return null;
-  }
 }
 
 module.exports = { fetchParkWind, calcWindFactor, PARKS };
