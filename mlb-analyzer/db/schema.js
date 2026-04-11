@@ -247,6 +247,7 @@ const q = {
   getRecentCronLogs: db.prepare(`SELECT * FROM cron_log ORDER BY ran_at DESC LIMIT 20`),
   getSetting: db.prepare(`SELECT value FROM app_settings WHERE key = ?`),
   setSetting: db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`),
+  updateWindData: db.prepare(`UPDATE game_log SET wind_speed=?, wind_dir=?, wind_factor=? WHERE game_date=? AND game_id=?`),
   getAllSettings: db.prepare(`SELECT key, value FROM app_settings`),
 };
 
