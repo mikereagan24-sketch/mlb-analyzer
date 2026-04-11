@@ -783,12 +783,6 @@ router.get('/debug/kalshi', async (req, res) => {
 });
 
 
-// TEMP: Test Kalshi API
-router.get('/kalshi-test', async (req, res) => {
-  try {
-    const date = req.query.date || new Date().toISOString().slice(0,10);
-    const url = 'https://api.elections.kalshi.com/trade-api/v2/events?series_ticker=KXMLBGAME&with_nested_markets=true&status=open&limit=20';
-    const resp = await fetch(url, {headers:{'Accept':'application/json'}});
     const data = await resp.json();
     res.json({status: resp.status, count: data.events?.length, sample: data.events?.slice(0,2)});
   } catch(e) { res.json({error: e.message}); }
