@@ -268,4 +268,34 @@ try {
   q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?, wind_dir=?, wind_factor=? WHERE game_date=? AND game_id=?`);
 } catch(e) { console.error('updateWindData init failed:', e.message); }
 
+
+// Bullpen wOBA queries
+q.getPitchersByTeam = (dataKey, teamAbbr) => {
+  return db.prepare(
+    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ? ORDER BY sample_size DESC"
+  ).all(dataKey, '%'+teamAbbr);
+};
+
+q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
+  // vsHand: 'lhb' or 'rhb' — which handedness the bullpen faces
+  const dataKey = 'pit-act-'+vsHand;
+  const rows = db.prepare(
+    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
+  ).all(dataKey, '%'+teamAbbr.toLowerCase());
+  if (!rows.length) return null;
+  // Exclude the starter
+  const starterNorm = (starterName||'').toLowerCase().replace(/[^a-z ]/g,'');
+  const bullpen = rows.filter(r => {
+    const rNorm = r.player_name.toLowerCase().replace(/[^a-z ]/g,'');
+    return !starterNorm || !rNorm.includes(starterNorm.split(' ')[1]||starterNorm);
+  });
+  if (!bullpen.length) return null;
+  // Weighted average by sample size (min 10 PA)
+  const qualified = bullpen.filter(r => r.sample_size >= 10);
+  const pool = qualified.length >= 3 ? qualified : bullpen.slice(0, 6);
+  const totalPA = pool.reduce((s,r)=>s+(r.sample_size||50), 0);
+  const woba = pool.reduce((s,r)=>s+(r.woba*(r.sample_size||50)), 0) / totalPA;
+  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
+};
+
 module.exports = { db, q };
