@@ -208,6 +208,30 @@ router.get('/backtest', (req, res) => {
   }
 });
 
+// Manual weather pull for a date
+router.post('/jobs/weather', async (req, res) => {
+  try {
+    const { fetchParkWind } = require('../services/weather');
+    const { processGameSignals, getWobaIndex, getSettings } = require('../services/jobs');
+    const dateStr = req.body.date || new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+    const games = db.prepare('SELECT * FROM game_log WHERE game_date=?').all(dateStr);
+    let updated = 0;
+    for (const g of games) {
+      const wind = await fetchParkWind(g.home_team, dateStr, g.game_time);
+      if (wind) {
+        q.updateWindData.run(wind.windSpeed, wind.windDir, wind.factor, dateStr, g.game_id);
+        // Rerun model with new wind data
+        const wobaIdx = getWobaIndex();
+        const settings = getSettings();
+        const latestRow = q.getGameById.get(dateStr, g.game_id);
+        if (latestRow) processGameSignals(latestRow, wobaIdx, settings);
+        updated++;
+      }
+    }
+    res.json({success:true, updated, date:dateStr});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
 router.post('/jobs/lineups', async (req, res) => {
   const { date } = req.body;
   const result = await runLineupJob(date || null);
