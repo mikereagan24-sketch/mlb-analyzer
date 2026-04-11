@@ -18,8 +18,9 @@ app.use('/api', require('./routes/api'));
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
 // SPA fallback
-app.get('*', (req, res) => { res.setHeader('Cache-Control','no-store, no-cache, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
+app.get('*', (req, res) => { res.setHeader('Cache-Control','no-store, no-cache, must-revalidate'); res.setHeader('Cache-Control','no-store'); res.setHeader('Content-Type','text/html'); res.send(INDEX_HTML); });
 
+const INDEX_HTML = require('fs').readFileSync(path.join(__dirname,'public','index.html'),'utf8');
 app.listen(PORT, () => {
   console.log(`MLB Analyzer running on port ${PORT}`);
   startCronJobs();
