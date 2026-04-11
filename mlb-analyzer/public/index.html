@@ -1352,65 +1352,7 @@ function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getEl
 async function loadCronLog(){
   try{
     const rows=await api('/cron-log');
-    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<div style="color:var(--text2);font-size:12px">No jobs run yet.</div>';
-  }catch(e){}
-}
-async function loadSettings(){
-  try{
-    const s=await api('/settings');
-    document.getElementById('s-run-mult').value=s.run_mult||48;
-    document.getElementById('s-hfa').value=s.hfa_boost||0.02;
-    document.getElementById('s-w-pit').value=s.w_pit||0.5;
-    document.getElementById('s-w-bat').value=s.w_bat||0.5;
-    document.getElementById('s-w-proj').value=s.w_proj||0.65;
-    document.getElementById('s-w-act').value=s.w_act||0.35;
-    document.getElementById('s-fav-adj').value=s.fav_adj!==undefined?s.fav_adj:0;
-    document.getElementById('s-dog-adj').value=s.dog_adj!==undefined?s.dog_adj:0;
-    document.getElementById('s-ml-val').value=s.ml_value_edge!==undefined?s.ml_value_edge:40;
-    document.getElementById('s-ml-lean').value=s.ml_lean_edge!==undefined?s.ml_lean_edge:20;
-    document.getElementById('s-sp-weight').value=s.sp_weight!==undefined?s.sp_weight:0.77;
-    document.getElementById('s-relief-weight').value=s.relief_weight!==undefined?s.relief_weight:0.23;
-    document.getElementById('s-sp-pit-weight').value=s.sp_pit_weight!==undefined?s.sp_pit_weight:0.80;
-    document.getElementById('s-relief-pit-weight').value=s.relief_pit_weight!==undefined?s.relief_pit_weight:0.20;
-    document.getElementById('s-ml-3star').value=s.ml_3star_edge!==undefined?s.ml_3star_edge:60;
-    document.getElementById('s-tot-3star').value=s.tot_3star_edge!==undefined?s.tot_3star_edge:0.12;
-    if(s.odds_api_key) document.getElementById('s-odds-api-key').value=s.odds_api_key.length>8?'••••••••'+s.odds_api_key.slice(-4):s.odds_api_key;
-    document.getElementById('s-tot-val').value=s.tot_value_edge!==undefined?s.tot_value_edge:0.06;
-    document.getElementById('s-tot-lean').value=s.tot_lean_edge!==undefined?s.tot_lean_edge:0.03;
-  }catch(e){}
-}
-async function saveOddsKey(){
-  const key=document.getElementById('s-odds-api-key').value.trim();
-  if(!key)return;
-  await api('/settings',{method:'POST',body:JSON.stringify({odds_api_key:key})});
-  document.getElementById('s-odds-api-key').value='••••••••'+key.slice(-4);
-}
-async function saveSettings(){
-  const s={run_mult:document.getElementById('s-run-mult').value,hfa_boost:document.getElementById('s-hfa').value,w_pit:document.getElementById('s-w-pit').value,w_bat:document.getElementById('s-w-bat').value,w_proj:document.getElementById('s-w-proj').value,w_act:document.getElementById('s-w-act').value,fav_adj:document.getElementById('s-fav-adj').value,dog_adj:document.getElementById('s-dog-adj').value,ml_value_edge:document.getElementById('s-ml-val').value,ml_lean_edge:document.getElementById('s-ml-lean').value,tot_value_edge:document.getElementById('s-tot-val').value,tot_lean_edge:document.getElementById('s-tot-lean').value,sp_weight:document.getElementById('s-sp-weight').value,relief_weight:document.getElementById('s-relief-weight').value,sp_pit_weight:document.getElementById('s-sp-pit-weight').value,relief_pit_weight:document.getElementById('s-relief-pit-weight').value,ml_3star_edge:document.getElementById('s-ml-3star').value,tot_3star_edge:document.getElementById('s-tot-3star').value};
-  const st=document.getElementById('settings-status');
-  try{
-    await api('/settings',{method:'POST',body:JSON.stringify(s)});
-    st.innerHTML='<span class="spinner"></span> Saved — updating model…';
-    // Rerun model on today + upcoming dates so ML lines reflect new settings immediately
-    try{
-      const dates=await api('/dates');
-      const today=todayStr();
-      const toRerun=dates.filter(d=>d>=today).slice(0,3);
-      for(const d of toRerun){try{await api('/games/'+d+'/rerun',{method:'POST'});}catch(e){}}
-      await loadGamesFromDB();
-    }catch(e){}
-    st.textContent='✓ Settings saved — model updated';
-    setTimeout(()=>st.textContent='',3000);
-  }catch(e){st.textContent='Error saving';}
-}
-init();
-</script>
-<div id="lu-modal" class="lu-modal" onclick="if(event.target.id==='lu-modal')this.classList.remove('open')">
-  <div class="lu-box">
-    <div class="lu-hdr">
-      <span class="lu-hdr-title" id="lu-title">Edit Lineup</span>
-      <span class="lu-close" onclick="document.getElementById('lu-modal').classList.remove('open')">×</span>
-    </div>
+    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<div class="setting-row"><label>Odds Source</label><span class="setting-note" style="color:var(--text2)">📊 Kalshi prediction market (no API key needed — free public data)</span></div>
     <div class="lu-cols">
       <div>
         <div class="lu-team-lbl" id="lu-away-lbl">Away Lineup</div>
