@@ -510,13 +510,13 @@ router.post('/signals/manual', (req, res) => {
       }
       return res.json({success:true, recalculated:updated});
     }
-    const { game_date, game_id, signal_type, signal_side, signal_label, market_line, bet_line } = req.body;
+    const { game_date, game_id, signal_type, signal_side, signal_label, market_line, bet_line, bet_price } = req.body;
     if (!game_date||!game_id||!signal_type||!signal_side||!signal_label||market_line==null)
       return res.status(400).json({error:'Missing required fields'});
     const gl = q.getGameById.get(game_date, game_id);
     if (!gl) return res.status(404).json({error:'Game not found: '+game_date+'/'+game_id});
     // category e.g. "2star-dog", "1star-over"
-    const stars = {'1★':'1star','2★':'2star','3★':'3star'}[signal_label]||'1star';
+    const stars = {'1★':'1star','2★':'2star','3★':'3star','unrated':'0star'}[signal_label]||'0star';
     const sideKey = signal_type==='ML' ? (Number(market_line)>0?'dog':'fav') : signal_side;
     const category = stars+'-'+sideKey;
     // model line from current DB
