@@ -427,6 +427,8 @@ router.patch('/games/:date/:gameId/odds', (req, res) => {
     if (g.wind_speed      !== undefined) { sets.push('wind_speed=?');      vals.push(g.wind_speed); }
     if (g.wind_dir        !== undefined) { sets.push('wind_dir=?');        vals.push(g.wind_dir); }
     if (g.wind_factor     !== undefined) { sets.push('wind_factor=?');     vals.push(g.wind_factor); }
+    if (g.temp_f          !== undefined) { sets.push('temp_f=?');          vals.push(g.temp_f); }
+    if (g.temp_run_adj    !== undefined) { sets.push('temp_run_adj=?');    vals.push(g.temp_run_adj); }
     if (!sets.length) return res.status(400).json({error:'No fields to update'});
     vals.push(date, gameId);
     db.prepare('UPDATE game_log SET '+sets.join(',')+' WHERE game_date=? AND game_id=?').run(...vals);
