@@ -59,10 +59,32 @@ function tryParse(str) {
 }
 
 function processGameSignals(gameRow, wobaIdx, settings) {
+  // Per-team bullpen wOBA from pit-act data
+  const awayParts = (gameRow.game_id||'').split('-');
+  const awayAbbr = awayParts[0]||'';
+  const homeAbbr = awayParts[1]||'';
+  const awaySpName = gameRow.away_pitcher||'';
+  const homeSpName = gameRow.home_pitcher||'';
+  let awayBpVsR = 0.318, awayBpVsL = 0.318, homeBpVsR = 0.318, homeBpVsL = 0.318;
+  try {
+    if (q.getBullpenWoba) {
+      const abr = q.getBullpenWoba(awayAbbr, awaySpName, 'rhb');
+      const abl = q.getBullpenWoba(awayAbbr, awaySpName, 'lhb');
+      const hbr = q.getBullpenWoba(homeAbbr, homeSpName, 'rhb');
+      const hbl = q.getBullpenWoba(homeAbbr, homeSpName, 'lhb');
+      if (abr?.woba) awayBpVsR = abr.woba;
+      if (abl?.woba) awayBpVsL = abl.woba;
+      if (hbr?.woba) homeBpVsR = hbr.woba;
+      if (hbl?.woba) homeBpVsL = hbl.woba;
+    }
+  } catch(e) { /* fallback to league avg */ }
   const game = {
     ...gameRow,
     awayLineup: tryParse(gameRow.away_lineup_json) || [],
     homeLineup: tryParse(gameRow.home_lineup_json) || [],
+    // Bullpen wOBA: away team's bullpen faces home batters, home team's bullpen faces away batters
+    awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
+    homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
   };
   const model = runModel(game, wobaIdx, settings);
   const signals = getSignals(game, model, settings);
