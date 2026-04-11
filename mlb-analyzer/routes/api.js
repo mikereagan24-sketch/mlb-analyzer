@@ -488,6 +488,28 @@ router.post('/signals/recalc', (req, res) => {
 
 router.post('/signals/manual', (req, res) => {
   try {
+    // If recalc:true, recalculate all resolved signal P&L with to-win-100 math
+    if (req.body.recalc) {
+      const sigs = db.prepare("SELECT * FROM bet_signals WHERE outcome IN ('win','loss')").all();
+      let updated = 0;
+      const upd = db.prepare("UPDATE bet_signals SET pnl=? WHERE id=?");
+      for (const sig of sigs) {
+        const ml = parseFloat(sig.bet_line || sig.market_line);
+        if (isNaN(ml) || ml === 0) continue;
+        let pnl;
+        if (sig.signal_type === 'ML') {
+          const stake = ml > 0 ? parseFloat((10000/ml).toFixed(2)) : Math.abs(ml);
+          pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
+        } else {
+          const price = parseFloat(sig.bet_line) || -110;
+          const stake = price < 0 ? Math.abs(price) : parseFloat((10000/price).toFixed(2));
+          pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
+        }
+        upd.run(parseFloat(pnl.toFixed(2)), sig.id);
+        updated++;
+      }
+      return res.json({success:true, recalculated:updated});
+    }
     const { game_date, game_id, signal_type, signal_side, signal_label, market_line, bet_line } = req.body;
     if (!game_date||!game_id||!signal_type||!signal_side||!signal_label||market_line==null)
       return res.status(400).json({error:'Missing required fields'});
