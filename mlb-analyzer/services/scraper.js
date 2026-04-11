@@ -263,56 +263,149 @@ const ODDS_TEAM_MAP = {
   'Washington Nationals':'WAS',
 };
 
-async function fetchOddsAPI(apiKey, dateStr) {
-  if (!apiKey) throw new Error('No Odds API key configured');
-  const url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds' +
-    '?apiKey='+apiKey+'&regions=us&markets=h2h,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betonlineag,bovada';
-  const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
-  if (!resp.ok) throw new Error('Odds API error '+resp.status+': '+await resp.text());
-  const games = await resp.json();
-  console.log('[odds-api] Remaining requests: '+resp.headers.get('x-requests-remaining'));
-  const BOOK_PRIORITY = ['draftkings','fanduel','betonlineag','bovada'];
+// Kalshi prediction market odds
+// No API key needed - public market data
+const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
+
+// Convert Kalshi decimal probability to American odds
+function kalshiToAmerican(prob) {
+  if (!prob || prob <= 0 || prob >= 1) return null;
+  if (prob >= 0.5) return Math.round(-(prob / (1 - prob)) * 100);
+  return Math.round(((1 - prob) / prob) * 100);
+}
+
+// Map Kalshi team names to our abbreviations
+const KALSHI_TEAM_MAP = {
+  'Arizona Diamondbacks': 'ari', 'Atlanta Braves': 'atl', 'Baltimore Orioles': 'bal',
+  'Boston Red Sox': 'bos', 'Chicago Cubs': 'chc', 'Chicago White Sox': 'cws',
+  'Cincinnati Reds': 'cin', 'Cleveland Guardians': 'cle', 'Colorado Rockies': 'col',
+  'Detroit Tigers': 'det', 'Houston Astros': 'hou', 'Kansas City Royals': 'kc',
+  'Los Angeles Angels': 'laa', 'Los Angeles Dodgers': 'lad', 'Miami Marlins': 'mia',
+  'Milwaukee Brewers': 'mil', 'Minnesota Twins': 'min', 'New York Mets': 'nym',
+  'New York Yankees': 'nyy', 'Oakland Athletics': 'ath', 'Philadelphia Phillies': 'phi',
+  'Pittsburgh Pirates': 'pit', 'San Diego Padres': 'sd', 'San Francisco Giants': 'sfg',
+  'Seattle Mariners': 'sea', 'St. Louis Cardinals': 'stl', 'Tampa Bay Rays': 'tb',
+  'Texas Rangers': 'tex', 'Toronto Blue Jays': 'tor', 'Washington Nationals': 'was',
+  'Athletics': 'ath', 'Angels': 'laa', 'Astros': 'hou', 'Blue Jays': 'tor',
+  'Braves': 'atl', 'Brewers': 'mil', 'Cardinals': 'stl', 'Cubs': 'chc',
+  'Diamondbacks': 'ari', 'Dodgers': 'lad', 'Giants': 'sfg', 'Guardians': 'cle',
+  'Mariners': 'sea', 'Marlins': 'mia', 'Mets': 'nym', 'Nationals': 'was',
+  'Orioles': 'bal', 'Padres': 'sd', 'Phillies': 'phi', 'Pirates': 'pit',
+  'Rangers': 'tex', 'Rays': 'tb', 'Red Sox': 'bos', 'Reds': 'cin',
+  'Rockies': 'col', 'Royals': 'kc', 'Tigers': 'det', 'Twins': 'min',
+  'White Sox': 'cws', 'Yankees': 'nyy',
+};
+
+function teamToAbbr(name) {
+  if (!name) return null;
+  // Try full name first, then last word
+  if (KALSHI_TEAM_MAP[name]) return KALSHI_TEAM_MAP[name];
+  const parts = name.split(' ');
+  const last = parts[parts.length - 1];
+  return KALSHI_TEAM_MAP[last] || null;
+}
+
+async function fetchKalshiOdds(dateStr) {
+  // Fetch all open KXMLBGAME markets (moneyline - game winner)
+  const mlUrl = KALSHI_BASE + '/events?series_ticker=KXMLBGAME&with_nested_markets=true&status=open&limit=50';
+  const mlResp = await fetch(mlUrl, { headers: { 'Accept': 'application/json' } });
+  if (!mlResp.ok) throw new Error('Kalshi ML fetch error ' + mlResp.status);
+  const mlData = await mlResp.json();
+  const events = mlData.events || [];
+  console.log('[kalshi] fetched ' + events.length + ' game events');
+
+  // Also fetch total runs markets
+  const totUrl = KALSHI_BASE + '/events?series_ticker=KXMLBGAMETOTAL&with_nested_markets=true&status=open&limit=50';
+  let totEvents = [];
+  try {
+    const totResp = await fetch(totUrl, { headers: { 'Accept': 'application/json' } });
+    if (totResp.ok) {
+      const totData = await totResp.json();
+      totEvents = totData.events || [];
+      console.log('[kalshi] fetched ' + totEvents.length + ' total events');
+    }
+  } catch(e) { console.log('[kalshi] no total markets: ' + e.message); }
+
+  // Build totals lookup: event_ticker → {line, overProb, underProb}
+  const totalsMap = {};
+  for (const ev of totEvents) {
+    const mkts = ev.markets || [];
+    // Markets are like "Over 7.5" - find the one with highest volume
+    for (const m of mkts) {
+      const lineMatch = (m.yes_sub_title || m.title || '').match(/([\d.]+)/);
+      if (!lineMatch) continue;
+      const line = parseFloat(lineMatch[1]);
+      const yesBid = parseFloat(m.yes_bid_dollars || 0);
+      const noBid = parseFloat(m.no_bid_dollars || 0);
+      // Store by event ticker + line
+      const key = (ev.sub_title || ev.title || '').toLowerCase();
+      if (!totalsMap[key]) totalsMap[key] = {};
+      totalsMap[key][line] = { overProb: yesBid, underProb: noBid, line };
+    }
+  }
+
+  // Parse ML events into our game format
   const results = [];
-  for (const g of games) {
-    const gameDate = new Date(g.commence_time).toLocaleDateString('en-CA',{timeZone:'America/New_York'});
-    if (gameDate !== dateStr) continue;
-    // Skip games that have already started — Odds API returns live lines for in-progress games
-    const commenceTime = new Date(g.commence_time);
-    const nowUTC = new Date();
-    if (commenceTime < nowUTC) {
-      console.log('[odds-api] Skipping started game: '+g.away_team+' @ '+g.home_team+' (commenced '+Math.round((nowUTC-commenceTime)/60000)+'min ago)');
+  for (const ev of events) {
+    const mkts = ev.markets || [];
+    if (!mkts.length) continue;
+
+    // Each event has exactly 2 markets: away team wins, home team wins
+    // sub_title format: "Team A" or we need to parse from yes_sub_title
+    // title format typically: "Team A vs Team B" or "Team A @ Team B"
+    const title = ev.title || ev.sub_title || '';
+    const awayMkt = mkts.find(m => (m.yes_sub_title||'').toLowerCase().includes('away') ||
+                                    mkts.indexOf(m) === 0);
+    const homeMkt = mkts.find(m => (m.yes_sub_title||'').toLowerCase().includes('home') ||
+                                    mkts.indexOf(m) === 1);
+    if (!awayMkt || !homeMkt) continue;
+
+    const awayProb = parseFloat(awayMkt.yes_bid_dollars || 0);
+    const homeProb = parseFloat(homeMkt.yes_bid_dollars || 0);
+    if (!awayProb || !homeProb) continue;
+
+    // Parse team names from yes_sub_title
+    const awayName = awayMkt.yes_sub_title || '';
+    const homeName = homeMkt.yes_sub_title || '';
+    const awayAbbr = teamToAbbr(awayName.replace(/\s+wins?$/i,'').trim());
+    const homeAbbr = teamToAbbr(homeName.replace(/\s+wins?$/i,'').trim());
+    if (!awayAbbr || !homeAbbr) {
+      console.log('[kalshi] could not map teams: ' + awayName + ' / ' + homeName);
       continue;
     }
-    const awayTeam = ODDS_TEAM_MAP[g.away_team];
-    const homeTeam = ODDS_TEAM_MAP[g.home_team];
-    if (!awayTeam || !homeTeam) continue;
-    const book = BOOK_PRIORITY.map(k=>g.bookmakers?.find(b=>b.key===k)).find(Boolean);
-    if (!book) continue;
-    console.log('[odds-api] '+awayTeam+'@'+homeTeam+' using: '+book.key);
-    const h2h    = book.markets?.find(m=>m.key==='h2h');
-    const totals = book.markets?.find(m=>m.key==='totals');
-    const awayOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===awayTeam||o.name===g.away_team);
-    const homeOdds = h2h?.outcomes?.find(o=>ODDS_TEAM_MAP[o.name]===homeTeam||o.name===g.home_team);
-    const overOdds  = totals?.outcomes?.find(o=>o.name==='Over');
-    const underOdds = totals?.outcomes?.find(o=>o.name==='Under');
+
+    const awayML = kalshiToAmerican(awayProb);
+    const homeML = kalshiToAmerican(homeProb);
+
+    // Look up totals
+    const evKey = (ev.sub_title || title).toLowerCase();
+    const totData = totalsMap[evKey] || {};
+    const totLines = Object.keys(totData).map(Number).sort((a,b)=>a-b);
+    // Use the most liquid line (closest to 0.5 prob)
+    let marketTotal = null, overPrice = -110, underPrice = -110;
+    if (totLines.length) {
+      const bestLine = totLines.reduce((best, l) => {
+        const t = totData[l];
+        const dist = Math.abs(t.overProb - 0.5);
+        return dist < Math.abs((totData[best]?.overProb||0) - 0.5) ? l : best;
+      }, totLines[0]);
+      marketTotal = bestLine;
+      overPrice = kalshiToAmerican(totData[bestLine].overProb);
+      underPrice = kalshiToAmerican(totData[bestLine].underProb);
+    }
+
     results.push({
-      game_id: makeGameId(awayTeam, homeTeam),
-      away_team: awayTeam,
-      home_team: homeTeam,
-      market_away_ml: awayOdds?.price ?? null,
-      market_home_ml: homeOdds?.price ?? null,
-      market_total: overOdds?.point ?? null,
-      over_price: overOdds?.price ?? -110,
-      under_price: underOdds?.price ?? -110,
-      commence_time: g.commence_time,
+      awayTeam: awayAbbr, homeTeam: homeAbbr,
+      awayML, homeML,
+      marketTotal, overPrice: overPrice || -110, underPrice: underPrice || -110,
+      source: 'kalshi',
+      volume: parseFloat(awayMkt.volume_fp || 0) + parseFloat(homeMkt.volume_fp || 0),
     });
   }
-  console.log('[odds-api] Got '+results.length+' games for '+dateStr);
+
+  console.log('[kalshi] parsed ' + results.length + ' games with odds');
   return results;
 }
 
-function makeGameId(away, home) {
-  return ((away||'').toLowerCase().replace(/[^a-z]/g,'') + '-' + (home||'').toLowerCase().replace(/[^a-z]/g,'')).toLowerCase();
-}
 
-module.exports = { fetchLineups, fetchScores, fetchOddsAPI, makeGameId };
+module.exports = { fetchLineups, fetchScores, fetchKalshiOdds, makeGameId };
