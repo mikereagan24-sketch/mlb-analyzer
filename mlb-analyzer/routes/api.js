@@ -436,6 +436,22 @@ router.patch('/games/:date/:gameId/odds', (req, res) => {
 
 // ── BACKTEST RESET ────────────────────────────────────────────────────
 // Unlock all odds for a date
+
+// Update wind data for a game and rerun model
+router.patch('/games/:date/:gameId/wind', (req, res) => {
+  try {
+    const { wind_speed, wind_dir, wind_factor } = req.body;
+    const { date, gameId } = req.params;
+    db.prepare('UPDATE game_log SET wind_speed=?, wind_dir=?, wind_factor=? WHERE game_date=? AND game_id=?')
+      .run(wind_speed, wind_dir, wind_factor, date, gameId);
+    // Rerun model with new wind factor
+    const { processGameSignals, getWobaIndex, getSettings } = require('../services/jobs');
+    const wobaIdx = getWobaIndex();
+    const settings = getSettings();
+    processGameSignals(date, gameId, wobaIdx, settings);
+    res.json({success:true, wind_factor});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
 router.post('/games/:date/unlock', (req, res) => {
   try {
     const r = db.prepare("UPDATE game_log SET odds_locked_at=NULL WHERE game_date=?").run(req.params.date);
