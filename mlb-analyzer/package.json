@@ -2,7 +2,7 @@
   "_deploy":"2026-04-08T21:06:49.537Z",
   "name": "mlb-analyzer",
   "version": "1.0.0",
-  "_deployed":"2026-04-09T20:08:55.136Z","description": "MLB Betting Analyzer with persistent storage and automated nightly pulls",
+  "_deployed":"2026-04-09T20:08:55.136Z","description": "MLB Betting Analyzer — build 2026-04-11T01:37:51.441Z",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
