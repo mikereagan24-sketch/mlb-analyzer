@@ -251,15 +251,20 @@ async function runScoreJob(dateStr) {
             { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line, bet_line: sig.bet_line },
             s.awayScore ?? s.away_score, s.homeScore ?? s.home_score, gameRow.market_total
           );
-          // To-win-100 P&L: use bet_line if locked, else market_line
-          const _ml = parseFloat(sig.bet_line || sig.market_line);
+          // To-win-100 P&L
           let _pnl = 0;
-          if (!isNaN(_ml) && _ml !== 0 && outcome !== 'pending' && outcome !== 'push') {
+          if (outcome !== 'pending' && outcome !== 'push') {
             if (sig.signal_type === 'ML') {
-              const _stake = _ml > 0 ? parseFloat((10000/_ml).toFixed(2)) : Math.abs(_ml);
-              _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
+              // ML: use locked bet_line price, else market ML price
+              const _ml = parseFloat(sig.bet_line || sig.market_line);
+              if (!isNaN(_ml) && _ml !== 0) {
+                const _stake = _ml > 0 ? parseFloat((10000/_ml).toFixed(2)) : Math.abs(_ml);
+                _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
+              }
             } else {
-              const _price = parseFloat(sig.bet_line) || -110;
+              // Total: bet_line is the O/U number, NOT the price — use over/under price from game
+              // If a manual price was stored in closing_line, use that; otherwise -110 default
+              const _price = parseFloat(sig.closing_line) || -110;
               const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
               _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
             }
