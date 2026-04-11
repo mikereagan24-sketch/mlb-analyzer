@@ -12,6 +12,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public'), {etag:false, lastModified:false, setHeaders:(res,filePath)=>{ if(filePath.endsWith('index.html')){res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');} }}));
 
 // API routes
+app.get('/api/version', (req, res) => res.json({build:'2026-04-11T14:20:01.140Z',routes:['weather','scores','lineups','odds','signals']}));
 app.use('/api', require('./routes/api'));
 
 // Health check for Render
