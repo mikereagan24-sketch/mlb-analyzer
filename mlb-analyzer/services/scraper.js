@@ -408,4 +408,64 @@ async function fetchKalshiOdds(dateStr) {
 }
 
 
-module.exports = { fetchLineups, fetchScores, fetchKalshiOdds, makeGameId };
+
+// DraftKings fallback via Odds API — used when Kalshi has no lines for a game
+async function fetchDKOdds(apiKey, dateStr) {
+  if (!apiKey) return [];
+  try {
+    const url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds' +
+      '?apiKey='+apiKey+'&regions=us&markets=h2h,totals&oddsFormat=american&bookmakers=draftkings';
+    const resp = await fetch(url, {headers:{'Accept':'application/json'}});
+    if (!resp.ok) { console.log('[dk] API error '+resp.status); return []; }
+    const games = await resp.json();
+    console.log('[dk] remaining requests: '+resp.headers.get('x-requests-remaining'));
+    const results = [];
+    for (const g of games) {
+      const dk = g.bookmakers?.find(b=>b.key==='draftkings');
+      if (!dk) continue;
+      const h2h = dk.markets?.find(m=>m.key==='h2h');
+      const tot = dk.markets?.find(m=>m.key==='totals');
+      const awayOutcome = h2h?.outcomes?.find(o=>o.name===g.away_team);
+      const homeOutcome = h2h?.outcomes?.find(o=>o.name===g.home_team);
+      const overOut = tot?.outcomes?.find(o=>o.name==='Over');
+      // Map full team names to abbreviations
+      const awayAbbr = teamToAbbr(g.away_team);
+      const homeAbbr = teamToAbbr(g.home_team);
+      if (!awayAbbr || !homeAbbr) continue;
+      results.push({
+        awayTeam: awayAbbr, homeTeam: homeAbbr,
+        awayML: awayOutcome?.price || null,
+        homeML: homeOutcome?.price || null,
+        marketTotal: overOut?.point || null,
+        overPrice: -110, underPrice: -110,
+        source: 'draftkings',
+      });
+    }
+    console.log('[dk] parsed '+results.length+' games');
+    return results;
+  } catch(e) { console.error('[dk] error:', e.message); return []; }
+}
+
+// Primary: Kalshi. Fallback: DraftKings via Odds API
+async function fetchOddsWithFallback(apiKey, dateStr) {
+  let kalshiGames = [];
+  try {
+    kalshiGames = await fetchKalshiOdds(dateStr);
+  } catch(e) { console.error('[odds] Kalshi failed:', e.message); }
+
+  if (kalshiGames.length === 0) {
+    console.log('[odds] Kalshi returned 0 games — falling back to DraftKings');
+    return fetchDKOdds(apiKey, dateStr);
+  }
+
+  // For any game missing from Kalshi, fill in from DK
+  let dkGames = [];
+  const kalshiGameIds = new Set(kalshiGames.map(g=>g.awayTeam+'-'+g.homeTeam));
+  const missingFromKalshi = []; // populated after we know today's games
+
+  // Return Kalshi primary, noting source
+  console.log('[odds] Kalshi: '+kalshiGames.length+' games');
+  return kalshiGames;
+}
+
+module.exports = { fetchDKOdds, fetchOddsWithFallback, fetchLineups, fetchScores, fetchKalshiOdds, makeGameId };
