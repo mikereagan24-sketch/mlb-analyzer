@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
 const { runModel, getSignals, calcPnl } = require('./model');
+const { fetchParkWind } = require('./weather');
 
 function todayET() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
