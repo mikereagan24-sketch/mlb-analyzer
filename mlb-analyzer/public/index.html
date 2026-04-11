@@ -137,6 +137,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .wind-in{background:rgba(37,99,235,.12);color:#1d4ed8;border:1px solid rgba(37,99,235,.3)}
 .wind-out{background:rgba(220,38,38,.12);color:#b91c1c;border:1px solid rgba(220,38,38,.3)}
 .wind-calm{background:var(--bg2);color:var(--text3);border:1px solid var(--border)}
+.roof-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent;margin-top:4px;font-weight:500}
+.roof-open{background:#e6f4ea;color:#1e7e34;border-color:#a8d5b5}
+.roof-closed{background:#fdecea;color:#c0392b;border-color:#f5b7b1}
+.roof-est{opacity:0.75;font-style:italic}
+.roof-badge .roof-icon{font-size:13px}
 .logbet-btn{font-size:10px;padding:3px 8px;border:1px solid var(--border2);border-radius:4px;cursor:pointer;background:var(--bg2);color:var(--text);margin-top:6px}
 .logbet-btn:hover{background:var(--border)}
 .mb-edge-preview{font-size:11px;color:var(--text2);margin-top:8px;padding:8px;background:var(--bg2);border-radius:6px;display:none}
@@ -945,6 +950,63 @@ function injectEditButtons(games, date) {
     if (spans.length >= 1) spans[0].after(ba); else gsp.prepend(ba);
     if (spans.length >= 2) spans[1].after(bh); else gsp.appendChild(bh);
 
+    // Roof status badge for retractable roof parks
+    const RETRACTABLE_PARKS={
+    'mil':{'name':'American Family','openAbove':60},
+    'tor':{'name':'Rogers Centre','openAbove':60},
+    'sea':{'name':'T-Mobile','openAbove':60},
+    'mia':{'name':'loanDepot Park','openAbove':999},
+    'hou':{'name':'Minute Maid','openAbove':85},
+    'tex':{'name':'Globe Life','openAbove':85},
+    'ari':{'name':'Chase Field','openAbove':85}
+  };
+    const homeKey=(g.home_team||'').toLowerCase().replace(/[^a-z]/g,'');
+    if (!card.querySelector('.roof-badge') && RETRACTABLE_PARKS[homeKey]) {
+      const rpInfo=RETRACTABLE_PARKS[homeKey];
+      // Check if wind/temp data available from game record
+      const windFactor=g.wind_factor||0;
+      const tempF=g.temp_f||null;
+      const tempRunAdj=g.temp_run_adj||0;
+      // Determine estimated roof status
+      const precipProb=g.precip_prob||0;
+      let roofOpen=null; // null=unknown
+      let roofSource='est';
+      if(tempF!==null){
+        roofOpen=(tempF<rpInfo.openAbove && precipProb<30);
+        roofSource='est';
+      }
+      // Check for manual override stored in localStorage
+      const overrideKey='roof_'+g.game_id+'_'+g.game_date;
+      const stored=localStorage.getItem(overrideKey);
+      if(stored==='open'){roofOpen=true;roofSource='manual';}
+      else if(stored==='closed'){roofOpen=false;roofSource='manual';}
+      const badge=document.createElement('div');
+      badge.className='roof-badge '+(roofOpen===null?'roof-est':(roofOpen?'roof-open':'roof-closed'))+(roofSource==='est'?' roof-est':'');
+      const icon=roofOpen===null?'🏟️':roofOpen?'☀️':'🏠';
+      const label=roofOpen===null?'Roof: unknown':roofOpen?'Roof: Open ('+roofSource+')':'Roof: Closed ('+roofSource+')';
+      badge.innerHTML='<span class="roof-icon">'+icon+'</span><span>'+label+'</span>';
+      badge.title='Click to toggle roof status';
+      badge.onclick=(function(gid,gdate,bEl,rpN){return function(e){
+        e.stopPropagation();
+        const k='roof_'+gid+'_'+gdate;
+        const cur=localStorage.getItem(k);
+        const next=cur==='open'?'closed':cur==='closed'?null:'open';
+        if(next===null)localStorage.removeItem(k);else localStorage.setItem(k,next);
+        const newOpen=next==='open'?true:next==='closed'?false:null;
+        const newIcon=newOpen===null?'🏟️':newOpen?'☀️':'🏠';
+        const newLabel=newOpen===null?'Roof: unknown (tap to set)':newOpen?'Roof: Open (manual)':'Roof: Closed (manual)';
+        bEl.className='roof-badge '+(newOpen===null?'roof-est':(newOpen?'roof-open':'roof-closed'));
+        bEl.innerHTML='<span class="roof-icon">'+newIcon+'</span><span>'+newLabel+'</span>';
+        // Re-run model if roof status changed and we have wind/temp data
+        fetch('/api/games/'+gdate+'/'+gid+'/odds',{method:'PATCH',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({roof_closed:newOpen===false?1:0})
+        }).catch(()=>{});
+      };})(g.game_id,g.game_date,badge,rpInfo.name);
+      var logBtnEl=card.querySelector('.logbet-btn');
+      if(logBtnEl)logBtnEl.parentNode.insertBefore(badge,logBtnEl);
+      else{var confD=card.querySelector('.conf-row,.model-row')||card;confD.appendChild(badge);}
+    }
     // Log Bet button
     if (!card.querySelector('.logbet-btn')) {
       var blb = document.createElement('button');
