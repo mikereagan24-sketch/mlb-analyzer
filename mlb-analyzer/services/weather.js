@@ -67,4 +67,45 @@ function calcWindFactor(windDir, windSpeed, park) {
   return parseFloat(factor.toFixed(3));
 }
 
+
+// Fetch wind at game time for a specific park using Open-Meteo (no API key needed)
+// Uses Node 20 built-in fetch
+async function fetchParkWind(homeTeam, gameDate, gameTime) {
+  const teamKey = (homeTeam || '').toLowerCase().replace(/[^a-z]/g, '');
+  const park = PARKS[teamKey];
+  if (!park) return null;
+
+  // Parse game hour (local time)
+  let gameHour = 18;
+  if (gameTime) {
+    const m = gameTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
+    if (m) {
+      let h = parseInt(m[1]), ap = m[3].toUpperCase();
+      if (ap === 'PM' && h !== 12) h += 12;
+      if (ap === 'AM' && h === 12) h = 0;
+      gameHour = h;
+    }
+  }
+
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${park.lat}&longitude=${park.lng}` +
+      `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
+      `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
+      `&start_date=${gameDate}&end_date=${gameDate}`;
+    const data = await fetch(url).then(r => r.json());
+    const idx = Math.min(gameHour, (data.hourly?.time || []).length - 1);
+    const windSpeed = data.hourly?.wind_speed_10m?.[idx] || 0;
+    const windDir   = data.hourly?.wind_direction_10m?.[idx] || 0;
+    const tempF     = data.hourly?.temperature_2m?.[idx] || 65;
+    const precipProb = data.hourly?.precipitation_probability?.[idx] || 0;
+    const factor = calcWindFactor(windDir, windSpeed, park);
+    // Temp adjustment: research shows ~1 run per 50F from 65F baseline
+    const tempAdj = tempF < 55 ? -0.5 : tempF < 70 ? 0 : tempF < 80 ? 0.3 : 0.6;
+    return { windSpeed, windDir, factor, tempF, tempAdj, precipProb, parkName: park.name, cfDir: park.cfDir };
+  } catch (e) {
+    console.error('[weather] fetch failed for ' + homeTeam + ':', e.message);
+    return null;
+  }
+}
+
 module.exports = { fetchParkWind, calcWindFactor, PARKS };
