@@ -1,13 +1,4 @@
-
-  // Restore bet_lines for signals that had them locked before rerun
-  if (lockedLines.length) {
-    for (const locked of lockedLines) {
-      db.prepare(
-        "UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?"
-      ).run(locked.bet_line, locked.bet_locked_at, locked.closing_line, locked.clv, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
-    }
-  }
-  const cron = require('node-cron');
+const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
 const { runModel, getSignals, calcPnl } = require('./model');
