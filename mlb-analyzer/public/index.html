@@ -216,7 +216,6 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div class="tabs">
 <button class="tab active" onclick="sw('games')">Today's Games</button>
 <button class="tab" onclick="sw('matchups')">Matchups</button>
-<button class="tab" onclick="sw('analysis')">Analysis</button>
 <button class="tab" onclick="sw('backtest');loadBacktest()">Backtest</button>
 <button class="tab" onclick="sw('data')">Data Import</button>
 <button class="tab" onclick="sw('model')">Model</button>
@@ -785,7 +784,7 @@ function analyzeGame(gameId,date){
   document.getElementById('a-bd-hdr').textContent=g.away_team+' vs '+g.home_sp+' ('+(g.home_sp_hand||'?')+'HP)';
   document.getElementById('h-bd-hdr').textContent=g.home_team+' vs '+g.away_sp+' ('+(g.away_sp_hand||'?')+'HP)';
   document.getElementById('ai-out').textContent='Click above to generate narrative analysis.';
-  sw('analysis');
+  sw('matchups');
 }
 
 async function runAI(){
@@ -1541,7 +1540,7 @@ async function submitManualBet(){
     })});
     if(r.success){
       st.textContent='Logged! '+r.category+' outcome='+r.outcome;st.style.color='var(--green)';
-      setTimeout(function(){closeManualModal();loadBacktest();},1200);
+      setTimeout(function(){closeManualModal(); setTimeout(()=>{sw('backtest');loadBacktest();},300);loadBacktest();},1200);
     } else {
       st.textContent='Error: '+(r.error||'unknown');st.style.color='#e05';
     }
