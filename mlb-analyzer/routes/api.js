@@ -209,6 +209,8 @@ router.get('/backtest', (req, res) => {
     const { from, to } = req.query;
     const fromDate = from || '2026-01-01';
     const toDate = to || '2099-12-31';
+    // One-time: null out CLV for Total signals (CLV not meaningful — bet_line is a price, not a total)
+    db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' AND clv IS NOT NULL").run();
     // Auto-backfill closing_line from market_line for resolved signals that have none
     db.prepare(`UPDATE bet_signals SET
       closing_line = market_line,
@@ -652,9 +654,9 @@ router.post('/signals/:id/closing-line', (req, res) => {
     if (closing_line == null) return res.status(400).json({error:'closing_line required'});
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
-    // Recalculate CLV if bet_line exists
+    // Recalculate CLV if bet_line exists (ML only — not meaningful for totals)
     let clv = null;
-    if (sig.bet_line != null) {
+    if (sig.bet_line != null && sig.signal_type === 'ML') {
       const isFav = sig.bet_line < 0;
       clv = isFav ? (closing_line - sig.bet_line) : (sig.bet_line - closing_line);
     }
