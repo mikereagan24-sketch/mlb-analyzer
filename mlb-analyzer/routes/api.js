@@ -1403,13 +1403,7 @@ router.get('/debug/scores', async (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── KALSHI TEST ENDPOINT (sandbox/debug) ─────────────────────────
-
-
-    const data = await resp.json();
-    res.json({status: resp.status, count: data.events?.length, sample: data.events?.slice(0,2)});
-  } catch(e) { res.json({error: e.message}); }
-});
+// ── KALSHI TEST ENDPOINT (removed debug endpoint) ─────────────
 
 // Team abbr → FanGraphs depth chart slug
 const FG_SLUGS = {
