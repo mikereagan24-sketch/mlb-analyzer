@@ -145,11 +145,15 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     });
   }
 
+  // Remove any duplicate signals (same type+side) — keep highest ID
+  db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
+    SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
+  )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
   // Restore bet_lines for any signals that had them locked before the rerun
   if (lockedLines.length) {
     for (const locked of lockedLines) {
       db.prepare(
-        'UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?'
+        'UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=? AND bet_line IS NULL'
       ).run(locked.bet_line, locked.bet_locked_at, locked.closing_line, locked.clv,
             gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
     }
