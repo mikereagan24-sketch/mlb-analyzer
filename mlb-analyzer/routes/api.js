@@ -1559,6 +1559,164 @@ router.get('/debug/bullpen-woba', async (req, res) => {
 });
 
 
+
+// ── MODEL COMPARISON: old params vs new params ───────────────────────────────
+// GET /api/model-compare?from=2026-04-09&to=2026-04-12
+// Re-simulates model totals/signals under configurable old vs new parameters
+// and shows which signals would fire/disappear and record impact
+router.get('/model-compare', (req, res) => {
+  try {
+    const from = req.query.from || new Date().toISOString().slice(0,10);
+    const to   = req.query.to   || from;
+
+    // Old params (baseline — what was hardcoded before today's changes)
+    const OLD_PF  = { ATH:0.96, KC:0.97 }; // all others unchanged
+    const oldTempAdj = t => t == null ? 0 :
+      (t < 55 ? -0.5 : t < 70 ? 0 : t < 80 ? 0.3 : 0.6);
+
+    // New params (today's changes)
+    const NEW_PF  = { ATH:1.12, KC:1.00 };
+    const newTempAdj = t => t == null ? 0 :
+      Math.max(-1.3, Math.min(1.3, (t - 65) * 0.052));
+
+    // Get resolved signals with game context
+    const sigs = q.getSignalsInRange.all(from, to)
+      .filter(s => s.outcome && s.outcome !== 'pending');
+
+    const games = {};
+    const gameRows = db.prepare(
+      'SELECT * FROM game_log WHERE game_date >= ? AND game_date <= ?'
+    ).all(from, to);
+    gameRows.forEach(g => { games[g.game_date + '_' + g.game_id] = g; });
+
+    // Signal threshold helpers (mirrors model.js getSignals)
+    const settings = q.getSettings ? q.getSettings.all().reduce((a,r)=>{a[r.key]=r.value;return a;},{}) : {};
+    const TOT_1STAR = Number(settings.tot_lean_edge  ?? 0.04);
+    const TOT_2STAR = Number(settings.tot_value_edge ?? 0.08);
+    const TOT_3STAR = Number(settings.tot_3star_edge ?? 0.12);
+    const ML_1STAR  = Number(settings.ml_lean_edge   ?? 15);
+    const ML_2STAR  = Number(settings.ml_value_edge  ?? 30);
+    const ML_3STAR  = Number(settings.ml_3star_edge  ?? 60);
+
+    function totLabel(edge) {
+      if (edge >= TOT_3STAR) return '3★';
+      if (edge >= TOT_2STAR) return '2★';
+      if (edge >= TOT_1STAR) return '1★';
+      return null;
+    }
+    function mlLabel(edge) {
+      if (edge >= ML_3STAR) return '3★';
+      if (edge >= ML_2STAR) return '2★';
+      if (edge >= ML_1STAR) return '1★';
+      return null;
+    }
+    function impliedP(price) {
+      price = parseFloat(price);
+      return price < 0 ? Math.abs(price)/(Math.abs(price)+100) : 100/(price+100);
+    }
+    function modelOverP(estTot, mkt) {
+      return Math.min(Math.max(0.5 + (estTot - mkt) * 0.08, 0.20), 0.80);
+    }
+
+    const results = [];
+    let oldW=0, oldL=0, oldPnl=0;
+    let newW=0, newL=0, newPnl=0;
+    const flipped = [];
+
+    sigs.forEach(s => {
+      const gm = games[s.game_date + '_' + s.game_id];
+      if (!gm || !gm.model_total) return;
+
+      const roofClosed = gm.roof_status === 'closed';
+      const temp = gm.temp_f;
+
+      // Old/new temp adjustments
+      const oldTA = roofClosed ? 0 : oldTempAdj(temp);
+      const newTA = roofClosed ? 0 : newTempAdj(temp);
+      const tempDelta = newTA - oldTA;
+
+      // Old/new park factor impact on run base
+      const homePFchange = gm.home_team === 'ATH' ? (NEW_PF.ATH - OLD_PF.ATH)
+                         : gm.home_team === 'KC'  ? (NEW_PF.KC  - OLD_PF.KC)  : 0;
+      const windAdj = (gm.wind_factor || 0) * 2.0;
+      const estRunsBase = gm.model_total - windAdj - oldTA;
+      const pfRunDelta = homePFchange !== 0
+        ? estRunsBase * (homePFchange / (gm.park_factor || 1.0)) : 0;
+
+      const oldEst = gm.model_total;
+      const newEst = oldEst + pfRunDelta + tempDelta;
+      const mkt    = gm.market_total;
+      const overP  = gm.over_price  || -110;
+      const underP = gm.under_price || -110;
+      const overImp  = impliedP(overP);
+      const underImp = impliedP(underP);
+
+      // Old label for this signal
+      let oldLabel, newLabel;
+      if (s.signal_type === 'Total') {
+        const oldEdge = s.signal_side === 'over'
+          ? modelOverP(oldEst, mkt) - overImp
+          : (1 - modelOverP(oldEst, mkt)) - underImp;
+        const newEdge = s.signal_side === 'over'
+          ? modelOverP(newEst, mkt) - overImp
+          : (1 - modelOverP(newEst, mkt)) - underImp;
+        oldLabel = totLabel(oldEdge);
+        newLabel = totLabel(newEdge);
+      } else {
+        // ML signals: only affected if park factor change is large enough to shift ML
+        // For simplicity treat as unchanged (park factor affects totals much more than ML at these deltas)
+        oldLabel = s.signal_label;
+        newLabel = s.signal_label;
+      }
+
+      // PnL helper: to-win-$100
+      function pnl(ml, won) {
+        ml = parseFloat(ml); if (!ml) return 0;
+        const stake = ml > 0 ? 10000/ml : Math.abs(ml);
+        return parseFloat((won ? 100 : -stake).toFixed(2));
+      }
+      const actualWon = s.outcome === 'win';
+      const betLine = parseFloat(s.bet_line) || parseFloat(s.market_line) || 0;
+      const sigPnl = pnl(betLine, actualWon);
+
+      // Old model: signal fired (it's in the DB) — count it
+      if (oldLabel) { oldW += actualWon?1:0; oldL += actualWon?0:1; oldPnl += sigPnl; }
+
+      // New model: signal fires only if newLabel is non-null
+      if (newLabel) { newW += actualWon?1:0; newL += actualWon?0:1; newPnl += sigPnl; }
+
+      const didFlip = oldLabel !== newLabel;
+      if (didFlip || Math.abs(newEst - oldEst) > 0.05) {
+        results.push({
+          date: s.game_date, game: s.game_id.toUpperCase(),
+          type: s.signal_type, side: s.signal_side,
+          home: gm.home_team, temp: temp ? Math.round(temp) : null,
+          roofClosed,
+          mktTotal: mkt, oldModelTotal: parseFloat(oldEst.toFixed(2)),
+          newModelTotal: parseFloat(newEst.toFixed(2)),
+          totalDelta: parseFloat((newEst - oldEst).toFixed(3)),
+          tempDelta: parseFloat(tempDelta.toFixed(3)),
+          pfDelta: parseFloat(pfRunDelta.toFixed(3)),
+          oldLabel, newLabel, flipped: didFlip,
+          outcome: s.outcome, pnl: sigPnl
+        });
+      }
+    });
+
+    res.json({
+      from, to,
+      old: { wins: oldW, losses: oldL, pnl: parseFloat(oldPnl.toFixed(2)), record: oldW+'-'+oldL },
+      new: { wins: newW, losses: newL, pnl: parseFloat(newPnl.toFixed(2)), record: newW+'-'+newL },
+      flippedCount: results.filter(r=>r.flipped).length,
+      changes: results,
+      params: {
+        old: { parkFactors: OLD_PF, tempFormula: 'step: <55→-0.5, <70→0, <80→+0.3, else +0.6' },
+        new: { parkFactors: NEW_PF, tempFormula: 'continuous: clamp((T-65)*0.052, -1.3, +1.3)' }
+      }
+    });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
 module.exports = router;
 
 
