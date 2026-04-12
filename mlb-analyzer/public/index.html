@@ -1356,20 +1356,9 @@ function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getEl
 async function loadCronLog(){
   try{
     const rows=await api('/cron-log');
-    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<div class="setting-row"><label>Odds Source</label><span class="setting-note" style="color:var(--text2)">📊 Kalshi prediction market (no API key needed — free public data)</span></div>
-    <div class="lu-cols">
-      <div>
-        <div class="lu-team-lbl" id="lu-away-lbl">Away Lineup</div>
-        <div id="lu-away-rows"></div>
-      </div>
-      <div>
-        <div class="lu-team-lbl" id="lu-home-lbl">Home Lineup</div>
-        <div id="lu-home-rows"></div>
-      </div>
-    </div>
-    <button class="lu-save" onclick="saveLineup()">Save & Rerun Model</button>
-  </div>
-</div>
+    document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<p>No cron logs yet.</p>';
+  }catch(e){console.error('cron log error',e);}
+}
 
 <div class="manual-modal-bg" id="manual-modal-bg" onclick="if(event.target===this)closeManualModal()">
   <div class="manual-modal">
