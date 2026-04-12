@@ -120,7 +120,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const lockedLines = db.prepare(
     'SELECT signal_type, signal_side, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE game_date=? AND game_id=? AND bet_line IS NOT NULL'
   ).all(gameRow.game_date, gameRow.game_id);
-  q.deleteSignalsForGame.run(gameRow.game_date, gameRow.game_id);
+  db.prepare('DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND bet_line IS NULL').run(gameRow.game_date, gameRow.game_id);
   for (const sig of signals) {
     const { outcome, pnl } = (gl.away_score != null)
       ? calcPnl({type:sig.type, side:sig.side, marketLine:sig.type==='ML'?(sig.side==='away'?gl.market_away_ml:gl.market_home_ml):gl.market_total, over_price:gl.over_price, under_price:gl.under_price}, gl.away_score, gl.home_score, gl.market_total)
