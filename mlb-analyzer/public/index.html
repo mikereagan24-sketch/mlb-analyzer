@@ -1359,6 +1359,7 @@ async function loadCronLog(){
     document.getElementById('cron-log').innerHTML=rows.length?rows.map(r=>'<div class="cron-row"><span class="cron-badge '+(r.status==='success'?'cron-ok':'cron-err')+'">'+r.status+'</span><div><div style="font-weight:500">'+r.job_type+' · '+r.run_date+'</div><div style="color:var(--text2)">'+(r.message||'')+' · '+r.games_updated+' games · '+utcToPT(r.ran_at)+'</div></div></div>').join(''):'<p>No cron logs yet.</p>';
   }catch(e){console.error('cron log error',e);}
 }
+</script>
 
 <div class="manual-modal-bg" id="manual-modal-bg" onclick="if(event.target===this)closeManualModal()">
   <div class="manual-modal">
@@ -1540,6 +1541,5 @@ async function submitManualBet(){
     }
   }catch(e){st.textContent='Error: '+e.message;st.style.color='#e05';}
 }
-</script>
 </body>
 </html>
