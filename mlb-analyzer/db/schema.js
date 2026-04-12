@@ -265,7 +265,7 @@ q.upsertWobaBatch = (key, rows) => {
 
 // Initialize prepared statements that need new columns
 try {
-  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?, wind_dir=?, wind_factor=? WHERE game_date=? AND game_id=?`);
+  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=? WHERE game_date=? AND game_id=?`);
 } catch(e) { console.error('updateWindData init failed:', e.message); }
 
 
