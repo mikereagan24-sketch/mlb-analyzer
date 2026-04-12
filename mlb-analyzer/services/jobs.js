@@ -309,9 +309,9 @@ async function runScoreJob(dateStr) {
                 _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
               }
             } else {
-              // Total: bet_line is the O/U number, NOT the price — use over/under price from game
-              // If a manual price was stored in closing_line, use that; otherwise -110 default
-              const _price = parseFloat(sig.closing_line) || -110;
+              // Total: bet_line is the O/U number, NOT the price
+              // Use over/under price from game_log, NOT closing_line (which stores the total number)
+              const _price = sig.signal_side === 'over' ? (gameRow.over_price || -110) : (gameRow.under_price || -110);
               const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
               _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
             }
