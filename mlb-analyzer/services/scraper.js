@@ -358,4 +358,9 @@ async function fetchOddsAPI(apiKey, dateStr) {
 }
 
 
+function makeGameId(away, home) {
+  const a = (away||'').toLowerCase().replace(/[^a-z]/g,'');
+  const h = (home||'').toLowerCase().replace(/[^a-z]/g,'');
+  return a+'-'+h;
+}
 module.exports = { fetchOddsAPI, fetchLineups, fetchScores, makeGameId };
