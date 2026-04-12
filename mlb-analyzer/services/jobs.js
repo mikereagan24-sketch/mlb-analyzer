@@ -153,7 +153,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   if (lockedLines.length) {
     for (const locked of lockedLines) {
       db.prepare(
-        'UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=? AND bet_line IS NULL'
+        'UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND UPPER(signal_type)=UPPER(?) AND UPPER(signal_side)=UPPER(?) AND bet_line IS NULL'
       ).run(locked.bet_line, locked.bet_locked_at, locked.closing_line, locked.clv,
             gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
     }
