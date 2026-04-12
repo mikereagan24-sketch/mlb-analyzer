@@ -1717,6 +1717,17 @@ router.get('/model-compare', (req, res) => {
   } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+
+// DELETE /api/signals/:id — hard delete a specific signal (bypasses bet_line protection)
+router.delete('/signals/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if(isNaN(id)) return res.status(400).json({error:'invalid id'});
+    const info = db.prepare('DELETE FROM bet_signals WHERE id=?').run(id);
+    res.json({success: info.changes > 0, deleted: id, changes: info.changes});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
 module.exports = router;
 
 
