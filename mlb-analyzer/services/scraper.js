@@ -177,7 +177,7 @@ Return ONLY a raw JSON array with this exact structure:
 [{"game_id":"chc-cle","away_team":"CHC","home_team":"CLE","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Edward Cabrera","hand":"R"},"home_sp":{"name":"Slade Cecconi","hand":"R"},"market_away_ml":-134,"market_home_ml":114,"market_total":7.5,"park_factor":0.95,"away_lineup":[{"slot":1,"name":"Nico Hoerner","hand":"R"},{"slot":2,"name":"Alex Bregman","hand":"R"}],"home_lineup":[{"slot":1,"name":"Steven Kwan","hand":"L"},{"slot":2,"name":"Chase DeLauter","hand":"L"}]}]
 
 Teams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH not OAK)
-Park factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:0.97 SEA:0.95 LAA:0.97 HOU:1.00 ATH:0.96 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93
+Park factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:1.00 SEA:0.95 LAA:0.97 HOU:1.00 ATH:1.12 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93
 Hands: R=right L=left S=switch
 Raw JSON array only — no markdown, no explanation.
 
