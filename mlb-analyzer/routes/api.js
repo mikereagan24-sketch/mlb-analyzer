@@ -628,15 +628,12 @@ router.post('/signals/:id/bet-line', (req, res) => {
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
     let clv = null;
-    if (sig.closing_line != null) {
-      // CLV = how much better your line is vs closing
-      // For ML: positive = you got a better price than closing
+    if (sig.closing_line != null && sig.signal_type === 'ML') {
+      // CLV = how much better your line is vs closing (ML only — not meaningful for totals)
       const isFav = bet_line < 0;
       if (isFav) {
-        // Less negative = better for favorite bettors
         clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 → clv = +20
       } else {
-        // More positive = better for underdog bettors
         clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 → clv = +15
       }
     }
