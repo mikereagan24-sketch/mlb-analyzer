@@ -1,4 +1,13 @@
-const cron = require('node-cron');
+
+  // Restore bet_lines for signals that had them locked before rerun
+  if (lockedLines.length) {
+    for (const locked of lockedLines) {
+      db.prepare(
+        "UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?"
+      ).run(locked.bet_line, locked.bet_locked_at, locked.closing_line, locked.clv, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
+    }
+  }
+  const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
 const { runModel, getSignals, calcPnl } = require('./model');
@@ -107,6 +116,10 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
+  // Preserve any locked bet_lines before wiping signals
+  const lockedLines = db.prepare(
+    'SELECT signal_type, signal_side, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE game_date=? AND game_id=? AND bet_line IS NOT NULL'
+  ).all(gameRow.game_date, gameRow.game_id);
   q.deleteSignalsForGame.run(gameRow.game_date, gameRow.game_id);
   for (const sig of signals) {
     const { outcome, pnl } = (gl.away_score != null)
