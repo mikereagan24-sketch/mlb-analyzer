@@ -187,6 +187,18 @@ router.get('/backtest', (req, res) => {
     const { from, to } = req.query;
     const fromDate = from || '2026-01-01';
     const toDate = to || '2099-12-31';
+    // Auto-backfill closing_line from market_line for resolved signals that have none
+    db.prepare(`UPDATE bet_signals SET
+      closing_line = market_line,
+      clv = CASE
+        WHEN bet_line IS NOT NULL AND market_line IS NOT NULL THEN
+          CASE WHEN market_line < 0
+               THEN market_line - bet_line
+               ELSE bet_line - market_line END
+        ELSE NULL END
+      WHERE closing_line IS NULL
+        AND outcome != 'pending'
+        AND market_line IS NOT NULL`).run();
     const byCategory = q.getSummaryByCategory.all(fromDate, toDate);
     const overall = q.getOverallSummary.get(fromDate, toDate);
     const signals = db.prepare(`
