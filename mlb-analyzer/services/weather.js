@@ -100,7 +100,7 @@ async function fetchParkWind(homeTeam, gameDate, gameTime) {
     const precipProb = data.hourly?.precipitation_probability?.[idx] || 0;
     const factor = calcWindFactor(windDir, windSpeed, park);
     // Temp adjustment: research shows ~1 run per 50F from 65F baseline
-    const tempAdj = tempF < 55 ? -0.5 : tempF < 70 ? 0 : tempF < 80 ? 0.3 : 0.6;
+    const tempAdj = Math.max(-1.3, Math.min(1.3, (tempF - 65) * 0.052)); // continuous: -1.3 at 40°F, 0 at 65°F baseline, +1.3 at 90°F
     return { windSpeed, windDir, factor, tempF, tempAdj, precipProb, parkName: park.name, cfDir: park.cfDir };
   } catch (e) {
     console.error('[weather] fetch failed for ' + homeTeam + ':', e.message);
