@@ -560,9 +560,14 @@ async function pullWeather(btn){
   (async()=>{
     try{
       const games=await api('/games?date='+date);
-      const list=Array.isArray(games)?games:(games.games||[]);
+      const tom=new Date(date+'T12:00:00');tom.setDate(tom.getDate()+1);
+      const tStr=tom.toISOString().split('T')[0];
+      const tmrwGames=await api('/games?date='+tStr);
+      const list=[...(Array.isArray(games)?games:(games.games||[])),
+        ...(Array.isArray(tmrwGames)?tmrwGames:(tmrwGames.games||[])).map(g=>({...g,_date:tStr}))];
       const log=[];let updated=0,skipped=0;
       for(const g of list){
+        const gDate=g._date||date;
         const pk=(g.home_team||'').toLowerCase().replace(/[^a-z]/g,'');
         const park=PARKS[pk];
         if(!park){skipped++;continue;}
@@ -571,7 +576,7 @@ async function pullWeather(btn){
         const url='https://api.open-meteo.com/v1/forecast?latitude='+park.lat+'&longitude='+park.lng
           +'&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability'
           +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
-          +'&start_date='+date+'&end_date='+date;
+          +'&start_date='+gDate+'&end_date='+gDate;
         const wd=await fetch(url).then(r=>r.json());
         const idx=Math.min(gameHour,(wd.hourly?.time||[]).length-1);
         const speed=parseFloat((wd.hourly?.wind_speed_10m?.[idx]||0).toFixed(1));
@@ -615,7 +620,7 @@ async function pullWeather(btn){
         }
         const roofMult=roofStatus==='closed'?0:roofStatus==='partial'?0.5:1;
         const effectiveWindFactor=windFactor*roofMult;
-        const effectiveTempAdj=roofStatus==='closed'?0:tempAdj*roofMult;        await api('/games/'+date+'/'+g.game_id+'/odds',{method:'PATCH',
+        const effectiveTempAdj=roofStatus==='closed'?0:tempAdj*roofMult;        await api('/games/'+gDate+'/'+g.game_id+'/odds',{method:'PATCH',
           body:JSON.stringify({wind_speed:speed,wind_dir:dir,wind_factor:effectiveWindFactor,temp_f:temp,temp_run_adj:effectiveTempAdj,roof_status:roofStatus,roof_confidence:roofConfidence})
         });
         const wLabel=windFactor>0.1?('OUT '+speed+'mph from '+dir+'deg'):windFactor<-0.1?('IN '+speed+'mph from '+dir+'deg'):('Cross/Calm '+speed+'mph');
@@ -634,7 +639,7 @@ async function pullWeather(btn){
     }
   })();
 }
-async async function pullOdds(){
+async function pullOdds(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
   st.innerHTML='<span class="spinner"></span>Pulling odds from Kalshi…';
