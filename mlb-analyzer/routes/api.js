@@ -182,6 +182,27 @@ router.get('/dates', (req, res) => {
   res.json(rows.map(r => r.game_date));
 });
 
+router.post('/jobs/fix-signals', (req, res) => {
+  try {
+    // 1. Remove duplicate signals — keep highest ID per game+type+side
+    db.prepare(`DELETE FROM bet_signals WHERE id NOT IN (
+      SELECT MAX(id) FROM bet_signals GROUP BY game_date, game_id, signal_type, signal_side
+    )`).run();
+    // 2. Backfill closing_line from market_line for all resolved signals
+    db.prepare(`UPDATE bet_signals SET
+      closing_line = market_line,
+      clv = CASE
+        WHEN bet_line IS NOT NULL AND market_line IS NOT NULL THEN
+          CASE WHEN signal_type='ML' THEN
+            CASE WHEN market_line < 0 THEN market_line - bet_line ELSE bet_line - market_line END
+          ELSE bet_line - market_line END
+        ELSE NULL END
+      WHERE closing_line IS NULL AND outcome != 'pending' AND market_line IS NOT NULL`).run();
+    const fixed = db.prepare('SELECT COUNT(*) as n FROM bet_signals WHERE closing_line IS NOT NULL').get();
+    res.json({success:true, withClosingLine: fixed.n});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
 router.get('/backtest', (req, res) => {
   try {
     const { from, to } = req.query;
