@@ -460,15 +460,7 @@ async function runOddsJob(dateStr) {
   dateStr = dateStr || todayET();
   try {
     const settings = getSettings();
-          // Weather: 8AM ET, 11AM ET, 3PM ET
-  // Weather: 7AM, 11AM, 3PM PT — today AND tomorrow
-  cron.schedule('0 14 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
-  cron.schedule('0 18 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
-  cron.schedule('0 22 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
-  // Final weather pull: 9PM PT (4:00 UTC) — last look before West Coast games end
-  cron.schedule('0 4 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
-};
-    const odds = await fetchOddsAPI(settings.oddsApiKey, dateStr);
+    const odds = await fetchOddsAPI(settings.odds_api_key, dateStr);
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
