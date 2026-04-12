@@ -12,6 +12,11 @@ function yesterdayET() {
   d.setDate(d.getDate() - 1);
   return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
+function tomorrowET() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
 
 function getSettings() {
   const rows = q.getAllSettings.all();
@@ -429,9 +434,10 @@ async function runOddsJob(dateStr) {
   try {
     const settings = getSettings();
           // Weather: 8AM ET, 11AM ET, 3PM ET
-  cron.schedule('0 13 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
-  cron.schedule('0 16 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
-  cron.schedule('0 20 * * *', () => { runWeatherJob(todayET()); }, { timezone: 'UTC' });
+  // Weather: 7AM, 11AM, 3PM PT — today AND tomorrow
+  cron.schedule('0 14 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
+  cron.schedule('0 18 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
+  cron.schedule('0 22 * * *', () => { runWeatherJob(todayET()); runWeatherJob(tomorrowET()); }, { timezone: 'UTC' });
 };
     const odds = await fetchOddsAPI(settings.oddsApiKey, dateStr);
     const wobaIdx = getWobaIndex();
