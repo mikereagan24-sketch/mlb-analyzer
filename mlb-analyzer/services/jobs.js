@@ -1,3 +1,4 @@
+// jobs.js v2026-04-12T19:57:39.540Z
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
