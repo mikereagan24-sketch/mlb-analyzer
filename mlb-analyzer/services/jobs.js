@@ -236,8 +236,8 @@ async function runLineupJob(dateStr) {
         home_sp: g.home_sp && g.home_sp.name,
         home_sp_hand: g.home_sp && g.home_sp.hand,
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
-      market_away_ml: existingRow ? (existingRow.market_away_ml||null) : (g.market_away_ml||null),
-      market_home_ml: existingRow ? (existingRow.market_home_ml||null) : (g.market_home_ml||null),
+      market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
+      market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
       market_total:   existingRow ? existingRow.market_total   : g.market_total,
       park_factor: g.park_factor || 1.0,
         model_away_ml: existingRow ? existingRow.model_away_ml : null,
