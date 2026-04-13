@@ -892,7 +892,12 @@ router.post('/jobs/weather', async (req, res) => {
     for (const g of games) {
       const wind = await fetchParkWind(g.home_team, dateStr, g.game_time);
       if (wind) {
-        q.updateWindData.run(wind.windSpeed, wind.windDir, wind.factor, dateStr, g.game_id);
+        q.updateWindData.run(
+          wind.windSpeed, wind.windDir, wind.factor,
+          wind.tempF, wind.tempAdj,
+          g.roof_status || 'open', g.roof_confidence || 'estimated',
+          dateStr, g.game_id
+        );
         // Rerun model with new wind data
         const wobaIdx = getWobaIndex();
         const settings = getSettings();
