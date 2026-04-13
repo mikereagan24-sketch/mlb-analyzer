@@ -286,7 +286,7 @@ const TEAM_NAME_MAP = {
   'Los Angeles Angels':'laa','Los Angeles Dodgers':'lad','Miami Marlins':'mia',
   'Milwaukee Brewers':'mil','Minnesota Twins':'min','New York Mets':'nym',
   'New York Yankees':'nyy','Oakland Athletics':'ath','Philadelphia Phillies':'phi',
-  'Pittsburgh Pirates':'pit','San Diego Padres':'sd','San Francisco Giants':'sfg',
+  'Pittsburgh Pirates':'pit','San Diego Padres':'sd','San Francisco Giants':'sf',
   'Seattle Mariners':'sea','St. Louis Cardinals':'stl','Tampa Bay Rays':'tb',
   'Texas Rangers':'tex','Toronto Blue Jays':'tor','Washington Nationals':'was',
   'Athletics':'ath',
