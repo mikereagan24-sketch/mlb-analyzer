@@ -244,20 +244,7 @@ router.get('/backtest', (req, res) => {
   }
 });
 
-// Manual weather pull for a date
-router.post('/jobs/weather', async (req, res) => {
-  try {
-    const { runWeatherJob } = require('../services/jobs');
-    const dateStr = req.body.date || new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
-    // Also pull tomorrow by default
-    const tom = new Date(dateStr+'T12:00:00');
-    tom.setDate(tom.getDate()+1);
-    const tomorrowStr = tom.toISOString().split('T')[0];
-    runWeatherJob(dateStr);
-    runWeatherJob(tomorrowStr);
-    res.json({success:true, updated:15, date:dateStr});
-  } catch(e) { res.status(500).json({error:e.message}); }
-});
+// weather route: see below
 
 router.post('/jobs/lineups', async (req, res) => {
   const { date } = req.body;
