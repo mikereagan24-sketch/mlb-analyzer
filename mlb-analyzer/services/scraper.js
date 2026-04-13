@@ -352,11 +352,24 @@ async function fetchOddsAPI(apiKey, dateStr) {
         console.log('[odds] DraftKings: '+dkResults.length+' games (for gap-fill)');
       } catch(e) { console.log('[odds] DK gap-fill failed: '+e.message); }
 
-      // Merge: Kalshi primary, DK fills missing games
-      const kalshiIds = new Set(kalshiResults.map(g=>g.awayTeam+'-'+g.homeTeam));
-      const dkOnly = dkResults.filter(g => !kalshiIds.has(g.awayTeam+'-'+g.homeTeam));
+      // Merge: use Kalshi ML lines, DK totals (Kalshi often lacks totals or has worse lines)
+      const dkByGameId = {};
+      dkResults.forEach(g => { dkByGameId[g.game_id] = g; });
+      const merged = kalshiResults.map(k => {
+        const dk = dkByGameId[k.game_id];
+        return {
+          ...k,
+          // Use DK total/over/under if available and non-null
+          market_total:  (dk?.market_total  != null ? dk.market_total  : k.market_total),
+          over_price:    (dk?.over_price     != null ? dk.over_price    : k.over_price),
+          under_price:   (dk?.under_price    != null ? dk.under_price   : k.under_price),
+        };
+      });
+      // Add any DK games not on Kalshi
+      const kalshiIds = new Set(kalshiResults.map(g=>g.game_id));
+      const dkOnly = dkResults.filter(g => !kalshiIds.has(g.game_id));
       if (dkOnly.length) console.log('[odds] DK filling '+dkOnly.length+' games not on Kalshi');
-      return [...kalshiResults, ...dkOnly];
+      return [...merged, ...dkOnly];
     }
     console.log('[odds] Kalshi returned 0 games — falling back to DraftKings');
   } catch(e) { console.log('[odds] Kalshi failed: '+e.message+' — trying DraftKings'); }
