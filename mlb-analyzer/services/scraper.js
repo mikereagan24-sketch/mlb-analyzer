@@ -337,10 +337,21 @@ async function fetchOddsForBookmaker(apiKey, region, bookmaker) {
 async function fetchOddsAPI(apiKey, dateStr) {
   if (!apiKey) throw new Error('No Odds API key configured');
 
-  // Filter games to only those commencing on dateStr (handles multi-day dupes)
+  // Filter games to only those commencing on dateStr (ET date, not UTC)
+  // Late-night ET games (e.g. 10 PM ET = 2 AM UTC next day) have commence_time on UTC next day
+  // So we also include games starting up to 06:00 UTC the following day
   const filterByDate = (games) => games.filter(g => {
     if (!dateStr || !g.commence_time) return true;
-    return g.commence_time.startsWith(dateStr);
+    if (g.commence_time.startsWith(dateStr)) return true;
+    // Check if it falls in the late-night window: next UTC day but before 06:00 UTC
+    const nextDay = new Date(dateStr + 'T00:00:00Z');
+    nextDay.setDate(nextDay.getDate() + 1);
+    const nextDayStr = nextDay.toISOString().slice(0, 10);
+    if (g.commence_time.startsWith(nextDayStr)) {
+      const hour = parseInt(g.commence_time.slice(11, 13), 10);
+      return hour < 6; // before 6 AM UTC = before 2 AM ET (covers games up to ~10 PM PT)
+    }
+    return false;
   });
 
   // 1. Try Kalshi first (us_ex region)
