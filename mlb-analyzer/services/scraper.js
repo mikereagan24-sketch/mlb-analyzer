@@ -311,12 +311,13 @@ function parseOddsAPIResponse(games, bookmakerKey) {
     const homeAbbr = teamToAbbr(g.home_team);
     if (!awayAbbr || !homeAbbr) { console.log('[odds] no abbr for '+g.away_team+' / '+g.home_team); continue; }
     results.push({
+      game_id: (awayAbbr + '-' + homeAbbr).toLowerCase(),
       awayTeam: awayAbbr, homeTeam: homeAbbr,
-      awayML: awayOut?.price || null,
-      homeML: homeOut?.price || null,
-      marketTotal: overOut?.point || null,
-      overPrice: overOut?.price || -110,
-      underPrice: underOut?.price || -110,
+      market_away_ml: awayOut?.price || null,
+      market_home_ml: homeOut?.price || null,
+      market_total: overOut?.point || null,
+      over_price: overOut?.price || -110,
+      under_price: underOut?.price || -110,
       source: bookmakerKey,
     });
   }
