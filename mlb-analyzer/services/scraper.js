@@ -337,9 +337,15 @@ async function fetchOddsForBookmaker(apiKey, region, bookmaker) {
 async function fetchOddsAPI(apiKey, dateStr) {
   if (!apiKey) throw new Error('No Odds API key configured');
 
+  // Filter games to only those commencing on dateStr (handles multi-day dupes)
+  const filterByDate = (games) => games.filter(g => {
+    if (!dateStr || !g.commence_time) return true;
+    return g.commence_time.startsWith(dateStr);
+  });
+
   // 1. Try Kalshi first (us_ex region)
   try {
-    const kalshiGames = await fetchOddsForBookmaker(apiKey, 'us_ex', 'kalshi');
+    const kalshiGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us_ex', 'kalshi'));
     const kalshiResults = parseOddsAPIResponse(kalshiGames, 'kalshi');
     if (kalshiResults.length > 0) {
       console.log('[odds] Kalshi: '+kalshiResults.length+' games — '+kalshiResults.map(g=>g.game_id+'('+g.market_away_ml+'/'+g.market_home_ml+')').join(', '));
@@ -347,7 +353,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
       // 2. Also fetch DK to fill in any games Kalshi is missing
       let dkResults = [];
       try {
-        const dkGames = await fetchOddsForBookmaker(apiKey, 'us', 'draftkings');
+        const dkGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us', 'draftkings'));
         dkResults = parseOddsAPIResponse(dkGames, 'draftkings');
         console.log('[odds] DraftKings: '+dkResults.length+' games (for gap-fill)');
       } catch(e) { console.log('[odds] DK gap-fill failed: '+e.message); }
@@ -375,7 +381,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
   } catch(e) { console.log('[odds] Kalshi failed: '+e.message+' — trying DraftKings'); }
 
   // 3. Full DK fallback
-  const dkGames = await fetchOddsForBookmaker(apiKey, 'us', 'draftkings');
+  const dkGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us', 'draftkings'));
   const dkResults = parseOddsAPIResponse(dkGames, 'draftkings');
   console.log('[odds] DraftKings fallback: '+dkResults.length+' games');
   return dkResults;
