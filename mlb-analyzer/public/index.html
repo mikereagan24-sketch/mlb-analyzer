@@ -829,11 +829,16 @@ function wobaHeat(w){
 }
 
 function renderModelOutput(g) {
-  var projRow = g.proj_model_away_ml != null
+  var projML = g.model_away_ml != null ? g.model_away_ml : g.proj_model_away_ml;
+  var projRow = projML != null
     ? '<div style="display:flex;gap:20px;flex-wrap:wrap">'
-      +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'+fmtML(g.proj_model_away_ml)+'</b></div>'
-      +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'+fmtML(g.proj_model_home_ml)+'</b></div>'
-      +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(g.proj_model_total ? parseFloat(g.proj_model_total).toFixed(1) : '—')+'</b></div>'
+      +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'
+        +fmtML(projML)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_away_ml)+'</span></div>'
+      +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'
+        +fmtML(g.model_home_ml != null ? g.model_home_ml : g.proj_model_home_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_home_ml)+'</span></div>'
+      +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'
+        +((g.model_total||g.proj_model_total) ? parseFloat(g.model_total||g.proj_model_total).toFixed(1) : '—')
+        +'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+(g.market_total||'—')+'</span></div>'
       +'</div>'
     : '<div style="font-size:11px;color:var(--text3);font-style:italic">No projected lineup pulled</div>';
   var awayConf=(g.away_lineup_status==='confirmed'); var homeConf=(g.home_lineup_status==='confirmed'); var confirmed=(awayConf||homeConf||g.lineup_status==='confirmed')&&g.model_away_ml!=null; var fullyConf=awayConf&&homeConf;
