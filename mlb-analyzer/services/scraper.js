@@ -337,33 +337,30 @@ async function fetchOddsForBookmaker(apiKey, region, bookmaker) {
 async function fetchOddsAPI(apiKey, dateStr) {
   if (!apiKey) throw new Error('No Odds API key configured');
 
-  // Filter games to only those commencing on dateStr (ET date, not UTC)
-  // Late-night ET games (e.g. 10 PM ET = 2 AM UTC next day) have commence_time on UTC next day
-  // So we also include games starting up to 06:00 UTC the following day
-  // After filtering, deduplicate by game_id keeping the earliest commence_time
-  // (avoids live in-game lines from same-day games bleeding into next day)
+  // Filter games commencing on dateStr (as ET date).
+  // ET dates don't align with UTC: a 10 PM ET game on Apr 14 = 2 AM UTC Apr 15.
+  // Strategy: include all games within a 30-hour window centered on dateStr,
+  // then deduplicate same team-pair matchups keeping LATEST commence_time
+  // (latest = the upcoming game, earlier = yesterday's already-played game)
   const filterByDate = (games) => {
+    // Window: dateStr 10:00 UTC through dateStr+2 10:00 UTC (covers all ET games for that date)
+    const windowStart = dateStr + 'T10:00:00Z'; // ~6 AM ET = after overnight games
+    const nextNext = new Date(dateStr + 'T10:00:00Z');
+    nextNext.setDate(nextNext.getDate() + 2);
+    const windowEnd = nextNext.toISOString();
     const filtered = games.filter(g => {
       if (!dateStr || !g.commence_time) return true;
-      if (g.commence_time.startsWith(dateStr)) return true;
-      // Late-night ET window: next UTC day before 06:00 UTC
-      const nextDay = new Date(dateStr + 'T00:00:00Z');
-      nextDay.setDate(nextDay.getDate() + 1);
-      const nextDayStr = nextDay.toISOString().slice(0, 10);
-      if (g.commence_time.startsWith(nextDayStr)) {
-        const hour = parseInt(g.commence_time.slice(11, 13), 10);
-        return hour < 6;
-      }
-      return false;
+      return g.commence_time >= windowStart && g.commence_time < windowEnd;
     });
-    // Deduplicate by away+home teams — keep earliest commence_time (pre-game, not live)
-    const seen = {};
-    return filtered.filter(g => {
+    // Deduplicate by team pair — keep LATEST commence_time (upcoming game, not completed one)
+    const byPair = {};
+    filtered.forEach(g => {
       const key = g.away_team + '|' + g.home_team;
-      if (seen[key]) return false;
-      seen[key] = true;
-      return true;
-    }).sort((a,b) => (a.commence_time||'').localeCompare(b.commence_time||''));
+      if (!byPair[key] || g.commence_time > byPair[key].commence_time) {
+        byPair[key] = g;
+      }
+    });
+    return Object.values(byPair);
   };
 
   // 1. Try Kalshi first (us_ex region)
