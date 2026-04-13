@@ -376,10 +376,10 @@ async function fetchOddsAPI(apiKey, dateStr) {
         const dk = dkByGameId[k.game_id];
         return {
           ...k,
-          // Use DK total/over/under if available and non-null
-          market_total:  (dk?.market_total  != null ? dk.market_total  : k.market_total),
-          over_price:    (dk?.over_price     != null ? dk.over_price    : k.over_price),
-          under_price:   (dk?.under_price    != null ? dk.under_price   : k.under_price),
+          // Kalshi total is primary (matches Robinhood), DK only fills if Kalshi has none
+          market_total:  (k.market_total   != null ? k.market_total   : dk?.market_total),
+          over_price:    (k.over_price      != null ? k.over_price     : dk?.over_price),
+          under_price:   (k.under_price     != null ? k.under_price    : dk?.under_price),
         };
       });
       // Add any DK games not on Kalshi
