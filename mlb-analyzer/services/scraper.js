@@ -63,7 +63,7 @@ function parseJSONRobust(text) {
   throw new Error('Could not parse any games from response');
 }
 
-async function callClaude(prompt, maxTokens) {
+async function callClaude(prompt, maxTokens, attempt = 0) {
   if (!API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
   const resp = await fetch(ANTHROPIC_API, {
     method: 'POST',
@@ -74,6 +74,16 @@ async function callClaude(prompt, maxTokens) {
     },
     body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
   });
+  // Retry on 529 (overloaded) or 529 with exponential backoff — up to 4 attempts
+  if (resp.status === 529 || resp.status === 529) {
+    if (attempt < 4) {
+      const wait = Math.pow(2, attempt) * 3000; // 3s, 6s, 12s, 24s
+      console.log('[scraper] Anthropic overloaded (529), retrying in ' + (wait/1000) + 's (attempt ' + (attempt+1) + '/4)');
+      await new Promise(r => setTimeout(r, wait));
+      return callClaude(prompt, maxTokens, attempt + 1);
+    }
+    throw new Error('Anthropic API overloaded after 4 retries');
+  }
   if (!resp.ok) throw new Error('Anthropic API error ' + resp.status + ': ' + await resp.text());
   const data = await resp.json();
   return data.content.filter(b => b.type === 'text').map(b => b.text).join('');
