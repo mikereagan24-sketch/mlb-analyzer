@@ -493,4 +493,4 @@ async function runOddsJob(dateStr) {
   }
 }
 
-module.exports = { runLineupJob, runScoreJob, runOddsJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
+module.exports = { runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
