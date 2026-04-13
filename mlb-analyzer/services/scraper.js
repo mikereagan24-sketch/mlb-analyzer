@@ -342,7 +342,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
     const kalshiGames = await fetchOddsForBookmaker(apiKey, 'us_ex', 'kalshi');
     const kalshiResults = parseOddsAPIResponse(kalshiGames, 'kalshi');
     if (kalshiResults.length > 0) {
-      console.log('[odds] Kalshi: '+kalshiResults.length+' games');
+      console.log('[odds] Kalshi: '+kalshiResults.length+' games — '+kalshiResults.map(g=>g.game_id+'('+g.market_away_ml+'/'+g.market_home_ml+')').join(', '));
 
       // 2. Also fetch DK to fill in any games Kalshi is missing
       let dkResults = [];
