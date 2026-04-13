@@ -59,6 +59,13 @@ function tryParse(str) {
 }
 
 router.post('/upload/:key?', upload.single('file'), (req, res) => {
+// Prevent browser caching on all API responses
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  next();
+});
+
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
