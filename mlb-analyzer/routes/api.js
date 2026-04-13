@@ -1727,6 +1727,21 @@ router.delete('/signals/:id', (req, res) => {
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
+
+// Debug: show raw Kalshi+DK parse results
+router.get('/debug/odds-raw', async (req, res) => {
+  try {
+    const { fetchOddsAPI } = require('../services/scraper');
+    const { getSettings } = require('../services/jobs');
+    const settings = getSettings();
+    const results = await fetchOddsAPI(settings.odds_api_key, req.query.date || '2026-04-14');
+    res.json({ count: results.length, results: results.map(r=>({
+      game_id: r.game_id, away: r.market_away_ml, home: r.market_home_ml,
+      total: r.market_total, source: r.source
+    }))});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
 module.exports = router;
 
 
