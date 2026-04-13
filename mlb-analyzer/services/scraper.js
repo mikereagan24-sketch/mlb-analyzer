@@ -235,7 +235,7 @@ async function fetchScores(dateStr) {
   const [year, month, day] = dateStr.split('-');
   const mmdd = month.padStart(2,'0')+'/'+day.padStart(2,'0')+'/'+year;
   const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date='+mmdd+'&hydrate=linescore';
-  const resp = await fetch(url, {headers:{'Accept':'application/json'}});
+  const resp = await fetch(url+'&_t='+Date.now(), {headers:{'Accept':'application/json','Cache-Control':'no-cache'}});
   if (!resp.ok) throw new Error('MLB API error: '+resp.status);
   const data = await resp.json();
   const games = (data.dates||[])[0]?.games || [];
