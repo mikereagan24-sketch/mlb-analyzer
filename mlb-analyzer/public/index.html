@@ -1068,7 +1068,7 @@ function showSPEdit(gameId, date, side) {
   if (existing) { existing.remove(); return; }
   var card = document.getElementById('gc-'+gameId);
   if (!card) return;
-  fetch('/api/games/'+date).then(function(r){return r.json();}).then(function(games){
+  fetch('/api/games/'+date+'?t='+Date.now()).then(function(r){return r.json();}).then(function(games){
     var g = games.find(function(x){return x.game_id===gameId;});
     if (!g) return;
     var name = side==='away' ? (g.away_sp||'') : (g.home_sp||'');
@@ -1112,7 +1112,7 @@ async function saveSP(gameId, date, side, rowId) {
 
 function showLineupEdit(gameId, date) {
   _luState.gameId=gameId; _luState.date=date;
-  fetch('/api/games/'+date).then(function(r){return r.json();}).then(function(games){
+  fetch('/api/games/'+date+'?t='+Date.now()).then(function(r){return r.json();}).then(function(games){
     var g = games.find(function(x){return x.game_id===gameId;});
     if (!g) return;
     _luState.awayTeam=g.away_team; _luState.homeTeam=g.home_team;
