@@ -258,8 +258,20 @@ function getSignals(game, modelResult, settings) {
 
   const aLabel = mlLabel(awayEdge);
   const hLabel = mlLabel(homeEdge);
-  if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
-  if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
+  // Only signal one side — if both qualify, pick the larger edge
+  if (aLabel || hLabel) {
+    if (aLabel && hLabel) {
+      // Both sides qualify — only take the larger edge
+      if (awayEdge >= homeEdge) {
+        signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
+      } else {
+        signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
+      }
+    } else {
+      if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
+      if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
+    }
+  }
 
   const mktTotal   = game.market_total || 8.5;
   const overPrice  = game.over_price   || -110;
