@@ -44,6 +44,7 @@ function getSettings() {
     RELIEF_WEIGHT:     num('relief_weight',     0.23),
     SP_PIT_WEIGHT:     num('sp_pit_weight',     0.80),
     RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
+    odds_api_key: s['odds_api_key'] || null,
   };
 }
 
