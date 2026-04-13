@@ -453,7 +453,11 @@ async function runOddsJob(dateStr) {
   dateStr = dateStr || todayET();
   try {
     const settings = getSettings();
-    const odds = await fetchOddsAPI(settings.odds_api_key, dateStr);
+    const oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
+    // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
+    const seen = new Set();
+    const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
+    if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' → '+odds.length+' results');
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
