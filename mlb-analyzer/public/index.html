@@ -429,8 +429,20 @@ async function fetchServerWoba(){
   }catch(e){}
 }
 
+let _appPassword = sessionStorage.getItem('mlb_pwd') || '';
+
 async function api(path,opts={}){
-  const r=await fetch('/api'+path,{headers:{'Content-Type':'application/json'},...opts});
+  const headers={'Content-Type':'application/json'};
+  if(_appPassword) headers['x-app-password']=_appPassword;
+  const r=await fetch('/api'+path,{headers,...opts});
+  if(r.status===401){
+    // Password required or wrong
+    const pwd=prompt('Enter app password:');
+    if(!pwd) throw new Error('Password required');
+    _appPassword=pwd;
+    sessionStorage.setItem('mlb_pwd',pwd);
+    return api(path,opts); // retry
+  }
   if(!r.ok)throw new Error('API '+path+' → '+r.status);
   return r.json();
 }
