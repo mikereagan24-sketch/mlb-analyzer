@@ -1,7 +1,7 @@
 // jobs.js v2026-04-12T19:57:39.540Z
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchScores, fetchOddsAPI, makeGameId } = require('./scraper');
+const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId } = require('./scraper');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
 
@@ -453,7 +453,17 @@ async function runOddsJob(dateStr) {
   dateStr = dateStr || todayET();
   try {
     const settings = getSettings();
-    const oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
+    let oddsRaw;
+    try {
+      oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
+    } catch(e) {
+      if (e.message && (e.message.includes('OUT_OF_USAGE_CREDITS') || e.message.includes('401'))) {
+        console.log('[odds] Odds API credits exhausted — using direct Kalshi');
+        oddsRaw = await fetchKalshiDirect(dateStr);
+      } else {
+        throw e;
+      }
+    }
     // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
     const seen = new Set();
     const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
