@@ -8,7 +8,8 @@ const SOURCE_NAMES  = {'9':'kalshi','3':'polymarket','59':'pinnacle','35':'pinna
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
 async function fetchUnabatedOdds(dateStr) {
-  const resp = await fetch(UB_URL, {headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0'}});
+  const cacheBust = '?v='+Date.now();
+  const resp = await fetch(UB_URL+cacheBust, {headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0','Cache-Control':'no-cache','Pragma':'no-cache'}});
   if (!resp.ok) throw new Error('Unabated HTTP '+resp.status);
   const data = await resp.json();
 
@@ -48,6 +49,15 @@ async function fetchUnabatedOdds(dateStr) {
   });
 
   console.log('[unabated] '+Object.keys(byMatchup).length+' games for '+dateStr);
+  // Log totals for each game so we can debug
+  for(const {g,away,home} of Object.values(byMatchup)){
+    let kalTot=null;
+    Object.entries(g.gameOddsMarketSourcesLines||{}).forEach(([k,v])=>{
+      const [si,ms,an]=k.split(':');
+      if(an==='an0'&&ms==='ms9'&&si==='si1') kalTot=v.bt3?.points;
+    });
+    if(!kalTot) console.log('[unabated] NO TOTAL: '+away+'-'+home+' start='+g.eventStart);
+  }
   const results = [];
 
   for (const {g,away,home} of Object.values(byMatchup)) {
