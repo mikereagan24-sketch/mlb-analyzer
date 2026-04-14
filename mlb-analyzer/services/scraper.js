@@ -296,13 +296,17 @@ function teamToAbbr(name) {
   return TEAM_NAME_MAP[name] || null;
 }
 
-function parseOddsAPIResponse(games, bookmakerKey) {
+function parseOddsAPIResponse(games, bookmakerKey, totalBookmakerKey) {
   const results = [];
   for (const g of games) {
     const bk = g.bookmakers?.find(b => b.key === bookmakerKey);
     if (!bk) continue;
     const h2h = bk.markets?.find(m => m.key === 'h2h');
-    const tot = bk.markets?.find(m => m.key === 'totals');
+    // For totals, prefer totalBookmakerKey (e.g. polymarket) if provided and available
+    const totBk = totalBookmakerKey
+      ? (g.bookmakers?.find(b => b.key === totalBookmakerKey) || bk)
+      : bk;
+    const tot = totBk.markets?.find(m => m.key === 'totals');
     const awayOut = h2h?.outcomes?.find(o => o.name === g.away_team);
     const homeOut = h2h?.outcomes?.find(o => o.name === g.home_team);
     const overOut = tot?.outcomes?.find(o => o.name === 'Over');
@@ -325,8 +329,9 @@ function parseOddsAPIResponse(games, bookmakerKey) {
 }
 
 async function fetchOddsForBookmaker(apiKey, region, bookmaker) {
+  const bkParam = bookmaker ? '&bookmakers='+bookmaker : '';
   const url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds' +
-    '?apiKey='+apiKey+'&regions='+region+'&markets=h2h,totals&oddsFormat=american&bookmakers='+bookmaker;
+    '?apiKey='+apiKey+'&regions='+region+'&markets=h2h,totals&oddsFormat=american'+bkParam;
   const resp = await fetch(url, {headers:{'Accept':'application/json'}});
   if (!resp.ok) throw new Error('Odds API '+bookmaker+' error '+resp.status+': '+await resp.text());
   const remaining = resp.headers.get('x-requests-remaining');
@@ -365,8 +370,8 @@ async function fetchOddsAPI(apiKey, dateStr) {
 
   // 1. Try Kalshi first (us_ex region)
   try {
-    const kalshiGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us_ex', 'kalshi'));
-    const kalshiResults = parseOddsAPIResponse(kalshiGames, 'kalshi');
+    const allUsExGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us_ex', ''));
+    const kalshiResults = parseOddsAPIResponse(allUsExGames, 'kalshi', 'polymarket');
     if (kalshiResults.length > 0) {
       console.log('[odds] Kalshi: '+kalshiResults.length+' games — '+kalshiResults.map(g=>g.game_id+'('+g.market_away_ml+'/'+g.market_home_ml+')').join(', '));
 
