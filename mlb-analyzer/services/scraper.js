@@ -340,7 +340,11 @@ async function fetchOddsForBookmaker(apiKey, region, bookmaker) {
 }
 
 async function fetchOddsAPI(apiKey, dateStr) {
-  if (!apiKey) throw new Error('No Odds API key configured');
+  // If no key, go direct immediately
+  if (!apiKey) {
+    console.log('[odds] No API key — using direct Kalshi');
+    return await fetchKalshiDirect(dateStr);
+  }
 
   // Filter games commencing on dateStr (as ET date).
   // ET dates don't align with UTC: a 10 PM ET game on Apr 14 = 2 AM UTC Apr 15.
@@ -405,11 +409,19 @@ async function fetchOddsAPI(apiKey, dateStr) {
     console.log('[odds] Kalshi returned 0 games — falling back to DraftKings');
   } catch(e) { console.log('[odds] Kalshi failed: '+e.message+' — trying DraftKings'); }
 
-  // 3. Full DK fallback
-  const dkGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us', 'draftkings'));
-  const dkResults = parseOddsAPIResponse(dkGames, 'draftkings');
-  console.log('[odds] DraftKings fallback: '+dkResults.length+' games');
-  return dkResults;
+  // 3. Full DK fallback (also catches 401 → direct Kalshi)
+  try {
+    const dkGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us', 'draftkings'));
+    const dkResults = parseOddsAPIResponse(dkGames, 'draftkings');
+    console.log('[odds] DraftKings fallback: '+dkResults.length+' games');
+    return dkResults;
+  } catch(e) {
+    if (e.message && (e.message.includes('OUT_OF_USAGE_CREDITS') || e.message.includes('401'))) {
+      console.log('[odds] Odds API credits exhausted — switching to direct Kalshi');
+      return await fetchKalshiDirect(dateStr);
+    }
+    throw e;
+  }
 }
 
 
