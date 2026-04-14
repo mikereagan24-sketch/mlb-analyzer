@@ -418,4 +418,104 @@ function makeGameId(away, home) {
   const h = (home||'').toLowerCase().replace(/[^a-z]/g,'');
   return a+'-'+h;
 }
-module.exports = { fetchOddsAPI, fetchLineups, fetchScores, makeGameId };
+
+// ── Direct Kalshi scraper (no Odds API credits needed) ───────────────────────
+// Hits api.elections.kalshi.com directly. No auth required for market data.
+// MLB series tickers: KXMLB (moneyline), KXMLBT (totals)
+const KALSHI_TEAM_MAP = {
+  'Arizona Diamondbacks':'ari','Atlanta Braves':'atl','Baltimore Orioles':'bal',
+  'Boston Red Sox':'bos','Chicago Cubs':'chc','Chicago White Sox':'cws',
+  'Cincinnati Reds':'cin','Cleveland Guardians':'cle','Colorado Rockies':'col',
+  'Detroit Tigers':'det','Houston Astros':'hou','Kansas City Royals':'kc',
+  'Los Angeles Angels':'laa','Los Angeles Dodgers':'lad','Miami Marlins':'mia',
+  'Milwaukee Brewers':'mil','Minnesota Twins':'min','New York Mets':'nym',
+  'New York Yankees':'nyy','Oakland Athletics':'ath','Athletics':'ath',
+  'Philadelphia Phillies':'phi','Pittsburgh Pirates':'pit','San Diego Padres':'sd',
+  'San Francisco Giants':'sf','Seattle Mariners':'sea','St. Louis Cardinals':'stl',
+  'Tampa Bay Rays':'tb','Texas Rangers':'tex','Toronto Blue Jays':'tor',
+  'Washington Nationals':'was',
+};
+
+async function fetchKalshiDirect(dateStr) {
+  const BASE = 'https://api.elections.kalshi.com/trade-api/v2';
+  const results = {};
+
+  // Fetch ML markets for the date
+  // Kalshi uses event tickers like KXMLB-26APR14-CHCPHI
+  // We can search by series and status=open
+  async function fetchMarkets(seriesTicker) {
+    const url = BASE+'/markets?series_ticker='+seriesTicker+'&status=open&limit=100';
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    if (!r.ok) throw new Error('Kalshi '+seriesTicker+' HTTP '+r.status);
+    const d = await r.json();
+    return d.markets || [];
+  }
+
+  // Fetch orderbook/price for a market ticker
+  async function fetchPrice(ticker) {
+    const url = BASE+'/markets/'+ticker;
+    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.market;
+  }
+
+  // Parse date string into Kalshi date format (26APR14)
+  const [year, month, day] = dateStr.split('-');
+  const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const kalshiDate = (parseInt(year)-2000).toString().padStart(2,'0') + MONTHS[parseInt(month)-1] + day;
+
+  // Fetch ML markets
+  try {
+    const mlMarkets = await fetchMarkets('KXMLB');
+    const dateMarkets = mlMarkets.filter(m => m.event_ticker?.includes(kalshiDate));
+    console.log('[kalshi-direct] ML markets for '+kalshiDate+': '+dateMarkets.length);
+
+    for (const m of dateMarkets) {
+      // Event ticker format: KXMLB-26APR14-CHCPHI
+      // Market ticker: KXMLB-26APR14-CHCPHI-CHC (home) or -PHI (away)
+      const ticker = m.ticker || '';
+      // Extract teams from event ticker
+      const eventTicker = m.event_ticker || '';
+      const teamsPart = eventTicker.split('-').slice(2).join('-'); // e.g. CHCPHI or NYM-LAD
+      
+      if (!results[eventTicker]) results[eventTicker] = { eventTicker, ml: {}, total: null };
+      
+      // yes_bid = probability market thinks this team wins
+      // Convert to American odds: if p > 0.5: -(p/(1-p)*100), else: (1-p)/p*100
+      const yesAsk = m.yes_ask; // cents (0-100)
+      const noAsk  = m.no_ask;
+      if (yesAsk != null) {
+        const p = yesAsk / 100;
+        const ml = p >= 0.5 ? -Math.round(p/(1-p)*100) : Math.round((1-p)/p*100);
+        results[eventTicker].ml[ticker] = { p, ml, subtitle: m.subtitle };
+      }
+    }
+  } catch(e) { console.log('[kalshi-direct] ML fetch failed: '+e.message); }
+
+  // Fetch Totals markets
+  try {
+    const totMarkets = await fetchMarkets('KXMLBT');
+    const dateMarkets = totMarkets.filter(m => m.event_ticker?.includes(kalshiDate));
+    console.log('[kalshi-direct] Total markets for '+kalshiDate+': '+dateMarkets.length);
+
+    for (const m of dateMarkets) {
+      const eventTicker = m.event_ticker || '';
+      if (!results[eventTicker]) results[eventTicker] = { eventTicker, ml: {}, total: null };
+      // Subtitle contains the line e.g. "Over 8.5" or "Under 8.5"
+      const sub = m.subtitle || '';
+      const match = sub.match(/(Over|Under)\s+([\d.]+)/i);
+      if (match && match[1].toLowerCase() === 'over') {
+        const line = parseFloat(match[2]);
+        const p = (m.yes_ask||50) / 100;
+        const ml = p >= 0.5 ? -Math.round(p/(1-p)*100) : Math.round((1-p)/p*100);
+        results[eventTicker].total = { line, overML: ml, underML: -ml };
+      }
+    }
+  } catch(e) { console.log('[kalshi-direct] Totals fetch failed: '+e.message); }
+
+  return results;
+}
+
+
+module.exports = { fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchScores, makeGameId };
