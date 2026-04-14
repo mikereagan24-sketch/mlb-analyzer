@@ -243,6 +243,7 @@ router.get('/backtest', (req, res) => {
       FROM bet_signals bs
       LEFT JOIN game_log gl ON gl.game_date=bs.game_date AND gl.game_id=bs.game_id
       WHERE bs.game_date BETWEEN ? AND ?
+        AND bs.bet_locked_at IS NOT NULL
       ORDER BY bs.game_date, bs.id
     `).all(fromDate, toDate);
     res.json({ overall, byCategory, signals });
