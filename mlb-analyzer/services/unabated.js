@@ -17,21 +17,24 @@ async function fetchUnabatedOdds(dateStr) {
 
   const allGames = data.gameOddsEvents?.[MLB_KEY] || [];
 
-  const nextDay = new Date(dateStr+'T00:00:00');
-  nextDay.setDate(nextDay.getDate()+1);
-  const nextDayStr = nextDay.toISOString().slice(0,10);
-  const windowEnd = new Date(dateStr+'T00:00:00');
-  windowEnd.setDate(windowEnd.getDate()+2);
-  const windowEndStr = windowEnd.toISOString().slice(0,10)+'T10:00:00';
+  // Window: games starting on dateStr (ET) through 04:00 ET next morning
+  // Unabated timestamps are ET (no UTC suffix), so late games like 10pm = same date
+  // Early morning games (1-3am ET) appear on dateStr+1
+  const nextDayStr = new Date(dateStr+'T00:00:00');
+  nextDayStr.setDate(nextDayStr.getDate()+1);
+  const nextDayS = nextDayStr.toISOString().slice(0,10);
+  const windowEnd = nextDayS + 'T04:00:00'; // covers up to 4am ET next day
 
   const dateGames = allGames.filter(g=>{
     if (!g.eventStart) return false;
     if (g.eventStart.startsWith(dateStr)) return true;
-    if (g.eventStart.startsWith(nextDayStr) && g.eventStart < windowEndStr) return true;
+    // Cover early morning ET games (e.g. 1am ET = technically next calendar day)
+    if (g.eventStart.startsWith(nextDayS) && g.eventStart < windowEnd) return true;
     return false;
   });
 
-  // Dedup by matchup — keep game with most lines (most data)
+  // Dedup by matchup — for same teams on same date, keep the one with most lines (most data)
+  // This handles doubleheaders correctly (different start times, same teams)
   const byMatchup = {};
   dateGames.forEach(g=>{
     const awayUb = teamMap[g.eventTeams['0']?.id];
