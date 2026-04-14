@@ -86,7 +86,9 @@ db.exec(`
   bet_line INTEGER,          -- the line you actually bet (manually entered)
   bet_locked_at TEXT,        -- when you locked your bet line
   closing_line INTEGER,      -- final pregame locked line (auto-set when odds lock)
-  clv REAL                   -- closing line value: how much better your line was,
+  clv REAL,                  -- closing line value: how much better your line was
+  is_active INTEGER NOT NULL DEFAULT 1, -- 1=show on Games tab, 0=locked bet no longer qualifies
+  notes TEXT                 -- explanation when signal state changes (e.g. line moved)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_signals_date ON bet_signals(game_date);
@@ -277,7 +279,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
 };
 
 q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
-  // vsHand: 'lhb' or 'rhb' — which handedness the bullpen faces
+  // vsHand: 'lhb' or 'rhb' â which handedness the bullpen faces
   const dataKey = 'pit-act-'+vsHand;
   const rows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
@@ -298,4 +300,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
 };
 
+// Add is_active and notes columns if not present
+  try { db.prepare("ALTER TABLE bet_signals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1").run(); } catch(e) {}
+  try { db.prepare("ALTER TABLE bet_signals ADD COLUMN notes TEXT").run(); } catch(e) {}
 module.exports = { db, q };
