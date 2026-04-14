@@ -1742,6 +1742,21 @@ router.get('/debug/odds-raw', async (req, res) => {
   } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+
+// Debug: look up a player in woba_data
+router.get('/debug/woba-lookup', (req, res) => {
+  const { name, team, key } = req.query;
+  const keys = key ? [key] : ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
+  const results = {};
+  keys.forEach(k => {
+    const rows = db.prepare(
+      "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ? LIMIT 5"
+    ).all(k, '%'+(name||'')+'%');
+    results[k] = rows;
+  });
+  res.json(results);
+});
+
 module.exports = router;
 
 
