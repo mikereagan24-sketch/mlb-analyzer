@@ -454,9 +454,11 @@ async function runOddsJob(dateStr) {
   dateStr = dateStr || todayET();
   try {
     const settings = getSettings();
-    let oddsRaw;
+    let oddsRaw = [];
     try {
+      console.log('[odds] Fetching from Unabated...');
       oddsRaw = await fetchUnabatedOdds(dateStr);
+      console.log('[odds] Unabated returned '+oddsRaw.length+' games');
       if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
       console.log('[odds] Unabated failed: '+e.message+' — falling back to Odds API');
@@ -464,9 +466,10 @@ async function runOddsJob(dateStr) {
         oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
       } catch(e2) {
         console.log('[odds] Odds API also failed: '+e2.message);
-        throw e2;
+        oddsRaw = []; // ensure array, don't throw — just log and continue
       }
     }
+    if (!Array.isArray(oddsRaw)) oddsRaw = [];
     // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
     const seen = new Set();
     const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
