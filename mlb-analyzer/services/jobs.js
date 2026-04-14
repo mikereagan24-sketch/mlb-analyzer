@@ -153,8 +153,12 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         // Signal no longer qualifies — deactivate with a note
         const finalMdl = locked.signal_type === 'Total' ? parseFloat(model.estTot.toFixed(2)) :
                          (locked.signal_side === 'away' ? model.aML : model.hML);
-        const note = 'Final model ' + locked.signal_type.toLowerCase() + ' ' + finalMdl +
-                     ' — no longer a rated play at closing.';
+        const mktRef = locked.signal_type === 'Total'
+          ? (gameRow.market_total != null ? ', mkt=' + gameRow.market_total : '')
+          : (locked.signal_side === 'away'
+              ? (gameRow.market_away_ml != null ? ', mkt=' + gameRow.market_away_ml : '')
+              : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
+        const note = 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
         db.prepare("UPDATE bet_signals SET is_active=0, notes=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
           .run(note, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
         console.log('[model] Deactivated stale signal: '+locked.signal_type+'/'+locked.signal_side+' | '+note);
