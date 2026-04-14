@@ -99,12 +99,12 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   // If lineup is projected (not yet confirmed), save as proj_model snapshot
   const isProjected = !gameRow.away_lineup_status || gameRow.away_lineup_status === 'projected';
   const hasProjSnapshot = gameRow.proj_model_away_ml != null;
-  if (isProjected && !hasProjSnapshot) {
-    // First time running with projected lineup — save snapshot
+  if (isProjected) {
+    // Lineup still projected — keep proj snapshot current
     db.prepare(`UPDATE game_log SET proj_model_away_ml=?, proj_model_home_ml=?, proj_model_total=?, model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   } else {
-    // Confirmed lineup (or proj snapshot already saved) — update current model only
+    // Confirmed lineup — proj snapshot is frozen, update current model only
     db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   }
@@ -143,9 +143,16 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
     SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
   )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
-  // Restore bet_lines for any signals that had them locked before the rerun
+  // Restore bet_lines — but only for signals that still exist after rerun
+  // (don't restore locked lines for signals that no longer qualify)
+  const newSigKeys = new Set(signals.map(s=>s.type+'|'+s.side));
   if (lockedLines.length) {
     for (const locked of lockedLines) {
+      // Skip restore if this signal type+side was not re-generated
+      if (!newSigKeys.has(locked.signal_type+'|'+locked.signal_side)) {
+        console.log('[model] Dropping stale locked signal: '+locked.signal_type+'/'+locked.signal_side);
+        continue;
+      }
       db.prepare(
         'UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND UPPER(signal_type)=UPPER(?) AND UPPER(signal_side)=UPPER(?)'
       ).run(locked.bet_line, locked.bet_locked_at, locked.closing_line, locked.clv,
