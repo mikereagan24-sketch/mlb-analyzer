@@ -2,6 +2,7 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId } = require('./scraper');
+const { fetchUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
 
@@ -455,13 +456,15 @@ async function runOddsJob(dateStr) {
     const settings = getSettings();
     let oddsRaw;
     try {
-      oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
+      oddsRaw = await fetchUnabatedOdds(dateStr);
+      if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
-      if (e.message && (e.message.includes('OUT_OF_USAGE_CREDITS') || e.message.includes('401'))) {
-        console.log('[odds] Odds API credits exhausted — using direct Kalshi');
-        oddsRaw = await fetchKalshiDirect(dateStr);
-      } else {
-        throw e;
+      console.log('[odds] Unabated failed: '+e.message+' — falling back to Odds API');
+      try {
+        oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
+      } catch(e2) {
+        console.log('[odds] Odds API also failed: '+e2.message);
+        throw e2;
       }
     }
     // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
