@@ -1282,7 +1282,8 @@ function renderSignalTracking(signals) {
     var clvTxt    = s.clv!=null ? (s.clv>=0?'+':'')+s.clv : '—';
     var clvCls    = s.clv!=null ? (s.clv>=0?'clv-pos':'clv-neg') : 'clv-neu';
     var inputId   = 'bl'+s.id;
-    return '<div class="sig-row">'
+    return '<div class="sig-row"'+(s.is_active===0?' style="opacity:0.65;background:rgba(128,0,0,0.04)"':'')+'>'
+
       +'<span style="width:80px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'
       +'<span style="width:75px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'
       +'<span style="width:50px">'+pill(s)+'</span>'
@@ -1296,7 +1297,8 @@ function renderSignalTracking(signals) {
       +'</span>'
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingML+'</span>'
-      +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+pnlTxt(s)+'</span>'
+      +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
+      +(s.is_active===0&&s.notes?'<div style="width:100%;padding:1px 0 4px 80px;font-size:10px;font-style:italic;color:var(--text3)">⚠️ '+s.notes+'</div>':'')
       +'</div>';
   }).join('');
 
@@ -1309,7 +1311,8 @@ function renderSignalTracking(signals) {
     var clvTxt    = s.clv!=null ? (s.clv>=0?'+':'')+s.clv : '—';
     var clvCls    = s.clv!=null ? (s.clv>=0?'clv-pos':'clv-neg') : 'clv-neu';
     var closingTot= s.closing_line!=null ? s.closing_line  : '—';
-    return '<div class="sig-row">'
+    return '<div class="sig-row"'+(s.is_active===0?' style="opacity:0.65;background:rgba(128,0,0,0.04)"':'')+'>'
+
       +'<span style="width:80px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'
       +'<span style="width:75px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'
       +'<span style="width:50px">'+pill(s)+'</span>'
@@ -1323,7 +1326,8 @@ function renderSignalTracking(signals) {
       +'</span>'
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingTot+'</span>'
-      +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+pnlTxt(s)+'</span>'
+      +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
+      +(s.is_active===0&&s.notes?'<div style="width:100%;padding:1px 0 4px 80px;font-size:10px;font-style:italic;color:var(--text3)">⚠️ '+s.notes+'</div>':'')
       +'</div>';
   }).join('');
 
