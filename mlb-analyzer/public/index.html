@@ -1435,6 +1435,62 @@ async function loadCronLog(){
   </div>
 </div>
 <script>
+
+async function loadSettings(){
+  try{
+    const s = await api('/settings');
+    const set = (id, val) => { const el=document.getElementById(id); if(el&&val!=null) el.value=val; };
+    set('s-odds-api-key',  s.odds_api_key);
+    set('s-run-mult',      s.run_mult);
+    set('s-hfa',           s.hfa_boost);
+    set('s-w-pit',         s.w_pit);
+    set('s-w-bat',         s.w_bat);
+    set('s-w-proj',        s.w_proj);
+    set('s-w-act',         s.w_act);
+    set('s-sp-weight',     s.sp_weight);
+    set('s-relief-weight', s.relief_weight);
+    set('s-sp-pit-weight', s.sp_pit_weight);
+    set('s-relief-pit-weight', s.relief_pit_weight);
+    set('s-fav-adj',       s.fav_adj);
+    set('s-dog-adj',       s.dog_adj);
+    set('s-ml-3star',      s.ml_3star_edge);
+    set('s-ml-val',        s.ml_value_edge);
+    set('s-ml-lean',       s.ml_lean_edge);
+    set('s-tot-3star',     s.tot_3star_edge);
+    set('s-tot-val',       s.tot_value_edge);
+    set('s-tot-lean',      s.tot_lean_edge);
+  } catch(e){ console.error('loadSettings error',e); }
+}
+
+async function saveSettings(){
+  const get = id => document.getElementById(id)?.value;
+  const pairs = {
+    odds_api_key:       get('s-odds-api-key'),
+    run_mult:           get('s-run-mult'),
+    hfa_boost:          get('s-hfa'),
+    w_pit:              get('s-w-pit'),
+    w_bat:              get('s-w-bat'),
+    w_proj:             get('s-w-proj'),
+    w_act:              get('s-w-act'),
+    sp_weight:          get('s-sp-weight'),
+    relief_weight:      get('s-relief-weight'),
+    sp_pit_weight:      get('s-sp-pit-weight'),
+    relief_pit_weight:  get('s-relief-pit-weight'),
+    fav_adj:            get('s-fav-adj'),
+    dog_adj:            get('s-dog-adj'),
+    ml_3star_edge:      get('s-ml-3star'),
+    ml_value_edge:      get('s-ml-val'),
+    ml_lean_edge:       get('s-ml-lean'),
+    tot_3star_edge:     get('s-tot-3star'),
+    tot_value_edge:     get('s-tot-val'),
+    tot_lean_edge:      get('s-tot-lean'),
+  };
+  try{
+    await api('/settings', {method:'POST', body:JSON.stringify(pairs)});
+    document.getElementById('games-status').textContent='✓ Settings saved';
+  } catch(e){ alert('Save failed: '+e.message); }
+}
+
 function openManualBetForGame(gameId, date, game) {
   // Pre-fill modal from game card data
   document.getElementById('mb-date').value = date;
