@@ -311,7 +311,8 @@ async function runScoreJob(dateStr) {
       });
       const gameRow = db.prepare(`SELECT * FROM game_log WHERE game_date=? AND game_id=?`).get(dateStr, gameId);
       if (gameRow) {
-        const signals = q.getSignalsByDate.all(dateStr).filter(sig => sig.game_id === gameId);
+        // Grade ALL locked signals (active + inactive) so P&L is complete
+        const signals = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND bet_locked_at IS NOT NULL').all(dateStr, gameId);
         const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
         for (const sig of signals) {
           const { outcome } = calcPnl(
