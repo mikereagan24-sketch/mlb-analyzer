@@ -216,7 +216,7 @@ const q = {
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
   getSignalsForBacktest: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? ORDER BY game_id`),
-  getSignalsByDateRange: db.prepare(`SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? AND is_active = 1 ORDER BY game_date, game_id`),
+  getSignalsByDateRange: db.prepare(`SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, game_id`),
   getBacktestByDateRange: db.prepare(`SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, game_id`),
   getBacktestByDateRange: db.prepare(`SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, game_id`),
   getSummaryByCategory: db.prepare(`
@@ -282,7 +282,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
 };
 
 q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
-  // vsHand: 'lhb' or 'rhb' ÃÂ¢ÃÂÃÂ which handedness the bullpen faces
+  // vsHand: 'lhb' or 'rhb' ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ which handedness the bullpen faces
   const dataKey = 'pit-act-'+vsHand;
   const rows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
