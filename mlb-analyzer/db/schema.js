@@ -229,7 +229,7 @@ const q = {
       ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END), 2) as total_pnl,
       ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END)
         / NULLIF(SUM(CASE WHEN outcome NOT IN ('pending','push') THEN 1 ELSE 0 END) * 100.0, 0) * 100, 2) as roi
-    FROM bet_signals WHERE game_date BETWEEN ? AND ?
+    FROM bet_signals WHERE game_date BETWEEN ? AND ? AND bet_locked_at IS NOT NULL
     GROUP BY category ORDER BY category
   `),
   getOverallSummary: db.prepare(`
@@ -252,7 +252,7 @@ const q = {
           THEN ABS(COALESCE(bet_line,market_line))
         ELSE 110.0
       END), 0) * 100, 2) as roi
-    FROM bet_signals WHERE game_date BETWEEN ? AND ? AND outcome NOT IN ('pending','push')
+    FROM bet_signals WHERE game_date BETWEEN ? AND ? AND bet_locked_at IS NOT NULL AND outcome NOT IN ('pending','push')
   `),
   logCron: db.prepare(`INSERT INTO cron_log (job_type, run_date, status, message, games_updated) VALUES (?, ?, ?, ?, ?)`),
   getRecentCronLogs: db.prepare(`SELECT * FROM cron_log ORDER BY ran_at DESC LIMIT 20`),
@@ -282,7 +282,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
 };
 
 q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
-  // vsHand: 'lhb' or 'rhb' ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ which handedness the bullpen faces
+  // vsHand: 'lhb' or 'rhb' ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ which handedness the bullpen faces
   const dataKey = 'pit-act-'+vsHand;
   const rows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
