@@ -51,6 +51,9 @@ db.exec(`
     proj_model_away_ml INTEGER,
   proj_model_home_ml INTEGER,
   proj_model_total REAL,
+  proj_market_away_ml INTEGER,
+  proj_market_home_ml INTEGER,
+  proj_market_total REAL,
   model_away_ml INTEGER,
     model_home_ml INTEGER,
     model_total REAL,
@@ -145,6 +148,9 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN home_lineup_status TEXT"); } catc
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_away_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_home_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_model_total REAL"); } catch(e) {}
+  try { db.exec("ALTER TABLE game_log ADD COLUMN proj_market_away_ml INTEGER"); } catch(e) {}
+  try { db.exec("ALTER TABLE game_log ADD COLUMN proj_market_home_ml INTEGER"); } catch(e) {}
+  try { db.exec("ALTER TABLE game_log ADD COLUMN proj_market_total REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_line INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_locked_at TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_line INTEGER"); } catch(e) {}
@@ -282,7 +288,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
 };
 
 q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
-  // vsHand: 'lhb' or 'rhb' ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ which handedness the bullpen faces
+  // vsHand: 'lhb' or 'rhb' ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ which handedness the bullpen faces
   const dataKey = 'pit-act-'+vsHand;
   const rows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
