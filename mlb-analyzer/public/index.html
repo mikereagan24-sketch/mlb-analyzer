@@ -849,7 +849,9 @@ function renderModelOutput(g) {
       +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'
         +fmtML(g.model_home_ml != null ? g.model_home_ml : g.proj_model_home_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_home_ml)+'</span></div>'
       +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'
-        +((g.model_total||g.proj_model_total) ? parseFloat(g.model_total||g.proj_model_total).toFixed(1) : '—')
+        +(g.model_total&&g.proj_model_total&&parseFloat(g.model_total).toFixed(1)!==parseFloat(g.proj_model_total).toFixed(1)
+          ? '<span style="font-size:10px;color:var(--text3);text-decoration:line-through">'+parseFloat(g.proj_model_total).toFixed(1)+'</span> '+parseFloat(g.model_total).toFixed(1)
+          : parseFloat(g.model_total||g.proj_model_total||0).toFixed(1)||'—')
         +'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+(g.market_total||'—')+'</span></div>'
       +'</div>'
     : '<div style="font-size:11px;color:var(--text3);font-style:italic">No projected lineup pulled</div>';
