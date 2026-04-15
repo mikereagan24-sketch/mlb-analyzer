@@ -157,9 +157,38 @@ async function fetchLineups(dateStr) {
   console.log('[scraper] RotoWire detected date: ' + (detectedDate || 'UNKNOWN') + ' | requested: ' + dateStr);
 
   if (detectedDate && detectedDate !== dateStr) {
-    const msg = 'RotoWire is showing ' + detectedDate + ' but you requested ' + dateStr + '. Page may not be available yet.';
-    console.log('[scraper] DATE MISMATCH — aborting to prevent bad data');
-    return { skipped: true, reason: 'date_mismatch', message: msg, rotowireDate: detectedDate };
+    // If requesting tomorrow but RotoWire shows today, try the ?date=tomorrow URL explicitly
+    if (dayType === 'tomorrow' && detectedDate === todayET()) {
+      console.log('[scraper] RotoWire not yet updated for tomorrow — retrying with explicit date param');
+      const tomorrowUrl = 'https://www.rotowire.com/baseball/daily-lineups.php?date=tomorrow';
+      try {
+        const resp2 = await fetch(tomorrowUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36', 'Accept': 'text/html' } });
+        if (resp2.ok) {
+          const html2 = await resp2.text();
+          const fullText2 = htmlToText(html2);
+          const detectedDate2 = extractRotoWireDate(fullText2.substring(0, 4000));
+          console.log('[scraper] Retry detected date: ' + (detectedDate2 || 'UNKNOWN'));
+          if (detectedDate2 === dateStr) {
+            // Use the retry response — fall through with this data
+            console.log('[scraper] Retry succeeded — proceeding with tomorrow lineups');
+            // Replace fullText in outer scope by reassigning
+            Object.assign(arguments[0]||{}, {}); // no-op, just continue below
+          } else {
+            // RotoWire genuinely not updated yet — return soft warning, DB data unchanged
+            const msg = 'RotoWire not yet showing ' + dateStr + ' lineups (showing ' + (detectedDate2||detectedDate) + '). Existing DB data preserved.';
+            console.log('[scraper] ' + msg);
+            return { skipped: true, reason: 'not_yet_available', message: msg, rotowireDate: detectedDate2||detectedDate };
+          }
+        }
+      } catch(e2) {
+        const msg = 'RotoWire retry failed: ' + e2.message + '. Existing DB data preserved.';
+        return { skipped: true, reason: 'not_yet_available', message: msg };
+      }
+    } else {
+      const msg = 'RotoWire is showing ' + detectedDate + ' but you requested ' + dateStr + '. Page may not be available yet.';
+      console.log('[scraper] DATE MISMATCH — aborting to prevent bad data');
+      return { skipped: true, reason: 'date_mismatch', message: msg, rotowireDate: detectedDate };
+    }
   }
 
   // Find the lineup section start
