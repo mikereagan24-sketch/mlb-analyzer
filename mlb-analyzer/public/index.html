@@ -1298,8 +1298,8 @@ function renderSignalTracking(signals) {
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingML+'</span>'
       +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
-      +(s.is_active===0&&s.notes?'<div style="width:100%;padding:2px 0 3px 8px;margin-top:2px;font-size:10px;font-style:italic;color:var(--text3)">⚠️ '+s.notes+'</div>':'')
-      +'</div>';
+      +'</div>'
+      +(s.is_active===0&&s.notes?'<div style="padding:2px 0 4px 8px;font-size:10px;font-style:italic;color:var(--text3);border-bottom:.5px solid var(--border)">⚠️ '+s.notes+'</div>':'');
   }).join('');
 
   // ── Total rows ───────────────────────────────────────────────────────
@@ -1327,8 +1327,8 @@ function renderSignalTracking(signals) {
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingTot+'</span>'
       +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
-      +(s.is_active===0&&s.notes?'<div style="width:100%;padding:2px 0 3px 8px;margin-top:2px;font-size:10px;font-style:italic;color:var(--text3)">⚠️ '+s.notes+'</div>':'')
-      +'</div>';
+      +'</div>'
+      +(s.is_active===0&&s.notes?'<div style="padding:2px 0 4px 8px;font-size:10px;font-style:italic;color:var(--text3);border-bottom:.5px solid var(--border)">⚠️ '+s.notes+'</div>':'');
   }).join('');
 
   var mlSection = mlSigs.length
