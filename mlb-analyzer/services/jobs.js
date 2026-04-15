@@ -110,6 +110,22 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
+  // If game is already final (scored), freeze all signals — don't rewrite
+  if (gl.away_score != null) {
+    // Just grade any ungraded signals and return — never wipe a completed game's signals
+    const existing = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(gameRow.game_date, gameRow.game_id);
+    const updateSig = db.prepare('UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?');
+    for (const ex of existing) {
+      if (ex.outcome !== 'pending') continue;
+      const { outcome, pnl } = calcPnl(
+        {type:ex.signal_type, side:ex.signal_side, marketLine:ex.market_line},
+        gl.away_score, gl.home_score, gl.market_total, gl.over_price, gl.under_price
+      );
+      if (outcome !== 'pending') updateSig.run(outcome, pnl, ex.id);
+    }
+    return;
+  }
+
   // Preserve any locked bet_lines before wiping signals
   const lockedLines = db.prepare(
     'SELECT signal_type, signal_side, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE game_date=? AND game_id=? AND bet_line IS NOT NULL'
