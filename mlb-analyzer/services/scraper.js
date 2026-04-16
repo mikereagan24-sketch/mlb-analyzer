@@ -210,7 +210,9 @@ async function fetchLineups(dateStr) {
   const PROMPT_BASE = `Extract MLB games from this RotoWire lineup section for ${dateStr}. Include Confirmed AND Expected lineups.
 
 CRITICAL rules:
-- awaySP = pitcher for AWAY team. homeSP = pitcher for HOME team.
+- away_sp = the STARTING PITCHER for the AWAY team (look for "SP:" label near the away team name). Include name and hand (R/L).
+- home_sp = the STARTING PITCHER for the HOME team (look for "SP:" label near the home team name). Include name and hand (R/L).
+- If no SP is listed for a team, use null for that field.
 - market_away_ml: negative for favorites, POSITIVE for underdogs. Include the sign.
 - Both teams must have opposite ML signs unless near even.
 - Do NOT use apostrophes in JSON output.
@@ -234,7 +236,7 @@ SECTION TEXT:
     for (let i = 0; i < gameStarts.length; i += BATCH) {
       const secStart = Math.max(0, gameStarts[i] - 150);
       const nextSec = gameStarts[Math.min(i + BATCH, gameStarts.length - 1)];
-      const secEnd = Math.min(nextSec + 3500, fullText.length);
+      const secEnd = Math.min(nextSec + 5500, fullText.length);
       const secChunk = fullText.substring(secStart, secEnd)
         .replace(/'/g, '').replace(/’/g, '').replace(/`/g, '');
       const batchText = await callClaude(PROMPT_BASE + secChunk, 4000);
