@@ -76,10 +76,12 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   let awayBpVsR = 0.318, awayBpVsL = 0.318, homeBpVsR = 0.318, homeBpVsL = 0.318;
   try {
     if (q.getBullpenWoba) {
-      const abr = q.getBullpenWoba(awayAbbr, awaySpName, 'rhb');
-      const abl = q.getBullpenWoba(awayAbbr, awaySpName, 'lhb');
-      const hbr = q.getBullpenWoba(homeAbbr, homeSpName, 'rhb');
-      const hbl = q.getBullpenWoba(homeAbbr, homeSpName, 'lhb');
+      const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
+      const _wAct  = (settings && settings.W_ACT  != null) ? parseFloat(settings.W_ACT)  : 0.35;
+      const abr = q.getBullpenWoba(awayAbbr, awaySpName, 'rhb', _wProj, _wAct);
+      const abl = q.getBullpenWoba(awayAbbr, awaySpName, 'lhb', _wProj, _wAct);
+      const hbr = q.getBullpenWoba(homeAbbr, homeSpName, 'rhb', _wProj, _wAct);
+      const hbl = q.getBullpenWoba(homeAbbr, homeSpName, 'lhb', _wProj, _wAct);
       if (abr?.woba) awayBpVsR = abr.woba;
       if (abl?.woba) awayBpVsL = abl.woba;
       if (hbr?.woba) homeBpVsR = hbr.woba;
