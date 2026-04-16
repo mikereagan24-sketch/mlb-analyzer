@@ -293,7 +293,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
   ).all(dataKey, '%'+teamAbbr);
 };
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
   // vsHand: 'lhb' or 'rhb' — which handedness the bullpen faces
   // Strategy: use pit-proj-* (has team suffixes) to get the team's bullpen roster,
   // then blend proj + act wOBA using fuzzy name matching — same as batter wOBA approach.
@@ -325,8 +325,9 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
   const actIdx = {};
   for (const r of actRows) actIdx[normName(r.player_name)] = r;
 
-  // 4. For each bullpen pitcher, blend proj + act (same weights as batter: 40% proj, 60% act)
-  const W_PROJ = 0.4, W_ACT = 0.6;
+  // 4. For each bullpen pitcher, blend proj + act using model settings weights
+  const W_PROJ = (wProj != null) ? wProj : 0.65;
+  const W_ACT  = (wAct  != null) ? wAct  : 0.35;
   const pitchers = bullpenProj.map(proj => {
     const pName = normName(proj.player_name.replace(/ [A-Z]+$/, '')); // strip team suffix
     // Fuzzy act lookup: exact, then last-name only
