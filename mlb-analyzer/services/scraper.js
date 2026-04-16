@@ -593,4 +593,47 @@ async function fetchKalshiDirect(dateStr) {
 }
 
 
-module.exports = { fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchScores, makeGameId };
+
+// MLB Stats API team IDs
+const MLB_TEAM_IDS = {
+  ARI:109,ATL:144,BAL:110,BOS:111,CHC:112,CWS:145,CIN:113,CLE:114,COL:115,
+  DET:116,HOU:117,KC:118,LAA:108,LAD:119,MIA:146,MIL:158,MIN:142,NYM:121,
+  NYY:147,ATH:133,PHI:143,PIT:134,SD:135,SF:137,SEA:136,STL:138,TB:139,
+  TEX:140,TOR:141,WAS:120
+};
+
+async function fetchActiveRosters() {
+  const results = {};
+  const teams = Object.keys(MLB_TEAM_IDS);
+
+  for (const team of teams) {
+    try {
+      const teamId = MLB_TEAM_IDS[team];
+      // Get active 26-man roster with season stats hydrated
+      const url = `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active&season=2026&hydrate=person(stats(type=season,sportId=1))`;
+      const data = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } }).then(r => r.json());
+      const pitchers = (data.roster || []).filter(p => p.position?.type === 'Pitcher');
+
+      results[team] = pitchers.map(p => {
+        const stats = p.person?.stats?.[0]?.splits?.[0]?.stat || {};
+        const gs = parseInt(stats.gamesStarted) || 0;
+        const g  = parseInt(stats.gamesPitched) || 0;
+        // SP = started at least 1 game AND starts ≥ 50% of appearances
+        const role = (gs > 0 && gs / Math.max(g, 1) >= 0.5) ? 'SP' : 'RP';
+        return {
+          name: p.person?.fullName || '',
+          mlb_id: p.person?.id || null,
+          role,
+          hand: p.person?.pitchHand?.code || 'R'
+        };
+      });
+      console.log(`[roster] ${team}: ${results[team].length} pitchers (${results[team].filter(p=>p.role==='SP').length} SP, ${results[team].filter(p=>p.role==='RP').length} RP)`);
+    } catch (e) {
+      console.error(`[roster] ${team} error: ${e.message}`);
+      results[team] = [];
+    }
+  }
+  return results;
+}
+
+module.exports = { fetchActiveRosters, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchScores, makeGameId };
