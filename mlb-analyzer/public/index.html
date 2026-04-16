@@ -229,6 +229,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="btn btn-primary btn-sm" onclick="loadGamesFromDB()">Load Games</button>
 <button class="btn btn-ghost btn-sm" onclick="refreshLineups()">→³ Refresh Lineups</button>
 <button class="btn btn-ghost btn-sm" onclick="triggerScores()">Pull Scores</button>
+        <button class="btn btn-ghost btn-sm" onclick="triggerRosters()">👥 Pull Rosters</button>
         <button class="btn btn-ghost btn-sm" onclick="pullWeather(this)">⛅ Pull Weather</button>
         <button class="btn btn-ghost btn-sm" onclick="pullOdds()">🎲 Pull Odds</button>
         <button class="btn btn-ghost btn-sm" onclick="rerunDate()">⟳ Rerun Model</button>
@@ -666,7 +667,18 @@ async function triggerScores(){
   const st=document.getElementById('games-status');
   st.innerHTML='<span class="spinner"></span>Fetching scores→¦';
   try{
-    const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date})});
+    const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date}
+function triggerRosters(){
+  const st=document.getElementById('games-status');
+  st.innerHTML='<span class="spinner"></span>Pulling rosters...';
+  fetch('/api/jobs/rosters',{method:'POST',headers:{'Content-Type':'application/json','x-app-password':appPw()}})
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.error) st.innerHTML='<span style="color:var(--red)">Roster error: '+d.error+'</span>';
+      else st.innerHTML='✓ Rosters: '+d.pitchers+' pitchers across '+d.teams+' teams';
+    })
+    .catch(e=>st.innerHTML='<span style="color:var(--red)">'+e.message+'</span>');
+})});
     st.textContent='✓ '+r.gamesUpdated+' games updated';
     await loadGamesFromDB();
   }catch(e){st.textContent='Error: '+e.message;}
