@@ -3,7 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -253,6 +253,24 @@ router.get('/backtest', (req, res) => {
 });
 
 // weather route: see below
+
+router.post('/jobs/rosters', async (req, res) => {
+  if(req.headers['x-app-password'] !== getSettings().app_password) return res.status(401).json({error:'unauthorized'});
+  console.log('[api] roster job fired');
+  try {
+    const result = await runRosterJob();
+    res.json(result);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+router.get('/rosters/:team', (req, res) => {
+  try {
+    const team = req.params.team.toUpperCase();
+    const rows = db.prepare("SELECT player_name,role,hand,updated_at FROM team_rosters WHERE team=? ORDER BY role,player_name").all(team);
+    const updatedAt = rows[0]?.updated_at||null;
+    res.json({ team, updatedAt, pitchers: rows });
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
 
 router.post('/jobs/lineups', async (req, res) => {
   const { date } = req.body;
