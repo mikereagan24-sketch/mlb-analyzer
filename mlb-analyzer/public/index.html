@@ -1286,6 +1286,7 @@ function renderSignalTracking(signals) {
 
       +'<span style="width:80px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'
       +'<span style="width:75px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'
+      +'<span style="width:50px;font-size:11px;color:var(--text2)">'+(s.away_score!=null?s.away_score+'-'+s.home_score:'')+'</span>'
       +'<span style="width:50px">'+pill(s)+'</span>'
       +'<span style="width:55px;color:var(--text2)">'+s.signal_side+'</span>'
       +'<span style="width:60px">mkt: '+fmtML(s.market_line)+'</span>'
@@ -1298,7 +1299,7 @@ function renderSignalTracking(signals) {
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingML+'</span>'
       +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
-      +'<span style="width:55px;text-align:right;color:var(--text2);font-size:11px">'+(s.away_score!=null?s.away_score+'-'+s.home_score:'—')+'</span>'
+
       +'</div>'
       +(s.is_active===0&&s.notes?'<div style="padding:2px 0 4px 8px;font-size:10px;font-style:italic;color:var(--text3);border-bottom:.5px solid var(--border)">⚠️ '+s.notes+'</div>':'');
   }).join('');
@@ -1316,6 +1317,7 @@ function renderSignalTracking(signals) {
 
       +'<span style="width:80px;color:var(--text2)">'+s.game_date.slice(5)+'</span>'
       +'<span style="width:75px;font-weight:500">'+s.game_id.toUpperCase()+'</span>'
+      +'<span style="width:50px;font-size:11px;color:var(--text2)">'+(s.away_score!=null?s.away_score+'-'+s.home_score:'')+'</span>'
       +'<span style="width:50px">'+pill(s)+'</span>'
       +'<span style="width:55px;color:var(--text2)">'+s.signal_side+'</span>'
       +'<span style="width:60px">mkt: '+mktTot+'</span>'
@@ -1328,7 +1330,7 @@ function renderSignalTracking(signals) {
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingTot+'</span>'
       +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
-      +'<span style="width:55px;text-align:right;color:var(--text2);font-size:11px">'+(s.away_score!=null?s.away_score+'-'+s.home_score:'—')+'</span>'
+
       +'</div>'
       +(s.is_active===0&&s.notes?'<div style="padding:2px 0 4px 8px;font-size:10px;font-style:italic;color:var(--text3);border-bottom:.5px solid var(--border)">⚠️ '+s.notes+'</div>':'');
   }).join('');
