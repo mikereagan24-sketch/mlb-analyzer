@@ -100,6 +100,19 @@ async function fetchUnabatedOdds(dateStr) {
         totalSrc=SOURCE_NAMES[msId]||msId; break;
       }
     }
+    // Sharp-only fallback: if no priority source posted, try known sharp/low-vig books only
+    // Excludes soft books (1,2,20,67,78,86 etc) that often post stale or incorrect lines
+    if(total==null){
+      const SHARP_FALLBACK=['60','36','89','98','95','52','66','104','49','27','25','24','8','10','4'];
+      for(const msId of SHARP_FALLBACK){
+        const s=bySource[msId];
+        if(s?.home?.bt3?.points!=null){
+          total=s.home.bt3.points; overPrice=s.home.bt3.americanPrice;
+          underPrice=s?.away?.bt3?.americanPrice??null;
+          totalSrc='src'+msId+'(fallback)'; break;
+        }
+      }
+    }
 
     console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') tot='+total+'('+totalSrc+')');
     results.push({game_id:away+'-'+home,market_away_ml:awayML,market_home_ml:homeML,market_total:total,over_price:overPrice,under_price:underPrice,source:'unabated'});
