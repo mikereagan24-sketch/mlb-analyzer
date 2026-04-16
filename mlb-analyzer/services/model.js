@@ -134,7 +134,7 @@ function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT) {
   const eff = effHand(batter.hand, pitcherHand);
   // Pitcher wOBA: SP_PIT_WEIGHT% from SP split vs batter's hand,
-  // RELIEF_PIT_WEIGHT% from league-avg bullpen (0.318) — placeholder until real bullpen data
+  // RELIEF_PIT_WEIGHT% from team bullpen wOBA (proj+act blend)
   const BULLPEN_AVG = 0.318;
   const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
   const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
@@ -194,9 +194,9 @@ function runModel(game, wobaIdx, settings) {
   const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT)}));
 
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : 0.315;
   const hTeamWoba = hWp>0 ? hWs/hWp : 0.315;
