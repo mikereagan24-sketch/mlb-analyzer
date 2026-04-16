@@ -1,4 +1,15 @@
-const Database = require('better-sqlite3');
+const Da
+
+db.prepare(`CREATE TABLE IF NOT EXISTS team_rosters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  team TEXT NOT NULL,
+  player_name TEXT NOT NULL,
+  mlb_id INTEGER,
+  role TEXT NOT NULL,
+  hand TEXT,
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(team, player_name)
+)`).run();tabase = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
@@ -310,10 +321,24 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
   ).all(projKey, '% '+teamLower.toUpperCase());
   if (!projRows.length) return null;
 
-  // 2. Exclude the starter by last name
+  // 2. Load active RP roster (excludes SPs, AAA, IL)
+  const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
+  const activeRPSet = new Set(rosterRows.map(r=>normName(r.player_name)));
+  const hasRoster = activeRPSet.size > 0;
+
+  // 3. Filter to active RPs, excluding today's starter
   const bullpenProj = projRows.filter(r => {
-    if (!starterNorm) return true;
-    return !normName(r.player_name).includes(starterNorm);
+    const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
+    const pn = normName(nameClean);
+    const last = pn.split(' ').pop();
+    // Always exclude today's starter
+    if (starterNorm && pn.includes(starterNorm)) return false;
+    // If roster loaded: only include active RPs
+    if (hasRoster) {
+      return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
+    }
+    // No roster yet: fall back to sample size filter
+    return r.sample_size >= 5;
   });
   if (!bullpenProj.length) return null;
 
