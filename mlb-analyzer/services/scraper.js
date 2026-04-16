@@ -192,39 +192,71 @@ async function fetchLineups(dateStr) {
   }
 
   // Find the lineup section start
-  const markers = ['Confirmed Lineup', 'Expected Lineup', 'PM ET', 'AM ET'];
-  let sectionStart = fullText.length;
-  for (const mk of markers) {
-    const idx = fullText.indexOf(mk);
-    if (idx > 0 && idx < sectionStart) sectionStart = idx;
+  // Split RotoWire text into per-game sections (3 games per API call) to prevent parser confusion
+  const timeRx = /\d{1,2}:\d{2} [AP]M ET/g;
+  const luRx = /(Confirmed Lineup|Expected Lineup)/g;
+  const allPos = [];
+  let _m;
+  while ((_m = timeRx.exec(fullText)) !== null) allPos.push(_m.index);
+  while ((_m = luRx.exec(fullText)) !== null) allPos.push(_m.index);
+  allPos.sort((a,b)=>a-b);
+  // Deduplicate nearby positions (within 200 chars = same game header)
+  const gameStarts = [];
+  for (const idx of allPos) {
+    if (!gameStarts.length || idx - gameStarts[gameStarts.length-1] > 200) gameStarts.push(idx);
   }
-  const start = Math.max(0, sectionStart - 200);
-  const chunk = fullText.substring(start, start + 50000)
-    .replace(/'/g, '').replace(/\u2019/g, '').replace(/`/g, '');
+  console.log('[scraper] Found ' + gameStarts.length + ' game section anchors');
 
-  const prompt = `Extract ALL MLB games from this RotoWire lineup page for ${dateStr}. Include Confirmed AND Expected lineups. Never skip a game.
+  const PROMPT_BASE = `Extract MLB games from this RotoWire lineup section for ${dateStr}. Include Confirmed AND Expected lineups.
 
 CRITICAL rules:
-- awaySP = pitcher for AWAY team (pitches against HOME batters)
-- homeSP = pitcher for HOME team (pitches against AWAY batters)
-- market_away_ml: negative for favorites (e.g. -154), POSITIVE for underdogs (e.g. +130). Include the sign.
-- market_home_ml: same rule — negative favorite, positive underdog.
-- Both teams in a game must have opposite signs (one negative, one positive) UNLESS they are near even.
-- Do NOT use apostrophes anywhere in JSON output.
+- awaySP = pitcher for AWAY team. homeSP = pitcher for HOME team.
+- market_away_ml: negative for favorites, POSITIVE for underdogs. Include the sign.
+- Both teams must have opposite ML signs unless near even.
+- Do NOT use apostrophes in JSON output.
+- The game_id must be lowercase: away-home (e.g. "chc-cle")
+- Only include games that appear in this section. Do not invent games.
 
-Return ONLY a raw JSON array with this exact structure:
-[{"game_id":"chc-cle","away_team":"CHC","home_team":"CLE","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Edward Cabrera","hand":"R"},"home_sp":{"name":"Slade Cecconi","hand":"R"},"market_away_ml":-134,"market_home_ml":114,"market_total":7.5,"park_factor":0.95,"away_lineup":[{"slot":1,"name":"Nico Hoerner","hand":"R"},{"slot":2,"name":"Alex Bregman","hand":"R"}],"home_lineup":[{"slot":1,"name":"Steven Kwan","hand":"L"},{"slot":2,"name":"Chase DeLauter","hand":"L"}]}]
+Return ONLY a raw JSON array:
+[{"game_id":"chc-cle","away_team":"CHC","home_team":"CLE","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Edward Cabrera","hand":"R"},"home_sp":{"name":"Slade Cecconi","hand":"R"},"market_away_ml":-134,"market_home_ml":114,"market_total":7.5,"park_factor":0.95,"away_lineup":[{"slot":1,"name":"Nico Hoerner","hand":"R"}],"home_lineup":[{"slot":1,"name":"Steven Kwan","hand":"L"}]}]
 
 Teams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH not OAK)
 Park factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:1.00 SEA:0.95 LAA:0.97 HOU:1.00 ATH:1.12 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93
 Hands: R=right L=left S=switch
 Raw JSON array only — no markdown, no explanation.
 
-PAGE TEXT:
-${chunk}`;
+SECTION TEXT:
+`;
 
-  const text = await callClaude(prompt, 8000);
-  const games = parseJSONRobust(text);
+  let games = [];
+  const BATCH = 3; // 3 games per API call
+  if (gameStarts.length >= 4) {
+    for (let i = 0; i < gameStarts.length; i += BATCH) {
+      const secStart = Math.max(0, gameStarts[i] - 150);
+      const nextSec = gameStarts[Math.min(i + BATCH, gameStarts.length - 1)];
+      const secEnd = Math.min(nextSec + 3500, fullText.length);
+      const secChunk = fullText.substring(secStart, secEnd)
+        .replace(/'/g, '').replace(/’/g, '').replace(/`/g, '');
+      const batchText = await callClaude(PROMPT_BASE + secChunk, 4000);
+      const batchGames = parseJSONRobust(batchText);
+      console.log('[scraper] Batch ' + Math.floor(i/BATCH+1) + ': parsed ' + batchGames.length + ' games');
+      games.push(...batchGames);
+    }
+    // Deduplicate by game_id, keep last (most complete)
+    const seen = {};
+    for (const g of games) { if (g.game_id) seen[g.game_id] = g; }
+    games = Object.values(seen);
+  } else {
+    // Fallback: single call with full chunk
+    console.log('[scraper] Falling back to single-call parse');
+    const start = Math.max(0, (gameStarts[0]||0) - 200);
+    const chunk = fullText.substring(start, start + 50000)
+      .replace(/'/g, '').replace(/’/g, '').replace(/`/g, '');
+    const text = await callClaude(PROMPT_BASE + chunk, 8000);
+    games = parseJSONRobust(text);
+  }
+
+
 
   // Post-process: fix underdog moneylines that came back negative when they should be positive
   // If both teams have negative ML something is wrong — flip the smaller absolute value to positive
