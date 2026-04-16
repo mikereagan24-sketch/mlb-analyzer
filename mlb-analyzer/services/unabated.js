@@ -3,7 +3,7 @@
 const UB_URL = 'https://content.unabated.com/markets/game-odds/b_gameodds.json';
 const MLB_KEY = 'lg5:pt1:pregame';
 const ML_SOURCES    = ['9','3','59','35','105','17','91','19','107'];
-const TOTAL_SOURCES = ['9','3','59','35','102','17','19'];
+const TOTAL_SOURCES = ['9','3','59','35','105','91','102','17','19'];
 const SOURCE_NAMES  = {'9':'kalshi','3':'polymarket','59':'pinnacle','35':'pinnacle-d','105':'circa','102':'unabated','17':'novig','19':'dk'};
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
