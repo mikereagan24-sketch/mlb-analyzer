@@ -1,7 +1,7 @@
 // jobs.js v2026-04-12T19:57:39.540Z
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId } = require('./scraper');
+const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters } = require('./scraper');
 const { fetchUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
@@ -550,4 +550,27 @@ async function runOddsJob(dateStr) {
   }
 }
 
-module.exports = { runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
+
+async function runRosterJob() {
+  console.log('[roster] Starting active roster pull for all 30 teams...');
+  try {
+    const rosters = await fetchActiveRosters();
+    let totalPitchers = 0;
+    const upsert = q.upsertRoster;
+    for (const [team, pitchers] of Object.entries(rosters)) {
+      if (!pitchers.length) continue;
+      q.clearRoster.run(team);
+      for (const p of pitchers) {
+        upsert.run(team, p.name, p.mlb_id, p.role, p.hand);
+      }
+      totalPitchers += pitchers.length;
+    }
+    console.log(`[roster] Done — ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
+    return { success: true, teams: Object.keys(rosters).length, pitchers: totalPitchers };
+  } catch(e) {
+    console.error('[roster] Error: '+e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+module.exports = { runRosterJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
