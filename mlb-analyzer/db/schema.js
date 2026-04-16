@@ -294,27 +294,61 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
 };
 
 q.getBullpenWoba = (teamAbbr, starterName, vsHand) => {
-  // vsHand: 'lhb' or 'rhb' ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ which handedness the bullpen faces
-  const dataKey = 'pit-act-'+vsHand;
-  const rows = db.prepare(
+  // vsHand: 'lhb' or 'rhb' — which handedness the bullpen faces
+  // Strategy: use pit-proj-* (has team suffixes) to get the team's bullpen roster,
+  // then blend proj + act wOBA using fuzzy name matching — same as batter wOBA approach.
+  const normName = n => (n||'').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
+  const teamLower = teamAbbr.toLowerCase();
+  const starterNorm = normName(starterName).split(' ').pop(); // last name for exclusion
+
+  // 1. Get bullpen from proj data (team-specific entries end with " TEAM")
+  const projKey = 'pit-proj-'+vsHand;
+  const projRows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
-  ).all(dataKey, '%'+teamAbbr.toLowerCase());
-  if (!rows.length) return null;
-  // Exclude the starter
-  const starterNorm = (starterName||'').toLowerCase().replace(/[^a-z ]/g,'');
-  const bullpen = rows.filter(r => {
-    const rNorm = r.player_name.toLowerCase().replace(/[^a-z ]/g,'');
-    return !starterNorm || !rNorm.includes(starterNorm.split(' ')[1]||starterNorm);
+  ).all(projKey, '% '+teamLower.toUpperCase());
+  if (!projRows.length) return null;
+
+  // 2. Exclude the starter by last name
+  const bullpenProj = projRows.filter(r => {
+    if (!starterNorm) return true;
+    return !normName(r.player_name).includes(starterNorm);
   });
-  if (!bullpen.length) return null;
-  // Weighted average by sample size (min 10 PA)
-  const qualified = bullpen.filter(r => r.sample_size >= 10);
-  const pool = qualified.length >= 3 ? qualified : bullpen.slice(0, 6);
-  const totalPA = pool.reduce((s,r)=>s+(r.sample_size||50), 0);
-  const woba = pool.reduce((s,r)=>s+(r.woba*(r.sample_size||50)), 0) / totalPA;
+  if (!bullpenProj.length) return null;
+
+  // 3. Build act lookup index for fuzzy blending
+  const actKey = 'pit-act-'+vsHand;
+  const actRows = db.prepare(
+    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=?"
+  ).all(actKey);
+  const actIdx = {};
+  for (const r of actRows) actIdx[normName(r.player_name)] = r;
+
+  // 4. For each bullpen pitcher, blend proj + act (same weights as batter: 40% proj, 60% act)
+  const W_PROJ = 0.4, W_ACT = 0.6;
+  const pitchers = bullpenProj.map(proj => {
+    const pName = normName(proj.player_name.replace(/ [A-Z]+$/, '')); // strip team suffix
+    // Fuzzy act lookup: exact, then last-name only
+    const lastName = pName.split(' ').pop();
+    const actExact = actIdx[pName];
+    const actFuzzy = actExact || Object.entries(actIdx).find(([k])=>k.endsWith(' '+lastName))?.[1];
+    let woba;
+    if (actFuzzy) {
+      woba = W_PROJ * proj.woba + W_ACT * actFuzzy.woba;
+    } else {
+      woba = proj.woba; // proj only
+    }
+    return { name: pName, woba, sample: proj.sample_size };
+  });
+
+  // 5. Weighted average — use proj sample_size as weight (larger = more reliable)
+  const qualified = pitchers.filter(p => p.sample >= 5);
+  const pool = qualified.length >= 3 ? qualified : pitchers.slice(0, 8);
+  const totalW = pool.reduce((s,p)=>s+(p.sample||20), 0);
+  const woba = pool.reduce((s,p)=>s+(p.woba*(p.sample||20)), 0) / totalW;
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
 };
-
 // Add is_active and notes columns if not present
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1").run(); } catch(e) {}
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN notes TEXT").run(); } catch(e) {}
