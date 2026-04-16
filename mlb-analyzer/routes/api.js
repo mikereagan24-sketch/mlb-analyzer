@@ -1414,150 +1414,34 @@ const FG_SLUGS = {
   col:'rockies',sd:'padres',tex:'rangers',lad:'dodgers',hou:'astros',sea:'mariners'
 };
 
-router.get('/debug/bullpen-woba', async (req, res) => {
+router.get('/debug/bullpen', (req, res) => {
   try {
-    const fetch2 = require('node-fetch');
-    const date = req.query.date || new Date().toISOString().split('T')[0];
-    const W_PROJ = parseFloat(req.query.w_proj||'0.65');
-    const W_ACT  = parseFloat(req.query.w_act ||'0.35');
-    const MIN_BF = 50;
-
-    // Get tonight's games + starters
-    const gameRows = q.getGamesByDate(date);
-    const starters = {}; // team → starterName
-    gameRows.forEach(g => {
-      const [a,h] = g.game_id.split('-');
-      if (g.away_sp) starters[a] = g.away_sp.toLowerCase();
-      if (g.home_sp) starters[h] = g.home_sp.toLowerCase();
+    const team = (req.query.team||'').toUpperCase();
+    const sp   = req.query.sp||'';
+    const hand = req.query.hand||'rhb';
+    if (!team) return res.json({ error: 'team required' });
+    const norm = n=>(n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
+    const projRows = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?").all('pit-proj-'+hand,'% '+team);
+    const actRows  = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=?").all('pit-act-'+hand);
+    const actIdx={}; for(const r of actRows) actIdx[norm(r.player_name)]=r;
+    const sets=getSettings(); const WP=sets.W_PROJ||0.65, WA=sets.W_ACT||0.35;
+    const starterLast=sp?norm(sp).split(' ').pop():'';
+    const pitchers=projRows.map(proj=>{
+      const nameClean=proj.player_name.replace(/ [A-Z]{2,3}$/,'');
+      const pNorm=norm(nameClean); const lastName=pNorm.split(' ').pop();
+      const isStarter=!!starterLast&&pNorm.includes(starterLast);
+      const actExact=actIdx[pNorm];
+      const actMatch=actExact||Object.entries(actIdx).find(([k])=>k.endsWith(' '+lastName))?.[1]||null;
+      const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
+      return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'×'+proj.woba.toFixed(4)+' + '+WA+'×'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
     });
-    const teams = Object.keys(starters);
-
-    // Get full wOBA index
-    const wobaRows = q.getAllWoba ? q.getAllWoba() : [];
-    // Build index: { 'pit-act-rhb': { 'porter hodge': {woba, sample_size} } }
-    const idx = {};
-    wobaRows.forEach(r => {
-      if (!idx[r.data_key]) idx[r.data_key] = {};
-      idx[r.data_key][r.player_name.toLowerCase()] = { woba: r.woba, sample: r.sample_size||0 };
-    });
-
-    function normName(n){ return (n||'').toLowerCase().replace(/[^a-z ]/g,'').replace(/\s+/g,' ').trim(); }
-
-    function fuzzyGet(keyMap, name) {
-      if (!keyMap) return null;
-      const k = normName(name);
-      if (keyMap[k]) return keyMap[k];
-      // Try last name match
-      const last = k.split(' ').pop();
-      const hits = Object.entries(keyMap).filter(([kk])=>kk.endsWith(' '+last)||kk===last);
-      if (hits.length===1) return hits[0][1];
-      return null;
-    }
-
-    function blendWoba(proj, act, wProj, wAct) {
-      const hp = proj && !isNaN(proj.woba);
-      const ha = act && !isNaN(act.woba) && act.sample >= MIN_BF;
-      if (hp && ha) return { woba: proj.woba*wProj + act.woba*wAct, source:'blend' };
-      if (hp) return { woba: proj.woba, source:'steamer' };
-      if (ha) return { woba: act.woba, source:'actual' };
-      return null;
-    }
-
-    function getPitcherWoba(name, hand) {
-      const bL = blendWoba(fuzzyGet(idx['pit-proj-lhb'],name), fuzzyGet(idx['pit-act-lhb'],name), W_PROJ, W_ACT);
-      const bR = blendWoba(fuzzyGet(idx['pit-proj-rhb'],name), fuzzyGet(idx['pit-act-rhb'],name), W_PROJ, W_ACT);
-      const DFLT = hand==='L' ? {vsLHB:0.310,vsRHB:0.330} : {vsLHB:0.320,vsRHB:0.295};
-      const vsLHB = (bL?.woba ?? DFLT.vsLHB);
-      const vsRHB = (bR?.woba ?? DFLT.vsRHB);
-      const src = bL||bR ? (bL?.source===bR?.source ? bL?.source||'steamer' : 'blend') : 'fallback';
-      return { vsLHB, vsRHB, overall:(vsLHB+vsRHB)/2, source:src };
-    }
-
-    const results = {};
-
-    for (const team of teams) {
-      const slug = FG_SLUGS[team];
-      if (!slug) { results[team]={error:'no FG slug'}; continue; }
-      try {
-        const html = await fetch2('https://www.fangraphs.com/roster-resource/depth-charts/'+slug,
-          {headers:{'User-Agent':'Mozilla/5.0 (compatible; mlb-analyzer/1.0)'},timeout:10000}
-        ).then(r=>r.text());
-
-        // Parse bullpen section — find table after "Bullpen" heading
-        // FG uses section headers like: <div class="depth-chart-section-header">Bullpen</div>
-        // Pitcher rows: <a href="/players/...">Name</a> with hand and status
-        const bullpenStart = html.indexOf('Bullpen');
-        if (bullpenStart<0) { results[team]={error:'no Bullpen section found'}; continue; }
-
-        // Extract text block after Bullpen heading up to next section
-        const nextSection = html.indexOf('Bullpen', bullpenStart+10);
-        const block = html.substring(bullpenStart, bullpenStart+8000);
-
-        // Parse player names — look for href="/players/" links
-        const nameRe = /href="\/players\/[^"]+">([^<]+)<\/a>/g;
-        // Also look for IL/status markers: "IL-10", "IL-15", "IL-60", "AAA", "DTD"
-        const ilRe = /\b(IL-\d+|IL60|AAA|DTD|Minors)\b/gi;
-
-        // FG roster resource structure: each player row has name, throws (L/R), last 6 days
-        // Let's parse more carefully using row structure
-        // Rows look like: <tr class="depth-chart-player-row ...">
-        const rowRe = /<tr[^>]*depth-chart[^>]*>(.*?)<\/tr>/gs;
-        const pitchers = [];
-        let m;
-        // Simpler: extract all player links with context
-        const playerRe = /<a[^>]+href="\/players\/([^"]+)"[^>]*>([^<]+)<\/a>/g;
-        while ((m=playerRe.exec(block))!==null) {
-          const name = m[2].trim();
-          if (name.length>2 && name.length<40 && /[A-Za-z]/.test(name)) {
-            pitchers.push(name);
-          }
-        }
-
-        // Also check for unavailable/IL markers near the bullpen section
-        const statusBlock = block.substring(0, 6000);
-        // Look for status spans: class containing "il" or "unavailable"
-        const unavailRe = /class="[^"]*unavail[^"]*"[^>]*>([^<]*)/gi;
-        const unavailNames = [];
-        while((m=unavailRe.exec(statusBlock))!==null) unavailNames.push(m[1].trim());
-
-        // Dedupe pitchers
-        const uniquePitchers = [...new Set(pitchers)];
-
-        // Look up wOBA for each, exclude starter
-        const starterLast = (starters[team]||'').split(' ').pop();
-        const bullpen = [];
-        for (const name of uniquePitchers.slice(0,20)) {
-          const nameLast = normName(name).split(' ').pop();
-          if (nameLast && starterLast && nameLast===starterLast) continue; // skip starter
-          // Guess hand from name lookup (default R if unknown)
-          const pw = getPitcherWoba(name, 'R');
-          bullpen.push({ name, ...pw });
-        }
-
-        // PA-weighted average (use source as proxy — fallback gets weight 30, steamer 50, blend/actual 100)
-        const PA_PROXY = {blend:100, actual:100, steamer:50, fallback:30};
-        const pool = bullpen.filter(p=>p.source!=='fallback'); // exclude fallback pitchers
-        if (!pool.length) { results[team]={error:'no wOBA data for any bullpen pitcher',pitchers:bullpen}; continue; }
-        const totalPA = pool.reduce((s,p)=>s+(PA_PROXY[p.source]||50),0);
-        const bpWoba = pool.reduce((s,p)=>s+p.overall*(PA_PROXY[p.source]||50),0)/totalPA;
-
-        results[team] = {
-          bullpenWoba: parseFloat(bpWoba.toFixed(4)),
-          pitcherCount: pool.length,
-          starter: starters[team],
-          pitchers: bullpen
-        };
-      } catch(e) {
-        results[team] = {error: e.message};
-      }
-    }
-
-    res.json(results);
-  } catch(e) {
-    res.status(500).json({error:e.message});
-  }
+    const pool=pitchers.filter(p=>p.role==='RP'&&p.proj_sample>=5);
+    const use=pool.length>=3?pool:pitchers.filter(p=>p.role==='RP').slice(0,8);
+    const tw=use.reduce((s,p)=>s+p.proj_sample,0);
+    const bpW=tw>0?+(use.reduce((s,p)=>s+p.blended_woba*p.proj_sample,0)/tw).toFixed(4):null;
+    res.json({team,hand,sp,W_PROJ:WP,W_ACT:WA,total_pitchers:projRows.length,pitchers,bullpen_woba:bpW,pool_size:use.length,pool_pitchers:use.map(p=>p.name)});
+  } catch(e){res.status(500).json({error:e.message,stack:e.stack});}
 });
-
 
 
 // ── MODEL COMPARISON: old params vs new params ───────────────────────────────
