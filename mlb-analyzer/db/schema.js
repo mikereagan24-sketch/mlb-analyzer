@@ -314,11 +314,57 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
   ).all(dataKey, '%'+teamAbbr);
 };
 
-q.getActiveRPs = (teamAbbr) => {
-  // Returns active RP names and hands from team_rosters
-  // wOBA lookup is done in processGameSignals using getPitcherWoba from model.js
-  const rows = db.prepare("SELECT player_name, hand FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
-  return rows.map(r => ({ name: r.player_name, hand: r.hand || 'R' }));
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
+  const normName = n => (n||'').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
+  const teamLower = teamAbbr.toLowerCase();
+  const starterNorm = normName(starterName).split(' ').pop();
+  const projKey = 'pit-proj-'+vsHand;
+  const projRows = db.prepare(
+    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
+  ).all(projKey, '% '+teamLower.toUpperCase());
+  if (!projRows.length) return null;
+  const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
+  const activeRPSet = new Set(rosterRows.map(r=>normName(r.player_name)));
+  const hasRoster = activeRPSet.size > 0;
+  const bullpenProj = projRows.filter(r => {
+    const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
+    const pn = normName(nameClean);
+    const last = pn.split(' ').pop();
+    if (starterNorm && pn.includes(starterNorm)) return false;
+    if (hasRoster) {
+      return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
+    }
+    return r.sample_size >= 5;
+  });
+  if (!bullpenProj.length) return null;
+  const actKey = 'pit-act-'+vsHand;
+  const actRows = db.prepare(
+    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=?"
+  ).all(actKey);
+  const actIdx = {};
+  for (const r of actRows) actIdx[normName(r.player_name)] = r;
+  const W_PROJ = (wProj != null) ? wProj : 0.65;
+  const W_ACT = (wAct != null) ? wAct : 0.35;
+  const pitchers = bullpenProj.map(proj => {
+    const pName = normName(proj.player_name.replace(/ [A-Z]+$/, ''));
+    const lastName = pName.split(' ').pop();
+    const actExact = actIdx[pName];
+    const actFuzzy = actExact || Object.entries(actIdx).find(([k])=>k.endsWith(' '+lastName))?.[1];
+    let woba;
+    if (actFuzzy) {
+      woba = W_PROJ * proj.woba + W_ACT * actFuzzy.woba;
+    } else {
+      woba = proj.woba;
+    }
+    return { name: pName, woba, sample: proj.sample_size };
+  });
+  const qualified = pitchers.filter(p => p.sample >= 5);
+  const pool = qualified.length >= 3 ? qualified : pitchers.slice(0, 8);
+  const totalW = pool.reduce((s,p)=>s+(p.sample||20), 0);
+  const woba = pool.reduce((s,p)=>s+(p.woba*(p.sample||20)), 0) / totalW;
+  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
 };
 
 // Add is_active and notes columns if not present
