@@ -44,12 +44,7 @@ async function fetchUnabatedOdds(dateStr) {
   const results = [];
   for (const {g,away,home} of Object.values(byMatchup)) {
     const lines = g.gameOddsMarketSourcesLines||{};
-    // DUMP: log ALL ms9 (Kalshi) line entries for every game so we can find total structure
-    if (away==='kc' && home==='nyy') {
-      const kalshiLines = {};
-      Object.entries(lines).forEach(([k,v])=>{ if(k.includes(':ms9:')) kalshiLines[k]=v; });
-      console.log('[unabated] KC-NYY KALSHI FULL: '+JSON.stringify(kalshiLines).substring(0,5000));
-    }
+    
 
     // Debug dump all bt3 keys for any game to understand structure
     if (away==='kc' && home==='nyy') {
@@ -59,8 +54,8 @@ async function fetchUnabatedOdds(dateStr) {
     }
 
     // Build bySource for ML (an0 only) and totals (all an values)
-    const bySource = {};      // for ML ÃÂ¢ÃÂÃÂ an0 only
-    const bySourceTot = {};   // for totals ÃÂ¢ÃÂÃÂ all an values, prefer bt3 with real points
+    const bySource = {};      // for ML ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ an0 only
+    const bySourceTot = {};   // for totals ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ all an values, prefer bt3 with real points
     Object.entries(lines).forEach(([key,val])=>{
       const [si,ms,an]=key.split(':');
       const msId=ms.replace('ms','');
@@ -70,7 +65,7 @@ async function fetchUnabatedOdds(dateStr) {
         if(!bySource[msId]) bySource[msId]={};
         bySource[msId][side]=val;
       }
-      // Totals: all an values ÃÂ¢ÃÂÃÂ keep entry with real points (non-null, non-negative)
+      // Totals: all an values ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ keep entry with real points (non-null, non-negative)
       if(val.bt3?.points!=null && val.bt3.points > 0){
         if(!bySourceTot[msId]) bySourceTot[msId]={};
         // Only overwrite if this an has a better (non-null) price
