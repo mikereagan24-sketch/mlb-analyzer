@@ -1,16 +1,4 @@
-const Da
-
-db.prepare(`CREATE TABLE IF NOT EXISTS team_rosters (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  team TEXT NOT NULL,
-  player_name TEXT NOT NULL,
-  mlb_id INTEGER,
-  role TEXT NOT NULL,
-  hand TEXT,
-  updated_at TEXT DEFAULT (datetime('now')),
-  UNIQUE(team, player_name)
-)`).run();
-tabase = require('better-sqlite3');
+const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
@@ -146,6 +134,20 @@ INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
 `);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS team_rosters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team TEXT NOT NULL,
+    player_name TEXT NOT NULL,
+    mlb_id INTEGER,
+    role TEXT NOT NULL,
+    hand TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(team, player_name)
+  )
+`);
+
 
 // Migrations for existing DBs
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
