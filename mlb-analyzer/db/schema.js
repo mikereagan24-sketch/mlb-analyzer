@@ -287,6 +287,13 @@ const q = {
   updateWindData: null, // initialized lazily after migrations
   getAllSettings: db.prepare(`SELECT key, value FROM app_settings`),
 };
+q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,role,hand,updated_at)
+  VALUES (?,?,?,?,?,datetime('now'))
+  ON CONFLICT(team,player_name) DO UPDATE SET
+    mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, updated_at=excluded.updated_at`);
+q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
+q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
+
 
 q.upsertWobaBatch = (key, rows) => {
   const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0); });
