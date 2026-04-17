@@ -255,7 +255,6 @@ router.get('/backtest', (req, res) => {
 // weather route: see below
 
 router.post('/jobs/rosters', async (req, res) => {
-  if(req.headers['x-app-password'] !== getSettings().app_password) return res.status(401).json({error:'unauthorized'});
   console.log('[api] roster job fired');
   try {
     const result = await runRosterJob();
