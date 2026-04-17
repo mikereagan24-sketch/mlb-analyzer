@@ -73,21 +73,36 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const homeAbbr = awayParts[1]||'';
   const awaySpName = gameRow.away_pitcher||'';
   const homeSpName = gameRow.home_pitcher||'';
-  let awayBpVsR = 0.318, awayBpVsL = 0.318, homeBpVsR = 0.318, homeBpVsL = 0.318;
-  try {
-    if (q.getBullpenWoba) {
-      const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
-      const _wAct  = (settings && settings.W_ACT  != null) ? parseFloat(settings.W_ACT)  : 0.35;
-      const abr = q.getBullpenWoba(awayAbbr, awaySpName, 'rhb', _wProj, _wAct);
-      const abl = q.getBullpenWoba(awayAbbr, awaySpName, 'lhb', _wProj, _wAct);
-      const hbr = q.getBullpenWoba(homeAbbr, homeSpName, 'rhb', _wProj, _wAct);
-      const hbl = q.getBullpenWoba(homeAbbr, homeSpName, 'lhb', _wProj, _wAct);
-      if (abr?.woba) awayBpVsR = abr.woba;
-      if (abl?.woba) awayBpVsL = abl.woba;
-      if (hbr?.woba) homeBpVsR = hbr.woba;
-      if (hbl?.woba) homeBpVsL = hbl.woba;
-    }
-  } catch(e) { /* fallback to league avg */ }
+  // Compute bullpen wOBA using getPitcherWoba from model.js (same fuzzy lookup as SPs)
+  const { getPitcherWoba } = require('./model');
+  const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
+  const _wAct = (settings && settings.W_ACT != null) ? parseFloat(settings.W_ACT) : 0.35;
+  const LEAGUE_BP = 0.318;
+  function calcBullpenWoba(teamAbbr, starterName, idx) {
+    try {
+      const rps = q.getActiveRPs ? q.getActiveRPs(teamAbbr) : [];
+      if (!rps.length) return { vsR: LEAGUE_BP, vsL: LEAGUE_BP };
+      const starterLast = (starterName||'').toLowerCase().split(' ').pop();
+      const bullpen = rps.filter(p => {
+        const last = p.name.toLowerCase().split(' ').pop();
+        return !starterLast || last !== starterLast;
+      });
+      if (!bullpen.length) return { vsR: LEAGUE_BP, vsL: LEAGUE_BP };
+      let sumVsR = 0, sumVsL = 0, count = 0;
+      for (const rp of bullpen) {
+        const pw = getPitcherWoba(idx, rp.name, rp.hand || 'R', teamAbbr, _wProj, _wAct);
+        if (pw && pw.vsRHB && pw.vsLHB && pw.source !== 'fallback') {
+          sumVsR += pw.vsRHB; sumVsL += pw.vsLHB; count++;
+        }
+      }
+      if (count < 2) return { vsR: LEAGUE_BP, vsL: LEAGUE_BP };
+      return { vsR: parseFloat((sumVsR/count).toFixed(4)), vsL: parseFloat((sumVsL/count).toFixed(4)) };
+    } catch(e) { return { vsR: LEAGUE_BP, vsL: LEAGUE_BP }; }
+  }
+  const awayBp = calcBullpenWoba(awayAbbr.toUpperCase(), gameRow.away_sp, wobaIdx);
+  const homeBp = calcBullpenWoba(homeAbbr.toUpperCase(), gameRow.home_sp, wobaIdx);
+  let awayBpVsR = awayBp.vsR, awayBpVsL = awayBp.vsL;
+  let homeBpVsR = homeBp.vsR, homeBpVsL = homeBp.vsL;
   const game = {
     ...gameRow,
     awayLineup: tryParse(gameRow.away_lineup_json) || [],
@@ -102,19 +117,19 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const isProjected = !gameRow.away_lineup_status || gameRow.away_lineup_status === 'projected';
   const hasProjSnapshot = gameRow.proj_model_away_ml != null;
   if (isProjected) {
-    // Lineup still projected — keep proj snapshot current
+    // Lineup still projected â keep proj snapshot current
     db.prepare(`UPDATE game_log SET proj_model_away_ml=?, proj_model_home_ml=?, proj_model_total=?, model_away_ml=?, model_home_ml=?, model_total=?, proj_market_away_ml=COALESCE(proj_market_away_ml, ?), proj_market_home_ml=COALESCE(proj_market_home_ml, ?), proj_market_total=COALESCE(proj_market_total, ?), updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.market_away_ml||null, gameRow.market_home_ml||null, gameRow.market_total||null, gameRow.game_date, gameRow.game_id);
   } else {
-    // Confirmed lineup — proj snapshot is frozen, update current model only
+    // Confirmed lineup â proj snapshot is frozen, update current model only
     db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
-  // If game is already final (scored), freeze all signals — don't rewrite
+  // If game is already final (scored), freeze all signals â don't rewrite
   if (gl.away_score != null) {
-    // Just grade any ungraded signals and return — never wipe a completed game's signals
+    // Just grade any ungraded signals and return â never wipe a completed game's signals
     const existing = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(gameRow.game_date, gameRow.game_id);
     const updateSig = db.prepare('UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?');
     for (const ex of existing) {
@@ -157,7 +172,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     });
   }
 
-  // Remove any duplicate signals (same type+side) — keep highest ID
+  // Remove any duplicate signals (same type+side) â keep highest ID
   db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
     SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
   )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
@@ -168,7 +183,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   if (lockedLines.length) {
     for (const locked of lockedLines) {
       if (!newSigKeys.has(locked.signal_type+'|'+locked.signal_side)) {
-        // Signal no longer qualifies — deactivate with a note
+        // Signal no longer qualifies â deactivate with a note
         const finalMdl = locked.signal_type === 'Total' ? parseFloat(model.estTot.toFixed(2)) :
                          (locked.signal_side === 'away' ? model.aML : model.hML);
         const mktRef = locked.signal_type === 'Total'
@@ -176,7 +191,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
           : (locked.signal_side === 'away'
               ? (gameRow.market_away_ml != null ? ', mkt=' + gameRow.market_away_ml : '')
               : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
-        const note = 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
+        const note = 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' â edge no longer meets threshold.';
         db.prepare("UPDATE bet_signals SET is_active=0, notes=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
           .run(note, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
         console.log('[model] Deactivated stale signal: '+locked.signal_type+'/'+locked.signal_side+' | '+note);
@@ -206,7 +221,7 @@ async function runLineupJob(dateStr) {
     }
 
     const games = Array.isArray(result) ? result : [];
-  // Normalize team codes — fix common scraper mistakes
+  // Normalize team codes â fix common scraper mistakes
   const TEAM_NORM = {'WSH':'WAS','OAK':'ATH','CWS':'CWS'};
   for (const g of games) {
     if (TEAM_NORM[g.away_team]) g.away_team = TEAM_NORM[g.away_team];
@@ -233,7 +248,7 @@ async function runLineupJob(dateStr) {
       const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const existingRow = q.getGameById.get(dateStr, gameId);
-        // Lock odds 10min before game start — only for TODAY's games, never future dates
+        // Lock odds 10min before game start â only for TODAY's games, never future dates
         const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
         if (existingRow && !existingRow.odds_locked_at && existingRow.game_time && dateStr === todayForLock) {
           const tm = existingRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
@@ -272,7 +287,7 @@ async function runLineupJob(dateStr) {
         away_sp_hand: g.away_sp && g.away_sp.hand,
         home_sp: g.home_sp && g.home_sp.name,
         home_sp_hand: g.home_sp && g.home_sp.hand,
-        // Lineup job NEVER overwrites odds — only the odds job writes market lines
+        // Lineup job NEVER overwrites odds â only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
       market_total:   existingRow ? existingRow.market_total   : g.market_total,
@@ -288,7 +303,7 @@ async function runLineupJob(dateStr) {
       const awayStatus = g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     const homeStatus = g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), awayStatus, homeStatus, dateStr, gameId);
-      // Clear zeros — treat 0 same as null for market odds
+      // Clear zeros â treat 0 same as null for market odds
       db.prepare("UPDATE game_log SET market_away_ml=CASE WHEN market_away_ml=0 THEN NULL ELSE market_away_ml END, market_home_ml=CASE WHEN market_home_ml=0 THEN NULL ELSE market_home_ml END, market_total=CASE WHEN market_total=0 THEN NULL ELSE market_total END WHERE game_date=? AND game_id=?").run(dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
       if (gameRow) {
@@ -302,7 +317,7 @@ async function runLineupJob(dateStr) {
     }
 
     q.logCron.run('lineups', dateStr, 'success', 'Pulled ' + games.length + ' games (date verified)', gamesUpdated);
-    console.log('[lineup-job] Done — ' + gamesUpdated + ' games processed');
+    console.log('[lineup-job] Done â ' + gamesUpdated + ' games processed');
     return { success: true, gamesUpdated, date: dateStr };
 
   } catch (err) {
@@ -361,7 +376,7 @@ async function runScoreJob(dateStr) {
       }
     }
     q.logCron.run('scores', dateStr, 'success', 'Updated ' + scores.length + ' scores', gamesUpdated);
-    console.log('[score-job] Done — ' + gamesUpdated + ' games updated');
+    console.log('[score-job] Done â ' + gamesUpdated + ' games updated');
     return { success: true, gamesUpdated, date: dateStr };
   } catch (err) {
     console.error('[score-job] Error:', err.message);
@@ -455,7 +470,7 @@ function startCronJobs() {
     runLineupJob(todayET());
   }, { timezone: 'UTC' });
   // Scores: 7 AM ET (12:00 UTC)
-    // Odds: 4 automated pulls per day — 8AM, 11AM, 3PM, 5PM PT
+    // Odds: 4 automated pulls per day â 8AM, 11AM, 3PM, 5PM PT
   // 8AM PT=15:00 UTC, 11AM PT=18:00 UTC, 3PM PT=22:00 UTC, 5PM PT=00:00 UTC
   ['0 15 * * *','0 18 * * *','0 22 * * *','0 0 * * *'].forEach((schedule,i) => {
     const labels = ['8AM PT','11AM PT','3PM PT','5PM PT'];
@@ -469,7 +484,7 @@ function startCronJobs() {
     console.log('[cron] 4AM PT score pull');
     runScoreJob(yesterdayET());
   }, { timezone: 'UTC' });
-  console.log('[cron] Jobs scheduled — lineups 8AM ET + hourly noon-6PM ET + 11PM ET');
+  console.log('[cron] Jobs scheduled â lineups 8AM ET + hourly noon-6PM ET + 11PM ET');
 }
 
 function gameHasStarted(gameRow, gameDate) {
@@ -498,19 +513,19 @@ async function runOddsJob(dateStr) {
       console.log('[odds] Unabated returned '+oddsRaw.length+' games');
       if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
-      console.log('[odds] Unabated failed: '+e.message+' — falling back to Odds API');
+      console.log('[odds] Unabated failed: '+e.message+' â falling back to Odds API');
       try {
         oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
       } catch(e2) {
         console.log('[odds] Odds API also failed: '+e2.message);
-        oddsRaw = []; // ensure array, don't throw — just log and continue
+        oddsRaw = []; // ensure array, don't throw â just log and continue
       }
     }
     if (!Array.isArray(oddsRaw)) oddsRaw = [];
-    // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
+    // Deduplicate by game_id â keep first occurrence (Kalshi lines take priority)
     const seen = new Set();
     const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
-    if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' → '+odds.length+' results');
+    if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' â '+odds.length+' results');
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
@@ -565,7 +580,7 @@ async function runRosterJob() {
       }
       totalPitchers += pitchers.length;
     }
-    console.log(`[roster] Done — ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
+    console.log(`[roster] Done â ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
     return { success: true, teams: Object.keys(rosters).length, pitchers: totalPitchers };
   } catch(e) {
     console.error('[roster] Error: '+e.message);
