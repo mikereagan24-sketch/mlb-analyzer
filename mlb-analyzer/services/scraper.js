@@ -74,7 +74,7 @@ async function callClaude(prompt, maxTokens, attempt = 0) {
     },
     body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
   });
-  // Retry on 529 (overloaded) or 529 with exponential backoff — up to 4 attempts
+  // Retry on 529 (overloaded) or 529 with exponential backoff â up to 4 attempts
   if (resp.status === 529 || resp.status === 529) {
     if (attempt < 4) {
       const wait = Math.pow(2, attempt) * 3000; // 3s, 6s, 12s, 24s
@@ -89,7 +89,7 @@ async function callClaude(prompt, maxTokens, attempt = 0) {
   return data.content.filter(b => b.type === 'text').map(b => b.text).join('');
 }
 
-// Classify dateStr relative to today/tomorrow in ET — handles DST correctly
+// Classify dateStr relative to today/tomorrow in ET â handles DST correctly
 function classifyDate(dateStr) {
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const d = new Date();
@@ -118,171 +118,135 @@ function extractRotoWireDate(text) {
 
 async function fetchLineups(dateStr) {
   console.log('[scraper] fetchLineups requested for ' + dateStr);
-
   const dayType = classifyDate(dateStr);
-  console.log('[scraper] Date classification: ' + dayType + ' (today=' +
-    new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) + ')');
+  console.log('[scraper] Date classification: ' + dayType);
 
-  // Block past dates and far-future dates immediately — no external call needed
   if (dayType === 'past') {
-    const msg = 'RotoWire only shows today and tomorrow. Use manual injection for past dates.';
-    console.log('[scraper] Blocked: ' + msg);
-    return { skipped: true, reason: 'past_date', message: msg };
+    return { skipped: true, reason: 'past_date', message: 'RotoWire only shows today and tomorrow. Use manual injection for past dates.' };
   }
   if (dayType === 'future') {
-    const msg = 'RotoWire only shows today and tomorrow. Check back closer to ' + dateStr + '.';
-    console.log('[scraper] Blocked: ' + msg);
-    return { skipped: true, reason: 'future_date', message: msg };
+    return { skipped: true, reason: 'future_date', message: 'RotoWire only shows today and tomorrow. Check back closer to ' + dateStr + '.' };
   }
 
-  // Choose correct URL — today uses base URL, tomorrow uses ?date=tomorrow
   const url = dayType === 'tomorrow'
     ? 'https://www.rotowire.com/baseball/daily-lineups.php?date=tomorrow'
     : 'https://www.rotowire.com/baseball/daily-lineups.php';
 
   console.log('[scraper] Fetching: ' + url);
+
   const resp = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html',
-    },
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
+    }
   });
+
   if (!resp.ok) throw new Error('RotoWire fetch failed: ' + resp.status);
   const html = await resp.text();
-  const fullText = htmlToText(html);
-  console.log('[scraper] RotoWire text length: ' + fullText.length);
+  console.log('[scraper] RotoWire HTML length: ' + html.length);
 
-  // Verify the date RotoWire is actually showing
-  const detectedDate = extractRotoWireDate(fullText.substring(0, 4000));
+  // Check we got actual lineup data
+  if (!html.includes('lineup__player') && !html.includes('lineup is-mlb')) {
+    throw new Error('Could not parse any games from response');
+  }
+
+  // Verify date
+  const detectedDate = extractRotoWireDate(htmlToText(html.substring(0, 5000)));
   console.log('[scraper] RotoWire detected date: ' + (detectedDate || 'UNKNOWN') + ' | requested: ' + dateStr);
-
   if (detectedDate && detectedDate !== dateStr) {
-    // If requesting tomorrow but RotoWire shows today, try the ?date=tomorrow URL explicitly
-    if (dayType === 'tomorrow' && detectedDate === todayET()) {
-      console.log('[scraper] RotoWire not yet updated for tomorrow — retrying with explicit date param');
-      const tomorrowUrl = 'https://www.rotowire.com/baseball/daily-lineups.php?date=tomorrow';
-      try {
-        const resp2 = await fetch(tomorrowUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36', 'Accept': 'text/html' } });
-        if (resp2.ok) {
-          const html2 = await resp2.text();
-          const fullText2 = htmlToText(html2);
-          const detectedDate2 = extractRotoWireDate(fullText2.substring(0, 4000));
-          console.log('[scraper] Retry detected date: ' + (detectedDate2 || 'UNKNOWN'));
-          if (detectedDate2 === dateStr) {
-            // Use the retry response — fall through with this data
-            console.log('[scraper] Retry succeeded — proceeding with tomorrow lineups');
-            // Replace fullText in outer scope by reassigning
-            Object.assign(arguments[0]||{}, {}); // no-op, just continue below
-          } else {
-            // RotoWire genuinely not updated yet — return soft warning, DB data unchanged
-            const msg = 'RotoWire not yet showing ' + dateStr + ' lineups (showing ' + (detectedDate2||detectedDate) + '). Existing DB data preserved.';
-            console.log('[scraper] ' + msg);
-            return { skipped: true, reason: 'not_yet_available', message: msg, rotowireDate: detectedDate2||detectedDate };
-          }
-        }
-      } catch(e2) {
-        const msg = 'RotoWire retry failed: ' + e2.message + '. Existing DB data preserved.';
-        return { skipped: true, reason: 'not_yet_available', message: msg };
-      }
-    } else {
-      const msg = 'RotoWire is showing ' + detectedDate + ' but you requested ' + dateStr + '. Page may not be available yet.';
-      console.log('[scraper] DATE MISMATCH — aborting to prevent bad data');
-      return { skipped: true, reason: 'date_mismatch', message: msg, rotowireDate: detectedDate };
-    }
+    return { skipped: true, reason: 'date_mismatch', message: 'RotoWire is showing ' + detectedDate + ' but you requested ' + dateStr + '. Page may not be available yet.' };
   }
 
-  // Find the lineup section start
-  // Split RotoWire text into per-game sections (3 games per API call) to prevent parser confusion
-  const timeRx = /\d{1,2}:\d{2} [AP]M ET/g;
-  const luRx = /(Confirmed Lineup|Expected Lineup)/g;
-  const allPos = [];
-  let _m;
-  while ((_m = timeRx.exec(fullText)) !== null) allPos.push(_m.index);
-  while ((_m = luRx.exec(fullText)) !== null) allPos.push(_m.index);
-  allPos.sort((a,b)=>a-b);
-  // Deduplicate nearby positions (within 200 chars = same game header)
-  const gameStarts = [];
-  for (const idx of allPos) {
-    if (!gameStarts.length || idx - gameStarts[gameStarts.length-1] > 200) gameStarts.push(idx);
-  }
-  console.log('[scraper] Found ' + gameStarts.length + ' game section anchors');
+  // Parse with cheerio
+  const cheerio = require('cheerio');
+  const $ = cheerio.load(html);
 
-  const PROMPT_BASE = `Extract MLB games from this RotoWire lineup section for ${dateStr}. Include Confirmed AND Expected lineups.
+  const PARK_FACTORS = {
+    LAD:1.00,WAS:1.02,STL:0.99,DET:0.96,MIA:1.01,NYY:1.04,SD:0.94,BOS:1.03,
+    TOR:1.01,CWS:1.01,CIN:1.06,TEX:1.02,PHI:1.03,COL:1.16,TB:0.97,MIN:0.97,
+    CHC:1.04,CLE:0.95,BAL:1.02,PIT:0.97,MIL:0.97,KC:1.00,SEA:0.95,LAA:0.97,
+    HOU:1.00,ATH:1.12,ATL:1.03,ARI:1.06,NYM:1.01,SF:0.93
+  };
 
-CRITICAL rules:
-- away_sp = the STARTING PITCHER for the AWAY team (look for "SP:" label near the away team name). Include name and hand (R/L).
-- home_sp = the STARTING PITCHER for the HOME team (look for "SP:" label near the home team name). Include name and hand (R/L).
-- If no SP is listed for a team, use null for that field.
-- market_away_ml: negative for favorites, POSITIVE for underdogs. Include the sign.
-- Both teams must have opposite ML signs unless near even.
-- Do NOT use apostrophes in JSON output.
-- The game_id must be lowercase: away-home (e.g. "chc-cle")
-- Only include games that appear in this section. Do not invent games.
+  const games = [];
 
-Return ONLY a raw JSON array:
-[{"game_id":"chc-cle","away_team":"CHC","home_team":"CLE","time":"1:10 PM ET","lineup_status":"confirmed","away_sp":{"name":"Edward Cabrera","hand":"R"},"home_sp":{"name":"Slade Cecconi","hand":"R"},"market_away_ml":-134,"market_home_ml":114,"market_total":7.5,"park_factor":0.95,"away_lineup":[{"slot":1,"name":"Nico Hoerner","hand":"R"}],"home_lineup":[{"slot":1,"name":"Steven Kwan","hand":"L"}]}]
+  $('.lineup.is-mlb').each((i, el) => {
+    const away = $(el).find('.lineup__team.is-visit .lineup__abbr').text().trim();
+    const home = $(el).find('.lineup__team.is-home .lineup__abbr').text().trim();
+    if (!away || !home) return;
 
-Teams: LAD WAS STL DET MIA NYY SD BOS TOR CWS CIN TEX PHI COL TB MIN CHC CLE BAL PIT MIL KC SEA LAA HOU ATH ATL ARI NYM SF (Athletics=ATH not OAK)
-Park factors: LAD:1.00 WAS:1.02 STL:0.99 DET:0.96 MIA:1.01 NYY:1.04 SD:0.94 BOS:1.03 TOR:1.01 CWS:1.01 CIN:1.06 TEX:1.02 PHI:1.03 COL:1.16 TB:0.97 MIN:0.97 CHC:1.04 CLE:0.95 BAL:1.02 PIT:0.97 MIL:0.97 KC:1.00 SEA:0.95 LAA:0.97 HOU:1.00 ATH:1.12 ATL:1.03 ARI:1.06 NYM:1.01 SF:0.93
-Hands: R=right L=left S=switch
-Raw JSON array only — no markdown, no explanation.
+    // Parse pitcher: "Kodai Senga R" -> name + hand
+    const parseP = raw => {
+      raw = (raw || '').replace(/\s+/g, ' ').trim();
+      const parts = raw.split(' ');
+      const hand = ['R','L','S'].includes(parts[parts.length-1]) ? parts[parts.length-1] : 'R';
+      const name = ['R','L','S'].includes(parts[parts.length-1]) ? parts.slice(0,-1).join(' ') : raw;
+      return { name: name.trim(), hand };
+    };
 
-SECTION TEXT:
-`;
+    const awayPit = parseP($(el).find('.lineup__list.is-visit .lineup__player-highlight-name').text());
+    const homePit = parseP($(el).find('.lineup__list.is-home .lineup__player-highlight-name').text());
+    const time = $(el).find('.lineup__time').first().text().trim();
+    const statusText = $(el).find('.lineup__status').text().trim().toLowerCase();
+    const lineup_status = statusText.includes('confirm') ? 'confirmed' : 'projected';
 
-  let games = [];
-  const BATCH = 3; // 3 games per API call
-  if (gameStarts.length >= 4) {
-    for (let i = 0; i < gameStarts.length; i += BATCH) {
-      const secStart = Math.max(0, gameStarts[i] - 150);
-      const nextSec = gameStarts[Math.min(i + BATCH, gameStarts.length - 1)];
-      const secEnd = Math.min(nextSec + 5500, fullText.length);
-      const secChunk = fullText.substring(secStart, secEnd)
-        .replace(/'/g, '').replace(/’/g, '').replace(/`/g, '');
-      const batchText = await callClaude(PROMPT_BASE + secChunk, 4000);
-      const batchGames = parseJSONRobust(batchText);
-      console.log('[scraper] Batch ' + Math.floor(i/BATCH+1) + ': parsed ' + batchGames.length + ' games');
-      games.push(...batchGames);
-    }
-    // Deduplicate by game_id, keep last (most complete)
-    const seen = {};
-    for (const g of games) { if (g.game_id) seen[g.game_id] = g; }
-    games = Object.values(seen);
-  } else {
-    // Fallback: single call with full chunk
-    console.log('[scraper] Falling back to single-call parse');
-    const start = Math.max(0, (gameStarts[0]||0) - 200);
-    const chunk = fullText.substring(start, start + 50000)
-      .replace(/'/g, '').replace(/’/g, '').replace(/`/g, '');
-    const text = await callClaude(PROMPT_BASE + chunk, 8000);
-    games = parseJSONRobust(text);
-  }
+    const parsePlayers = (side) => {
+      const players = [];
+      $(el).find('.lineup__list.' + side + ' .lineup__player').each((j, p) => {
+        const txt = $(p).text().replace(/\s+/g, ' ').trim();
+        // Format: "RF Carson Benge L"
+        const parts = txt.split(' ');
+        if (parts.length < 3) return;
+        const bats = ['R','L','S'].includes(parts[parts.length-1]) ? parts[parts.length-1] : 'R';
+        const pos = parts[0];
+        const name = parts.slice(1, ['R','L','S'].includes(parts[parts.length-1]) ? -1 : undefined).join(' ');
+        if (name) players.push({ name, hand: bats, pos });
+      });
+      return players;
+    };
 
+    // Normalize team abbrs
+    const NORM = { WSH:'WAS', OAK:'ATH' };
+    const awayTeam = NORM[away] || away;
+    const homeTeam = NORM[home] || home;
+    const gameId = (awayTeam + '-' + homeTeam).toLowerCase();
 
+    games.push({
+      game_id: gameId,
+      away_team: awayTeam,
+      home_team: homeTeam,
+      time,
+      lineup_status,
+      away_lineup_status: lineup_status,
+      home_lineup_status: lineup_status,
+      away_sp: awayPit.name ? { name: awayPit.name, hand: awayPit.hand } : null,
+      home_sp: homePit.name ? { name: homePit.name, hand: homePit.hand } : null,
+      market_total: null,
+      park_factor: PARK_FACTORS[homeTeam] || 1.0,
+      away_lineup: parsePlayers('is-visit'),
+      home_lineup: parsePlayers('is-home'),
+    });
+  });
 
-  // Post-process: fix underdog moneylines that came back negative when they should be positive
-  // If both teams have negative ML something is wrong — flip the smaller absolute value to positive
-  for (const g of games) {
-    const aml = g.market_away_ml;
-    const hml = g.market_home_ml;
-    if (aml && hml && aml < 0 && hml < 0) {
-      // Both negative — the lesser absolute value should be positive (underdog)
-      if (Math.abs(aml) < Math.abs(hml)) {
-        g.market_away_ml = Math.abs(aml);
-        console.log('[scraper] Fixed underdog ML: ' + g.game_id + ' away ' + aml + ' -> +' + Math.abs(aml));
-      } else {
-        g.market_home_ml = Math.abs(hml);
-        console.log('[scraper] Fixed underdog ML: ' + g.game_id + ' home ' + hml + ' -> +' + Math.abs(hml));
-      }
-    }
-  }
-
-  console.log('[scraper] Returning ' + games.length + ' games for ' + dateStr);
+  console.log('[scraper] Cheerio parsed ' + games.length + ' games for ' + dateStr);
+  if (!games.length) throw new Error('Could not parse any games from response');
   return games;
 }
 
 async function fetchScores(dateStr) {
-  // Uses MLB Stats API — free, no auth, returns final scores as JSON
+  // Uses MLB Stats API â free, no auth, returns final scores as JSON
   const TEAM_MAP = {
     'San Diego Padres':'SD','Boston Red Sox':'BOS','Pittsburgh Pirates':'PIT',
     'Kansas City Royals':'KC','Cleveland Guardians':'CLE','Milwaukee Brewers':'MIL',
@@ -336,7 +300,7 @@ const ODDS_TEAM_MAP = {
   'Washington Nationals':'WAS',
 };
 
-// Odds via The Odds API — Kalshi (primary, us_ex region) + DraftKings (fallback, us region)
+// Odds via The Odds API â Kalshi (primary, us_ex region) + DraftKings (fallback, us region)
 // Bookmaker keys: 'kalshi' | 'draftkings'
 // Regions: 'us_ex' for exchanges (Kalshi) | 'us' for sportsbooks (DK)
 
@@ -405,7 +369,7 @@ async function fetchOddsForBookmaker(apiKey, region, bookmaker) {
 async function fetchOddsAPI(apiKey, dateStr) {
   // If no key, go direct immediately
   if (!apiKey) {
-    console.log('[odds] No API key — using direct Kalshi');
+    console.log('[odds] No API key â using direct Kalshi');
     return await fetchKalshiDirect(dateStr);
   }
 
@@ -424,7 +388,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
       if (!dateStr || !g.commence_time) return true;
       return g.commence_time >= windowStart && g.commence_time < windowEnd;
     });
-    // Deduplicate by team pair — keep LATEST commence_time (upcoming game, not completed one)
+    // Deduplicate by team pair â keep LATEST commence_time (upcoming game, not completed one)
     const byPair = {};
     filtered.forEach(g => {
       const key = g.away_team + '|' + g.home_team;
@@ -440,7 +404,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
     const allUsExGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us_ex', ''));
     const kalshiResults = parseOddsAPIResponse(allUsExGames, 'kalshi', 'polymarket');
     if (kalshiResults.length > 0) {
-      console.log('[odds] Kalshi: '+kalshiResults.length+' games — '+kalshiResults.map(g=>g.game_id+'('+g.market_away_ml+'/'+g.market_home_ml+')').join(', '));
+      console.log('[odds] Kalshi: '+kalshiResults.length+' games â '+kalshiResults.map(g=>g.game_id+'('+g.market_away_ml+'/'+g.market_home_ml+')').join(', '));
 
       // 2. Also fetch DK to fill in any games Kalshi is missing
       let dkResults = [];
@@ -469,10 +433,10 @@ async function fetchOddsAPI(apiKey, dateStr) {
       if (dkOnly.length) console.log('[odds] DK filling '+dkOnly.length+' games not on Kalshi');
       return [...merged, ...dkOnly];
     }
-    console.log('[odds] Kalshi returned 0 games — falling back to DraftKings');
-  } catch(e) { console.log('[odds] Kalshi failed: '+e.message+' — trying DraftKings'); }
+    console.log('[odds] Kalshi returned 0 games â falling back to DraftKings');
+  } catch(e) { console.log('[odds] Kalshi failed: '+e.message+' â trying DraftKings'); }
 
-  // 3. Full DK fallback (also catches 401 → direct Kalshi)
+  // 3. Full DK fallback (also catches 401 â direct Kalshi)
   try {
     const dkGames = filterByDate(await fetchOddsForBookmaker(apiKey, 'us', 'draftkings'));
     const dkResults = parseOddsAPIResponse(dkGames, 'draftkings');
@@ -480,7 +444,7 @@ async function fetchOddsAPI(apiKey, dateStr) {
     return dkResults;
   } catch(e) {
     if (e.message && (e.message.includes('OUT_OF_USAGE_CREDITS') || e.message.includes('401'))) {
-      console.log('[odds] Odds API credits exhausted — switching to direct Kalshi');
+      console.log('[odds] Odds API credits exhausted â switching to direct Kalshi');
       return await fetchKalshiDirect(dateStr);
     }
     throw e;
@@ -494,7 +458,7 @@ function makeGameId(away, home) {
   return a+'-'+h;
 }
 
-// ── Direct Kalshi scraper (no Odds API credits needed) ───────────────────────
+// ââ Direct Kalshi scraper (no Odds API credits needed) âââââââââââââââââââââââ
 // Hits api.elections.kalshi.com directly. No auth required for market data.
 // MLB series tickers: KXMLB (moneyline), KXMLBT (totals)
 const KALSHI_TEAM_MAP = {
@@ -618,7 +582,7 @@ async function fetchActiveRosters() {
         const stats = p.person?.stats?.[0]?.splits?.[0]?.stat || {};
         const gs = parseInt(stats.gamesStarted) || 0;
         const g  = parseInt(stats.gamesPitched) || 0;
-        // SP = started at least 1 game AND starts ≥ 50% of appearances
+        // SP = started at least 1 game AND starts â¥ 50% of appearances
         const role = (gs > 0 && gs / Math.max(g, 1) >= 0.5) ? 'SP' : 'RP';
         return {
           name: p.person?.fullName || '',
