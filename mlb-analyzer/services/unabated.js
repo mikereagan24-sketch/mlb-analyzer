@@ -52,14 +52,26 @@ async function fetchUnabatedOdds(dateStr) {
       console.log('[unabated] KC-NYY ALL bt3: '+JSON.stringify(bt3dump).substring(0,3000));
     }
 
-    // Build bySource: msId -> { away: val, home: val } for an0
-    const bySource = {};
+    // Build bySource for ML (an0 only) and totals (all an values)
+    const bySource = {};      // for ML — an0 only
+    const bySourceTot = {};   // for totals — all an values, prefer bt3 with real points
     Object.entries(lines).forEach(([key,val])=>{
       const [si,ms,an]=key.split(':');
-      if(an!=='an0') return;
       const msId=ms.replace('ms','');
-      if(!bySource[msId]) bySource[msId]={};
-      bySource[msId][si==='si0'?'away':'home']=val;
+      const side=si==='si0'?'away':'home';
+      // ML: an0 only
+      if(an==='an0'){
+        if(!bySource[msId]) bySource[msId]={};
+        bySource[msId][side]=val;
+      }
+      // Totals: all an values — keep entry with real points (non-null, non-negative)
+      if(val.bt3?.points!=null && val.bt3.points > 0){
+        if(!bySourceTot[msId]) bySourceTot[msId]={};
+        // Only overwrite if this an has a better (non-null) price
+        if(!bySourceTot[msId][side] || bySourceTot[msId][side].bt3?.points==null){
+          bySourceTot[msId][side]=val;
+        }
+      }
     });
 
     // ML
@@ -83,7 +95,7 @@ async function fetchUnabatedOdds(dateStr) {
     // TOTAL: bt3 can be on si0 (over/away) OR si1 (under/home) depending on book
     let total=null,overPrice=null,underPrice=null,totalSrc=null;
     for(const msId of TOTAL_SOURCES){
-      const s=bySource[msId];
+      const s=bySourceTot[msId];
       if(s?.away?.bt3?.points!=null){
         total=s.away.bt3.points; overPrice=s.away.bt3.americanPrice??null;
         underPrice=s?.home?.bt3?.americanPrice??null;
@@ -97,7 +109,7 @@ async function fetchUnabatedOdds(dateStr) {
     if(total==null){
       const SHARP=['60','36','89','98','95','52','66','104','49','27','25','24','8','10','4'];
       for(const msId of SHARP){
-        const s=bySource[msId];
+        const s=bySourceTot[msId];
         if(s?.away?.bt3?.points!=null){
           total=s.away.bt3.points; overPrice=s.away.bt3.americanPrice??null;
           underPrice=s?.home?.bt3?.americanPrice??null; totalSrc='src'+msId+'(fb)'; break;
