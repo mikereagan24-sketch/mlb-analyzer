@@ -34,7 +34,7 @@ async function fetchUnabatedOdds(dateStr) {
     return false;
   });
 
-  // Dedup by matchup — for same teams on same date, keep the one with most lines (most data)
+  // Dedup by matchup â for same teams on same date, keep the one with most lines (most data)
   // This handles doubleheaders correctly (different start times, same teams)
   const byMatchup = {};
   dateGames.forEach(g=>{
@@ -92,25 +92,14 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
   }
-    for(const msId of TOTAL_SOURCES){
-      const s=bySource[msId];
-      if(s?.home?.bt3?.points!=null){
-        total=s.home.bt3.points; overPrice=s.home.bt3.americanPrice;
-        underPrice=s?.away?.bt3?.americanPrice??null;
-        totalSrc=SOURCE_NAMES[msId]||msId; break;
-      }
-    }
+    for(const msId of TOTAL_SOURCES){const s=bySource[msId];const si0bt3=s?.away?.bt3;const si1bt3=s?.home?.bt3;if(si0bt3?.points!=null){total=si0bt3.points;overPrice=si0bt3.americanPrice??null;underPrice=si1bt3?.americanPrice??null;totalSrc=SOURCE_NAMES[msId]||msId;break;}else if(si1bt3?.points!=null){total=si1bt3.points;overPrice=si0bt3?.americanPrice??null;underPrice=si1bt3.americanPrice??null;totalSrc=SOURCE_NAMES[msId]||msId;break;}}
     // Sharp-only fallback: if no priority source posted, try known sharp/low-vig books only
     // Excludes soft books (1,2,20,67,78,86 etc) that often post stale or incorrect lines
     if(total==null){
       const SHARP_FALLBACK=['60','36','89','98','95','52','66','104','49','27','25','24','8','10','4'];
       for(const msId of SHARP_FALLBACK){
         const s=bySource[msId];
-        if(s?.home?.bt3?.points!=null){
-          total=s.home.bt3.points; overPrice=s.home.bt3.americanPrice;
-          underPrice=s?.away?.bt3?.americanPrice??null;
-          totalSrc='src'+msId+'(fallback)'; break;
-        }
+        const fb0=s?.away?.bt3;const fb1=s?.home?.bt3;if(fb0?.points!=null){total=fb0.points;overPrice=fb0.americanPrice??null;underPrice=fb1?.americanPrice??null;totalSrc='src'+msId+'(fallback)';break;}else if(fb1?.points!=null){total=fb1.points;overPrice=fb0?.americanPrice??null;underPrice=fb1.americanPrice??null;totalSrc='src'+msId+'(fallback)';break;}
       }
     }
 
