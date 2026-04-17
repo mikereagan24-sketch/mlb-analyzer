@@ -1452,6 +1452,18 @@ router.get('/debug/bullpen', (req, res) => {
       const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
       return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'×'+proj.woba.toFixed(4)+' + '+WA+'×'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
     });
+    // Load active roster — prefer RP-tagged pitchers from team_rosters
+    const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=?").all(team);
+    const activeRPs = new Set(rosterRows.filter(r=>r.role==='RP').map(r=>norm(r.player_name)));
+    const hasRoster = activeRPs.size > 0;
+    // Tag each pitcher with roster role
+    pitchers.forEach(p => {
+      const last = norm(p.name).split(' ').pop();
+      if (hasRoster) {
+        const inRoster = activeRPs.has(norm(p.name)) || [...activeRPs].some(n=>n.endsWith(' '+last));
+        p.role = inRoster ? 'RP' : (rosterRows.find(r=>norm(r.player_name).endsWith(' '+last))?.role||'not_on_roster');
+      }
+    });
     const pool=pitchers.filter(p=>p.role==='RP'&&p.proj_sample>=5);
     const use=pool.length>=3?pool:pitchers.filter(p=>p.role==='RP').slice(0,8);
     const tw=use.reduce((s,p)=>s+p.proj_sample,0);
