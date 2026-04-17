@@ -667,7 +667,12 @@ async function triggerScores(){
   const st=document.getElementById('games-status');
   st.innerHTML='<span class="spinner"></span>Fetching scores→¦';
   try{
-    const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date}
+        const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date})});
+    st.textContent='✓ '+r.gamesUpdated+' games updated';
+    await loadGamesFromDB();
+  }catch(e){st.textContent='Error: '+e.message;}
+}
+
 function triggerRosters(){
   const st=document.getElementById('games-status');
   st.innerHTML='<span class="spinner"></span>Pulling rosters...';
@@ -678,10 +683,6 @@ function triggerRosters(){
       else st.innerHTML='✓ Rosters: '+d.pitchers+' pitchers across '+d.teams+' teams';
     })
     .catch(e=>st.innerHTML='<span style="color:var(--red)">'+e.message+'</span>');
-})});
-    st.textContent='✓ '+r.gamesUpdated+' games updated';
-    await loadGamesFromDB();
-  }catch(e){st.textContent='Error: '+e.message;}
 }
 
 function renderGameGrid(games,date){
