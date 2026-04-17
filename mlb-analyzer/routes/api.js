@@ -58,6 +58,35 @@ function tryParse(str) {
   try { return str ? JSON.parse(str) : null; } catch { return null; }
 }
 
+
+router.get('/debug/unabated', async (req, res) => {
+  try {
+    const fetch2 = require('node-fetch');
+    const ubResp = await fetch2('https://content.unabated.com/markets/game-odds/b_gameodds.json?v='+Date.now(), {
+      headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0','Cache-Control':'no-cache'}
+    });
+    const data = await ubResp.json();
+    const teamMap = {};
+    Object.entries(data.teams||{}).forEach(([id,t])=>{ if(t.abbreviation) teamMap[id]=t.abbreviation; });
+    const allGames = data.gameOddsEvents?.['lg5:pt1:pregame'] || [];
+    // Find KC-NYY
+    const game = allGames.find(g => {
+      const t0 = teamMap[g.eventTeams?.['0']?.id];
+      const t1 = teamMap[g.eventTeams?.['1']?.id];
+      return (t0==='KC'&&t1==='NYY')||(t0==='NYY'&&t1==='KC');
+    });
+    if (!game) return res.json({error:'KC-NYY not found', teams: Object.values(teamMap).slice(0,30)});
+    // Dump all bt3 entries
+    const lines = game.gameOddsMarketSourcesLines||{};
+    const bt3 = {};
+    Object.entries(lines).forEach(([k,v])=>{ if(v.bt3!=null) bt3[k]={pts:v.bt3.points,price:v.bt3.americanPrice}; });
+    // Also dump all keys for ms9 (Kalshi)
+    const kalshi = {};
+    Object.entries(lines).forEach(([k,v])=>{ if(k.includes('ms9')) kalshi[k]=v; });
+    res.json({eventStart:game.eventStart, bt3Keys:bt3, kalshiKeys:kalshi});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
 router.post('/upload/:key?', upload.single('file'), (req, res) => {
 // Prevent browser caching on all API responses
 router.use((req, res, next) => {
@@ -137,7 +166,7 @@ router.post('/games/:date/rerun', (req, res) => {
   }
 });
 
-// ââ BULK GAME UPSERT (historical backfill) ââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ BULK GAME UPSERT (historical backfill) Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 router.post('/games/upsert', async (req, res) => {
   try {
     const g = req.body;
@@ -192,7 +221,7 @@ router.get('/dates', (req, res) => {
 
 router.post('/jobs/fix-signals', (req, res) => {
   try {
-    // 1. Remove duplicate signals — keep highest ID per game+type+side
+    // 1. Remove duplicate signals â keep highest ID per game+type+side
     db.prepare(`DELETE FROM bet_signals WHERE id NOT IN (
       SELECT MAX(id) FROM bet_signals GROUP BY game_date, game_id, signal_type, signal_side
     )`).run();
@@ -216,7 +245,7 @@ router.get('/backtest', (req, res) => {
     const { from, to } = req.query;
     const fromDate = from || '2026-01-01';
     const toDate = to || '2099-12-31';
-    // One-time: null out CLV for Total signals (CLV not meaningful — bet_line is a price, not a total)
+    // One-time: null out CLV for Total signals (CLV not meaningful â bet_line is a price, not a total)
     db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' AND clv IS NOT NULL").run();
     // Auto-backfill closing_line from market_line for resolved signals that have none
     db.prepare(`UPDATE bet_signals SET
@@ -319,7 +348,7 @@ router.get('/export/csv', (req, res) => {
   res.send(csv);
 });
 
-// ââ DELETE GAME âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ DELETE GAME Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 router.delete('/games/:date/:gameId', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -331,7 +360,7 @@ router.delete('/games/:date/:gameId', (req, res) => {
   }
 });
 
-// ââ WOBA LOOKUP FOR MATCHUP TAB âââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ WOBA LOOKUP FOR MATCHUP TAB Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 router.get('/woba/game/:date/:gameId', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -428,7 +457,7 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
 });
 
 
-// ── PATCH GAME LINEUP / SP ────────────────────────────────────────────
+// ââ PATCH GAME LINEUP / SP ââââââââââââââââââââââââââââââââââââââââââââ
 router.patch('/games/:date/:gameId/lineup', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -449,7 +478,7 @@ router.patch('/games/:date/:gameId/lineup', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── PATCH GAME ODDS (safe update — only touches columns provided) ─────
+// ââ PATCH GAME ODDS (safe update â only touches columns provided) âââââ
 router.patch('/games/:date/:gameId/odds', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -480,7 +509,7 @@ router.patch('/games/:date/:gameId/odds', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── BACKTEST RESET ────────────────────────────────────────────────────
+// ââ BACKTEST RESET ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // Unlock all odds for a date
 
 // Update wind data for a game and rerun model
@@ -542,7 +571,7 @@ router.get('/debug/woba-keys', (req, res) => {
   res.json(keys);
 });
 
-// ── BET LINE TRACKING ─────────────────────────────────────────────────
+// ââ BET LINE TRACKING âââââââââââââââââââââââââââââââââââââââââââââââââ
 // Lock your actual bet line for a signal
 router.post('/signals/recalc', (req, res) => {
   try {
@@ -590,7 +619,7 @@ router.post('/signals/manual', (req, res) => {
             pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
           }
         } else {
-          // Total: bet_line is the line number not the price — use closing_line as price or -110
+          // Total: bet_line is the line number not the price â use closing_line as price or -110
           const price = parseFloat(sig.closing_line) || -110;
           const stake = price < 0 ? Math.abs(price) : parseFloat((10000/price).toFixed(2));
           pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
@@ -606,7 +635,7 @@ router.post('/signals/manual', (req, res) => {
     const gl = q.getGameById.get(game_date, game_id);
     if (!gl) return res.status(404).json({error:'Game not found: '+game_date+'/'+game_id});
     // category e.g. "2star-dog", "1star-over"
-    const stars = {'1★':'1star','2★':'2star','3★':'3star','unrated':'0star'}[signal_label]||'0star';
+    const stars = {'1â':'1star','2â':'2star','3â':'3star','unrated':'0star'}[signal_label]||'0star';
     const sideKey = signal_type==='ML' ? (Number(market_line)>0?'dog':'fav') : signal_side;
     const category = stars+'-'+sideKey;
     // model line from current DB
@@ -644,12 +673,12 @@ router.post('/signals/:id/bet-line', (req, res) => {
     if (!sig) return res.status(404).json({error:'Signal not found'});
     let clv = null;
     if (sig.closing_line != null && sig.signal_type === 'ML') {
-      // CLV = how much better your line is vs closing (ML only — not meaningful for totals)
+      // CLV = how much better your line is vs closing (ML only â not meaningful for totals)
       const isFav = bet_line < 0;
       if (isFav) {
-        clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 → clv = +20
+        clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 â clv = +20
       } else {
-        clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 → clv = +15
+        clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 â clv = +15
       }
     }
     db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
@@ -666,7 +695,7 @@ router.post('/signals/:id/closing-line', (req, res) => {
     if (closing_line == null) return res.status(400).json({error:'closing_line required'});
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
-    // Recalculate CLV if bet_line exists (ML only — not meaningful for totals)
+    // Recalculate CLV if bet_line exists (ML only â not meaningful for totals)
     let clv = null;
     if (sig.bet_line != null && sig.signal_type === 'ML') {
       const isFav = sig.bet_line < 0;
@@ -697,7 +726,7 @@ router.post('/signals/closing-lines', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── LOOKUP DEBUG ───────────────────────────────────────────────────
+// ââ LOOKUP DEBUG âââââââââââââââââââââââââââââââââââââââââââââââââââ
 router.get('/debug/lookup', (req, res) => {
   try {
     const name = req.query.name || 'S. Woods Richardson';
@@ -731,7 +760,7 @@ router.get('/debug/lookup', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message, stack:err.stack?.split('\n').slice(0,5)}); }
 });
 
-// ── SCORE DEBUG ENDPOINT ──────────────────────────────────────────────
+// ââ SCORE DEBUG ENDPOINT ââââââââââââââââââââââââââââââââââââââââââââââ
 router.get('/debug/scores', async (req, res) => {
   try {
     const date = req.query.date || '2026-04-08';
@@ -753,7 +782,7 @@ router.get('/debug/scores', async (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── KALSHI TEST ENDPOINT (sandbox/debug) ─────────────────────────
+// ââ KALSHI TEST ENDPOINT (sandbox/debug) âââââââââââââââââââââââââ
 
 router.post('/upload/:key?', upload.single('file'), (req, res) => {
   try {
@@ -827,7 +856,7 @@ router.post('/games/:date/rerun', (req, res) => {
   }
 });
 
-// ââ BULK GAME UPSERT (historical backfill) ââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ BULK GAME UPSERT (historical backfill) Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 router.post('/games/upsert', async (req, res) => {
   try {
     const g = req.body;
@@ -983,7 +1012,7 @@ router.get('/export/csv', (req, res) => {
   res.send(csv);
 });
 
-// ââ DELETE GAME âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ DELETE GAME Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 router.delete('/games/:date/:gameId', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -995,7 +1024,7 @@ router.delete('/games/:date/:gameId', (req, res) => {
   }
 });
 
-// ââ WOBA LOOKUP FOR MATCHUP TAB âââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ WOBA LOOKUP FOR MATCHUP TAB Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 router.get('/woba/game/:date/:gameId', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -1092,7 +1121,7 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
 });
 
 
-// ── PATCH GAME LINEUP / SP ────────────────────────────────────────────
+// ââ PATCH GAME LINEUP / SP ââââââââââââââââââââââââââââââââââââââââââââ
 router.patch('/games/:date/:gameId/lineup', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -1113,7 +1142,7 @@ router.patch('/games/:date/:gameId/lineup', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── PATCH GAME ODDS (safe update — only touches columns provided) ─────
+// ââ PATCH GAME ODDS (safe update â only touches columns provided) âââââ
 router.patch('/games/:date/:gameId/odds', (req, res) => {
   try {
     const { date, gameId } = req.params;
@@ -1144,7 +1173,7 @@ router.patch('/games/:date/:gameId/odds', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── BACKTEST RESET ────────────────────────────────────────────────────
+// ââ BACKTEST RESET ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // Unlock all odds for a date
 
 // Update wind data for a game and rerun model
@@ -1206,7 +1235,7 @@ router.get('/debug/woba-keys', (req, res) => {
   res.json(keys);
 });
 
-// ── BET LINE TRACKING ─────────────────────────────────────────────────
+// ââ BET LINE TRACKING âââââââââââââââââââââââââââââââââââââââââââââââââ
 // Lock your actual bet line for a signal
 router.post('/signals/recalc', (req, res) => {
   try {
@@ -1254,7 +1283,7 @@ router.post('/signals/manual', (req, res) => {
             pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
           }
         } else {
-          // Total: bet_line is the line number not the price — use closing_line as price or -110
+          // Total: bet_line is the line number not the price â use closing_line as price or -110
           const price = parseFloat(sig.closing_line) || -110;
           const stake = price < 0 ? Math.abs(price) : parseFloat((10000/price).toFixed(2));
           pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
@@ -1270,7 +1299,7 @@ router.post('/signals/manual', (req, res) => {
     const gl = q.getGameById.get(game_date, game_id);
     if (!gl) return res.status(404).json({error:'Game not found: '+game_date+'/'+game_id});
     // category e.g. "2star-dog", "1star-over"
-    const stars = {'1★':'1star','2★':'2star','3★':'3star','unrated':'0star'}[signal_label]||'0star';
+    const stars = {'1â':'1star','2â':'2star','3â':'3star','unrated':'0star'}[signal_label]||'0star';
     const sideKey = signal_type==='ML' ? (Number(market_line)>0?'dog':'fav') : signal_side;
     const category = stars+'-'+sideKey;
     // model line from current DB
@@ -1313,10 +1342,10 @@ router.post('/signals/:id/bet-line', (req, res) => {
       const isFav = bet_line < 0;
       if (isFav) {
         // Less negative = better for favorite bettors
-        clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 → clv = +20
+        clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 â clv = +20
       } else {
         // More positive = better for underdog bettors
-        clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 → clv = +15
+        clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 â clv = +15
       }
     }
     db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
@@ -1364,7 +1393,7 @@ router.post('/signals/closing-lines', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── LOOKUP DEBUG ───────────────────────────────────────────────────
+// ââ LOOKUP DEBUG âââââââââââââââââââââââââââââââââââââââââââââââââââ
 router.get('/debug/lookup', (req, res) => {
   try {
     const name = req.query.name || 'S. Woods Richardson';
@@ -1398,7 +1427,7 @@ router.get('/debug/lookup', (req, res) => {
   } catch(err) { res.status(500).json({error:err.message, stack:err.stack?.split('\n').slice(0,5)}); }
 });
 
-// ── SCORE DEBUG ENDPOINT ──────────────────────────────────────────────
+// ââ SCORE DEBUG ENDPOINT ââââââââââââââââââââââââââââââââââââââââââââââ
 router.get('/debug/scores', async (req, res) => {
   try {
     const date = req.query.date || '2026-04-08';
@@ -1420,9 +1449,9 @@ router.get('/debug/scores', async (req, res) => {
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
-// ── KALSHI TEST ENDPOINT (removed debug endpoint) ─────────────
+// ââ KALSHI TEST ENDPOINT (removed debug endpoint) âââââââââââââ
 
-// Team abbr → FanGraphs depth chart slug
+// Team abbr â FanGraphs depth chart slug
 const FG_SLUGS = {
   ari:'diamondbacks',phi:'phillies',mia:'marlins',det:'tigers',pit:'pirates',chc:'cubs',
   min:'twins',tor:'blue-jays',ath:'athletics',nym:'mets',cws:'white-sox',kc:'royals',
@@ -1450,9 +1479,9 @@ router.get('/debug/bullpen', (req, res) => {
       const actExact=actIdx[pNorm];
       const actMatch=actExact||Object.entries(actIdx).find(([k])=>k.endsWith(' '+lastName))?.[1]||null;
       const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
-      return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'×'+proj.woba.toFixed(4)+' + '+WA+'×'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
+      return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'Ã'+proj.woba.toFixed(4)+' + '+WA+'Ã'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
     });
-    // Load active roster — prefer RP-tagged pitchers from team_rosters
+    // Load active roster â prefer RP-tagged pitchers from team_rosters
     const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=?").all(team);
     const activeRPs = new Set(rosterRows.filter(r=>r.role==='RP').map(r=>norm(r.player_name)));
     const hasRoster = activeRPs.size > 0;
@@ -1473,7 +1502,7 @@ router.get('/debug/bullpen', (req, res) => {
 });
 
 
-// ── MODEL COMPARISON: old params vs new params ───────────────────────────────
+// ââ MODEL COMPARISON: old params vs new params âââââââââââââââââââââââââââââââ
 // GET /api/model-compare?from=2026-04-09&to=2026-04-12
 // Re-simulates model totals/signals under configurable old vs new parameters
 // and shows which signals would fire/disappear and record impact
@@ -1482,7 +1511,7 @@ router.get('/model-compare', (req, res) => {
     const from = req.query.from || new Date().toISOString().slice(0,10);
     const to   = req.query.to   || from;
 
-    // Old params (baseline — what was hardcoded before today's changes)
+    // Old params (baseline â what was hardcoded before today's changes)
     const OLD_PF  = { ATH:0.96, KC:0.97 }; // all others unchanged
     const oldTempAdj = t => t == null ? 0 :
       (t < 55 ? -0.5 : t < 70 ? 0 : t < 80 ? 0.3 : 0.6);
@@ -1512,15 +1541,15 @@ router.get('/model-compare', (req, res) => {
     const ML_3STAR  = Number(settings.ml_3star_edge  ?? 60);
 
     function totLabel(edge) {
-      if (edge >= TOT_3STAR) return '3★';
-      if (edge >= TOT_2STAR) return '2★';
-      if (edge >= TOT_1STAR) return '1★';
+      if (edge >= TOT_3STAR) return '3â';
+      if (edge >= TOT_2STAR) return '2â';
+      if (edge >= TOT_1STAR) return '1â';
       return null;
     }
     function mlLabel(edge) {
-      if (edge >= ML_3STAR) return '3★';
-      if (edge >= ML_2STAR) return '2★';
-      if (edge >= ML_1STAR) return '1★';
+      if (edge >= ML_3STAR) return '3â';
+      if (edge >= ML_2STAR) return '2â';
+      if (edge >= ML_1STAR) return '1â';
       return null;
     }
     function impliedP(price) {
@@ -1592,7 +1621,7 @@ router.get('/model-compare', (req, res) => {
       const betLine = parseFloat(s.bet_line) || parseFloat(s.market_line) || 0;
       const sigPnl = pnl(betLine, actualWon);
 
-      // Old model: signal fired (it's in the DB) — count it
+      // Old model: signal fired (it's in the DB) â count it
       if (oldLabel) { oldW += actualWon?1:0; oldL += actualWon?0:1; oldPnl += sigPnl; }
 
       // New model: signal fires only if newLabel is non-null
@@ -1623,7 +1652,7 @@ router.get('/model-compare', (req, res) => {
       flippedCount: results.filter(r=>r.flipped).length,
       changes: results,
       params: {
-        old: { parkFactors: OLD_PF, tempFormula: 'step: <55→-0.5, <70→0, <80→+0.3, else +0.6' },
+        old: { parkFactors: OLD_PF, tempFormula: 'step: <55â-0.5, <70â0, <80â+0.3, else +0.6' },
         new: { parkFactors: NEW_PF, tempFormula: 'continuous: clamp((T-65)*0.052, -1.3, +1.3)' }
       }
     });
@@ -1631,7 +1660,7 @@ router.get('/model-compare', (req, res) => {
 });
 
 
-// DELETE /api/signals/:id — hard delete a specific signal (bypasses bet_line protection)
+// DELETE /api/signals/:id â hard delete a specific signal (bypasses bet_line protection)
 router.delete('/signals/:id', (req, res) => {
   try {
     const id = parseInt(req.params.id);
