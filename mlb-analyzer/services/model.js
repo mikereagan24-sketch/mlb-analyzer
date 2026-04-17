@@ -1,4 +1,4 @@
-/** Model service — all settings from DB, no hardcoded constants */
+/** Model service â all settings from DB, no hardcoded constants */
 const PA_WEIGHTS = [4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
@@ -30,13 +30,13 @@ function fuzzyLookup(keyMap, name, teamHint) {
     if (keyMap[tk]) return keyMap[tk];
   }
   if (keyMap[k]) return keyMap[k];
-  // Strip generational suffixes from lookup key (e.g. "lance mccullers jr" → "lance mccullers")
+  // Strip generational suffixes from lookup key (e.g. "lance mccullers jr" â "lance mccullers")
   const kStripped = stripSfx(k);
   if (kStripped !== k) {
     if (teamHint && keyMap[kStripped + ' ' + teamHint.toLowerCase()]) return keyMap[kStripped + ' ' + teamHint.toLowerCase()];
     if (keyMap[kStripped]) return keyMap[kStripped];
   }
-  // Add common suffixes in case index has them but name lookup doesn't (e.g. lookup "lance mccullers" → index has "lance mccullers jr")
+  // Add common suffixes in case index has them but name lookup doesn't (e.g. lookup "lance mccullers" â index has "lance mccullers jr")
   for (const sfx of ['jr','sr','ii','iii','iv']) {
     if (teamHint && keyMap[k+' '+sfx+' '+teamHint.toLowerCase()]) return keyMap[k+' '+sfx+' '+teamHint.toLowerCase()];
     if (keyMap[k+' '+sfx]) return keyMap[k+' '+sfx];
@@ -60,7 +60,7 @@ function fuzzyLookup(keyMap, name, teamHint) {
     });
     if (matches.length===1) return matches[0][1];
     // Compound surname fallback: try each word in lookup key as last name
-    // e.g. "s woods richardson" — try last="woods" matching "simeon woods"
+    // e.g. "s woods richardson" â try last="woods" matching "simeon woods"
     if (matches.length===0 && parts.length>2) {
       for (let wi=1;wi<parts.length;wi++) {
         const altLast=parts[wi];
@@ -194,9 +194,9 @@ function runModel(game, wobaIdx, settings) {
   const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT)}));
 
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,game.homeBullpenVsR,game.homeBullpenVsL)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,game.awayBullpenVsR,game.awayBullpenVsL)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : 0.315;
   const hTeamWoba = hWp>0 ? hWs/hWp : 0.315;
@@ -215,13 +215,13 @@ function runModel(game, wobaIdx, settings) {
 
   const windFactor = game.wind_factor || 0;
   const tempRunAdj = game.temp_run_adj || 0;
-  const windRunAdj = windFactor * 2.0; // factor=1.0 → +2 runs, -1.0 → -2 runs
+  const windRunAdj = windFactor * 2.0; // factor=1.0 â +2 runs, -1.0 â -2 runs
   const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
   return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj };
 }
 
 function catKey(signalType, signalSide, signalLabel, marketLine) {
-  const lbl = (signalLabel||'').replace('★','star').replace('*','star').toLowerCase();
+  const lbl = (signalLabel||'').replace('â','star').replace('*','star').toLowerCase();
   if (signalType==='ML') { const isFav=parseInt(marketLine)<0; return lbl+'-'+(isFav?'fav':'dog'); }
   return lbl+'-'+signalSide;
 }
@@ -250,9 +250,9 @@ function getSignals(game, modelResult, settings) {
   const homeEdge = (hMarket > 0 && hModel < 0) || (hMarket > hModel) ? mlEdge(hMarket, hModel) : 0;
 
   function mlLabel(edge) {
-    if (edge >= ML_3STAR) return '3★';
-    if (edge >= ML_2STAR) return '2★';
-    if (edge >= ML_1STAR) return '1★';
+    if (edge >= ML_3STAR) return '3â';
+    if (edge >= ML_2STAR) return '2â';
+    if (edge >= ML_1STAR) return '1â';
     return null;
   }
 
@@ -277,9 +277,9 @@ function getSignals(game, modelResult, settings) {
   const underEdge = modelUnderP - underImplied;
 
   function totLabel(edge) {
-    if (edge >= TOT_3STAR) return '3★';
-    if (edge >= TOT_2STAR) return '2★';
-    if (edge >= TOT_1STAR) return '1★';
+    if (edge >= TOT_3STAR) return '3â';
+    if (edge >= TOT_2STAR) return '2â';
+    if (edge >= TOT_1STAR) return '1â';
     return null;
   }
 
@@ -303,8 +303,8 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
   }
 
   // "To win $100" P&L:
-  //   +odds (dog):  stake = 10000/odds  → win +100, loss -stake
-  //   -odds (fav):  stake = abs(odds)   → win +100, loss -stake
+  //   +odds (dog):  stake = 10000/odds  â win +100, loss -stake
+  //   -odds (fav):  stake = abs(odds)   â win +100, loss -stake
   function toWin100(ml, won) {
     ml = parseFloat(ml);
     if (isNaN(ml) || ml === 0) return null;
@@ -321,7 +321,7 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     const pnl = toWin100(line, betTeamWon);
     return { outcome: betTeamWon ? 'win' : 'loss', pnl };
   } else {
-    // Total — use -110 vig basis (standard): stake $110 to win $100
+    // Total â use -110 vig basis (standard): stake $110 to win $100
     // But if over_price/under_price available via signal.overPrice/underPrice, use that
     const tot = parseFloat(marketTotal) || parseFloat(signal.marketLine);
     if (isNaN(tot)) return { outcome: 'pending', pnl: 0 };
@@ -337,7 +337,7 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     const pnl = toWin100(line, covered);
     return { outcome: covered ? 'win' : 'loss', pnl };
   }
-}/** Model service — all settings from DB, no hardcoded constants */
+}/** Model service â all settings from DB, no hardcoded constants */
 function calcPnl(signal, awayScore, homeScore, marketTotal) {
   if(awayScore==null||homeScore==null) return {outcome:'pending',pnl:0};
   const actualTotal=awayScore+homeScore;
@@ -352,7 +352,7 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
   } else {
     // marketTotal param comes from game_log.market_total; fall back to signal.marketLine
     const line = parseFloat(marketTotal ?? signal.marketLine);
-    if(isNaN(line) || line === 0) return {outcome:'pending',pnl:null}; // no total — can't score
+    if(isNaN(line) || line === 0) return {outcome:'pending',pnl:null}; // no total â can't score
     if(actualTotal===line) return {outcome:'push',pnl:0};
     const hitOver=actualTotal>line;
     const betWon=signal.side==='over'?hitOver:!hitOver;
