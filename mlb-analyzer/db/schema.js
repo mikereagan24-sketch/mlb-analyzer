@@ -1,4 +1,4 @@
-const Da
+const D
 
 db.prepare(`CREATE TABLE IF NOT EXISTS team_rosters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9,7 +9,8 @@ db.prepare(`CREATE TABLE IF NOT EXISTS team_rosters (
   hand TEXT,
   updated_at TEXT DEFAULT (datetime('now')),
   UNIQUE(team, player_name)
-)`).run();tabase = require('better-sqlite3');
+)`).run();
+atabase = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
