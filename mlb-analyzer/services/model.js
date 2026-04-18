@@ -343,30 +343,6 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     const pnl = toWin100(line, covered);
     return { outcome: covered ? 'win' : 'loss', pnl };
   }
-}/** Model service â all settings from DB, no hardcoded constants */
-function calcPnl(signal, awayScore, homeScore, marketTotal) {
-  if(awayScore==null||homeScore==null) return {outcome:'pending',pnl:0};
-  const actualTotal=awayScore+homeScore;
-  if(signal.type==='ML'){
-    if(awayScore===homeScore) return {outcome:'push',pnl:0};
-    const betTeamWon=signal.side==='away'?awayScore>homeScore:homeScore>awayScore;
-    const ml=parseInt(signal.marketLine);
-    // If marketLine is missing/null, still record outcome but pnl is null
-    if(isNaN(ml)||ml===0) return {outcome:betTeamWon?'win':'loss',pnl:null};
-    const pnl=betTeamWon?(ml>0?ml:parseFloat((100/Math.abs(ml)*100).toFixed(2))):-100;
-    return {outcome:betTeamWon?'win':'loss',pnl:parseFloat(pnl.toFixed(2))};
-  } else {
-    // marketTotal param comes from game_log.market_total; fall back to signal.marketLine
-    const line = parseFloat(marketTotal ?? signal.marketLine);
-    if(isNaN(line) || line === 0) return {outcome:'pending',pnl:null}; // no total â can't score
-    if(actualTotal===line) return {outcome:'push',pnl:0};
-    const hitOver=actualTotal>line;
-    const betWon=signal.side==='over'?hitOver:!hitOver;
-    // Use over/under price if available, else default -110
-    const price = signal.side==='over' ? (signal.overPrice||-110) : (signal.underPrice||-110);
-    const payout = price>0 ? price : parseFloat((10000/Math.abs(price)).toFixed(2));
-    return {outcome:betWon?'win':'loss',pnl:betWon?parseFloat(payout.toFixed(2)):-100};
-  }
 }
 
 module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,impliedP };

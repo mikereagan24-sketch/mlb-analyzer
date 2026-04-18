@@ -533,6 +533,7 @@ async function refreshLineups(){
     } else {
       st.textContent='Error: '+r.error;
     }
+    await rerunDate(date);
   }catch(e){st.textContent='Error: '+e.message;}
 }
 
@@ -657,6 +658,7 @@ async function pullWeather(btn){
       document.getElementById('games-status').textContent='⛅ Weather updated for '+updated+' parks'+(skipped?' ('+skipped+' skipped)':'');
       if(btn){btn.textContent='Pull Weather';btn.disabled=false;}
       loadGamesFromDB();
+      await rerunDate(date);
     }catch(e){
       if(btn){btn.textContent='Pull Weather';btn.disabled=false;}
       console.error('[weather]',e);
@@ -672,6 +674,7 @@ async function pullOdds(){
     const r=await api('/jobs/odds',{method:'POST',body:JSON.stringify({date})});
     if(r.success){st.textContent='✓ '+r.updated+' games updated from '+(r.source||'Kalshi')+'/DK';await loadGamesFromDB();}
     else{st.textContent='Error: '+r.error;}
+    await rerunDate(date);
   }catch(e){st.textContent='Error: '+e.message;}
 }
 async function triggerScores(){
@@ -682,6 +685,7 @@ async function triggerScores(){
         const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date})});
     st.textContent='✓ '+r.gamesUpdated+' games updated';
     await loadGamesFromDB();
+    await rerunDate(date);
   }catch(e){st.textContent='Error: '+e.message;}
 }
 
