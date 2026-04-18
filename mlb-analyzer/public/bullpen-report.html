@@ -80,9 +80,13 @@ input[type=date], .btn{padding:7px 12px;font-size:12px;border:.5px solid var(--b
 .blend{color:var(--text);font-weight:500}
 .pool-yes{color:var(--green);font-weight:600}
 .pool-no{color:var(--text3)}
-.team-footer{margin-top:10px;padding:8px 10px;background:var(--green-bg);border:.5px solid var(--green-border);border-radius:var(--r-md);display:flex;justify-content:space-around;gap:8px;font-size:11px}
+.team-footer{margin-top:10px;padding:10px 12px;background:var(--green-bg);border:1px solid var(--green-border);border-radius:var(--r-md);font-size:11px}
+.team-footer-row{display:flex;justify-content:space-around;align-items:center;gap:8px;flex-wrap:wrap}
 .team-footer .fl{color:var(--green);text-transform:uppercase;letter-spacing:.05em;font-size:10px;font-weight:600;margin-right:4px}
-.team-footer .fv{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.team-footer .fv{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums;font-size:13px}
+.team-footer .fn{color:var(--text2);font-weight:500;font-size:10px}
+.team-footer-note{margin-top:6px;padding-top:6px;border-top:.5px dashed var(--green-border);text-align:center;font-size:10px;color:var(--text2)}
+.team-footer-note b{color:var(--yellow);font-weight:600}
 .status{font-size:12px;color:var(--text2);padding:8px 0}
 .status.err{color:var(--red)}
 .spinner{display:inline-block;width:11px;height:11px;border:2px solid var(--border2);border-top-color:var(--navy);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px;margin-right:6px}
@@ -174,6 +178,11 @@ function renderTeam(team, teamAbbr){
   const emptyRow = pitchers.length ? '' :
     '<tr><td colspan="10" class="muted" style="text-align:center;padding:12px">No pitchers to show</td></tr>';
 
+  const poolCount = team.pitchers.filter(p => p.in_pool).length;
+  const fatigueCount = team.pitchers.filter(p => p.fatigued).length;
+  const lhb = team.team_bullpen_woba_vs_lhb != null ? Number(team.team_bullpen_woba_vs_lhb).toFixed(3) : '—';
+  const rhb = team.team_bullpen_woba_vs_rhb != null ? Number(team.team_bullpen_woba_vs_rhb).toFixed(3) : '—';
+
   return ''
     + '<div class="team-card">'
     +   '<div class="team-head">'
@@ -192,9 +201,15 @@ function renderTeam(team, teamAbbr){
     +     '<tbody>'+rows+emptyRow+'</tbody>'
     +   '</table>'
     +   '</div>'
-    +   '<div class="team-footer">'
-    +     '<div><span class="fl">Bullpen vs LHB</span><span class="fv">'+(team.team_bullpen_woba_vs_lhb!=null?Number(team.team_bullpen_woba_vs_lhb).toFixed(4):'—')+'</span></div>'
-    +     '<div><span class="fl">Bullpen vs RHB</span><span class="fv">'+(team.team_bullpen_woba_vs_rhb!=null?Number(team.team_bullpen_woba_vs_rhb).toFixed(4):'—')+'</span></div>'
+    +   '<div class="team-footer" title="This is the bullpen wOBA the model uses — average of in-pool pitchers only, fatigued pitchers excluded">'
+    +     '<div class="team-footer-row">'
+    +       '<div><span class="fl">Pool avg vs LHB</span><span class="fv">'+lhb+'</span></div>'
+    +       '<div><span class="fl">Pool avg vs RHB</span><span class="fv">'+rhb+'</span></div>'
+    +       '<div><span class="fl">Pool size</span><span class="fv">'+poolCount+'</span><span class="fn"> of '+team.pitchers.length+'</span></div>'
+    +     '</div>'
+    +     (fatigueCount > 0
+    +       ? '<div class="team-footer-note"><b>'+fatigueCount+'</b> '+(fatigueCount===1?'pitcher':'pitchers')+' excluded for fatigue</div>'
+    +       : '<div class="team-footer-note">No pitchers excluded for fatigue</div>')
     +   '</div>'
     + '</div>';
 }
