@@ -331,8 +331,8 @@ q.getPitcherLogForTeam = db.prepare(
 
 // Returns an array of { pitcher_name, reasons[] } for pitchers who should
 // be excluded from a team's bullpen pool on gameDate based on recent usage.
-// Rules: pitched yesterday (back-to-back), pitched 3 of last 4 days (3in4),
-// threw >29 pitches yesterday (pitch-count).
+// Rules: pitched both yesterday AND the day before (2-consecutive),
+// pitched 3 of last 4 days (3in4), threw >29 pitches yesterday (pitch-count).
 q.getFatiguedPitchers = (teamAbbr, gameDate) => {
   if (!gameDate) return [];
   const teamU = (teamAbbr||'').toUpperCase();
@@ -342,6 +342,7 @@ q.getFatiguedPitchers = (teamAbbr, gameDate) => {
     return d.toISOString().slice(0,10);
   };
   const yesterday = addDays(-1);
+  const dayBefore = addDays(-2);
   const fourDaysAgo = addDays(-4);
   const fiveDaysAgo = addDays(-5);
   const rows = q.getPitcherLogForTeam.all(teamU, fiveDaysAgo, gameDate);
@@ -355,7 +356,7 @@ q.getFatiguedPitchers = (teamAbbr, gameDate) => {
   for (const [name, apps] of Object.entries(byPitcher)) {
     const dates = new Set(apps.map(a => a.game_date));
     const reasons = [];
-    if (dates.has(yesterday)) reasons.push('back-to-back');
+    if (dates.has(yesterday) && dates.has(dayBefore)) reasons.push('2-consecutive');
     const last4 = apps.filter(a => a.game_date >= fourDaysAgo);
     if (last4.length >= 3) reasons.push('3in4');
     const yApp = apps.find(a => a.game_date === yesterday);
