@@ -131,20 +131,16 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF) {
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 
-function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT) {
+function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, BULLPEN_AVG, BAT_DFLT_START, BAT_DFLT_OPP) {
   const eff = effHand(batter.hand, pitcherHand);
-  // Pitcher wOBA: SP_PIT_WEIGHT% from SP split vs batter's hand,
-  // RELIEF_PIT_WEIGHT% from team bullpen wOBA (proj+act blend)
-  const BULLPEN_AVG = 0.318;
   const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
   const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
   const pitWvsBatter = eff === 'L' ? pitWvsL : pitWvsR;
   const pitW = pitWvsBatter * spPitW + BULLPEN_AVG * relPitW;
-  // Batter wOBA: SP_WEIGHT% vs SP hand, RELIEF_WEIGHT% vs opposite hand (bullpen blend)
   const spW  = (SP_WEIGHT  != null) ? SP_WEIGHT  : 0.77;
   const relW = (RELIEF_WEIGHT != null) ? RELIEF_WEIGHT : 0.23;
-  const vsStart = pitcherHand === 'R' ? (batter.vsRHP ?? 0.315) : (batter.vsLHP ?? 0.315);
-  const vsOpp   = pitcherHand === 'R' ? (batter.vsLHP ?? 0.325) : (batter.vsRHP ?? 0.305);
+  const vsStart = pitcherHand === 'R' ? (batter.vsRHP ?? BAT_DFLT_START) : (batter.vsLHP ?? BAT_DFLT_START);
+  const vsOpp   = pitcherHand === 'R' ? (batter.vsLHP ?? BAT_DFLT_OPP)   : (batter.vsRHP ?? BAT_DFLT_OPP);
   const batW = vsStart * spW + vsOpp * relW;
   return pitW * W_PIT + batW * W_BAT;
 }
@@ -242,6 +238,7 @@ function getSignals(game, modelResult, settings) {
   const TOT_1STAR = typeof settings.TOT_LEAN_EDGE  !== 'undefined' ? Number(settings.TOT_LEAN_EDGE)  : 0.04;
   const TOT_2STAR = typeof settings.TOT_VALUE_EDGE !== 'undefined' ? Number(settings.TOT_VALUE_EDGE) : 0.08;
   const TOT_3STAR = typeof settings.TOT_3STAR_EDGE !== 'undefined' ? Number(settings.TOT_3STAR_EDGE) : 0.12;
+  const TOT_SLOPE = typeof settings.TOT_SLOPE      !== 'undefined' ? Number(settings.TOT_SLOPE)      : 0.08;
 
   const signals = [];
   const aModel  = modelResult.aML;
