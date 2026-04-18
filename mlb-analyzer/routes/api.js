@@ -1078,6 +1078,103 @@ router.get('/debug/woba-lookup', (req, res) => {
   res.json(results);
 });
 
+
+// Debug: per-pitcher bullpen wOBA breakdown for each game on a date
+router.get('/debug/bullpen-report', (req, res) => {
+  try {
+    const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const settings = getSettings();
+    const W_PROJ = settings.W_PROJ != null ? Number(settings.W_PROJ) : 0.65;
+    const W_ACT  = settings.W_ACT  != null ? Number(settings.W_ACT)  : 0.35;
+
+    const normName = n => (n||'').toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g,'')
+      .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
+    const stripSfx = n => n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();
+    const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
+    const idx = {};
+    for (const k of KEYS) {
+      idx[k] = {};
+      const rows = db.prepare('SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=?').all(k);
+      for (const r of rows) idx[k][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
+    }
+
+    const lookup = (key, name, teamAbbr) => {
+      const nm = normName(name);
+      const tl = (teamAbbr||'').toLowerCase();
+      if (tl && idx[key][nm+' '+tl]) return idx[key][nm+' '+tl];
+      if (idx[key][nm]) return idx[key][nm];
+      const sk = stripSfx(nm);
+      if (sk !== nm) {
+        if (tl && idx[key][sk+' '+tl]) return idx[key][sk+' '+tl];
+        if (idx[key][sk]) return idx[key][sk];
+      }
+      return null;
+    };
+    const blend = (proj, act) => {
+      if (proj != null && act != null) return parseFloat((W_PROJ*proj + W_ACT*act).toFixed(4));
+      if (proj != null) return parseFloat(proj.toFixed(4));
+      if (act != null) return parseFloat(act.toFixed(4));
+      return null;
+    };
+    const mean = (arr) => arr.length ? parseFloat((arr.reduce((s,x)=>s+x,0)/arr.length).toFixed(4)) : null;
+
+    const games = db.prepare('SELECT game_id, away_team, home_team, away_sp, home_sp FROM game_log WHERE game_date=? ORDER BY game_id').all(date);
+    const rosterStmt = db.prepare('SELECT player_name, role, hand FROM team_rosters WHERE team=? ORDER BY role, player_name');
+
+    const buildTeamReport = (teamAbbr, spName) => {
+      const teamU = (teamAbbr||'').toUpperCase();
+      const spNorm = normName(spName);
+      const spLast = spNorm.split(' ').pop();
+      const roster = rosterStmt.all(teamU);
+      const pitchers = roster.map(p => {
+        const pNorm = normName(p.player_name);
+        const pLast = pNorm.split(' ').pop();
+        const projL = lookup('pit-proj-lhb', p.player_name, teamU);
+        const projR = lookup('pit-proj-rhb', p.player_name, teamU);
+        const actL  = lookup('pit-act-lhb',  p.player_name, teamU);
+        const actR  = lookup('pit-act-rhb',  p.player_name, teamU);
+        const blended_vs_lhb = blend(projL?.woba, actL?.woba);
+        const blended_vs_rhb = blend(projR?.woba, actR?.woba);
+        const isSP = !!spLast && (pNorm === spNorm || pLast === spLast);
+        const in_pool = p.role === 'RP' && !isSP;
+        return {
+          name: p.player_name,
+          role: p.role,
+          hand: p.hand,
+          proj_vs_lhb: projL?.woba ?? null,
+          proj_vs_rhb: projR?.woba ?? null,
+          act_vs_lhb:  actL?.woba  ?? null,
+          act_vs_rhb:  actR?.woba  ?? null,
+          blended_vs_lhb,
+          blended_vs_rhb,
+          in_pool,
+        };
+      });
+      const poolL = pitchers.filter(p => p.in_pool && p.blended_vs_lhb != null).map(p => p.blended_vs_lhb);
+      const poolR = pitchers.filter(p => p.in_pool && p.blended_vs_rhb != null).map(p => p.blended_vs_rhb);
+      return {
+        sp_name: spName || null,
+        pitchers,
+        team_bullpen_woba_vs_lhb: mean(poolL),
+        team_bullpen_woba_vs_rhb: mean(poolR),
+      };
+    };
+
+    const report = games.map(g => ({
+      game_id: g.game_id,
+      away_team: g.away_team,
+      home_team: g.home_team,
+      away: buildTeamReport(g.away_team, g.away_sp),
+      home: buildTeamReport(g.home_team, g.home_sp),
+    }));
+
+    res.json({ date, weights: { W_PROJ, W_ACT }, game_count: games.length, games: report });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 module.exports = router;
 
 
