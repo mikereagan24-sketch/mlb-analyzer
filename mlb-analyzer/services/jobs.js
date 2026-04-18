@@ -47,6 +47,15 @@ function getSettings() {
     RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
     BP_STRONG_WEIGHT: num('bp_strong_weight', 0.65),
     BP_WEAK_WEIGHT: num('bp_weak_weight', 0.35),
+    BULLPEN_AVG:    num('bullpen_avg',    0.318),
+    WOBA_BASELINE:  num('woba_baseline',  0.230),
+    PYTH_EXP:       num('pyth_exp',       1.83),
+    WIND_SCALE:     num('wind_scale',     2.0),
+    TOT_SLOPE:      num('tot_slope',      0.08),
+    MIN_PA:         num('min_pa',         60),
+    MIN_BF:         num('min_bf',         100),
+    BAT_DFLT_START: num('bat_dflt_start', 0.315),
+    BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
