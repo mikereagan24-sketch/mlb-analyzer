@@ -970,7 +970,14 @@ async function loadDataQuality(date, games, containerId) {
       var hbat = (wd.home_batters||[]).filter(function(b){return BAD.includes(b.source);});
       if (asb||hsb||abat.length||hbat.length) {
         issues.push({id:g.game_id,at:g.away_team,ht:g.home_team,
-          asp:asb?(g.away_sp||'?'):null, hsp:hsb?(g.home_sp||'?'):null,
+
+          // Bullpen wOBA check
+          try {
+            const awayBp = await fetch('/api/debug/bullpen?team='+g.away_team+'&sp='+encodeURIComponent(g.away_sp||'')+'&date='+date).then(r=>r.json());
+            const homeBp = await fetch('/api/debug/bullpen?team='+g.home_team+'&sp='+encodeURIComponent(g.home_sp||'')+'&date='+date).then(r=>r.json());
+            if (!awayBp.bullpen_woba || awayBp.pool_size < 2) issues.push(g.away_team+' bullpen: no wOBA data (pool='+( awayBp.pool_size||0)+') — pull rosters');
+            if (!homeBp.bullpen_woba || homeBp.pool_size < 2) issues.push(g.home_team+' bullpen: no wOBA data (pool='+(homeBp.pool_size||0)+') — pull rosters');
+          } catch(bpe) {}          asp:asb?(g.away_sp||'?'):null, hsp:hsb?(g.home_sp||'?'):null,
           ab:abat.map(function(b){return b.name;}), hb:hbat.map(function(b){return b.name;})});
       }
     } catch(e) {}
