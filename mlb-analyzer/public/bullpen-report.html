@@ -61,7 +61,10 @@ input[type=date], .btn{padding:7px 12px;font-size:12px;border:.5px solid var(--b
 .tbl td{padding:5px 4px;border-bottom:.5px solid var(--border);text-align:center;vertical-align:middle;white-space:nowrap}
 .tbl tr:last-child td{border-bottom:none}
 .tbl tr.out-of-pool{opacity:.55}
+.tbl tr.is-fatigued{opacity:.6;background:rgba(176,122,0,.05)}
 .tbl tr.is-sp td:first-child::after{content:' ★';color:var(--yellow);font-size:9px}
+.fatigue-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600;background:var(--yellow-bg);color:var(--yellow);border:.5px solid var(--yellow-border);letter-spacing:.02em;opacity:.85}
+.fatigue-badge + .fatigue-badge{margin-left:3px}
 .name{font-weight:500;color:var(--text)}
 .role-sp{color:var(--blue);font-weight:500}
 .role-rp{color:var(--text2)}
@@ -147,9 +150,15 @@ function renderTeam(team, teamAbbr){
     ? team.pitchers.filter(p => p.in_pool)
     : team.pitchers;
   const rows = pitchers.map(p => {
-    const cls = (!p.in_pool ? 'out-of-pool' : '') + (p.name === team.sp_name ? ' is-sp' : '');
-    return '<tr class="'+cls.trim()+'">'
-      + '<td><span class="name">'+escapeHtml(p.name)+'</span></td>'
+    const classes = [];
+    if (!p.in_pool) classes.push('out-of-pool');
+    if (p.fatigued) classes.push('is-fatigued');
+    if (p.name === team.sp_name) classes.push('is-sp');
+    const badges = (p.fatigue_reasons || [])
+      .map(r => '<span class="fatigue-badge" title="Excluded for fatigue: '+escapeHtml(r)+'">'+escapeHtml(r)+'</span>')
+      .join('');
+    return '<tr class="'+classes.join(' ')+'">'
+      + '<td><span class="name">'+escapeHtml(p.name)+'</span>'+badges+'</td>'
       + '<td>'+roleBadge(p.role||'?')+'</td>'
       + '<td>'+handPill(p.hand)+'</td>'
       + '<td class="proj">'+fmtWoba(p.proj_vs_lhb)+'</td>'
