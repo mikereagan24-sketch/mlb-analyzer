@@ -1126,12 +1126,8 @@ router.get('/debug/bullpen-report', (req, res) => {
       const roster = rosterStmt.all(teamU);
       const fatigued = q.getFatiguedPitchers(teamU, date);
       const fatigueByExact = {};
-      const fatigueByLast = {};
       for (const f of fatigued) {
-        const nm = normName(f.pitcher_name);
-        fatigueByExact[nm] = f.reasons;
-        const last = nm.split(' ').pop();
-        if (last) fatigueByLast[last] = f.reasons;
+        fatigueByExact[normName(f.pitcher_name)] = f.reasons;
       }
       const pitchers = roster.map(p => {
         const pNorm = normName(p.player_name);
@@ -1143,7 +1139,7 @@ router.get('/debug/bullpen-report', (req, res) => {
         const blended_vs_lhb = blend(projL?.woba, actL?.woba);
         const blended_vs_rhb = blend(projR?.woba, actR?.woba);
         const isSP = !!spLast && (pNorm === spNorm || pLast === spLast);
-        const fatigue_reasons = fatigueByExact[pNorm] || fatigueByLast[pLast] || null;
+        const fatigue_reasons = fatigueByExact[pNorm] || null;
         const fatigued_flag = !!fatigue_reasons;
         const in_pool = p.role === 'RP' && !isSP && !fatigued_flag;
         return {
