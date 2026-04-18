@@ -45,6 +45,8 @@ function getSettings() {
     RELIEF_WEIGHT:     num('relief_weight',     0.23),
     SP_PIT_WEIGHT:     num('sp_pit_weight',     0.80),
     RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
+    BP_STRONG_WEIGHT: num('bp_strong_weight', 0.65),
+    BP_WEAK_WEIGHT: num('bp_weak_weight', 0.35),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -73,19 +75,23 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const homeAbbr = awayParts[1]||'';
   const awaySpName = gameRow.away_pitcher||'';
   const homeSpName = gameRow.home_pitcher||'';
-  let awayBpVsR = 0.318, awayBpVsL = 0.318, homeBpVsR = 0.318, homeBpVsL = 0.318;
+  const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
+  const _wAct = (settings && settings.W_ACT != null) ? parseFloat(settings.W_ACT) : 0.35;
+  const _bpStrong = (settings && settings.BP_STRONG_WEIGHT != null) ? parseFloat(settings.BP_STRONG_WEIGHT) : 0.65;
+  const _bpWeak = (settings && settings.BP_WEAK_WEIGHT != null) ? parseFloat(settings.BP_WEAK_WEIGHT) : 0.35;
+  const LEAGUE_BP = 0.318;
+  let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
+  let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;
   try {
-    if (q.getBullpenWoba) {
-      const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
-      const _wAct = (settings && settings.W_ACT != null) ? parseFloat(settings.W_ACT) : 0.35;
-      const abr = q.getBullpenWoba(awayAbbr, awaySpName, 'rhb', _wProj, _wAct);
-      const abl = q.getBullpenWoba(awayAbbr, awaySpName, 'lhb', _wProj, _wAct);
-      const hbr = q.getBullpenWoba(homeAbbr, homeSpName, 'rhb', _wProj, _wAct);
-      const hbl = q.getBullpenWoba(homeAbbr, homeSpName, 'lhb', _wProj, _wAct);
-      if (abr?.woba) awayBpVsR = abr.woba;
-      if (abl?.woba) awayBpVsL = abl.woba;
-      if (hbr?.woba) homeBpVsR = hbr.woba;
-      if (hbl?.woba) homeBpVsL = hbl.woba;
+    if (q.getBullpenWobaBlended) {
+      const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
+      const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrong, _bpWeak, _wProj, _wAct);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrong, _bpWeak, _wProj, _wAct);
+      if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
+      if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
+      if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;
+      if (homeBp?.vsLHB) homeBpVsL = homeBp.vsLHB;
     }
   } catch(e) { /* fallback to league avg */ }
   const game = {
