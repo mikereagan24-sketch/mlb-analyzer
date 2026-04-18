@@ -604,10 +604,10 @@ async function pullWeather(btn){
           +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
           +'&start_date='+gDate+'&end_date='+gDate;
         const wd=await fetch(url).then(r=>r.json());
-        const idx=Math.min(gameHour,(wd.hourly?.time||[]).length-1);
-        const speed=parseFloat((wd.hourly?.wind_speed_10m?.[idx]||0).toFixed(1));
-        const dir=Math.round(wd.hourly?.wind_direction_10m?.[idx]||0);
-        const temp=parseFloat((wd.hourly?.temperature_2m?.[idx]||65).toFixed(1));
+        const idx=Math.min(gameHour,((wd.hourly && wd.hourly.time)||[]).length-1);
+        const speed=parseFloat(((wd.hourly && wd.hourly.wind_speed_10m && wd.hourly.wind_speed_10m[idx])||0).toFixed(1));
+        const dir=Math.round((wd.hourly && wd.hourly.wind_direction_10m && wd.hourly.wind_direction_10m[idx])||0);
+        const temp=parseFloat(((wd.hourly && wd.hourly.temperature_2m && wd.hourly.temperature_2m[idx])||65).toFixed(1));
         // Wind factor: <8mph negligible; threshold-based above
         const windTo=(dir+180)%360;
         const diff=windTo-park.cfDir;
@@ -616,7 +616,7 @@ async function pullWeather(btn){
         // <55F=-0.5 runs, 55-70=neutral, 70-80=+0.3, 80+=+0.6
         const tempAdj=temp<55?-0.5:temp<70?0:temp<80?0.3:0.6;
         // Roof status logic — behavior-profile based
-        const precipProb=wd.hourly?.precipitation_probability?.[idx]||0;
+        const precipProb=(wd.hourly && wd.hourly.precipitation_probability && wd.hourly.precipitation_probability[idx])||0;
         const gameMonth=new Date(date).getMonth()+1;
         let roofClosed=false;
         let roofStatus='open';
@@ -899,8 +899,8 @@ function renderModelOutput(g) {
 async function renderMatchupGame(id){
   const g=currentGames.find(x=>x.game_id===id);
   if(!g){document.getElementById('mu-content').innerHTML='<div class="notice">Select a game above</div>';
-    if(typeof gDate!=='undefined'&&typeof id!=='undefined') loadDataQuality(gDate,[{game_id:id,away_team:id.split('-')[0]?.toUpperCase()||'',home_team:id.split('-')[1]?.toUpperCase()||''}],'dq-matchup');
-  var _gid=document.getElementById('mu-selector')?.value||''; var _gdate=document.getElementById('games-date')?.value||''; if(_gid) loadDataQuality(_gdate,[{game_id:_gid,away_team:(_gid.split('-')[0]||'').toUpperCase(),home_team:(_gid.split('-')[1]||'').toUpperCase()}],'dq-matchup');return;}
+    if(typeof gDate!=='undefined'&&typeof id!=='undefined') loadDataQuality(gDate,[{game_id:id,away_team:(id.split('-')[0]||'').toUpperCase(),home_team:(id.split('-')[1]||'').toUpperCase()}],'dq-matchup');
+  var _gid=(document.getElementById('mu-selector')||{}).value||''; var _gdate=(document.getElementById('games-date')||{}).value||''; if(_gid) loadDataQuality(_gdate,[{game_id:_gid,away_team:(_gid.split('-')[0]||'').toUpperCase(),home_team:(_gid.split('-')[1]||'').toUpperCase()}],'dq-matchup');return;}
   const date=document.getElementById('games-date').value||todayStr();
   document.getElementById('mu-content').innerHTML='<div class="notice"><span class="spinner"></span>Loading...</div>';
   let wd=null;
@@ -958,7 +958,7 @@ function sw(name){
 const CAT_LABELS={'3star-fav':'3★ — favorite','2star-fav':'2★ — favorite','1star-fav':'1★ — favorite','0star-fav':'unrated — favorite','3star-dog':'3★ — underdog','2star-dog':'2★ — underdog','1star-dog':'1★ — underdog','0star-dog':'unrated — underdog','3star-over':'3★ — over','2star-over':'2★ — over','1star-over':'1★ — over','0star-over':'unrated — over','3star-under':'3★ — under','2star-under':'2★ — under','1star-under':'1★ — under','0star-under':'unrated — under'};
 async function lockBetLine(sigId, inputEl) {
   const el = typeof inputEl === 'string' ? document.getElementById(inputEl) : inputEl;
-  const line = parseInt(el?.value);
+  const line = parseInt(el && el.value);
   if (isNaN(line)) return alert('Enter a valid moneyline (e.g. -156 or +113)');
   try {
     const r = await api('/signals/'+sigId+'/bet-line',{method:'POST',body:JSON.stringify({bet_line:line})});
@@ -1518,7 +1518,7 @@ async function loadSettings(){
 }
 
 async function saveSettings(){
-  const get = id => document.getElementById(id)?.value;
+  const get = id => (document.getElementById(id)||{}).value;
   const pairs = {
     odds_api_key:       get('s-odds-api-key'),
     run_mult:           get('s-run-mult'),
@@ -1590,7 +1590,7 @@ function calcManualEdge(){
   var side = document.getElementById('mb-side').value;
   var mkt  = parseFloat(document.getElementById('mb-mktline').value);
   var bet  = parseFloat(document.getElementById('mb-betline').value);
-  var price= parseFloat(document.getElementById('mb-price')?.value||'-110');
+  var price= parseFloat((document.getElementById('mb-price')||{}).value||'-110');
   var prev = document.getElementById('mb-edge-preview');
   var res  = document.getElementById('mb-edge-result');
   if (!prev||!res) return;
@@ -1661,7 +1661,7 @@ async function submitManualBet(){
   var type=document.getElementById('mb-type').value;
   var side=document.getElementById('mb-side').value;
   var stars=document.getElementById('mb-stars').value;
-  var price=document.getElementById('mb-price')?.value;
+  var price=(document.getElementById('mb-price')||{}).value;
   var mkt=document.getElementById('mb-mktline').value;
   var bet=document.getElementById('mb-betline').value;
   var st=document.getElementById('mb-status');
