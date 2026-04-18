@@ -89,6 +89,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const LEAGUE_BP = 0.318;
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
   let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;
+  let awayBpWoba = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
   try {
     if (q.getBullpenWobaBlended) {
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
@@ -99,13 +100,17 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;
       if (homeBp?.vsLHB) homeBpVsL = homeBp.vsLHB;
+      awayBpWoba = awayBp?.woba || LEAGUE_BP;
+      homeBpWoba = homeBp?.woba || LEAGUE_BP;
     }
   } catch(e) { /* fallback to league avg */ }
   const game = {
     ...gameRow,
     awayLineup: tryParse(gameRow.away_lineup_json) || [],
     homeLineup: tryParse(gameRow.home_lineup_json) || [],
-    // Bullpen wOBA: away team's bullpen faces home batters, home team's bullpen faces away batters
+    // Bullpen wOBA: away team's bullpen faces home batters, home team's bullpen faces away batters.
+    // awayBullpenWoba/homeBullpenWoba feed the model; the per-side values stay for the debug report.
+    awayBullpenWoba: awayBpWoba, homeBullpenWoba: homeBpWoba,
     awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
     homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
   };
