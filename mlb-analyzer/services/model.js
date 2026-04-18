@@ -226,7 +226,7 @@ function runModel(game, wobaIdx, settings) {
 }
 
 function catKey(signalType, signalSide, signalLabel, marketLine) {
-  const lbl = (signalLabel||'').replace('â','star').replace('*','star').toLowerCase();
+  const lbl = (signalLabel||'').replace('★','star').replace('*','star').toLowerCase();
   if (signalType==='ML') { const isFav=parseInt(marketLine)<0; return lbl+'-'+(isFav?'fav':'dog'); }
   return lbl+'-'+signalSide;
 }
@@ -256,9 +256,9 @@ function getSignals(game, modelResult, settings) {
   const homeEdge = (hMarket > 0 && hModel < 0) || (hMarket > hModel) ? mlEdge(hMarket, hModel) : 0;
 
   function mlLabel(edge) {
-    if (edge >= ML_3STAR) return '3â';
-    if (edge >= ML_2STAR) return '2â';
-    if (edge >= ML_1STAR) return '1â';
+    if (edge >= ML_3STAR) return '3★';
+    if (edge >= ML_2STAR) return '2★';
+    if (edge >= ML_1STAR) return '1★';
     return null;
   }
 
@@ -283,9 +283,9 @@ function getSignals(game, modelResult, settings) {
   const underEdge = modelUnderP - underImplied;
 
   function totLabel(edge) {
-    if (edge >= TOT_3STAR) return '3â';
-    if (edge >= TOT_2STAR) return '2â';
-    if (edge >= TOT_1STAR) return '1â';
+    if (edge >= TOT_3STAR) return '3★';
+    if (edge >= TOT_2STAR) return '2★';
+    if (edge >= TOT_1STAR) return '1★';
     return null;
   }
 
