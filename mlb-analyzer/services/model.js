@@ -2,8 +2,6 @@
 const PA_WEIGHTS = [4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
-const MIN_PA = 60;
-const MIN_BF = 100;
 
 function normName(n) {
   return (n||'').toLowerCase().normalize('NFD')
@@ -93,16 +91,17 @@ function blendWoba(proj, act, minSample, wProj, wAct) {
   return null;
 }
 
-function getBatterWoba(idx, name, hand, teamHint, wProj, wAct) {
+function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA) {
+  if (minPA == null) minPA = 60;
   const bL = blendWoba(
     fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
     fuzzyLookup(idx['bat-act-lhp'], name, teamHint),
-    MIN_PA, wProj, wAct
+    minPA, wProj, wAct
   );
   const bR = blendWoba(
     fuzzyLookup(idx['bat-proj-rhp'], name, teamHint),
     fuzzyLookup(idx['bat-act-rhp'], name, teamHint),
-    MIN_PA, wProj, wAct
+    minPA, wProj, wAct
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
   const d = BAT_DFLT[eff] || BAT_DFLT['R'];
@@ -113,16 +112,17 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct) {
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback' };
 }
 
-function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct) {
+function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF) {
+  if (minBF == null) minBF = 100;
   const bL = blendWoba(
     fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
     fuzzyLookup(idx['pit-act-lhb'], name, teamHint),
-    MIN_BF, wProj, wAct
+    minBF, wProj, wAct
   );
   const bR = blendWoba(
     fuzzyLookup(idx['pit-proj-rhb'], name, teamHint),
     fuzzyLookup(idx['pit-act-rhb'], name, teamHint),
-    MIN_BF, wProj, wAct
+    minBF, wProj, wAct
   );
   const d = PIT_DFLT[hand] || PIT_DFLT['R'];
   const src = bL||bR ? (bL?.source===bR?.source?bL?.source||'steamer':'blend') : 'fallback';
@@ -186,26 +186,35 @@ function runModel(game, wobaIdx, settings) {
   const RELIEF_WEIGHT = num(settings.RELIEF_WEIGHT, 0.23);
   const SP_PIT_WEIGHT     = num(settings.SP_PIT_WEIGHT,     0.80);
   const RELIEF_PIT_WEIGHT = num(settings.RELIEF_PIT_WEIGHT, 0.20);
+  const BULLPEN_AVG    = num(settings.BULLPEN_AVG,     0.318);
+  const WOBA_BASELINE  = num(settings.WOBA_BASELINE,   0.230);
+  const PYTH_EXP       = num(settings.PYTH_EXP,       1.83);
+  const WIND_SCALE     = num(settings.WIND_SCALE,      2.0);
+  const TOT_SLOPE      = num(settings.TOT_SLOPE,       0.08);
+  const MIN_PA         = num(settings.MIN_PA,          60);
+  const MIN_BF         = num(settings.MIN_BF,          100);
+  const BAT_DFLT_START = num(settings.BAT_DFLT_START,  0.315);
+  const BAT_DFLT_OPP   = num(settings.BAT_DFLT_OPP,   0.320);
 
-  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT);
-  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT);
+  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT, MIN_BF);
+  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT, MIN_BF);
 
-  const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT)}));
-  const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT)}));
+  const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA)}));
+  const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA)}));
 
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,game.homeBullpenVsR,game.homeBullpenVsL)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,BULLPEN_AVG,BAT_DFLT_START,BAT_DFLT_OPP)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,game.awayBullpenVsR,game.awayBullpenVsL)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,BULLPEN_AVG,BAT_DFLT_START,BAT_DFLT_OPP)*pa; hWp+=pa; });
 
-  const aTeamWoba = aWp>0 ? aWs/aWp : 0.315;
-  const hTeamWoba = hWp>0 ? hWs/hWp : 0.315;
+  const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
+  const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
   const pf = game.park_factor||1.0;
-  const aRuns = Math.max(0,(aTeamWoba-0.230)*RUN_MULT*pf);
-  const hRuns = Math.max(0,(hTeamWoba-0.230)*RUN_MULT*pf);
+  const aRuns = Math.max(0,(aTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
+  const hRuns = Math.max(0,(hTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
 
   const rawHW = (aRuns<=0&&hRuns<=0)?0.5 : hRuns<=0?0.25 : aRuns<=0?0.75 :
-    hRuns**1.83/(hRuns**1.83+aRuns**1.83);
+    hRuns**PYTH_EXP/(hRuns**PYTH_EXP+aRuns**PYTH_EXP);
   const adjHW = Math.min(Math.max(rawHW+HFA_BOOST,0.25),0.75);
   const adjAW = 1-adjHW;
 
@@ -215,7 +224,7 @@ function runModel(game, wobaIdx, settings) {
 
   const windFactor = game.wind_factor || 0;
   const tempRunAdj = game.temp_run_adj || 0;
-  const windRunAdj = windFactor * 2.0; // factor=1.0 â +2 runs, -1.0 â -2 runs
+  const windRunAdj = windFactor * WIND_SCALE; // factor=1.0 â +2 runs, -1.0 â -2 runs
   const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
   return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj };
 }
@@ -270,7 +279,7 @@ function getSignals(game, modelResult, settings) {
   const underImplied = underPrice < 0 ? Math.abs(underPrice)/(Math.abs(underPrice)+100) : 100/(underPrice+100);
 
   const runDiff    = estTot - mktTotal;
-  const modelOverP = Math.min(Math.max(0.5 + runDiff * 0.08, 0.20), 0.80);
+  const modelOverP = Math.min(Math.max(0.5 + runDiff * TOT_SLOPE, 0.20), 0.80);
   const modelUnderP = 1 - modelOverP;
 
   const overEdge  = modelOverP  - overImplied;
