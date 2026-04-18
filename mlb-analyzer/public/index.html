@@ -355,6 +355,8 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter relief wt</label><input type="number" id="s-relief-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher SP hand wt</label><input type="number" id="s-sp-pit-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher relief wt</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1"></div>
+      <div class="setting-row"><label>Bullpen strong side wt</label><input type="number" id="s-bp-strong" step="0.01" min="0" max="1"></div>
+      <div class="setting-row"><label>Bullpen weak side wt</label><input type="number" id="s-bp-weak" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -1479,6 +1481,8 @@ async function loadSettings(){
     set('s-relief-weight', s.relief_weight);
     set('s-sp-pit-weight', s.sp_pit_weight);
     set('s-relief-pit-weight', s.relief_pit_weight);
+    set('s-bp-strong',       s.bp_strong_weight);
+    set('s-bp-weak',         s.bp_weak_weight);
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
     set('s-ml-3star',      s.ml_3star_edge);
@@ -1504,6 +1508,8 @@ async function saveSettings(){
     relief_weight:      get('s-relief-weight'),
     sp_pit_weight:      get('s-sp-pit-weight'),
     relief_pit_weight:  get('s-relief-pit-weight'),
+        bp_strong_weight:   get('s-bp-strong'),
+        bp_weak_weight:     get('s-bp-weak'),
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
     ml_3star_edge:      get('s-ml-3star'),
