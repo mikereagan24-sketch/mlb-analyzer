@@ -46,8 +46,8 @@ function getSettings() {
     RELIEF_WEIGHT:     num('relief_weight',     0.23),
     SP_PIT_WEIGHT:     num('sp_pit_weight',     0.80),
     RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
-    BP_STRONG_WEIGHT: num('bp_strong_weight', 0.65),
-    BP_WEAK_WEIGHT: num('bp_weak_weight', 0.35),
+    BP_STRONG_WEIGHT: num('bp_strong_weight', 0.60),
+    BP_WEAK_WEIGHT: num('bp_weak_weight', 0.40),
     BULLPEN_AVG:    num('bullpen_avg',    0.318),
     WOBA_BASELINE:  num('woba_baseline',  0.230),
     PYTH_EXP:       num('pyth_exp',       1.83),
@@ -84,8 +84,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const homeSpName = gameRow.home_pitcher||'';
   const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
   const _wAct = (settings && settings.W_ACT != null) ? parseFloat(settings.W_ACT) : 0.35;
-  const _bpStrong = (settings && settings.BP_STRONG_WEIGHT != null) ? parseFloat(settings.BP_STRONG_WEIGHT) : 0.65;
-  const _bpWeak = (settings && settings.BP_WEAK_WEIGHT != null) ? parseFloat(settings.BP_WEAK_WEIGHT) : 0.35;
+  const _bpStrong = (settings && settings.BP_STRONG_WEIGHT != null) ? parseFloat(settings.BP_STRONG_WEIGHT) : 0.60;
+  const _bpWeak = (settings && settings.BP_WEAK_WEIGHT != null) ? parseFloat(settings.BP_WEAK_WEIGHT) : 0.40;
   const LEAGUE_BP = 0.318;
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
   let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;

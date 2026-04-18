@@ -1167,7 +1167,7 @@ router.get('/debug/bullpen-report', (req, res) => {
       if (vsLHB != null && vsRHB != null) {
         const strong = Math.min(vsLHB, vsRHB);
         const weak   = Math.max(vsLHB, vsRHB);
-        bullpenWoba = parseFloat((strong * 0.65 + weak * 0.35).toFixed(4));
+        bullpenWoba = parseFloat((strong * 0.60 + weak * 0.40).toFixed(4));
       } else if (vsLHB != null) {
         bullpenWoba = vsLHB;
       } else if (vsRHB != null) {

@@ -131,8 +131,8 @@ INSERT OR IGNORE INTO app_settings VALUES ('sp_weight', '0.77');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_weight', '0.23');
 INSERT OR IGNORE INTO app_settings VALUES ('sp_pit_weight', '0.80');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
-  INSERT OR IGNORE INTO app_settings VALUES ('bp_strong_weight', '0.65');
-  INSERT OR IGNORE INTO app_settings VALUES ('bp_weak_weight', '0.35');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_strong_weight', '0.60');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_weak_weight', '0.40');
   INSERT OR IGNORE INTO app_settings VALUES ('bullpen_avg', '0.318');
   INSERT OR IGNORE INTO app_settings VALUES ('woba_baseline', '0.230');
   INSERT OR IGNORE INTO app_settings VALUES ('pyth_exp', '1.83');
@@ -444,8 +444,8 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, 
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   if (!vsRHB && !vsLHB) return null;
-  const strongWt = (bpStrongWt != null) ? bpStrongWt : 0.65;
-  const weakWt = (bpWeakWt != null) ? bpWeakWt : 0.35;
+  const strongWt = (bpStrongWt != null) ? bpStrongWt : 0.60;
+  const weakWt = (bpWeakWt != null) ? bpWeakWt : 0.40;
   if (vsRHB && vsLHB && lineup && lineup.length > 0) {
     // Use actual lineup handedness composition
     let pctR = 0;
