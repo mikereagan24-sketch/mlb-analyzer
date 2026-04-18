@@ -130,6 +130,8 @@ INSERT OR IGNORE INTO app_settings VALUES ('sp_weight', '0.77');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_weight', '0.23');
 INSERT OR IGNORE INTO app_settings VALUES ('sp_pit_weight', '0.80');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_strong_weight', '0.65');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_weak_weight', '0.35');
 INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
@@ -403,6 +405,39 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
   const totalW = pool.reduce((s,p)=>s+(p.sample||20), 0);
   const woba = pool.reduce((s,p)=>s+(p.woba*(p.sample||20)), 0) / totalW;
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
+};
+
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, wProj, wAct) => {
+  // Compute bullpen wOBA blended by actual opposing lineup handedness
+  // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct);
+  const vsRHB = rhb?.woba || null;
+  const vsLHB = lhb?.woba || null;
+  if (!vsRHB && !vsLHB) return null;
+  const strongWt = (bpStrongWt != null) ? bpStrongWt : 0.65;
+  const weakWt = (bpWeakWt != null) ? bpWeakWt : 0.35;
+  if (vsRHB && vsLHB && lineup && lineup.length > 0) {
+    // Use actual lineup handedness composition
+    let pctR = 0;
+    for (const b of lineup) {
+      if (b.hand === 'R') pctR += 1;
+      else if (b.hand === 'L') pctR += 0;
+      else pctR += 0.5; // switch hitter
+    }
+    pctR = pctR / lineup.length;
+    const pctL = 1 - pctR;
+    const blended = parseFloat((pctR * vsRHB + pctL * vsLHB).toFixed(4));
+    return { woba: blended, vsRHB, vsLHB, pctR: parseFloat(pctR.toFixed(3)), pctL: parseFloat(pctL.toFixed(3)), source: 'lineup-weighted' };
+  }
+  // Fallback: use strong/weak manager assumption
+  if (vsRHB && vsLHB) {
+    const strongWoba = Math.min(vsRHB, vsLHB);
+    const weakWoba = Math.max(vsRHB, vsLHB);
+    const blended = parseFloat((strongWt * strongWoba + weakWt * weakWoba).toFixed(4));
+    return { woba: blended, vsRHB, vsLHB, source: 'strong-weak-fallback' };
+  }
+  return { woba: vsRHB || vsLHB, vsRHB, vsLHB, source: 'single-side' };
 };
 
 // Add is_active and notes columns if not present
