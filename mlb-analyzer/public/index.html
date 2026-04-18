@@ -357,6 +357,16 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher relief wt</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1"></div>
       <div class="setting-row"><label>Bullpen strong side wt</label><input type="number" id="s-bp-strong" step="0.01" min="0" max="1"></div>
       <div class="setting-row"><label>Bullpen weak side wt</label><input type="number" id="s-bp-weak" step="0.01" min="0" max="1"></div>
+      <div class="setting-section-header" style="margin:12px 0 4px;font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Formula parameters</div>
+      <div class="setting-row"><label title="League-average bullpen wOBA used when no roster data is available. Applied at RELIEF_PIT_WEIGHT% of pitcher side exposure.">Bullpen avg wOBA</label><input type="number" id="s-bullpen-avg" step="0.001" min="0.200" max="0.450"></div>
+      <div class="setting-row"><label title="The wOBA value subtracted before scaling to run expectancy. Lower = more runs generated from same wOBA. Default: 0.230 (league floor).">wOBA baseline</label><input type="number" id="s-woba-baseline" step="0.001" min="0.150" max="0.300"></div>
+      <div class="setting-row"><label title="Pythagorean exponent used to convert run ratio to win probability. Higher = favorite wins more. Default: 1.83 (baseball standard).">Pythagorean exp</label><input type="number" id="s-pyth-exp" step="0.01" min="1.00" max="3.00"></div>
+      <div class="setting-row"><label title="Runs added/subtracted per unit of wind factor. factor=+1.0 (out to CF) adds this many runs to total. Default: 2.0.">Wind run scale</label><input type="number" id="s-wind-scale" step="0.1" min="0" max="5"></div>
+      <div class="setting-row"><label title="Slope converting run differential to over probability. Higher = model is more aggressive on totals. Default: 0.08 (8% per run).">Total prob slope</label><input type="number" id="s-tot-slope" step="0.005" min="0.01" max="0.25"></div>
+      <div class="setting-row"><label title="Minimum plate appearances required to use a batter's actual wOBA. Below this threshold, projection-only is used.">Min PA (actual)</label><input type="number" id="s-min-pa" step="1" min="10" max="200"></div>
+      <div class="setting-row"><label title="Minimum batters faced required to use a pitcher's actual wOBA. Below this threshold, projection-only is used.">Min BF (actual)</label><input type="number" id="s-min-bf" step="1" min="10" max="300"></div>
+      <div class="setting-row"><label title="Default batter wOBA vs same-handed starter when no CSV data found. Used as fallback only.">Batter dflt (same hand)</label><input type="number" id="s-bat-dflt-start" step="0.001" min="0.250" max="0.400"></div>
+      <div class="setting-row"><label title="Default batter wOBA vs opposite-handed reliever when no CSV data found. Used as fallback only.">Batter dflt (opp hand)</label><input type="number" id="s-bat-dflt-opp" step="0.001" min="0.250" max="0.400"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -1483,6 +1493,15 @@ async function loadSettings(){
     set('s-relief-pit-weight', s.relief_pit_weight);
     set('s-bp-strong',       s.bp_strong_weight);
     set('s-bp-weak',         s.bp_weak_weight);
+    set('s-bullpen-avg',     s.bullpen_avg);
+    set('s-woba-baseline',   s.woba_baseline);
+    set('s-pyth-exp',        s.pyth_exp);
+    set('s-wind-scale',      s.wind_scale);
+    set('s-tot-slope',       s.tot_slope);
+    set('s-min-pa',          s.min_pa);
+    set('s-min-bf',          s.min_bf);
+    set('s-bat-dflt-start',  s.bat_dflt_start);
+    set('s-bat-dflt-opp',    s.bat_dflt_opp);
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
     set('s-ml-3star',      s.ml_3star_edge);
@@ -1510,6 +1529,15 @@ async function saveSettings(){
     relief_pit_weight:  get('s-relief-pit-weight'),
         bp_strong_weight:   get('s-bp-strong'),
         bp_weak_weight:     get('s-bp-weak'),
+        bullpen_avg:        get('s-bullpen-avg'),
+        woba_baseline:      get('s-woba-baseline'),
+        pyth_exp:           get('s-pyth-exp'),
+        wind_scale:         get('s-wind-scale'),
+        tot_slope:          get('s-tot-slope'),
+        min_pa:             get('s-min-pa'),
+        min_bf:             get('s-min-bf'),
+        bat_dflt_start:     get('s-bat-dflt-start'),
+        bat_dflt_opp:       get('s-bat-dflt-opp'),
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
     ml_3star_edge:      get('s-ml-3star'),
