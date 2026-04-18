@@ -5,6 +5,7 @@ const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId, 
 const { fetchUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
+const { normName } = require('../utils/names');
 
 function todayET() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -65,10 +66,7 @@ function getWobaIndex() {
   const idx = {};
   for (const r of rows) {
     if (!idx[r.data_key]) idx[r.data_key] = {};
-    const key = r.player_name.toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
-    idx[r.data_key][key] = { woba: r.woba, sample: r.sample_size };
+    idx[r.data_key][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
   }
   return idx;
 }

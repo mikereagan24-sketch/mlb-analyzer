@@ -5,6 +5,7 @@ const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
+const { normName, stripSfx } = require('../utils/names');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -1087,10 +1088,6 @@ router.get('/debug/bullpen-report', (req, res) => {
     const W_PROJ = settings.W_PROJ != null ? Number(settings.W_PROJ) : 0.65;
     const W_ACT  = settings.W_ACT  != null ? Number(settings.W_ACT)  : 0.35;
 
-    const normName = n => (n||'').toLowerCase()
-      .normalize('NFD').replace(/[̀-ͯ]/g,'')
-      .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
-    const stripSfx = n => n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();
     const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
     const idx = {};
     for (const k of KEYS) {

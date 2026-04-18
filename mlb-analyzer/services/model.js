@@ -3,10 +3,7 @@ const PA_WEIGHTS = [4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
 
-function normName(n) {
-  return (n||'').toLowerCase().normalize('NFD')
-    .replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
-}
+const { normName, fuzzyLookup } = require('../utils/names');
 
 function buildWobaIndex(rows) {
   const idx = {};
@@ -15,69 +12,6 @@ function buildWobaIndex(rows) {
     idx[r.data_key][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
   }
   return idx;
-}
-
-function fuzzyLookup(keyMap, name, teamHint) {
-  if (!keyMap) return null;
-  const k = normName(name);
-  const parts = k.split(' ');
-  const isAbbrev = parts.length >= 2 && parts[0].length === 1;
-  function stripSfx(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-  if (teamHint) {
-    const tk = k + ' ' + teamHint.toLowerCase();
-    if (keyMap[tk]) return keyMap[tk];
-  }
-  if (keyMap[k]) return keyMap[k];
-  // Strip generational suffixes from lookup key (e.g. "lance mccullers jr" â "lance mccullers")
-  const kStripped = stripSfx(k);
-  if (kStripped !== k) {
-    if (teamHint && keyMap[kStripped + ' ' + teamHint.toLowerCase()]) return keyMap[kStripped + ' ' + teamHint.toLowerCase()];
-    if (keyMap[kStripped]) return keyMap[kStripped];
-  }
-  // Add common suffixes in case index has them but name lookup doesn't (e.g. lookup "lance mccullers" â index has "lance mccullers jr")
-  for (const sfx of ['jr','sr','ii','iii','iv']) {
-    if (teamHint && keyMap[k+' '+sfx+' '+teamHint.toLowerCase()]) return keyMap[k+' '+sfx+' '+teamHint.toLowerCase()];
-    if (keyMap[k+' '+sfx]) return keyMap[k+' '+sfx];
-  }
-  if (isAbbrev && teamHint) {
-    const initial=parts[0], last=parts[parts.length-1], tl=teamHint.toLowerCase();
-    const e = Object.entries(keyMap).find(([n]) => {
-      if (!n.endsWith(' '+tl)) return false;
-      const base = n.slice(0, n.length-tl.length-1).trim();
-      const p = stripSfx(base).split(' ');
-      return p[p.length-1]===last && p[0] && p[0][0]===initial;
-    });
-    if (e) return e[1];
-  }
-  if (isAbbrev) {
-    const initial=parts[0], last=parts[parts.length-1];
-    const matches = Object.entries(keyMap).filter(([n]) => {
-      if (/\s[a-z]{2,3}$/.test(n)) return false;
-      const p = stripSfx(n).split(' ');
-      return p[p.length-1]===last && p[0] && p[0][0]===initial;
-    });
-    if (matches.length===1) return matches[0][1];
-    // Compound surname fallback: try each word in lookup key as last name
-    // e.g. "s woods richardson" â try last="woods" matching "simeon woods"
-    if (matches.length===0 && parts.length>2) {
-      for (let wi=1;wi<parts.length;wi++) {
-        const altLast=parts[wi];
-        const altMatches=Object.entries(keyMap).filter(([n])=>{
-          if(/\s[a-z]{2,3}$/.test(n)) return false;
-          const p=stripSfx(n).split(' ');
-          return p[p.length-1]===altLast && p[0] && p[0][0]===initial;
-        });
-        if(altMatches.length===1) return altMatches[0][1];
-      }
-    }
-  }
-  const sk = stripSfx(k);
-  if (teamHint) {
-    const tk2 = sk+' '+teamHint.toLowerCase();
-    if (keyMap[tk2]) return keyMap[tk2];
-  }
-  const e2 = Object.entries(keyMap).find(([n]) => !/\s[a-z]{2,3}$/.test(n) && stripSfx(n)===sk);
-  return e2 ? e2[1] : null;
 }
 
 function blendWoba(proj, act, minSample, wProj, wAct) {

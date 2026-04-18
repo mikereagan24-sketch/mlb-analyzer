@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const { normName, fuzzyLookup } = require('../utils/names');
 
 let DATA_DIR;
 if (process.env.RENDER) {
@@ -387,9 +388,6 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
 };
 
 q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
-  const normName = n => (n||'').toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
   const projKey = 'pit-proj-'+vsHand;
@@ -400,13 +398,14 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
   const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
   const activeRPSet = new Set(rosterRows.map(r=>normName(r.player_name)));
   const hasRoster = activeRPSet.size > 0;
+  // Fatigue log stores full names from MLB Stats API — exact match only, no last-name fallback.
   const fatiguedSet = new Set(q.getFatiguedPitchers(teamAbbr, gameDate).map(f => normName(f.pitcher_name)));
   const bullpenProj = projRows.filter(r => {
     const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
     const pn = normName(nameClean);
     const last = pn.split(' ').pop();
     if (starterNorm && pn.includes(starterNorm)) return false;
-    if (fatiguedSet.has(pn) || [...fatiguedSet].some(n => n.endsWith(' '+last))) return false;
+    if (fatiguedSet.has(pn)) return false;
     if (hasRoster) {
       return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
     }
@@ -420,53 +419,11 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
   const actIdx = {};
   for (const r of actRows) actIdx[normName(r.player_name)] = r;
 
-  // Fuzzy act lookup — mirrors model.js fuzzyLookup for consistency
-  function fuzzyLookupAct(name, teamHint) {
-    const k = normName(name);
-    const parts = k.split(' ');
-    const isAbbrev = parts.length >= 2 && parts[0].length === 1;
-    function stripSfx(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-    if (teamHint) { const tk = k+' '+teamHint.toLowerCase(); if (actIdx[tk]) return actIdx[tk]; }
-    if (actIdx[k]) return actIdx[k];
-    const kS = stripSfx(k);
-    if (kS !== k) {
-      if (teamHint && actIdx[kS+' '+teamHint.toLowerCase()]) return actIdx[kS+' '+teamHint.toLowerCase()];
-      if (actIdx[kS]) return actIdx[kS];
-    }
-    for (const sfx of ['jr','sr','ii','iii','iv']) {
-      if (teamHint && actIdx[k+' '+sfx+' '+teamHint.toLowerCase()]) return actIdx[k+' '+sfx+' '+teamHint.toLowerCase()];
-      if (actIdx[k+' '+sfx]) return actIdx[k+' '+sfx];
-    }
-    if (isAbbrev) {
-      const initial=parts[0], last=parts[parts.length-1];
-      if (teamHint) {
-        const tl=teamHint.toLowerCase();
-        const e=Object.entries(actIdx).find(([n])=>{
-          if(!n.endsWith(' '+tl))return false;
-          const base=n.slice(0,n.length-tl.length-1).trim();
-          const p=stripSfx(base).split(' ');
-          return p[p.length-1]===last && p[0] && p[0][0]===initial;
-        });
-        if(e) return e[1];
-      }
-      const matches=Object.entries(actIdx).filter(([n])=>{
-        if(/\s[a-z]{2,3}$/.test(n)) return false;
-        const p=stripSfx(n).split(' ');
-        return p[p.length-1]===last && p[0] && p[0][0]===initial;
-      });
-      if(matches.length===1) return matches[0][1];
-    }
-    const sk=stripSfx(k);
-    if (teamHint && actIdx[sk+' '+teamHint.toLowerCase()]) return actIdx[sk+' '+teamHint.toLowerCase()];
-    const e2=Object.entries(actIdx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripSfx(n)===sk);
-    return e2 ? e2[1] : null;
-  }
-
   const W_PROJ = (wProj != null) ? wProj : 0.65;
   const W_ACT = (wAct != null) ? wAct : 0.35;
   const pitchers = bullpenProj.map(proj => {
     const pName = normName(proj.player_name.replace(/ [A-Z]+$/, ''));
-    const actMatch = fuzzyLookupAct(pName, teamAbbr);
+    const actMatch = fuzzyLookup(actIdx, pName, teamAbbr);
     const woba = (actMatch && actMatch.woba)
       ? W_PROJ * proj.woba + W_ACT * actMatch.woba
       : proj.woba;
