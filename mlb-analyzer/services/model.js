@@ -65,12 +65,12 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF) {
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 
-function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP) {
+function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, BULLPEN_AVG, BAT_DFLT_START, BAT_DFLT_OPP) {
   const eff = effHand(batter.hand, pitcherHand);
   const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
   const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
   const pitWvsBatter = eff === 'L' ? pitWvsL : pitWvsR;
-  const pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW;
+  const pitW = pitWvsBatter * spPitW + BULLPEN_AVG * relPitW;
   const spW  = (SP_WEIGHT  != null) ? SP_WEIGHT  : 0.77;
   const relW = (RELIEF_WEIGHT != null) ? RELIEF_WEIGHT : 0.23;
   const vsStart = pitcherHand === 'R' ? (batter.vsRHP ?? BAT_DFLT_START) : (batter.vsLHP ?? BAT_DFLT_START);
@@ -132,15 +132,10 @@ function runModel(game, wobaIdx, settings) {
   const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA)}));
   const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA)}));
 
-  // Away batters face the home team's bullpen; home batters face the away team's bullpen.
-  // Fall back to league-average BULLPEN_AVG if the per-team value is null/missing.
-  const awayVsBullpen = game.homeBullpenWoba ?? BULLPEN_AVG;
-  const homeVsBullpen = game.awayBullpenWoba ?? BULLPEN_AVG;
-
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,BULLPEN_AVG,BAT_DFLT_START,BAT_DFLT_OPP)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,SP_PIT_WEIGHT,RELIEF_PIT_WEIGHT,BULLPEN_AVG,BAT_DFLT_START,BAT_DFLT_OPP)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
