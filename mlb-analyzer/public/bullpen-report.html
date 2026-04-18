@@ -123,76 +123,119 @@ input[type=date], .btn{padding:7px 12px;font-size:12px;border:.5px solid var(--b
 </div>
 
 <script>
-const $ = (id) => document.getElementById(id);
-const dateInput = $('date-input');
-const poolOnly = $('pool-only');
-const refreshBtn = $('refresh-btn');
-const statusEl = $('status');
-const gamesEl = $('games');
-const metaEl = $('meta');
+// ES5-only: no arrow functions, const/let, template literals, async/await,
+// optional chaining, or fetch. Transport is XMLHttpRequest.
 
-let currentData = null;
+var dateInput = document.getElementById('date-input');
+var poolOnly = document.getElementById('pool-only');
+var refreshBtn = document.getElementById('refresh-btn');
+var statusEl = document.getElementById('status');
+var gamesEl = document.getElementById('games');
+var metaEl = document.getElementById('meta');
 
-function todayET(){
+var currentData = null;
+
+var HTML_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function escapeHtml(s) {
+  s = String(s == null ? '' : s);
+  return s.replace(/[&<>"']/g, function(c) { return HTML_ESC[c]; });
+}
+
+function todayET() {
+  // YYYY-MM-DD in Eastern Time. en-CA locale produces ISO-style date.
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
 
-function fmtWoba(v){
-  if (v == null) return '<span class="muted">—</span>';
-  return '<span class="num">'+Number(v).toFixed(4)+'</span>';
+function fmtWoba(v) {
+  if (v == null) return '<span class="muted">\u2014</span>';
+  return '<span class="num">' + Number(v).toFixed(4) + '</span>';
 }
 
-function handPill(h){
+function handPill(h) {
   if (!h) return '<span class="hand hS">?</span>';
-  const cls = h === 'R' ? 'hR' : h === 'L' ? 'hL' : 'hS';
-  return '<span class="hand '+cls+'">'+h+'</span>';
+  var cls = h === 'R' ? 'hR' : (h === 'L' ? 'hL' : 'hS');
+  return '<span class="hand ' + cls + '">' + h + '</span>';
 }
 
-function roleBadge(role){
-  const cls = role === 'SP' ? 'role-sp' : 'role-rp';
-  return '<span class="'+cls+'">'+role+'</span>';
+function roleBadge(role) {
+  var cls = role === 'SP' ? 'role-sp' : 'role-rp';
+  return '<span class="' + cls + '">' + role + '</span>';
 }
 
-function renderTeam(team, teamAbbr){
-  const pitchers = poolOnly.checked
-    ? team.pitchers.filter(p => p.in_pool)
-    : team.pitchers;
-  const rows = pitchers.map(p => {
-    const classes = [];
+function countInPool(pitchers) {
+  var n = 0;
+  for (var i = 0; i < pitchers.length; i++) if (pitchers[i].in_pool) n++;
+  return n;
+}
+
+function countFatigued(pitchers) {
+  var n = 0;
+  for (var i = 0; i < pitchers.length; i++) if (pitchers[i].fatigued) n++;
+  return n;
+}
+
+function renderTeam(team, teamAbbr) {
+  var allPitchers = team.pitchers || [];
+  var pitchers = poolOnly.checked
+    ? allPitchers.filter(function(p) { return p.in_pool; })
+    : allPitchers;
+
+  var rowsHtml = '';
+  for (var i = 0; i < pitchers.length; i++) {
+    var p = pitchers[i];
+    var classes = [];
     if (!p.in_pool) classes.push('out-of-pool');
     if (p.fatigued) classes.push('is-fatigued');
     if (p.name === team.sp_name) classes.push('is-sp');
-    const badges = (p.fatigue_reasons || [])
-      .map(r => '<span class="fatigue-badge" title="Excluded for fatigue: '+escapeHtml(r)+'">'+escapeHtml(r)+'</span>')
-      .join('');
-    return '<tr class="'+classes.join(' ')+'">'
-      + '<td><span class="name">'+escapeHtml(p.name)+'</span>'+badges+'</td>'
-      + '<td>'+roleBadge(p.role||'?')+'</td>'
-      + '<td>'+handPill(p.hand)+'</td>'
-      + '<td class="proj">'+fmtWoba(p.proj_vs_lhb)+'</td>'
-      + '<td class="proj">'+fmtWoba(p.proj_vs_rhb)+'</td>'
-      + '<td class="act">'+fmtWoba(p.act_vs_lhb)+'</td>'
-      + '<td class="act">'+fmtWoba(p.act_vs_rhb)+'</td>'
-      + '<td class="blend">'+fmtWoba(p.blended_vs_lhb)+'</td>'
-      + '<td class="blend">'+fmtWoba(p.blended_vs_rhb)+'</td>'
-      + '<td>'+(p.in_pool ? '<span class="pool-yes">YES</span>' : '<span class="pool-no">no</span>')+'</td>'
+
+    var badges = '';
+    var reasons = p.fatigue_reasons || [];
+    for (var j = 0; j < reasons.length; j++) {
+      var r = reasons[j];
+      badges += '<span class="fatigue-badge" title="Excluded for fatigue: ' + escapeHtml(r) + '">' + escapeHtml(r) + '</span>';
+    }
+
+    rowsHtml += '<tr class="' + classes.join(' ') + '">'
+      + '<td><span class="name">' + escapeHtml(p.name) + '</span>' + badges + '</td>'
+      + '<td>' + roleBadge(p.role || '?') + '</td>'
+      + '<td>' + handPill(p.hand) + '</td>'
+      + '<td class="proj">' + fmtWoba(p.proj_vs_lhb) + '</td>'
+      + '<td class="proj">' + fmtWoba(p.proj_vs_rhb) + '</td>'
+      + '<td class="act">' + fmtWoba(p.act_vs_lhb) + '</td>'
+      + '<td class="act">' + fmtWoba(p.act_vs_rhb) + '</td>'
+      + '<td class="blend">' + fmtWoba(p.blended_vs_lhb) + '</td>'
+      + '<td class="blend">' + fmtWoba(p.blended_vs_rhb) + '</td>'
+      + '<td>' + (p.in_pool ? '<span class="pool-yes">YES</span>' : '<span class="pool-no">no</span>') + '</td>'
       + '</tr>';
-  }).join('');
+  }
 
-  const emptyRow = pitchers.length ? '' :
-    '<tr><td colspan="10" class="muted" style="text-align:center;padding:12px">No pitchers to show</td></tr>';
+  var emptyRow = pitchers.length
+    ? ''
+    : '<tr><td colspan="10" class="muted" style="text-align:center;padding:12px">No pitchers to show</td></tr>';
 
-  const poolCount = team.pitchers.filter(p => p.in_pool).length;
-  const fatigueCount = team.pitchers.filter(p => p.fatigued).length;
-  const lhb = team.team_bullpen_woba_vs_lhb != null ? Number(team.team_bullpen_woba_vs_lhb).toFixed(3) : '—';
-  const rhb = team.team_bullpen_woba_vs_rhb != null ? Number(team.team_bullpen_woba_vs_rhb).toFixed(3) : '—';
-  const model = team.team_bullpen_woba != null ? Number(team.team_bullpen_woba).toFixed(3) : '—';
+  var poolCount = countInPool(allPitchers);
+  var fatigueCount = countFatigued(allPitchers);
+  var lhb = team.team_bullpen_woba_vs_lhb != null ? Number(team.team_bullpen_woba_vs_lhb).toFixed(3) : '\u2014';
+  var rhb = team.team_bullpen_woba_vs_rhb != null ? Number(team.team_bullpen_woba_vs_rhb).toFixed(3) : '\u2014';
+  var model = team.team_bullpen_woba != null ? Number(team.team_bullpen_woba).toFixed(3) : '\u2014';
+
+  var fatigueNote;
+  if (fatigueCount > 0) {
+    fatigueNote = '<div class="team-footer-note"><b>' + fatigueCount + '</b> '
+      + (fatigueCount === 1 ? 'pitcher' : 'pitchers') + ' excluded for fatigue</div>';
+  } else {
+    fatigueNote = '<div class="team-footer-note">No pitchers excluded for fatigue</div>';
+  }
+
+  var spLine = team.sp_name
+    ? '<b>' + escapeHtml(team.sp_name) + '</b>'
+    : '<span class="muted">TBD</span>';
 
   return ''
     + '<div class="team-card">'
     +   '<div class="team-head">'
-    +     '<div class="team-name">'+escapeHtml(teamAbbr||'')+'</div>'
-    +     '<div class="team-sp">SP: '+(team.sp_name ? '<b>'+escapeHtml(team.sp_name)+'</b>' : '<span class="muted">TBD</span>')+'</div>'
+    +     '<div class="team-name">' + escapeHtml(teamAbbr || '') + '</div>'
+    +     '<div class="team-sp">SP: ' + spLine + '</div>'
     +   '</div>'
     +   '<div style="overflow-x:auto">'
     +   '<table class="tbl">'
@@ -203,74 +246,98 @@ function renderTeam(team, teamAbbr){
     +       '<th>Blend L</th><th>Blend R</th>'
     +       '<th>Pool</th>'
     +     '</tr></thead>'
-    +     '<tbody>'+rows+emptyRow+'</tbody>'
+    +     '<tbody>' + rowsHtml + emptyRow + '</tbody>'
     +   '</table>'
     +   '</div>'
-    +   '<div class="team-footer" title="Model wOBA is the strong/weak manager blend (min*0.65 + max*0.35) of the per-side pool averages — this is the single number the model feeds into perBatterEW">'
+    +   '<div class="team-footer" title="Model wOBA is the strong/weak manager blend (min*0.65 + max*0.35) of the per-side pool averages \u2014 this is the single number the model feeds into perBatterEW">'
     +     '<div class="team-footer-hero">'
     +       '<span class="hl">Model wOBA</span>'
-    +       '<span class="hv">'+model+'</span>'
-    +       '<div class="hsub">strong 65% · weak 35%</div>'
+    +       '<span class="hv">' + model + '</span>'
+    +       '<div class="hsub">strong 65% \u00b7 weak 35%</div>'
     +     '</div>'
     +     '<div class="team-footer-row">'
-    +       '<div><span class="fl">Pool vs LHB</span><span class="fv">'+lhb+'</span></div>'
-    +       '<div><span class="fl">Pool vs RHB</span><span class="fv">'+rhb+'</span></div>'
-    +       '<div><span class="fl">Pool size</span><span class="fv">'+poolCount+'</span><span class="fn"> of '+team.pitchers.length+'</span></div>'
+    +       '<div><span class="fl">Pool vs LHB</span><span class="fv">' + lhb + '</span></div>'
+    +       '<div><span class="fl">Pool vs RHB</span><span class="fv">' + rhb + '</span></div>'
+    +       '<div><span class="fl">Pool size</span><span class="fv">' + poolCount + '</span><span class="fn"> of ' + allPitchers.length + '</span></div>'
     +     '</div>'
-    +     (fatigueCount > 0
-    +       ? '<div class="team-footer-note"><b>'+fatigueCount+'</b> '+(fatigueCount===1?'pitcher':'pitchers')+' excluded for fatigue</div>'
-    +       : '<div class="team-footer-note">No pitchers excluded for fatigue</div>')
+    +     fatigueNote
     +   '</div>'
     + '</div>';
 }
 
-function escapeHtml(s){
-  return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function render(data){
+function render(data) {
   currentData = data;
-  if (!data || !data.games || data.games.length === 0){
-    gamesEl.innerHTML = '<div class="card muted" style="text-align:center">No games found for '+escapeHtml(data && data.date || '')+'</div>';
+  if (!data || !data.games || data.games.length === 0) {
+    var fallbackDate = (data && data.date) || '';
+    gamesEl.innerHTML = '<div class="card muted" style="text-align:center">No games found for ' + escapeHtml(fallbackDate) + '</div>';
     metaEl.textContent = '';
     return;
   }
-  metaEl.innerHTML = data.game_count+' games · W_PROJ='+data.weights.W_PROJ+' · W_ACT='+data.weights.W_ACT;
-  gamesEl.innerHTML = data.games.map(g => ''
-    + '<div class="game-section">'
-    +   '<div class="game-head">'
-    +     '<div>'+escapeHtml((g.away_team||'').toUpperCase())+' @ '+escapeHtml((g.home_team||'').toUpperCase())+'</div>'
-    +     '<div class="game-id">'+escapeHtml(g.game_id)+'</div>'
-    +   '</div>'
-    +   '<div class="teams">'
-    +     renderTeam(g.away, g.away_team)
-    +     renderTeam(g.home, g.home_team)
-    +   '</div>'
-    + '</div>').join('');
+  var weights = data.weights || {};
+  metaEl.innerHTML = data.game_count + ' games \u00b7 W_PROJ=' + weights.W_PROJ + ' \u00b7 W_ACT=' + weights.W_ACT;
+
+  var html = '';
+  for (var i = 0; i < data.games.length; i++) {
+    var g = data.games[i];
+    html += ''
+      + '<div class="game-section">'
+      +   '<div class="game-head">'
+      +     '<div>' + escapeHtml((g.away_team || '').toUpperCase()) + ' @ ' + escapeHtml((g.home_team || '').toUpperCase()) + '</div>'
+      +     '<div class="game-id">' + escapeHtml(g.game_id) + '</div>'
+      +   '</div>'
+      +   '<div class="teams">'
+      +     renderTeam(g.away, g.away_team)
+      +     renderTeam(g.home, g.home_team)
+      +   '</div>'
+      + '</div>';
+  }
+  gamesEl.innerHTML = html;
 }
 
-async function load(){
-  const date = dateInput.value || todayET();
+function showError(msg) {
+  statusEl.className = 'status err';
+  statusEl.textContent = 'Error: ' + msg;
+}
+
+function load() {
+  var date = dateInput.value || todayET();
   statusEl.className = 'status';
-  statusEl.innerHTML = '<span class="spinner"></span>Loading '+escapeHtml(date)+'…';
+  statusEl.innerHTML = '<span class="spinner"></span>Loading ' + escapeHtml(date) + '\u2026';
   gamesEl.innerHTML = '';
-  try {
-    const r = await fetch('/api/debug/bullpen-report?date='+encodeURIComponent(date));
-    if (!r.ok) throw new Error('HTTP '+r.status);
-    const data = await r.json();
-    if (data.error) throw new Error(data.error);
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/api/debug/bullpen-report?date=' + encodeURIComponent(date), true);
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState !== 4) return;
+    if (xhr.status < 200 || xhr.status >= 300) {
+      showError('HTTP ' + xhr.status);
+      return;
+    }
+    var data;
+    try {
+      data = JSON.parse(xhr.responseText);
+    } catch (e) {
+      showError('invalid JSON response');
+      return;
+    }
+    if (data && data.error) {
+      showError(data.error);
+      return;
+    }
     statusEl.textContent = '';
     render(data);
-  } catch(e){
-    statusEl.className = 'status err';
-    statusEl.textContent = 'Error: '+e.message;
-    gamesEl.innerHTML = '';
-  }
+  };
+  xhr.onerror = function() { showError('network failure'); };
+  xhr.send();
+}
+
+function onPoolOnlyChange() {
+  if (currentData) render(currentData);
 }
 
 dateInput.value = todayET();
 dateInput.addEventListener('change', load);
-poolOnly.addEventListener('change', () => { if (currentData) render(currentData); });
+poolOnly.addEventListener('change', onPoolOnlyChange);
 refreshBtn.addEventListener('click', load);
 load();
 </script>
