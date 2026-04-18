@@ -1450,9 +1450,33 @@ router.get('/debug/bullpen', (req, res) => {
       const nameClean=proj.player_name.replace(/ [A-Z]{2,3}$/,'');
       const pNorm=norm(nameClean); const lastName=pNorm.split(' ').pop();
       const isStarter=!!starterLast&&pNorm.includes(starterLast);
-      const actExact=actIdx[pNorm];
-      const actMatch=actExact||Object.entries(actIdx).find(([k])=>k.endsWith(' '+lastName))?.[1]||null;
-      const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
+      // fuzzyLookupAct — mirrors model.js fuzzyLookup (requires first initial + last name match)
+      function stripSfxA(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
+      function fuzzyLookupAct(name, teamHint) {
+        const k=norm(name), parts=k.split(' '), isAbbrev=parts.length>=2&&parts[0].length===1;
+        if(teamHint){const tk=k+' '+teamHint.toLowerCase();if(actIdx[tk])return actIdx[tk];}
+        if(actIdx[k])return actIdx[k];
+        const kS=stripSfxA(k);
+        if(kS!==k){
+          if(teamHint&&actIdx[kS+' '+teamHint.toLowerCase()])return actIdx[kS+' '+teamHint.toLowerCase()];
+          if(actIdx[kS])return actIdx[kS];
+        }
+        for(const sfx of['jr','sr','ii','iii','iv']){
+          if(teamHint&&actIdx[k+' '+sfx+' '+teamHint.toLowerCase()])return actIdx[k+' '+sfx+' '+teamHint.toLowerCase()];
+          if(actIdx[k+' '+sfx])return actIdx[k+' '+sfx];
+        }
+        if(isAbbrev){
+          const initial=parts[0],last=parts[parts.length-1];
+          if(teamHint){const tl=teamHint.toLowerCase();const e=Object.entries(actIdx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripSfxA(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1];}
+          const matches=Object.entries(actIdx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripSfxA(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
+          if(matches.length===1)return matches[0][1];
+        }
+        const sk=stripSfxA(k);
+        if(teamHint&&actIdx[sk+' '+teamHint.toLowerCase()])return actIdx[sk+' '+teamHint.toLowerCase()];
+        const e2=Object.entries(actIdx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripSfxA(n)===sk);
+        return e2?e2[1]:null;
+      }
+      const actMatch = fuzzyLookupAct(pNorm, team);      const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
       return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ'+proj.woba.toFixed(4)+' + '+WA+'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
     });
     // Load active roster ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ prefer RP-tagged pitchers from team_rosters
