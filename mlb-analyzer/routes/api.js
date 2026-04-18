@@ -1159,11 +1159,26 @@ router.get('/debug/bullpen-report', (req, res) => {
       });
       const poolL = pitchers.filter(p => p.in_pool && p.blended_vs_lhb != null).map(p => p.blended_vs_lhb);
       const poolR = pitchers.filter(p => p.in_pool && p.blended_vs_rhb != null).map(p => p.blended_vs_rhb);
+      const vsLHB = mean(poolL);
+      const vsRHB = mean(poolR);
+      // Strong/weak manager blend: the side the pen is better on (lower wOBA) gets 65%,
+      // the side it's worse on gets 35%. This is the single number the model will use.
+      let bullpenWoba = null;
+      if (vsLHB != null && vsRHB != null) {
+        const strong = Math.min(vsLHB, vsRHB);
+        const weak   = Math.max(vsLHB, vsRHB);
+        bullpenWoba = parseFloat((strong * 0.65 + weak * 0.35).toFixed(4));
+      } else if (vsLHB != null) {
+        bullpenWoba = vsLHB;
+      } else if (vsRHB != null) {
+        bullpenWoba = vsRHB;
+      }
       return {
         sp_name: spName || null,
         pitchers,
-        team_bullpen_woba_vs_lhb: mean(poolL),
-        team_bullpen_woba_vs_rhb: mean(poolR),
+        team_bullpen_woba: bullpenWoba,
+        team_bullpen_woba_vs_lhb: vsLHB,
+        team_bullpen_woba_vs_rhb: vsRHB,
       };
     };
 
