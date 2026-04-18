@@ -95,8 +95,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     if (q.getBullpenWobaBlended) {
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrong, _bpWeak, _wProj, _wAct);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrong, _bpWeak, _wProj, _wAct);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date);
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;
@@ -327,6 +327,49 @@ async function runLineupJob(dateStr) {
   }
 }
 
+// Fetch pitcher usage (pitch counts) from MLB Stats API for a given date.
+// Returns array of { team, pitcher_name, pitcher_mlb_id, pitches_thrown }.
+async function fetchPitcherUsage(dateStr) {
+  const fetch = require('node-fetch');
+  const [y,m,d] = dateStr.split('-');
+  const mmddyyyy = m + '/' + d + '/' + y;
+  const schedUrl = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=' + mmddyyyy + '&hydrate=linescore,pitchers';
+  const sResp = await fetch(schedUrl);
+  if (!sResp.ok) throw new Error('MLB schedule HTTP ' + sResp.status);
+  const sched = await sResp.json();
+  const games = (sched.dates && sched.dates[0] && sched.dates[0].games) || [];
+  const out = [];
+  for (const g of games) {
+    const status = g.status && g.status.abstractGameState;
+    if (status !== 'Final') continue;
+    try {
+      const boxUrl = 'https://statsapi.mlb.com/api/v1/game/' + g.gamePk + '/boxscore';
+      const bResp = await fetch(boxUrl);
+      if (!bResp.ok) continue;
+      const box = await bResp.json();
+      for (const side of ['home','away']) {
+        const teamObj = box.teams && box.teams[side];
+        if (!teamObj) continue;
+        const teamAbbr = (teamObj.team && teamObj.team.abbreviation || '').toUpperCase();
+        const pitcherIds = teamObj.pitchers || [];
+        for (const pid of pitcherIds) {
+          const player = teamObj.players && teamObj.players['ID' + pid];
+          if (!player) continue;
+          const name = player.person && player.person.fullName;
+          if (!name) continue;
+          const pitching = (player.stats && player.stats.pitching) || {};
+          const pitches = pitching.numberOfPitches != null ? pitching.numberOfPitches
+                        : (pitching.pitchesThrown != null ? pitching.pitchesThrown : 0);
+          out.push({ team: teamAbbr, pitcher_name: name, pitcher_mlb_id: pid, pitches_thrown: Number(pitches)||0 });
+        }
+      }
+    } catch(e) {
+      console.log('[pitcher-usage] boxscore fail for gamePk=' + g.gamePk + ': ' + e.message);
+    }
+  }
+  return out;
+}
+
 async function runScoreJob(dateStr) {
   dateStr = dateStr || yesterdayET();
   console.log('[score-job] Starting for ' + dateStr);
@@ -375,7 +418,19 @@ async function runScoreJob(dateStr) {
         gamesUpdated++;
       }
     }
-    q.logCron.run('scores', dateStr, 'success', 'Updated ' + scores.length + ' scores', gamesUpdated);
+    // Pull pitcher usage from MLB Stats API and record for fatigue tracking.
+    let pitcherRecords = 0;
+    try {
+      const usage = await fetchPitcherUsage(dateStr);
+      for (const u of usage) {
+        q.upsertPitcherGameLog.run(dateStr, u.team, u.pitcher_name, u.pitcher_mlb_id, u.pitches_thrown, 1);
+        pitcherRecords++;
+      }
+      console.log('[score-job] Recorded ' + pitcherRecords + ' pitcher appearances for ' + dateStr);
+    } catch(e) {
+      console.log('[score-job] pitcher-usage fetch failed: ' + e.message);
+    }
+    q.logCron.run('scores', dateStr, 'success', 'Updated ' + scores.length + ' scores, ' + pitcherRecords + ' pitcher apps', gamesUpdated);
     console.log('[score-job] Done Ã¢ÂÂ ' + gamesUpdated + ' games updated');
     return { success: true, gamesUpdated, date: dateStr };
   } catch (err) {

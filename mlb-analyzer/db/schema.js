@@ -156,7 +156,19 @@ db.exec(`
     hand TEXT,
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(team, player_name)
-  )
+  );
+  CREATE TABLE IF NOT EXISTS pitcher_game_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_date TEXT NOT NULL,
+    team TEXT NOT NULL,
+    pitcher_name TEXT NOT NULL,
+    pitcher_mlb_id INTEGER,
+    pitches_thrown INTEGER DEFAULT 0,
+    appeared INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pgl_date_team_pitcher ON pitcher_game_log(game_date, team, pitcher_name);
+  CREATE INDEX IF NOT EXISTS idx_pgl_team_date ON pitcher_game_log(team, game_date);
 `);
 
 
@@ -305,6 +317,54 @@ q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,r
 q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
 q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
 
+q.upsertPitcherGameLog = db.prepare(
+  `INSERT OR REPLACE INTO pitcher_game_log
+   (game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown, appeared, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+);
+q.getPitcherLogForTeam = db.prepare(
+  `SELECT game_date, pitcher_name, pitcher_mlb_id, pitches_thrown, appeared
+   FROM pitcher_game_log
+   WHERE team=? AND game_date >= ? AND game_date < ?
+   ORDER BY game_date DESC`
+);
+
+// Returns an array of { pitcher_name, reasons[] } for pitchers who should
+// be excluded from a team's bullpen pool on gameDate based on recent usage.
+// Rules: pitched yesterday (back-to-back), pitched 3 of last 4 days (3in4),
+// threw >29 pitches yesterday (pitch-count).
+q.getFatiguedPitchers = (teamAbbr, gameDate) => {
+  if (!gameDate) return [];
+  const teamU = (teamAbbr||'').toUpperCase();
+  const base = new Date(gameDate + 'T00:00:00Z');
+  const addDays = (n) => {
+    const d = new Date(base); d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0,10);
+  };
+  const yesterday = addDays(-1);
+  const fourDaysAgo = addDays(-4);
+  const fiveDaysAgo = addDays(-5);
+  const rows = q.getPitcherLogForTeam.all(teamU, fiveDaysAgo, gameDate);
+  const byPitcher = {};
+  for (const r of rows) {
+    if (!r.appeared) continue;
+    if (!byPitcher[r.pitcher_name]) byPitcher[r.pitcher_name] = [];
+    byPitcher[r.pitcher_name].push(r);
+  }
+  const out = [];
+  for (const [name, apps] of Object.entries(byPitcher)) {
+    const dates = new Set(apps.map(a => a.game_date));
+    const reasons = [];
+    if (dates.has(yesterday)) reasons.push('back-to-back');
+    const last4 = apps.filter(a => a.game_date >= fourDaysAgo);
+    if (last4.length >= 3) reasons.push('3in4');
+    const yApp = apps.find(a => a.game_date === yesterday);
+    if (yApp && (yApp.pitches_thrown||0) > 29) reasons.push('pitch-count');
+    if (reasons.length) out.push({ pitcher_name: name, reasons });
+  }
+  return out;
+};
+
 
 q.upsertWobaBatch = (key, rows) => {
   const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0); });
@@ -325,7 +385,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
   ).all(dataKey, '%'+teamAbbr);
 };
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
   const normName = n => (n||'').toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
@@ -339,11 +399,13 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
   const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
   const activeRPSet = new Set(rosterRows.map(r=>normName(r.player_name)));
   const hasRoster = activeRPSet.size > 0;
+  const fatiguedSet = new Set(q.getFatiguedPitchers(teamAbbr, gameDate).map(f => normName(f.pitcher_name)));
   const bullpenProj = projRows.filter(r => {
     const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
     const pn = normName(nameClean);
     const last = pn.split(' ').pop();
     if (starterNorm && pn.includes(starterNorm)) return false;
+    if (fatiguedSet.has(pn) || [...fatiguedSet].some(n => n.endsWith(' '+last))) return false;
     if (hasRoster) {
       return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
     }
@@ -416,11 +478,11 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct) => {
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, wProj, wAct) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, wProj, wAct, gameDate) => {
   // Compute bullpen wOBA blended by actual opposing lineup handedness
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   if (!vsRHB && !vsLHB) return null;
