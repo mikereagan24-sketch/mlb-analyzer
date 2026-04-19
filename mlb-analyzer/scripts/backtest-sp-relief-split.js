@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
-// Backtest: for every resolved game in the DB, replay getSignals under two
+// Backtest: for every resolved game in the DB, replay getSignals under three
 // SP/RP weight splits and grade the resulting signals against actual scores.
 //   A = current   SP_PIT=0.90  RELIEF_PIT=0.10
-//   B = proposed  SP_PIT=0.75  RELIEF_PIT=0.25
+//   B = midpoint  SP_PIT=0.85  RELIEF_PIT=0.15
+//   C = proposed  SP_PIT=0.75  RELIEF_PIT=0.25
 // All other settings come from app_settings.
 //
 // Uses the app's own runModel + getSignals + calcPnl — no re-implementation.
@@ -129,7 +130,14 @@ var wobaIdx = jobs.getWobaIndex();
 
 var scenarios = {
   A: Object.assign({}, base, { SP_PIT_WEIGHT: 0.90, RELIEF_PIT_WEIGHT: 0.10 }),
-  B: Object.assign({}, base, { SP_PIT_WEIGHT: 0.75, RELIEF_PIT_WEIGHT: 0.25 }),
+  B: Object.assign({}, base, { SP_PIT_WEIGHT: 0.85, RELIEF_PIT_WEIGHT: 0.15 }),
+  C: Object.assign({}, base, { SP_PIT_WEIGHT: 0.75, RELIEF_PIT_WEIGHT: 0.25 }),
+};
+var SCEN_NAMES = ['A', 'B', 'C'];
+var SCEN_LABELS = {
+  A: 'A (SP=0.90 / RP=0.10)',
+  B: 'B (SP=0.85 / RP=0.15)',
+  C: 'C (SP=0.75 / RP=0.25)',
 };
 
 var gameSql = "SELECT DISTINCT gl.* FROM game_log gl "
@@ -151,7 +159,8 @@ if (!games.length) {
 
 console.log('Backtest: SP/RP weight split');
 console.log('  A = current   SP_PIT=0.90  RELIEF_PIT=0.10');
-console.log('  B = proposed  SP_PIT=0.75  RELIEF_PIT=0.25');
+console.log('  B = midpoint  SP_PIT=0.85  RELIEF_PIT=0.15');
+console.log('  C = proposed  SP_PIT=0.75  RELIEF_PIT=0.25');
 console.log('Universe: ' + games.length + ' resolved games  ('
   + games[0].game_date + ' → ' + games[games.length - 1].game_date + ')');
 console.log('='.repeat(80));
@@ -164,10 +173,14 @@ function newStats() {
   for (var j = 0; j < TYPES.length; j++) s.byType[TYPES[j]] = emptyBucket();
   return s;
 }
-var stats = { A: newStats(), B: newStats() };
+var stats = { A: newStats(), B: newStats(), C: newStats() };
 
-var diffAnotB = [];
-var diffBnotA = [];
+// Exclusive-unique buckets: signals that fire in exactly one scenario,
+// i.e. present in that scenario but absent from both others.
+var unique = { A: [], B: [], C: [] };
+// Also track signals present in ANY scenario but NOT all three — useful for
+// spotting where the scenarios disagree without being single-scenario.
+var sharedByTwo = []; // { key, date, game, where: 'AB'|'BC'|'AC' } plus a representative sig + graded
 
 function sigKey(s) { return s.type + ':' + s.side; }
 
@@ -177,12 +190,15 @@ for (var gi = 0; gi < games.length; gi++) {
   try {
     var gameA = buildGame(g, scenarios.A);
     var gameB = buildGame(g, scenarios.B);
+    var gameC = buildGame(g, scenarios.C);
     var mA = model.runModel(gameA, wobaIdx, scenarios.A);
     var mB = model.runModel(gameB, wobaIdx, scenarios.B);
+    var mC = model.runModel(gameC, wobaIdx, scenarios.C);
     var sigsA = model.getSignals(gameA, mA, scenarios.A);
     var sigsB = model.getSignals(gameB, mB, scenarios.B);
+    var sigsC = model.getSignals(gameC, mC, scenarios.C);
 
-    var pairs = [['A', sigsA], ['B', sigsB]];
+    var pairs = [['A', sigsA], ['B', sigsB], ['C', sigsC]];
     for (var pi = 0; pi < pairs.length; pi++) {
       var scen = pairs[pi][0];
       var sigs = pairs[pi][1];
@@ -197,11 +213,30 @@ for (var gi = 0; gi < games.length; gi++) {
       }
     }
 
-    var keysA = {}, keysB = {};
-    for (var ai = 0; ai < sigsA.length; ai++) keysA[sigKey(sigsA[ai])] = sigsA[ai];
-    for (var bi = 0; bi < sigsB.length; bi++) keysB[sigKey(sigsB[bi])] = sigsB[bi];
-    for (var ka in keysA) if (!keysB[ka]) diffAnotB.push({ game: g.game_id, date: g.game_date, sig: keysA[ka], graded: grade(keysA[ka], g) });
-    for (var kb in keysB) if (!keysA[kb]) diffBnotA.push({ game: g.game_id, date: g.game_date, sig: keysB[kb], graded: grade(keysB[kb], g) });
+    // Exclusive uniques per scenario + 2-of-3 shared
+    var keys = { A: {}, B: {}, C: {} };
+    for (var ai = 0; ai < sigsA.length; ai++) keys.A[sigKey(sigsA[ai])] = sigsA[ai];
+    for (var bi = 0; bi < sigsB.length; bi++) keys.B[sigKey(sigsB[bi])] = sigsB[bi];
+    for (var ci = 0; ci < sigsC.length; ci++) keys.C[sigKey(sigsC[ci])] = sigsC[ci];
+    var allKeys = {};
+    for (var ka in keys.A) allKeys[ka] = 1;
+    for (var kb in keys.B) allKeys[kb] = 1;
+    for (var kc in keys.C) allKeys[kc] = 1;
+    for (var k in allKeys) {
+      var inA = !!keys.A[k], inB = !!keys.B[k], inC = !!keys.C[k];
+      var count = (inA?1:0) + (inB?1:0) + (inC?1:0);
+      if (count === 3) continue; // present in all three — not a diff
+      if (count === 1) {
+        var scen = inA ? 'A' : (inB ? 'B' : 'C');
+        var sig = keys[scen][k];
+        unique[scen].push({ game: g.game_id, date: g.game_date, sig: sig, graded: grade(sig, g) });
+      } else {
+        // Exactly 2 of 3 — record where the gap is
+        var where = (inA?'A':'') + (inB?'B':'') + (inC?'C':'');
+        var rep = inA ? keys.A[k] : (inB ? keys.B[k] : keys.C[k]);
+        sharedByTwo.push({ game: g.game_id, date: g.game_date, sig: rep, where: where, graded: grade(rep, g) });
+      }
+    }
 
     processed++;
   } catch (e) {
@@ -231,8 +266,10 @@ function printSection(name, stat) {
   }
 }
 
-printSection('A (SP=0.90 / RP=0.10)', stats.A);
-printSection('B (SP=0.75 / RP=0.25)', stats.B);
+for (var sn = 0; sn < SCEN_NAMES.length; sn++) {
+  var nm = SCEN_NAMES[sn];
+  printSection(SCEN_LABELS[nm], stats[nm]);
+}
 
 function printDiffTable(title, rows) {
   console.log('');
@@ -259,7 +296,39 @@ function printDiffTable(title, rows) {
     + 'win% ' + winPct(tot) + '   pnl ' + tot.pnl.toFixed(2) + '   roi ' + roi(tot));
 }
 
-printDiffTable('Signals unique to A (would NOT fire under B)', diffAnotB);
-printDiffTable('Signals unique to B (would NOT fire under A)', diffBnotA);
+for (var sn2 = 0; sn2 < SCEN_NAMES.length; sn2++) {
+  var sc = SCEN_NAMES[sn2];
+  printDiffTable('Signals unique to ' + sc + ' ' + SCEN_LABELS[sc] + ' — fires only in this scenario', unique[sc]);
+}
+
+// Also break the 2-of-3 shared list out by where-pair so you can see where B
+// sits closer to A vs C at the signal level.
+function printSharedBreakdown(rows) {
+  console.log('');
+  console.log('='.repeat(80));
+  console.log('Signals present in exactly 2 of 3 scenarios  (' + rows.length + ')');
+  var groups = { 'AB': [], 'AC': [], 'BC': [] };
+  for (var i = 0; i < rows.length; i++) {
+    var w = rows[i].where;
+    if (groups[w]) groups[w].push(rows[i]);
+  }
+  var labels = {
+    AB: 'A+B (dropped under C): midpoint + current agree, proposed disagrees',
+    AC: 'A+C (dropped under B): current + proposed agree, midpoint disagrees',
+    BC: 'B+C (dropped under A): midpoint + proposed agree, current disagrees',
+  };
+  var pairs = ['AB', 'AC', 'BC'];
+  for (var p = 0; p < pairs.length; p++) {
+    var pk = pairs[p];
+    var rs = groups[pk];
+    var tot = emptyBucket();
+    for (var r2 = 0; r2 < rs.length; r2++) accumulate(tot, rs[r2].graded);
+    console.log('  ' + pad(pk, 4, true) + ' (' + rs.length + ')  '
+      + tot.wins + 'W / ' + tot.losses + 'L / ' + tot.pushes + 'P   '
+      + 'win% ' + winPct(tot) + '   pnl ' + tot.pnl.toFixed(2) + '   roi ' + roi(tot)
+      + '   ' + labels[pk]);
+  }
+}
+printSharedBreakdown(sharedByTwo);
 
 console.log('');
