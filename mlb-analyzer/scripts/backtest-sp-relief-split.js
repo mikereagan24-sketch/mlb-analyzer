@@ -3,21 +3,59 @@
 
 // Backtest: for every resolved game in the DB, replay getSignals under three
 // SP/RP weight splits and grade the resulting signals against actual scores.
-//   A = current   SP_PIT=0.90  RELIEF_PIT=0.10
-//   B = midpoint  SP_PIT=0.85  RELIEF_PIT=0.15
-//   C = proposed  SP_PIT=0.75  RELIEF_PIT=0.25
-// All other settings come from app_settings.
+// All non-weight settings come from app_settings. Uses the app's own
+// runModel + getSignals + calcPnl — no re-implementation. Writes nothing.
 //
-// Uses the app's own runModel + getSignals + calcPnl — no re-implementation.
-// Writes nothing to the DB.
+// USAGE:
+//   node scripts/backtest-sp-relief-split.js                                # all dates, default splits
+//   node scripts/backtest-sp-relief-split.js 2026-04-01                     # single date, default splits
+//   node scripts/backtest-sp-relief-split.js 2026-04-01 2026-04-30          # date range, default splits
+//   node scripts/backtest-sp-relief-split.js 2026-04-01 2026-04-30 0.90/0.10 0.80/0.20 0.70/0.30
 //
-// Usage:
-//   node scripts/backtest-sp-relief-split.js                        # full history
-//   node scripts/backtest-sp-relief-split.js 2026-04-01             # single date
-//   node scripts/backtest-sp-relief-split.js 2026-04-01 2026-04-18  # date range
+// Arg order: dates first (optional, YYYY-MM-DD), then 1-3 scenario strings
+// in SP/RP form. Any missing scenarios fall back to the default row.
+//
+// DEFAULT SCENARIOS:
+//   A = current   SP=0.90 / RP=0.10
+//   B = midpoint  SP=0.85 / RP=0.15
+//   C = proposed  SP=0.75 / RP=0.25
+//
+// RE-RUN CADENCE
+// Rerun this weekly as new games resolve. ROI numbers are noisy until
+// you have ~200+ plays per bucket — by-star breakdowns stabilize later
+// than the Overall row. Suggested rhythm:
+//   - Monday full-history run as the anchor (no date args)
+//   - Rolling 30-day run before any weight change:
+//       node scripts/backtest-sp-relief-split.js <30-days-ago> <yesterday>
+// Save outputs with `tee` if you want a longitudinal record:
+//   node scripts/backtest-sp-relief-split.js | tee reports/bt-$(date +%F).txt
 
-var DATE_START = process.argv[2] || null;
-var DATE_END   = process.argv[3] || null;
+var args = process.argv.slice(2);
+var dateRe = /^\d{4}-\d{2}-\d{2}$/;
+var DATE_START = null, DATE_END = null;
+var ai = 0;
+if (args[ai] && dateRe.test(args[ai])) { DATE_START = args[ai]; ai++; }
+if (args[ai] && dateRe.test(args[ai])) { DATE_END = args[ai]; ai++; }
+
+var scenArgs = args.slice(ai);
+var DEFAULTS = ['0.90/0.10', '0.85/0.15', '0.75/0.25'];
+var scenStrings = [
+  scenArgs[0] || DEFAULTS[0],
+  scenArgs[1] || DEFAULTS[1],
+  scenArgs[2] || DEFAULTS[2],
+];
+
+function parseScenario(str) {
+  var m = String(str).match(/^\s*([0-9.]+)\s*[\/,]\s*([0-9.]+)\s*$/);
+  if (!m) { console.error('Invalid scenario "' + str + '" — expected SP/RP, e.g. 0.90/0.10'); process.exit(1); }
+  var sp = parseFloat(m[1]);
+  var rp = parseFloat(m[2]);
+  if (isNaN(sp) || isNaN(rp)) { console.error('Invalid scenario "' + str + '" — non-numeric values'); process.exit(1); }
+  if (sp < 0 || rp < 0 || sp > 1 || rp > 1) console.error('WARN: scenario "' + str + '" has weights outside [0,1] — proceeding anyway');
+  if (Math.abs((sp + rp) - 1) > 0.01) console.error('WARN: scenario "' + str + '" weights sum to ' + (sp + rp).toFixed(2) + ' (not 1.00)');
+  return { sp: sp, rp: rp };
+}
+var parsedScenarios = scenStrings.map(parseScenario);
 
 var q_db = require('../db/schema');
 var q = q_db.q;
@@ -128,17 +166,15 @@ function pad(s, n, right) {
 var base = jobs.getSettings();
 var wobaIdx = jobs.getWobaIndex();
 
-var scenarios = {
-  A: Object.assign({}, base, { SP_PIT_WEIGHT: 0.90, RELIEF_PIT_WEIGHT: 0.10 }),
-  B: Object.assign({}, base, { SP_PIT_WEIGHT: 0.85, RELIEF_PIT_WEIGHT: 0.15 }),
-  C: Object.assign({}, base, { SP_PIT_WEIGHT: 0.75, RELIEF_PIT_WEIGHT: 0.25 }),
-};
 var SCEN_NAMES = ['A', 'B', 'C'];
-var SCEN_LABELS = {
-  A: 'A (SP=0.90 / RP=0.10)',
-  B: 'B (SP=0.85 / RP=0.15)',
-  C: 'C (SP=0.75 / RP=0.25)',
-};
+var scenarios = {};
+var SCEN_LABELS = {};
+for (var si = 0; si < SCEN_NAMES.length; si++) {
+  var nmX = SCEN_NAMES[si];
+  var pX = parsedScenarios[si];
+  scenarios[nmX] = Object.assign({}, base, { SP_PIT_WEIGHT: pX.sp, RELIEF_PIT_WEIGHT: pX.rp });
+  SCEN_LABELS[nmX] = nmX + ' (SP=' + pX.sp.toFixed(2) + ' / RP=' + pX.rp.toFixed(2) + ')';
+}
 
 var gameSql = "SELECT DISTINCT gl.* FROM game_log gl "
   + "JOIN bet_signals bs ON bs.game_date=gl.game_date AND bs.game_id=gl.game_id "
@@ -158,9 +194,9 @@ if (!games.length) {
 }
 
 console.log('Backtest: SP/RP weight split');
-console.log('  A = current   SP_PIT=0.90  RELIEF_PIT=0.10');
-console.log('  B = midpoint  SP_PIT=0.85  RELIEF_PIT=0.15');
-console.log('  C = proposed  SP_PIT=0.75  RELIEF_PIT=0.25');
+for (var sb = 0; sb < SCEN_NAMES.length; sb++) {
+  console.log('  ' + SCEN_LABELS[SCEN_NAMES[sb]]);
+}
 console.log('Universe: ' + games.length + ' resolved games  ('
   + games[0].game_date + ' → ' + games[games.length - 1].game_date + ')');
 console.log('='.repeat(80));
