@@ -564,6 +564,13 @@ function startCronJobs() {
     console.log('[cron] 4AM PT score pull');
     runScoreJob(yesterdayET());
   }, { timezone: 'UTC' });
+  // Tomorrow's odds: single pull at 8PM ET so lines are staged for next
+  // day's slate before bedtime. Uses the existing ET-locale tomorrowET().
+  cron.schedule('0 20 * * *', () => {
+    const d = tomorrowET();
+    console.log('[cron] 8PM ET tomorrow odds pull for ' + d);
+    runOddsJob(d);
+  }, { timezone: 'America/New_York' });
   console.log('[cron] Jobs scheduled Ã¢ÂÂ lineups 8AM ET + hourly noon-6PM ET + 11PM ET');
 }
 
