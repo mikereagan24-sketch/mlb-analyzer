@@ -218,7 +218,13 @@ router.post('/jobs/fix-signals', (req, res) => {
 router.get('/backtest', (req, res) => {
   try {
     const { from, to } = req.query;
-    const fromDate = from || '2026-01-01';
+    // Model version floor: 2026-04-09 is when the current parameter set was
+    // established. Signals from earlier dates were produced by older model
+    // versions and must never appear in backtest output, no matter what
+    // `from` is passed. Clamp to MIN_MODEL_DATE if caller asks for earlier.
+    const MIN_MODEL_DATE = '2026-04-09';
+    const requestedFrom = from || '2026-01-01';
+    const fromDate = requestedFrom < MIN_MODEL_DATE ? MIN_MODEL_DATE : requestedFrom;
     const toDate = to || '2099-12-31';
     // One-time: null out CLV for Total signals (CLV not meaningful ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ bet_line is a price, not a total)
     db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' AND clv IS NOT NULL").run();
@@ -247,6 +253,7 @@ router.get('/backtest', (req, res) => {
       FROM bet_signals bs
       LEFT JOIN game_log gl ON gl.game_date=bs.game_date AND gl.game_id=bs.game_id
       WHERE bs.game_date BETWEEN ? AND ?
+        AND bs.game_date >= '2026-04-09'
         AND (bs.is_active = 1 OR bs.outcome != 'pending')
       ORDER BY bs.game_date, bs.id
     `).all(fromDate, toDate);

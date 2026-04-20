@@ -176,13 +176,20 @@ for (var si = 0; si < SCEN_NAMES.length; si++) {
   SCEN_LABELS[nmX] = nmX + ' (SP=' + pX.sp.toFixed(2) + ' / RP=' + pX.rp.toFixed(2) + ')';
 }
 
+// Model version floor: 2026-04-09 is when the current model parameter set
+// (SP/RP weights, bullpen blend, fatigue rules, etc) was established.
+// Anything before that date was produced by older versions and would
+// contaminate the backtest. Enforced regardless of CLI date args.
+var MIN_MODEL_DATE = '2026-04-09';
+var effectiveStart = (DATE_START && DATE_START > MIN_MODEL_DATE) ? DATE_START : MIN_MODEL_DATE;
+
 var gameSql = "SELECT DISTINCT gl.* FROM game_log gl "
   + "JOIN bet_signals bs ON bs.game_date=gl.game_date AND bs.game_id=gl.game_id "
   + "WHERE bs.outcome IS NOT NULL AND bs.outcome != 'pending' "
-  + "AND gl.away_score IS NOT NULL AND gl.home_score IS NOT NULL";
-var params = [];
-if (DATE_START && DATE_END) { gameSql += ' AND gl.game_date BETWEEN ? AND ?'; params = [DATE_START, DATE_END]; }
-else if (DATE_START)       { gameSql += ' AND gl.game_date = ?';             params = [DATE_START]; }
+  + "AND gl.away_score IS NOT NULL AND gl.home_score IS NOT NULL "
+  + "AND gl.game_date >= ?";
+var params = [effectiveStart];
+if (DATE_END) { gameSql += ' AND gl.game_date <= ?'; params.push(DATE_END); }
 gameSql += ' ORDER BY gl.game_date, gl.game_id';
 
 var stmt = db.prepare(gameSql);
