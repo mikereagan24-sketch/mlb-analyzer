@@ -58,6 +58,8 @@ function getSettings() {
     BAT_DFLT_START: num('bat_dflt_start', 0.315),
     BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
     UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
+    SP_IP_BASELINE:    num('sp_ip_baseline',    5.5),
+    SP_IP_WEIGHT_PER:  num('sp_ip_weight_per',  0.03),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -106,6 +108,15 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       homeBpWoba = homeBp?.woba || LEAGUE_BP;
     }
   } catch(e) { /* fallback to league avg */ }
+  // Projected IP/start for each SP, drives the dynamic SP/RP split in runModel.
+  // Null when no projection row exists — runModel falls back to flat SP weight.
+  // NOTE: existing bullpen code at line ~86 reads gameRow.away_pitcher which
+  // isn't a real column; the canonical column is away_sp. Using away_sp here
+  // (with away_pitcher fallback) so projIP lookup actually finds something.
+  var awaySpLookupName = gameRow.away_sp || gameRow.away_pitcher || '';
+  var homeSpLookupName = gameRow.home_sp || gameRow.home_pitcher || '';
+  var awaySpProjIP = q.getPitcherProjIP ? q.getPitcherProjIP(awaySpLookupName) : null;
+  var homeSpProjIP = q.getPitcherProjIP ? q.getPitcherProjIP(homeSpLookupName) : null;
   const game = {
     ...gameRow,
     awayLineup: tryParse(gameRow.away_lineup_json) || [],
@@ -115,6 +126,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     awayBullpenWoba: awayBpWoba, homeBullpenWoba: homeBpWoba,
     awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
     homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
+    // Starter projected IP (null when no projection uploaded)
+    awaySpProjIP: awaySpProjIP, homeSpProjIP: homeSpProjIP,
   };
   const model = runModel(game, wobaIdx, settings);
   const signals = getSignals(game, model, settings);

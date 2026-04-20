@@ -333,6 +333,35 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <span>ð <code>pit_actual_vs_lhb.csv</code></span><span>ð <code>pit_actual_vs_rhb.csv</code></span>
 </div>
 </div>
+
+<!-- Pitcher IP projections (separate pipeline from the 8-file wOBA upload) -->
+<div class="card" style="margin-top:1rem">
+  <div class="slabel">Pitcher IP Projections (Steamer)</div>
+  <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Expected filename: <code>steamer_pitchers.csv</code> &middot; columns Name, Team, IP, GS</div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+    <input type="file" id="pit-ip-file" accept=".csv" style="flex:1;min-width:200px">
+    <button class="btn btn-primary btn-sm" onclick="uploadPitProjIP()">Upload</button>
+  </div>
+  <div id="pit-ip-upload-status" class="notice" style="font-size:11px;display:none"></div>
+
+  <div class="slabel" style="margin-top:14px">Add/Edit Override</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;margin-bottom:6px;align-items:end">
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher name</label><input type="text" id="pit-ip-override-name" placeholder="e.g. Shohei Ohtani"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Team (optional)</label><input type="text" id="pit-ip-override-team" placeholder="LAD" style="text-transform:uppercase"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">IP/Start</label><input type="number" id="pit-ip-override-ip" step="0.1" min="0.1" max="9" placeholder="5.8"></div>
+    <div><button class="btn btn-primary btn-sm" onclick="savePitIPOverride()">Save</button></div>
+  </div>
+  <div id="pit-ip-override-status" style="font-size:11px;color:var(--text2);margin-bottom:8px;min-height:14px"></div>
+
+  <div class="slabel">Current rows</div>
+  <div style="overflow-x:auto;max-height:380px;overflow-y:auto;border:.5px solid var(--border);border-radius:var(--r-md)">
+    <table class="mu-tbl" style="width:100%;font-size:11px">
+      <thead><tr><th style="text-align:left">Pitcher</th><th>Team</th><th>IP/Start</th><th>Type</th><th>Updated</th></tr></thead>
+      <tbody id="pit-ip-tbody"><tr><td colspan="5" class="muted" style="text-align:center;padding:12px">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
 </div>
 
 <!-- MODEL SETTINGS -->
@@ -368,6 +397,8 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Default batter wOBA vs same-handed starter when no CSV data found. Used as fallback only.">Batter dflt (same hand)</label><input type="number" id="s-bat-dflt-start" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="Default batter wOBA vs opposite-handed reliever when no CSV data found. Used as fallback only.">Batter dflt (opp hand)</label><input type="number" id="s-bat-dflt-opp" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
+      <div class="setting-row"><label title="Average innings a starter is projected to pitch. Used to scale SP/RP weight dynamically.">SP IP baseline</label><input type="number" id="s-sp-ip-baseline" step="0.5" min="3.0" max="8.0"></div>
+      <div class="setting-row"><label title="How much to adjust SP weight for each inning above/below baseline. 0.03 = 3 percentage points per inning.">SP weight per IP</label><input type="number" id="s-sp-ip-weight-per" step="0.01" min="0" max="0.20"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -961,7 +992,77 @@ function sw(name){
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('active',s.id==='sec-'+name));
   if(name==='backtest')loadCronLog();
   if(name==='model')loadSettings();
+  if(name==='data')refreshPitIPTable();
   if(name==='matchups'&&muSelectedGame)renderMatchupGame(muSelectedGame);
+}
+
+// --- Pitcher IP projections UI ---
+async function refreshPitIPTable(){
+  var tbody=document.getElementById('pit-ip-tbody');
+  if(!tbody) return;
+  try{
+    var res=await api('/pit-proj-ip');
+    var rows=(res&&res.rows)||[];
+    if(!rows.length){ tbody.innerHTML='<tr><td colspan="5" class="muted" style="text-align:center;padding:12px">No projections loaded yet. Upload a CSV above.</td></tr>'; return; }
+    tbody.innerHTML=rows.map(function(r){
+      var typeCell=r.is_override
+        ? '<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600">override</span>'
+        : '<span style="color:var(--text2);font-size:10px">projected</span>';
+      var updated=r.uploaded_at?String(r.uploaded_at).slice(0,10):'';
+      return '<tr>'
+        +'<td style="text-align:left">'+escapeHtmlIP(r.player_name)+'</td>'
+        +'<td>'+escapeHtmlIP(r.team||'')+'</td>'
+        +'<td>'+(r.ip_per_start!=null?Number(r.ip_per_start).toFixed(2):'\u2014')+'</td>'
+        +'<td>'+typeCell+'</td>'
+        +'<td class="muted" style="font-size:10px">'+updated+'</td>'
+        +'</tr>';
+    }).join('');
+  }catch(e){
+    tbody.innerHTML='<tr><td colspan="5" class="muted" style="text-align:center;padding:12px;color:var(--red)">Error: '+escapeHtmlIP(e.message)+'</td></tr>';
+  }
+}
+function escapeHtmlIP(s){
+  s=String(s==null?'':s);
+  return s.replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});
+}
+async function uploadPitProjIP(){
+  var fileEl=document.getElementById('pit-ip-file');
+  var status=document.getElementById('pit-ip-upload-status');
+  if(!fileEl||!fileEl.files||!fileEl.files[0]){ status.style.display='block'; status.textContent='Select a CSV file first.'; return; }
+  var file=fileEl.files[0];
+  status.style.display='block';
+  status.textContent='Uploading '+file.name+'\u2026';
+  var fd=new FormData();
+  fd.append('file', file);
+  try{
+    var headers={};
+    if(_appPassword) headers['x-app-password']=_appPassword;
+    var r=await fetch('/api/upload/pit-proj-ip',{method:'POST',headers:headers,body:fd});
+    var j=await r.json();
+    if(!r.ok){ status.textContent='Error: '+(j.error||('HTTP '+r.status)); return; }
+    status.innerHTML='\u2713 Uploaded <b>'+j.filename+'</b> on '+new Date().toLocaleString()
+      +' \u00b7 '+j.upserted+' pitchers updated'
+      +(j.skipped_overrides?' \u00b7 '+j.skipped_overrides+' overrides preserved':'');
+    fileEl.value='';
+    refreshPitIPTable();
+  }catch(e){ status.textContent='Error: '+e.message; }
+}
+async function savePitIPOverride(){
+  var name=(document.getElementById('pit-ip-override-name').value||'').trim();
+  var team=(document.getElementById('pit-ip-override-team').value||'').trim();
+  var ip=parseFloat(document.getElementById('pit-ip-override-ip').value);
+  var status=document.getElementById('pit-ip-override-status');
+  if(!name){ status.textContent='Enter a pitcher name.'; return; }
+  if(isNaN(ip)||ip<=0||ip>9){ status.textContent='IP/Start must be a number in (0, 9].'; return; }
+  status.textContent='Saving\u2026';
+  try{
+    var r=await api('/pit-proj-ip/override',{method:'POST',body:JSON.stringify({player_name:name,ip_per_start:ip,team:team||null})});
+    status.textContent='\u2713 Saved '+name+' = '+ip+' IP/start (override)';
+    document.getElementById('pit-ip-override-name').value='';
+    document.getElementById('pit-ip-override-team').value='';
+    document.getElementById('pit-ip-override-ip').value='';
+    refreshPitIPTable();
+  }catch(e){ status.textContent='Error: '+e.message; }
 }
 
 const CAT_LABELS={'3star-fav':'3★ — favorite','2star-fav':'2★ — favorite','1star-fav':'1★ — favorite','0star-fav':'unrated — favorite','3star-dog':'3★ — underdog','2star-dog':'2★ — underdog','1star-dog':'1★ — underdog','0star-dog':'unrated — underdog','3star-over':'3★ — over','2star-over':'2★ — over','1star-over':'1★ — over','0star-over':'unrated — over','3star-under':'3★ — under','2star-under':'2★ — under','1star-under':'1★ — under','0star-under':'unrated — under'};
@@ -1516,6 +1617,8 @@ async function loadSettings(){
     set('s-bat-dflt-start',  s.bat_dflt_start);
     set('s-bat-dflt-opp',    s.bat_dflt_opp);
     set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
+    set('s-sp-ip-baseline',   s.sp_ip_baseline);
+    set('s-sp-ip-weight-per', s.sp_ip_weight_per);
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
     set('s-ml-3star',      s.ml_3star_edge);
@@ -1553,6 +1656,8 @@ async function saveSettings(){
         bat_dflt_start:     get('s-bat-dflt-start'),
         bat_dflt_opp:       get('s-bat-dflt-opp'),
         unknown_pitcher_woba: get('s-unknown-pitcher-woba'),
+        sp_ip_baseline:     get('s-sp-ip-baseline'),
+        sp_ip_weight_per:   get('s-sp-ip-weight-per'),
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
     ml_3star_edge:      get('s-ml-3star'),

@@ -143,6 +143,8 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_start', '0.315');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_opp', '0.320');
   INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
+  INSERT OR IGNORE INTO app_settings VALUES ('sp_ip_baseline', '5.5');
+  INSERT OR IGNORE INTO app_settings VALUES ('sp_ip_weight_per', '0.03');
 INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
@@ -374,6 +376,26 @@ q.getAllPitProjIP = db.prepare(
 q.getPitProjIPByNameNorm = db.prepare(
   `SELECT * FROM pit_proj_ip WHERE player_name_norm=?`
 );
+
+// Look up a pitcher's projected IP/start. Exact normalized match first,
+// then last-name fallback (prefer is_override rows, then most recent).
+// Returns a number or null.
+q.getPitcherProjIP = (playerName) => {
+  if (!playerName) return null;
+  const norm = normName(playerName);
+  if (!norm) return null;
+  const exact = q.getPitProjIPByNameNorm.get(norm);
+  if (exact) return exact.ip_per_start;
+  const parts = norm.split(' ');
+  const last = parts[parts.length - 1];
+  if (!last || last.length < 3) return null;
+  const row = db.prepare(
+    "SELECT ip_per_start FROM pit_proj_ip " +
+    "WHERE player_name_norm LIKE ? OR player_name_norm = ? " +
+    "ORDER BY is_override DESC, uploaded_at DESC LIMIT 1"
+  ).get('% ' + last, last);
+  return row ? row.ip_per_start : null;
+};
 q.getPitcherLogForTeam = db.prepare(
   `SELECT game_date, pitcher_name, pitcher_mlb_id, pitches_thrown, appeared
    FROM pitcher_game_log
