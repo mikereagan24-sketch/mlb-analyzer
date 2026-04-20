@@ -163,7 +163,11 @@ async function fetchLineups(dateStr) {
   }
 
   // Verify date
-  const detectedDate = extractRotoWireDate(htmlToText(html.substring(0, 5000)));
+  // Strip first, then window. Scanning the raw first 5000 bytes skipped the
+  // actual date text (which lives past 50KB of <head> scripts/styles); after
+  // stripping those to whitespace, position 3491 of the remainder contains
+  // "Starting MLB lineups for April 20, 2026" — well inside the 5000 window.
+  const detectedDate = extractRotoWireDate(htmlToText(html).substring(0, 5000));
   console.log('[scraper] RotoWire detected date: ' + (detectedDate || 'UNKNOWN') + ' | requested: ' + dateStr);
   // Fail-closed: reject when either (a) RotoWire is showing the wrong date,
   // or (b) we couldn't detect a date at all. The old `detectedDate && ...`
