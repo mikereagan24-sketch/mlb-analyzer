@@ -142,6 +142,7 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('min_bf', '100');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_start', '0.315');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_opp', '0.320');
+  INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
 INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
@@ -387,17 +388,18 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
   ).all(dataKey, '%'+teamAbbr);
 };
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba) => {
+  if (unknownWoba == null) unknownWoba = 0.335;
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
   const projKey = 'pit-proj-'+vsHand;
   const projRows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
   ).all(projKey, '% '+teamLower.toUpperCase());
-  if (!projRows.length) return null;
   const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
   const activeRPSet = new Set(rosterRows.map(r=>normName(r.player_name)));
   const hasRoster = activeRPSet.size > 0;
+  if (!projRows.length && !hasRoster) return null;
   // Fatigue log stores full names from MLB Stats API — exact match only, no last-name fallback.
   const fatiguedSet = new Set(q.getFatiguedPitchers(teamAbbr, gameDate).map(f => normName(f.pitcher_name)));
   const bullpenProj = projRows.filter(r => {
@@ -411,7 +413,6 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
     }
     return r.sample_size >= 5;
   });
-  if (!bullpenProj.length) return null;
   const actKey = 'pit-act-'+vsHand;
   const actRows = db.prepare(
     "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=?"
@@ -427,20 +428,47 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate) => {
     const woba = (actMatch && actMatch.woba)
       ? W_PROJ * proj.woba + W_ACT * actMatch.woba
       : proj.woba;
-    return { name: pName, woba, sample: proj.sample_size };
+    return { name: pName, woba, sample: proj.sample_size, fallback: false };
   });
-  const qualified = pitchers.filter(p => p.sample >= 5);
-  const pool = qualified.length >= 3 ? qualified : pitchers.slice(0, 8);
+
+  // Inject fallback entries for active RPs who have no proj row (injury
+  // callups, recent trades, etc). Skip the SP and any fatigued pitchers.
+  // Last-name collision with an existing proj entry = treat as same person.
+  if (hasRoster) {
+    const representedFull = new Set(pitchers.map(p => p.name));
+    const representedLast = new Set(pitchers.map(p => { var parts = p.name.split(' '); return parts[parts.length-1]; }));
+    for (const r of rosterRows) {
+      const rName = normName(r.player_name);
+      const rParts = rName.split(' ');
+      const rLast = rParts[rParts.length-1];
+      if (!rName) continue;
+      if (representedFull.has(rName)) continue;
+      if (rLast && representedLast.has(rLast)) continue;
+      if (starterNorm && rName.includes(starterNorm)) continue;
+      if (fatiguedSet.has(rName)) continue;
+      pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true });
+    }
+  }
+
+  if (!pitchers.length) return null;
+  const fallbackList = pitchers.filter(p => p.fallback);
+  const projPitchers = pitchers.filter(p => !p.fallback);
+  const qualifiedProj = projPitchers.filter(p => p.sample >= 5);
+  // Primary pool: qualified proj if enough; otherwise take up to 8 proj rows.
+  const primary = qualifiedProj.length >= 3 ? qualifiedProj : projPitchers.slice(0, 8);
+  // Always include fallback entries — a rostered callup will throw innings.
+  const pool = primary.concat(fallbackList);
+  if (!pool.length) return null;
   const totalW = pool.reduce((s,p)=>s+(p.sample||20), 0);
   const woba = pool.reduce((s,p)=>s+(p.woba*(p.sample||20)), 0) / totalW;
-  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length };
+  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, wProj, wAct, gameDate) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, wProj, wAct, gameDate, unknownWoba) => {
   // Compute bullpen wOBA blended by actual opposing lineup handedness
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   if (!vsRHB && !vsLHB) return null;

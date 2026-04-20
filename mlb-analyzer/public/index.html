@@ -367,6 +367,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Minimum batters faced required to use a pitcher's actual wOBA. Below this threshold, projection-only is used.">Min BF (actual)</label><input type="number" id="s-min-bf" step="1" min="10" max="300"></div>
       <div class="setting-row"><label title="Default batter wOBA vs same-handed starter when no CSV data found. Used as fallback only.">Batter dflt (same hand)</label><input type="number" id="s-bat-dflt-start" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="Default batter wOBA vs opposite-handed reliever when no CSV data found. Used as fallback only.">Batter dflt (opp hand)</label><input type="number" id="s-bat-dflt-opp" step="0.001" min="0.250" max="0.400"></div>
+      <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -1514,6 +1515,7 @@ async function loadSettings(){
     set('s-min-bf',          s.min_bf);
     set('s-bat-dflt-start',  s.bat_dflt_start);
     set('s-bat-dflt-opp',    s.bat_dflt_opp);
+    set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
     set('s-ml-3star',      s.ml_3star_edge);
@@ -1550,6 +1552,7 @@ async function saveSettings(){
         min_bf:             get('s-min-bf'),
         bat_dflt_start:     get('s-bat-dflt-start'),
         bat_dflt_opp:       get('s-bat-dflt-opp'),
+        unknown_pitcher_woba: get('s-unknown-pitcher-woba'),
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
     ml_3star_edge:      get('s-ml-3star'),

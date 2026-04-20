@@ -57,6 +57,7 @@ function getSettings() {
     MIN_BF:         num('min_bf',         100),
     BAT_DFLT_START: num('bat_dflt_start', 0.315),
     BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
+    UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -86,6 +87,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const _wAct = (settings && settings.W_ACT != null) ? parseFloat(settings.W_ACT) : 0.35;
   const _bpStrong = (settings && settings.BP_STRONG_WEIGHT != null) ? parseFloat(settings.BP_STRONG_WEIGHT) : 0.60;
   const _bpWeak = (settings && settings.BP_WEAK_WEIGHT != null) ? parseFloat(settings.BP_WEAK_WEIGHT) : 0.40;
+  const _unknownWoba = (settings && settings.UNKNOWN_PITCHER_WOBA != null) ? parseFloat(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
   const LEAGUE_BP = 0.318;
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
   let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;
@@ -94,8 +96,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     if (q.getBullpenWobaBlended) {
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date, _unknownWoba);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date, _unknownWoba);
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;

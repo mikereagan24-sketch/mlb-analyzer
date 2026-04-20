@@ -1068,6 +1068,7 @@ router.get('/debug/bullpen-report', (req, res) => {
     const settings = getSettings();
     const W_PROJ = settings.W_PROJ != null ? Number(settings.W_PROJ) : 0.65;
     const W_ACT  = settings.W_ACT  != null ? Number(settings.W_ACT)  : 0.35;
+    const UNKNOWN_PITCHER_WOBA = settings.UNKNOWN_PITCHER_WOBA != null ? Number(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
 
     const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
     const idx = {};
@@ -1117,11 +1118,20 @@ router.get('/debug/bullpen-report', (req, res) => {
         const projR = lookup('pit-proj-rhb', p.player_name, teamU);
         const actL  = lookup('pit-act-lhb',  p.player_name, teamU);
         const actR  = lookup('pit-act-rhb',  p.player_name, teamU);
-        const blended_vs_lhb = blend(projL?.woba, actL?.woba);
-        const blended_vs_rhb = blend(projR?.woba, actR?.woba);
+        let blended_vs_lhb = blend(projL?.woba, actL?.woba);
+        let blended_vs_rhb = blend(projR?.woba, actR?.woba);
         const isSP = !!spLast && (pNorm === spNorm || pLast === spLast);
         const fatigue_reasons = fatigueByExact[pNorm] || null;
         const fatigued_flag = !!fatigue_reasons;
+        // An RP rostered with no proj data will be injected into the model's
+        // pool using UNKNOWN_PITCHER_WOBA — reflect that here too so the
+        // debug report matches the model's actual pool average.
+        const uses_fallback_woba = p.role === 'RP' && !isSP && !fatigued_flag
+          && projL == null && projR == null && actL == null && actR == null;
+        if (uses_fallback_woba) {
+          blended_vs_lhb = UNKNOWN_PITCHER_WOBA;
+          blended_vs_rhb = UNKNOWN_PITCHER_WOBA;
+        }
         const in_pool = p.role === 'RP' && !isSP && !fatigued_flag;
         return {
           name: p.player_name,
@@ -1135,6 +1145,7 @@ router.get('/debug/bullpen-report', (req, res) => {
           blended_vs_rhb,
           fatigued: fatigued_flag,
           fatigue_reasons,
+          uses_fallback_woba,
           in_pool,
         };
       });
