@@ -399,7 +399,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
       <div class="setting-row"><label title="Average innings a starter is projected to pitch. Used to scale SP/RP weight dynamically.">SP IP baseline</label><input type="number" id="s-sp-ip-baseline" step="0.5" min="3.0" max="8.0"></div>
       <div class="setting-row"><label title="How much to adjust SP weight for each inning above/below baseline. 0.03 = 3 percentage points per inning.">SP weight per IP</label><input type="number" id="s-sp-ip-weight-per" step="0.01" min="0" max="0.20"></div>
-      <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77"></div>
+      <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -418,7 +418,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 </div>
 <script>
 
-  const PA_WEIGHTS=[4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77];
+  // Lineup-order PA weights used by the Matchup-tab preview renders.
+  // Seeded with server defaults; overwritten once /api/settings loads
+  // (see loadSettings below and the page-boot fetch at the bottom of <script>).
+  // Matches services/model.js PA_WEIGHTS_DEFAULT exactly.
+  window.PA_WEIGHTS = window.PA_WEIGHTS || [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
 const KEY_LABELS={'bat-proj-lhp':'Batters vs LHP (Steamer)','bat-proj-rhp':'Batters vs RHP (Steamer)','pit-proj-lhb':'Pitchers vs LHB (Steamer)','pit-proj-rhb':'Pitchers vs RHB (Steamer)','bat-act-lhp':'Batters vs LHP (actual)','bat-act-rhp':'Batters vs RHP (actual)','pit-act-lhb':'Pitchers vs LHB (actual)','pit-act-rhb':'Pitchers vs RHB (actual)'};
 const FILE_KEY_TESTS=[{key:'bat-proj-lhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-proj-rhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-proj-lhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-proj-rhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/rhb|_rh/i.test(n)},{key:'bat-act-lhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-act-rhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-act-lhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-act-rhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/rhb|_rh/i.test(n)}];
 function detectKey(fn){const n=fn.toLowerCase();for(const{key,t}of FILE_KEY_TESTS)if(t(n))return key;return null;}
@@ -464,6 +468,10 @@ async function init(){
   await refreshWobaStatus();
   await loadGamesFromDB();
   await fetchServerWoba();
+  // Populate window.PA_WEIGHTS (and the rest of the Model form) from
+  // the live settings so Matchup-tab previews match what the server
+  // uses. Fire-and-forget — loadSettings has its own error handling.
+  loadSettings();
 }
 
 async function fetchServerWoba(){
@@ -863,7 +871,7 @@ function analyzeGame(gameId,date){
       const woba=b.vsRHP||b.vsLHP?((oppHand==='R'?(b.vsRHP||0.310):(b.vsLHP||0.310)).toFixed(3)):'—';
       return'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:.5px solid var(--border);font-size:12px">'+
         '<span><span class="hbadge h'+eff+'" style="font-size:9px;width:18px;height:16px;line-height:16px">'+(b.hand==='S'?'S→'+eff:b.hand)+'</span> '+b.name+'</span>'+
-        '<span style="color:var(--text2)">'+PA_WEIGHTS[i]+'</span></div>';
+        '<span style="color:var(--text2)">'+window.PA_WEIGHTS[i]+'</span></div>';
     }).join('');
   };
   mkBD(g.away_lineup||[],g.home_sp_hand||'R',document.getElementById('a-bd'));
@@ -956,7 +964,7 @@ async function renderMatchupGame(id){
   function mt(lu,sn,sh,pw,lbl){
     let wB=0,wP=0,wA=0,wT=0;
     const rows=lu.map((b,i)=>{
-      const pa=PA_WEIGHTS[i]||3.77,eff=b.hand==='S'?(sh==='R'?'L':'R'):b.hand;
+      const pa=window.PA_WEIGHTS[i]||3.77,eff=b.hand==='S'?(sh==='R'?'L':'R'):b.hand;
       const bw=b.woba!=null?b.woba:(eff==='L'?.330:.305),pw2=eff==='L'?gw(pw,'vsLHB'):gw(pw,'vsRHB'),av=(bw+pw2)/2;
       wB+=bw*pa;wP+=pw2*pa;wA+=av*pa;wT+=pa;
       const hd=b.hand==='S'?'S>'+eff:b.hand,dt=b.source&&b.source!=='default'?'<span style="color:var(--green);font-size:9px"> *</span>':'';
@@ -1620,10 +1628,15 @@ async function loadSettings(){
     set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
     set('s-sp-ip-baseline',   s.sp_ip_baseline);
     set('s-sp-ip-weight-per', s.sp_ip_weight_per);
-    // pa_weights is stored as a JSON array string — display as comma-sep
+    // pa_weights is stored as a JSON array string — display as comma-sep.
+    // Also updates window.PA_WEIGHTS so Matchup-tab previews use the same
+    // numbers the server-side model does.
     try {
       var _paw = s.pa_weights ? JSON.parse(s.pa_weights) : null;
-      if (Array.isArray(_paw)) set('s-pa-weights', _paw.join(','));
+      if (Array.isArray(_paw) && _paw.length === 9) {
+        set('s-pa-weights', _paw.join(','));
+        window.PA_WEIGHTS = _paw;
+      }
     } catch(e) { /* leave input blank if malformed */ }
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);

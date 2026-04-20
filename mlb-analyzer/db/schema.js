@@ -145,7 +145,7 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
   INSERT OR IGNORE INTO app_settings VALUES ('sp_ip_baseline', '5.5');
   INSERT OR IGNORE INTO app_settings VALUES ('sp_ip_weight_per', '0.03');
-  INSERT OR IGNORE INTO app_settings VALUES ('pa_weights', '[4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77]');
+  INSERT OR IGNORE INTO app_settings VALUES ('pa_weights', '[4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7]');
 INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
