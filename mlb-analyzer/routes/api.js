@@ -1204,7 +1204,24 @@ router.get('/debug/bullpen-report', (req, res) => {
     };
     const mean = (arr) => arr.length ? parseFloat((arr.reduce((s,x)=>s+x,0)/arr.length).toFixed(4)) : null;
 
-    const games = db.prepare('SELECT game_id, away_team, home_team, away_sp, home_sp FROM game_log WHERE game_date=? ORDER BY game_id').all(date);
+    // Chronological order — parse game_time ("7:05 PM" / "10:05 AM") to
+    // minutes-since-midnight so strings like "10:05 PM" don't sort before
+    // "7:05 PM". NULL game_times sort last. Matches the q.getGamesByDate
+    // pattern in schema.js.
+    const games = db.prepare(
+      "SELECT game_id, away_team, home_team, away_sp, home_sp, game_time FROM game_log " +
+      "WHERE game_date=? " +
+      "ORDER BY " +
+      "  CASE " +
+      "    WHEN game_time IS NULL THEN 9999 " +
+      "    WHEN game_time LIKE '%AM%' THEN " +
+      "      (CAST(SUBSTR(game_time,1,INSTR(game_time,':')-1) AS INT)%12)*60 + " +
+      "      CAST(TRIM(SUBSTR(game_time,INSTR(game_time,':')+1,2)) AS INT) " +
+      "    ELSE " +
+      "      ((CAST(SUBSTR(game_time,1,INSTR(game_time,':')-1) AS INT)%12)+12)*60 + " +
+      "      CAST(TRIM(SUBSTR(game_time,INSTR(game_time,':')+1,2)) AS INT) " +
+      "  END ASC, game_id ASC"
+    ).all(date);
     const rosterStmt = db.prepare('SELECT player_name, role, hand FROM team_rosters WHERE team=? ORDER BY role, player_name');
 
     const buildTeamReport = (teamAbbr, spName) => {
