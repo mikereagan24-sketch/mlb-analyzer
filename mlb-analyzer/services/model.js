@@ -27,7 +27,7 @@ function blendWoba(proj, act, minSample, wProj, wAct) {
   return null;
 }
 
-function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA) {
+function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) {
   if (minPA == null) minPA = 60;
   const bL = blendWoba(
     fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
@@ -40,7 +40,19 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA) {
     minPA, wProj, wAct
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
-  const d = BAT_DFLT[eff] || BAT_DFLT['R'];
+  // Prefer per-hand BAT_DFLT from settings; fall back to module const for
+  // external callers (e.g. routes/api.js debug routes) that don't pass settings.
+  let d;
+  if (settings && settings.BAT_DFLT_R_VS_RHP != null) {
+    const byHand = {
+      R: { vsRHP: settings.BAT_DFLT_R_VS_RHP, vsLHP: settings.BAT_DFLT_R_VS_LHP },
+      L: { vsRHP: settings.BAT_DFLT_L_VS_RHP, vsLHP: settings.BAT_DFLT_L_VS_LHP },
+      S: { vsRHP: settings.BAT_DFLT_S_VS_RHP, vsLHP: settings.BAT_DFLT_S_VS_LHP },
+    };
+    d = byHand[eff] || byHand.R;
+  } else {
+    d = BAT_DFLT[eff] || BAT_DFLT['R'];
+  }
   if (bL || bR) {
     const src = bL&&bR ? (bL.source===bR.source?bL.source:'blend') : (bL?.source||bR?.source);
     return { vsLHP: bL?.woba??d.vsLHP, vsRHP: bR?.woba??d.vsRHP, source: src };
@@ -48,7 +60,7 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA) {
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback' };
 }
 
-function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF) {
+function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings) {
   if (minBF == null) minBF = 100;
   const bL = blendWoba(
     fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
@@ -60,7 +72,16 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF) {
     fuzzyLookup(idx['pit-act-rhb'], name, teamHint),
     minBF, wProj, wAct
   );
-  const d = PIT_DFLT[hand] || PIT_DFLT['R'];
+  let d;
+  if (settings && settings.PIT_DFLT_R_VS_LHB != null) {
+    const byHand = {
+      R: { vsLHB: settings.PIT_DFLT_R_VS_LHB, vsRHB: settings.PIT_DFLT_R_VS_RHB },
+      L: { vsLHB: settings.PIT_DFLT_L_VS_LHB, vsRHB: settings.PIT_DFLT_L_VS_RHB },
+    };
+    d = byHand[hand] || byHand.R;
+  } else {
+    d = PIT_DFLT[hand] || PIT_DFLT['R'];
+  }
   const src = bL||bR ? (bL?.source===bR?.source?bL?.source||'steamer':'blend') : 'fallback';
   return { vsLHB: bL?.woba??d.vsLHB, vsRHB: bR?.woba??d.vsRHB, source: src };
 }
@@ -81,8 +102,10 @@ function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEI
   return pitW * W_PIT + batW * W_BAT;
 }
 
-function rawToML(wp) {
-  const c = Math.min(Math.max(wp, 0.25), 0.75);
+function rawToML(wp, clampLo, clampHi) {
+  if (clampLo == null) clampLo = 0.25;
+  if (clampHi == null) clampHi = 0.75;
+  const c = Math.min(Math.max(wp, clampLo), clampHi);
   return c>=0.5 ? -Math.round(c/(1-c)*100) : Math.round((1-c)/c*100);
 }
 
@@ -129,12 +152,15 @@ function runModel(game, wobaIdx, settings) {
   const BAT_DFLT_OPP   = num(settings.BAT_DFLT_OPP,   0.320);
   const SP_IP_BASELINE   = num(settings.SP_IP_BASELINE,   5.5);
   const SP_IP_WEIGHT_PER = num(settings.SP_IP_WEIGHT_PER, 0.03);
+  // Probability clamp bounds (win prob for ML, over prob for totals).
+  const WP_CLAMP_LO = num(settings.WP_CLAMP_LO, 0.25);
+  const WP_CLAMP_HI = num(settings.WP_CLAMP_HI, 0.75);
 
-  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT, MIN_BF);
-  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT, MIN_BF);
+  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT, MIN_BF, settings);
+  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT, MIN_BF, settings);
 
-  const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA)}));
-  const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA)}));
+  const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA,settings)}));
+  const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA,settings)}));
 
   // Away batters face the home team's bullpen; home batters face the away team's bullpen.
   // Fall back to league-average BULLPEN_AVG if the per-team value is null/missing.
@@ -174,11 +200,11 @@ function runModel(game, wobaIdx, settings) {
 
   const rawHW = (aRuns<=0&&hRuns<=0)?0.5 : hRuns<=0?0.25 : aRuns<=0?0.75 :
     hRuns**PYTH_EXP/(hRuns**PYTH_EXP+aRuns**PYTH_EXP);
-  const adjHW = Math.min(Math.max(rawHW+HFA_BOOST,0.25),0.75);
+  const adjHW = Math.min(Math.max(rawHW+HFA_BOOST, WP_CLAMP_LO), WP_CLAMP_HI);
   const adjAW = 1-adjHW;
 
-  const rawAML = rawToML(adjAW);
-  const rawHML = rawToML(adjHW);
+  const rawAML = rawToML(adjAW, WP_CLAMP_LO, WP_CLAMP_HI);
+  const rawHML = rawToML(adjHW, WP_CLAMP_LO, WP_CLAMP_HI);
   const { adjA:aML, adjH:hML } = applySpread(rawAML, rawHML, FAV_ADJ, DOG_ADJ);
 
   const windFactor = game.wind_factor || 0;
@@ -202,6 +228,9 @@ function getSignals(game, modelResult, settings) {
   const TOT_2STAR = typeof settings.TOT_VALUE_EDGE !== 'undefined' ? Number(settings.TOT_VALUE_EDGE) : 0.08;
   const TOT_3STAR = typeof settings.TOT_3STAR_EDGE !== 'undefined' ? Number(settings.TOT_3STAR_EDGE) : 0.12;
   const TOT_SLOPE = typeof settings.TOT_SLOPE      !== 'undefined' ? Number(settings.TOT_SLOPE)      : 0.08;
+  const TOT_PROB_LO = typeof settings.TOT_PROB_LO !== 'undefined' ? Number(settings.TOT_PROB_LO) : 0.20;
+  const TOT_PROB_HI = typeof settings.TOT_PROB_HI !== 'undefined' ? Number(settings.TOT_PROB_HI) : 0.80;
+  const MARKET_TOTAL_DFLT = typeof settings.MARKET_TOTAL_DFLT !== 'undefined' ? Number(settings.MARKET_TOTAL_DFLT) : 8.5;
 
   const signals = [];
   const aModel  = modelResult.aML;
@@ -230,7 +259,7 @@ function getSignals(game, modelResult, settings) {
   if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
   if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
 
-  const mktTotal   = game.market_total || 8.5;
+  const mktTotal   = game.market_total || MARKET_TOTAL_DFLT;
   const overPrice  = game.over_price   || -110;
   const underPrice = game.under_price  || -110;
   const estTot     = modelResult.estTot;
@@ -239,7 +268,7 @@ function getSignals(game, modelResult, settings) {
   const underImplied = underPrice < 0 ? Math.abs(underPrice)/(Math.abs(underPrice)+100) : 100/(underPrice+100);
 
   const runDiff    = estTot - mktTotal;
-  const modelOverP = Math.min(Math.max(0.5 + runDiff * TOT_SLOPE, 0.20), 0.80);
+  const modelOverP = Math.min(Math.max(0.5 + runDiff * TOT_SLOPE, TOT_PROB_LO), TOT_PROB_HI);
   const modelUnderP = 1 - modelOverP;
 
   const overEdge  = modelOverP  - overImplied;

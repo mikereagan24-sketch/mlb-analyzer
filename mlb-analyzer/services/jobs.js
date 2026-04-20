@@ -71,6 +71,21 @@ function getSettings() {
       } catch(e) {}
       return [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
     })(),
+    WP_CLAMP_LO:       num('wp_clamp_lo',       0.25),
+    WP_CLAMP_HI:       num('wp_clamp_hi',       0.75),
+    TOT_PROB_LO:       num('tot_prob_lo',       0.20),
+    TOT_PROB_HI:       num('tot_prob_hi',       0.80),
+    MARKET_TOTAL_DFLT: num('market_total_dflt', 8.5),
+    BAT_DFLT_R_VS_RHP: num('bat_dflt_r_vs_rhp', 0.305),
+    BAT_DFLT_R_VS_LHP: num('bat_dflt_r_vs_lhp', 0.325),
+    BAT_DFLT_L_VS_RHP: num('bat_dflt_l_vs_rhp', 0.330),
+    BAT_DFLT_L_VS_LHP: num('bat_dflt_l_vs_lhp', 0.290),
+    BAT_DFLT_S_VS_RHP: num('bat_dflt_s_vs_rhp', 0.322),
+    BAT_DFLT_S_VS_LHP: num('bat_dflt_s_vs_lhp', 0.308),
+    PIT_DFLT_R_VS_LHB: num('pit_dflt_r_vs_lhb', 0.320),
+    PIT_DFLT_R_VS_RHB: num('pit_dflt_r_vs_rhb', 0.295),
+    PIT_DFLT_L_VS_LHB: num('pit_dflt_l_vs_lhb', 0.285),
+    PIT_DFLT_L_VS_RHB: num('pit_dflt_l_vs_rhb', 0.330),
     odds_api_key: s['odds_api_key'] || null,
   };
 }

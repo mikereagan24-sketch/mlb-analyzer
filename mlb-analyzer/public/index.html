@@ -400,6 +400,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Average innings a starter is projected to pitch. Used to scale SP/RP weight dynamically.">SP IP baseline</label><input type="number" id="s-sp-ip-baseline" step="0.5" min="3.0" max="8.0"></div>
       <div class="setting-row"><label title="How much to adjust SP weight for each inning above/below baseline. 0.03 = 3 percentage points per inning.">SP weight per IP</label><input type="number" id="s-sp-ip-weight-per" step="0.01" min="0" max="0.20"></div>
       <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7"></div>
+      <div class="setting-row"><label title="Lower bound for win probability clamp. Caps extreme ML output. Default 0.25 (cap ≈ ±300).">Win prob clamp lo</label><input type="number" id="s-wp-clamp-lo" step="0.01" min="0.05" max="0.45"></div>
+      <div class="setting-row"><label title="Upper bound for win probability clamp. Caps extreme ML output. Default 0.75 (cap ≈ ±300).">Win prob clamp hi</label><input type="number" id="s-wp-clamp-hi" step="0.01" min="0.55" max="0.95"></div>
+      <div class="setting-row"><label title="Lower bound for model's over-probability on totals. Default 0.20.">Total prob clamp lo</label><input type="number" id="s-tot-prob-lo" step="0.01" min="0.05" max="0.45"></div>
+      <div class="setting-row"><label title="Upper bound for model's over-probability on totals. Default 0.80.">Total prob clamp hi</label><input type="number" id="s-tot-prob-hi" step="0.01" min="0.55" max="0.95"></div>
+      <div class="setting-row"><label title="Fallback total (runs) used when a game has no market total yet. Default 8.5.">Market total default</label><input type="number" id="s-market-total-dflt" step="0.5" min="5" max="12"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -1635,6 +1640,11 @@ async function loadSettings(){
     set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
     set('s-sp-ip-baseline',   s.sp_ip_baseline);
     set('s-sp-ip-weight-per', s.sp_ip_weight_per);
+    set('s-wp-clamp-lo',      s.wp_clamp_lo);
+    set('s-wp-clamp-hi',      s.wp_clamp_hi);
+    set('s-tot-prob-lo',      s.tot_prob_lo);
+    set('s-tot-prob-hi',      s.tot_prob_hi);
+    set('s-market-total-dflt', s.market_total_dflt);
     // pa_weights is stored as a JSON array string — display as comma-sep.
     // Also updates window.PA_WEIGHTS so Matchup-tab previews use the same
     // numbers the server-side model does.
@@ -1696,6 +1706,11 @@ async function saveSettings(){
         sp_ip_baseline:     get('s-sp-ip-baseline'),
         sp_ip_weight_per:   get('s-sp-ip-weight-per'),
         pa_weights:         _paWeightsJson,
+        wp_clamp_lo:        get('s-wp-clamp-lo'),
+        wp_clamp_hi:        get('s-wp-clamp-hi'),
+        tot_prob_lo:        get('s-tot-prob-lo'),
+        tot_prob_hi:        get('s-tot-prob-hi'),
+        market_total_dflt:  get('s-market-total-dflt'),
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
     ml_3star_edge:      get('s-ml-3star'),
