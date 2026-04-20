@@ -55,6 +55,36 @@ function parseCSV(buffer, isPitcher) {
   return rows;
 }
 
+// Parse a pitcher IP projection CSV (standard FanGraphs Steamer format).
+// Expected columns: Name, Team, IP, GS. Team is normalized via FG_MAP.
+// Rows with GS<1 are skipped unless IP is non-zero; divide-by-zero guarded.
+function parseCSVPitIP(buffer) {
+  const text = buffer.toString('utf-8').replace(/^\uFEFF/, '');
+  const delim = text.includes('\t') ? '\t' : ',';
+  const records = parse(text, { columns: true, skip_empty_lines: true, delimiter: delim, trim: true });
+  if (!records.length) return [];
+  const nameCol = Object.keys(records[0]).find(h => ['name','player','playername'].includes(h.toLowerCase()));
+  const teamCol = Object.keys(records[0]).find(h => h.toLowerCase() === 'team');
+  const ipCol   = Object.keys(records[0]).find(h => h.toLowerCase() === 'ip');
+  const gsCol   = Object.keys(records[0]).find(h => h.toLowerCase() === 'gs');
+  if (!nameCol || !ipCol || !gsCol) return [];
+  const FG_MAP = {'KCR':'KC','SDP':'SD','SFG':'SF','TBR':'TB','WSN':'WAS','CHW':'CWS'};
+  const out = [];
+  for (const r of records) {
+    const name = (r[nameCol] || '').trim();
+    if (!name) continue;
+    const ip = parseFloat(r[ipCol]);
+    const gs = parseInt(r[gsCol], 10);
+    if (isNaN(ip) || ip <= 0) continue;
+    const effGS = (!isNaN(gs) && gs >= 1) ? gs : 1;
+    const ipPerStart = parseFloat((ip / effGS).toFixed(3));
+    const fgTeam = teamCol ? (r[teamCol] || '').trim().toUpperCase() : null;
+    const team = fgTeam ? (FG_MAP[fgTeam] || fgTeam) : null;
+    out.push({ name, team, ipPerStart, seasonIP: ip, seasonGS: (!isNaN(gs) ? gs : null) });
+  }
+  return out;
+}
+
 function tryParse(str) {
   try { return str ? JSON.parse(str) : null; } catch { return null; }
 }
@@ -103,6 +133,62 @@ router.get('/woba-status', (req, res) => {
   const status = {};
   rows.forEach(r => { status[r.data_key] = { rows: r.row_count, uploadedAt: r.uploaded_at }; });
   res.json(status);
+});
+
+// Bulk-upload pitcher IP projections from a FanGraphs Steamer CSV.
+// Expected columns: Name, Team, IP, GS. Rows where an existing record has
+// is_override=1 are left untouched — manual overrides are sticky.
+router.post('/upload/pit-proj-ip', upload.single('file'), (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+    const rows = parseCSVPitIP(file.buffer);
+    if (!rows.length) return res.status(400).json({ error: 'No valid rows parsed. Need columns: Name, Team, IP, GS.' });
+    let upserted = 0;
+    let skippedOverrides = 0;
+    const tx = db.transaction((items) => {
+      for (const r of items) {
+        const norm = normName(r.name);
+        if (!norm) continue;
+        const info = q.upsertPitProjIPBulk.run(r.name, norm, r.team, r.ipPerStart, r.seasonIP, r.seasonGS);
+        if (info.changes > 0) upserted++;
+        else skippedOverrides++;
+      }
+    });
+    tx(rows);
+    q.logUpload.run('pit-proj-ip', file.originalname, rows.length);
+    res.json({ success: true, filename: file.originalname, rows_parsed: rows.length, upserted, skipped_overrides: skippedOverrides });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual single-row override. Survives monthly bulk re-uploads.
+router.post('/pit-proj-ip/override', (req, res) => {
+  try {
+    const { player_name, ip_per_start, team } = req.body || {};
+    if (!player_name || typeof player_name !== 'string') return res.status(400).json({ error: 'player_name required' });
+    const ip = parseFloat(ip_per_start);
+    if (isNaN(ip) || ip <= 0 || ip > 9) return res.status(400).json({ error: 'ip_per_start must be a number in (0, 9]' });
+    const norm = normName(player_name);
+    if (!norm) return res.status(400).json({ error: 'player_name normalized to empty string' });
+    const teamNorm = team ? String(team).trim().toUpperCase() : null;
+    q.upsertPitProjIPOverride.run(player_name.trim(), norm, teamNorm, parseFloat(ip.toFixed(3)));
+    const row = q.getPitProjIPByNameNorm.get(norm);
+    res.json({ success: true, row });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List every IP projection row, sorted by team then player.
+router.get('/pit-proj-ip', (req, res) => {
+  try {
+    const rows = q.getAllPitProjIP.all();
+    res.json({ count: rows.length, rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/games/:date', (req, res) => {

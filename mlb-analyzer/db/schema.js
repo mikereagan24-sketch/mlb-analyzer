@@ -171,6 +171,19 @@ db.exec(`
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_pgl_date_team_pitcher ON pitcher_game_log(game_date, team, pitcher_name);
   CREATE INDEX IF NOT EXISTS idx_pgl_team_date ON pitcher_game_log(team, game_date);
+  CREATE TABLE IF NOT EXISTS pit_proj_ip (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_name TEXT NOT NULL,
+    player_name_norm TEXT NOT NULL,
+    team TEXT,
+    ip_per_start REAL NOT NULL,
+    season_ip REAL,
+    season_gs INTEGER,
+    is_override INTEGER DEFAULT 0,
+    uploaded_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(player_name_norm)
+  );
+  CREATE INDEX IF NOT EXISTS idx_pit_proj_ip_team ON pit_proj_ip(team);
 `);
 
 
@@ -327,6 +340,39 @@ q.upsertPitcherGameLog = db.prepare(
   `INSERT OR REPLACE INTO pitcher_game_log
    (game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown, appeared, created_at)
    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+);
+
+// Projected starter IP (from Steamer or manual override).
+// Bulk uploads only update rows where is_override=0. Override writes are
+// sticky and always win. Query by normalized player name.
+q.upsertPitProjIPBulk = db.prepare(
+  `INSERT INTO pit_proj_ip (player_name, player_name_norm, team, ip_per_start, season_ip, season_gs, is_override, uploaded_at)
+   VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+   ON CONFLICT(player_name_norm) DO UPDATE SET
+     player_name=excluded.player_name,
+     team=excluded.team,
+     ip_per_start=excluded.ip_per_start,
+     season_ip=excluded.season_ip,
+     season_gs=excluded.season_gs,
+     uploaded_at=datetime('now')
+   WHERE pit_proj_ip.is_override = 0`
+);
+q.upsertPitProjIPOverride = db.prepare(
+  `INSERT INTO pit_proj_ip (player_name, player_name_norm, team, ip_per_start, is_override, uploaded_at)
+   VALUES (?, ?, ?, ?, 1, datetime('now'))
+   ON CONFLICT(player_name_norm) DO UPDATE SET
+     player_name=excluded.player_name,
+     team=excluded.team,
+     ip_per_start=excluded.ip_per_start,
+     is_override=1,
+     uploaded_at=datetime('now')`
+);
+q.getAllPitProjIP = db.prepare(
+  `SELECT player_name, player_name_norm, team, ip_per_start, season_ip, season_gs, is_override, uploaded_at
+   FROM pit_proj_ip ORDER BY COALESCE(team,'zzz'), player_name`
+);
+q.getPitProjIPByNameNorm = db.prepare(
+  `SELECT * FROM pit_proj_ip WHERE player_name_norm=?`
 );
 q.getPitcherLogForTeam = db.prepare(
   `SELECT game_date, pitcher_name, pitcher_mlb_id, pitches_thrown, appeared
