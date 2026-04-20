@@ -962,10 +962,17 @@ async function renderMatchupGame(id){
   function gw(p,s){if(!p)return .310;const v=p[s];return v&&v.woba!=null?v.woba:(typeof v==='number'?v:.310);}
   function wc(w){const lo=.260,mid=.320,hi=.380;let r,g,b;if(w>=hi){r=39;g=139;b=66;}else if(w>=mid){const t=(w-mid)/(hi-mid);r=Math.round(200-161*t);g=Math.round(180-41*t);b=Math.round(50+16*t);}else if(w>=lo){const t=(w-lo)/(mid-lo);r=200;g=Math.round(50+130*t);b=50;}else{r=200;g=50;b=50;}const a=Math.min(.18+Math.abs(w-mid)/.12*.10,.32);return 'background:rgba('+r+','+g+','+b+','+a+');color:rgb('+Math.round(r*.55)+','+Math.round(g*.55)+','+Math.round(b*.55)+');border-radius:3px;padding:3px 4px';}
   function mt(lu,sn,sh,pw,lbl){
+    // Pull W_PIT / W_BAT from the live settings object (populated by
+    // loadSettings at boot). Fallback to 0.5/0.5 if settings haven't
+    // loaded yet — matches both the server default and the old hardcoded
+    // blend, so early-render previews don't jump when settings arrive.
+    const _s = window._appSettings || {};
+    const wPit = (_s.w_pit != null && !isNaN(parseFloat(_s.w_pit))) ? parseFloat(_s.w_pit) : 0.5;
+    const wBat = (_s.w_bat != null && !isNaN(parseFloat(_s.w_bat))) ? parseFloat(_s.w_bat) : 0.5;
     let wB=0,wP=0,wA=0,wT=0;
     const rows=lu.map((b,i)=>{
       const pa=window.PA_WEIGHTS[i]||3.77,eff=b.hand==='S'?(sh==='R'?'L':'R'):b.hand;
-      const bw=b.woba!=null?b.woba:(eff==='L'?.330:.305),pw2=eff==='L'?gw(pw,'vsLHB'):gw(pw,'vsRHB'),av=(bw+pw2)/2;
+      const bw=b.woba!=null?b.woba:(eff==='L'?.330:.305),pw2=eff==='L'?gw(pw,'vsLHB'):gw(pw,'vsRHB'),av=bw*wBat+pw2*wPit;
       wB+=bw*pa;wP+=pw2*pa;wA+=av*pa;wT+=pa;
       const hd=b.hand==='S'?'S>'+eff:b.hand,dt=b.source&&b.source!=='default'?'<span style="color:var(--green);font-size:9px"> *</span>':'';
       return '<tr><td>'+(i+1)+'</td><td><span class="hbadge h'+eff+'" style="font-size:9px;width:20px;height:15px;line-height:15px">'+hd+'</span> '+b.name+dt+'</td><td>'+pa.toFixed(2)+'</td><td style="'+wc(bw)+'">'+bw.toFixed(3)+'</td><td style="'+wc(pw2)+'">'+pw2.toFixed(3)+'</td><td style="'+wc(av)+'">'+av.toFixed(3)+'</td></tr>';
@@ -1638,6 +1645,9 @@ async function loadSettings(){
         window.PA_WEIGHTS = _paw;
       }
     } catch(e) { /* leave input blank if malformed */ }
+    // Expose the raw settings object so other client code (mt(), Matchup
+    // preview) can read W_PIT / W_BAT / etc. without grabbing form values.
+    window._appSettings = s;
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
     set('s-ml-3star',      s.ml_3star_edge);
