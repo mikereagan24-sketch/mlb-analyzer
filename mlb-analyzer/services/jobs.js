@@ -114,12 +114,14 @@ function tryParse(str) {
 function checkOddsSanity(awayML, homeML) {
   const a = parseFloat(awayML), h = parseFloat(homeML);
   if (isNaN(a) || isNaN(h) || a === 0 || h === 0) return null;
-  if (a > 0 && h > 0) return 'both_positive: away=+' + a + ' / home=+' + h + ' (two favorites impossible)';
-  if (a < 0 && h < 0) return 'both_negative: away=' + a + ' / home=' + h + ' (two underdogs impossible)';
+  if (a > 0 && h > 0) return 'both teams same sign ML: away=+' + a + ' / home=+' + h;
+  if (a < 0 && h < 0) return 'both teams same sign ML: away=' + a + ' / home=' + h;
   const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
   const pa = impP(a), ph = impP(h);
-  if (pa > 0.80) return 'extreme_fav: away=' + a + ' (implied p=' + pa.toFixed(3) + ' > 0.80)';
-  if (ph > 0.80) return 'extreme_fav: home=' + h + ' (implied p=' + ph.toFixed(3) + ' > 0.80)';
+  if (pa > 0.80) return 'extreme line: away at ' + (a > 0 ? '+' + a : a) + ' (implied p=' + pa.toFixed(3) + ')';
+  if (ph > 0.80) return 'extreme line: home at ' + (h > 0 ? '+' + h : h) + ' (implied p=' + ph.toFixed(3) + ')';
+  const sum = pa + ph;
+  if (sum < 0.85 || sum > 1.15) return "implied probs don't sum correctly: away=" + pa.toFixed(3) + ' + home=' + ph.toFixed(3) + ' = ' + sum.toFixed(3);
   return null;
 }
 
