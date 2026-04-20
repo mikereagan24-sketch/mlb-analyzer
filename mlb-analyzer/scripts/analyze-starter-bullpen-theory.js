@@ -25,18 +25,19 @@ var DATE_END   = process.argv[3] || null;
 
 var db = new Database(DB_PATH, { readonly: true });
 
-// MLB abbreviation → our game_id abbreviation
-var ABBR_MAP = {
-  ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',
-  COL:'col',DET:'det',HOU:'hou',KC:'kc', LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',
-  MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',
-  SF:'sf', SEA:'sea',STL:'stl',TB:'tb', TEX:'tex',TOR:'tor',WSH:'was',WAS:'was',
+// IMPORTANT: the MLB Stats /v1/schedule endpoint returns teams.{side}.team
+// as { id, name, link } — NO abbreviation field. Match by the numeric team
+// id instead (stable across seasons) and map to our lowercase game_id form.
+var TEAM_ID_TO_ABBR = {
+  108: 'laa', 109: 'ari', 110: 'bal', 111: 'bos', 112: 'chc', 113: 'cin',
+  114: 'cle', 115: 'col', 116: 'det', 117: 'hou', 118: 'kc',  119: 'lad',
+  120: 'was', 121: 'nym', 133: 'ath', 134: 'pit', 135: 'sd',  136: 'sea',
+  137: 'sf',  138: 'stl', 139: 'tb',  140: 'tex', 141: 'tor', 142: 'min',
+  143: 'phi', 144: 'atl', 145: 'cws', 146: 'mia', 147: 'nyy', 158: 'mil',
 };
-function normAbbr(mlbAbbr) {
-  if (!mlbAbbr) return '';
-  var u = mlbAbbr.toUpperCase();
-  return ABBR_MAP[u] || u.toLowerCase();
-}
+
+// Set env DEBUG_MATCH=1 to log every schedule vs game_id mismatch.
+var DEBUG = !!process.env.DEBUG_MATCH;
 
 // MLB IP strings like "6.1" mean 6 innings + 1 out (= 6 1/3).
 function parseIP(ipStr) {
@@ -126,15 +127,27 @@ async function getBoxscore(gamePk) {
   if (!r.ok) throw new Error('boxscore HTTP ' + r.status);
   return await r.json();
 }
-function findGamePk(schedule, awayAbbr, homeAbbr) {
+function findGamePk(schedule, awayAbbr, homeAbbr, gameDateForLog, gameIdForLog) {
   var days = schedule.dates || [];
+  var candidates = []; // for debug
   for (var i = 0; i < days.length; i++) {
     var gs = days[i].games || [];
     for (var j = 0; j < gs.length; j++) {
       var g = gs[j];
-      var a = normAbbr(g.teams && g.teams.away && g.teams.away.team && g.teams.away.team.abbreviation);
-      var h = normAbbr(g.teams && g.teams.home && g.teams.home.team && g.teams.home.team.abbreviation);
+      var awayId = g.teams && g.teams.away && g.teams.away.team && g.teams.away.team.id;
+      var homeId = g.teams && g.teams.home && g.teams.home.team && g.teams.home.team.id;
+      var a = TEAM_ID_TO_ABBR[awayId] || '';
+      var h = TEAM_ID_TO_ABBR[homeId] || '';
+      candidates.push({ awayId: awayId, homeId: homeId, awayAbbr: a, homeAbbr: h, gamePk: g.gamePk });
       if (a === awayAbbr && h === homeAbbr) return g.gamePk;
+    }
+  }
+  if (DEBUG) {
+    console.error('[debug] no pk for ' + gameDateForLog + '/' + gameIdForLog
+      + ' (looking for ' + awayAbbr + '@' + homeAbbr + '); schedule had:');
+    for (var k = 0; k < candidates.length; k++) {
+      var c = candidates[k];
+      console.error('  ' + c.awayAbbr + '(' + c.awayId + ')@' + c.homeAbbr + '(' + c.homeId + ') pk=' + c.gamePk);
     }
   }
   return null;
@@ -159,7 +172,8 @@ async function main() {
   console.log('');
 
   var rows = [];
-  var processed = 0, skipped = 0;
+  var processed = 0;
+  var skipNoPk = 0, skipNoIP = 0, skipError = 0;
 
   for (var i = 0; i < games.length; i++) {
     var g = games[i];
@@ -168,12 +182,17 @@ async function main() {
     var homeAbbr = parts[1];
     try {
       var sched = await getSchedule(g.game_date);
-      var gamePk = findGamePk(sched, awayAbbr, homeAbbr);
-      if (!gamePk) { skipped++; process.stderr.write('?'); continue; }
+      var gamePk = findGamePk(sched, awayAbbr, homeAbbr, g.game_date, g.game_id);
+      if (!gamePk) { skipNoPk++; process.stderr.write('?'); continue; }
       var box = await getBoxscore(gamePk);
       var awayIP = getStarterIP(box, 'away');
       var homeIP = getStarterIP(box, 'home');
-      if (awayIP == null || homeIP == null) { skipped++; process.stderr.write('!'); continue; }
+      if (awayIP == null || homeIP == null) {
+        skipNoIP++; process.stderr.write('!');
+        if (DEBUG) console.error('[debug] no IP for ' + g.game_date + '/' + g.game_id + ' pk=' + gamePk
+          + ' awayIP=' + awayIP + ' homeIP=' + homeIP);
+        continue;
+      }
 
       var key = g.game_date + '|' + g.game_id;
       var modelTot = modelTotMap[key];
@@ -199,12 +218,15 @@ async function main() {
       processed++;
       if (processed % 20 === 0) process.stderr.write('.');
     } catch (e) {
-      skipped++;
+      skipError++;
       process.stderr.write('x');
+      if (DEBUG) console.error('[debug] error on ' + g.game_date + '/' + g.game_id + ': ' + e.message);
     }
   }
   process.stderr.write('\n');
-  console.log('Processed: ' + processed + '  Skipped: ' + skipped);
+  console.log('Processed: ' + processed
+    + '  Skipped: ' + (skipNoPk + skipNoIP + skipError)
+    + ' (no-pk=' + skipNoPk + ', no-IP=' + skipNoIP + ', error=' + skipError + ')');
   console.log('');
 
   // --- bucket summary ---
