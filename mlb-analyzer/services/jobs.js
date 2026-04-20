@@ -7,18 +7,21 @@ const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName } = require('../utils/names');
 
-function todayET() {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+// Pacific-Time date helpers (app is Pacific-based now). Neutral names on
+// purpose — if the app's canonical TZ ever shifts again, only these three
+// function bodies need updating, not every call site.
+function todayStr() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 }
-function yesterdayET() {
+function yesterdayStr() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
-  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 }
-function tomorrowET() {
+function tomorrowStr() {
   const d = new Date();
   d.setDate(d.getDate() + 1);
-  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 }
 
 function getSettings() {
@@ -225,7 +228,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
 }
 
 async function runLineupJob(dateStr) {
-  dateStr = dateStr || todayET();
+  dateStr = dateStr || todayStr();
   console.log('[lineup-job] Starting for ' + dateStr);
   let gamesUpdated = 0;
   try {
@@ -267,14 +270,14 @@ async function runLineupJob(dateStr) {
       const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const existingRow = q.getGameById.get(dateStr, gameId);
         // Lock odds 10min before game start Ã¢ÂÂ only for TODAY's games, never future dates
-        const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+        const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});
         if (existingRow && !existingRow.odds_locked_at && existingRow.game_time && dateStr === todayForLock) {
           const tm = existingRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
           if (tm) {
             let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
             if(ap==='PM'&&h!==12)h+=12; if(ap==='AM'&&h===12)h=0;
-            const nowET=new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
-            const minsToGame=(h*60+mn)-(nowET.getHours()*60+nowET.getMinutes());
+            const nowPT=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));
+            const minsToGame=(h*60+mn)-(nowPT.getHours()*60+nowPT.getMinutes());
             if(minsToGame<=10&&minsToGame>=-240){
               db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
               console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)');
@@ -389,7 +392,7 @@ async function fetchPitcherUsage(dateStr) {
 }
 
 async function runScoreJob(dateStr) {
-  dateStr = dateStr || yesterdayET();
+  dateStr = dateStr || yesterdayStr();
   console.log('[score-job] Starting for ' + dateStr);
   let gamesUpdated = 0;
   try {
@@ -534,63 +537,88 @@ async function runWeatherJob(date) {
 }
 
 function startCronJobs() {
-  // Lineups: 8AM ET, hourly noon-6PM ET, 11PM ET (all free RotoWire scrapes)
-  // UTC: 8AM ET=13:00, noon=17:00, 1PM=18:00, 2PM=19:00, 3PM=20:00, 4PM=21:00, 5PM=22:00, 6PM=23:00, 11PM=04:00
-  [
-    [13,'8AM ET'],[17,'Noon ET'],[18,'1PM ET'],[19,'2PM ET'],
-    [20,'3PM ET'],[21,'4PM ET'],[22,'5PM ET'],[23,'6PM ET']
-  ].forEach(([h,label]) => {
-    cron.schedule('0 '+h+' * * *', () => {
-      console.log('[cron] '+label+' lineup pull');
-      runLineupJob(todayET());
-    }, { timezone: 'UTC' });
-  });
-  cron.schedule('0 4 * * *', () => {
-    console.log('[cron] 11PM ET lineup pull');
-    runLineupJob(todayET());
-  }, { timezone: 'UTC' });
-  // Scores: 7 AM ET (12:00 UTC)
-    // Odds: 4 automated pulls per day Ã¢ÂÂ 8AM, 11AM, 3PM, 5PM PT
-  // 8AM PT=15:00 UTC, 11AM PT=18:00 UTC, 3PM PT=22:00 UTC, 5PM PT=00:00 UTC
-  ['0 15 * * *','0 18 * * *','0 22 * * *','0 0 * * *'].forEach((schedule,i) => {
-    const labels = ['8AM PT','11AM PT','3PM PT','5PM PT'];
-    cron.schedule(schedule, () => {
-      console.log('[cron] '+labels[i]+' odds pull');
-      runOddsJob(todayET());
-    }, { timezone: 'UTC' });
-  });
+  // All schedules below run in America/Los_Angeles. The cron hour is the
+  // Pacific-time hour; node-cron handles DST transitions automatically.
 
-  cron.schedule('0 11 * * *', () => {
-    console.log('[cron] 4AM PT score pull');
-    runScoreJob(yesterdayET());
-  }, { timezone: 'UTC' });
-  // Tomorrow's odds: single pull at 8PM ET so lines are staged for next
-  // day's slate before bedtime. Uses the existing ET-locale tomorrowET().
+  // --- Lineups: 8AM, Noon-6PM hourly, 11PM PT (free RotoWire scrapes) ---
+  [[8,'8AM'],[12,'Noon'],[13,'1PM'],[14,'2PM'],[15,'3PM'],[16,'4PM'],[17,'5PM'],[18,'6PM']].forEach(([h,label]) => {
+    cron.schedule('0 '+h+' * * *', () => {
+      console.log('[cron] '+label+' PT lineup pull');
+      runLineupJob(todayStr());
+    }, { timezone: 'America/Los_Angeles' });
+  });
+  cron.schedule('0 23 * * *', () => {
+    console.log('[cron] 11PM PT lineup pull');
+    runLineupJob(todayStr());
+  }, { timezone: 'America/Los_Angeles' });
+
+  // --- Odds: 4 pulls today (8AM, 11AM, 3PM, 5PM PT) + 1 pull tomorrow (8PM PT) ---
+  [[8,'8AM'],[11,'11AM'],[15,'3PM'],[17,'5PM']].forEach(([h,label]) => {
+    cron.schedule('0 '+h+' * * *', () => {
+      console.log('[cron] '+label+' PT odds pull');
+      runOddsJob(todayStr());
+    }, { timezone: 'America/Los_Angeles' });
+  });
   cron.schedule('0 20 * * *', () => {
-    const d = tomorrowET();
-    console.log('[cron] 8PM ET tomorrow odds pull for ' + d);
+    const d = tomorrowStr();
+    console.log('[cron] 8PM PT tomorrow odds pull for ' + d);
     runOddsJob(d);
-  }, { timezone: 'America/New_York' });
-  console.log('[cron] Jobs scheduled Ã¢ÂÂ lineups 8AM ET + hourly noon-6PM ET + 11PM ET');
+  }, { timezone: 'America/Los_Angeles' });
+
+  // --- Scores: 4AM PT ---
+  cron.schedule('0 4 * * *', () => {
+    console.log('[cron] 4AM PT score pull');
+    runScoreJob(yesterdayStr());
+  }, { timezone: 'America/Los_Angeles' });
+
+  // --- 7AM PT morning refresh: odds -> weather -> lineups -> rerun all games ---
+  // Sequential so we don't thrash SQLite or hit rate limits. Catches each step
+  // individually so a single failure doesn't abort the rest of the chain.
+  cron.schedule('0 7 * * *', async () => {
+    const d = todayStr();
+    console.log('[cron] 7AM PT morning refresh for ' + d);
+    try { await runOddsJob(d); }
+    catch(e) { console.error('[cron-refresh] odds failed:', e && e.message); }
+    try { await runWeatherJob(d); }
+    catch(e) { console.error('[cron-refresh] weather failed:', e && e.message); }
+    try { await runLineupJob(d); }
+    catch(e) { console.error('[cron-refresh] lineups failed:', e && e.message); }
+    // Final rerun of every game on the slate (mirrors POST /games/:date/rerun).
+    try {
+      const games = q.getGamesByDate.all(d);
+      const wobaIdx = getWobaIndex();
+      const settings = getSettings();
+      let n = 0;
+      for (const g of games) {
+        try { processGameSignals(g, wobaIdx, settings); n++; }
+        catch(e) { console.error('[cron-refresh] rerun skip '+g.game_id+':', e && e.message); }
+      }
+      console.log('[cron-refresh] complete — reran ' + n + ' of ' + games.length + ' games');
+    } catch(e) { console.error('[cron-refresh] rerun loop failed:', e && e.message); }
+  }, { timezone: 'America/Los_Angeles' });
+
+  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P + tomorrow 8P, scores 4A, morning refresh 7A');
 }
 
 function gameHasStarted(gameRow, gameDate) {
-  // Returns true if game start time has passed (game is live or finished)
-  // Only games on TODAY's date can have started
-  const todayET = new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+  // Returns true if game start time has passed (game is live or finished).
+  // Only games on TODAY's date (Pacific) can have started. NOTE: assumes
+  // gameRow.game_time text is PT-local ("7:05 PM" = 7:05 PM PT). If game_time
+  // is stored in a different TZ this comparison needs adjusting.
+  const today = new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});
   if (!gameRow || !gameRow.game_time) return false;
-  if (gameDate && gameDate !== todayET) return false; // future/past dates never "in progress"
+  if (gameDate && gameDate !== today) return false; // future/past dates never "in progress"
   const tm = gameRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
   if (!tm) return false;
   let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
   if(ap==='PM'&&h!==12)h+=12; if(ap==='AM'&&h===12)h=0;
-  const nowET=new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
-  const minsToGame=(h*60+mn)-(nowET.getHours()*60+nowET.getMinutes());
+  const nowPT=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));
+  const minsToGame=(h*60+mn)-(nowPT.getHours()*60+nowPT.getMinutes());
   return minsToGame < -5; // started more than 5 min ago
 }
 
 async function runOddsJob(dateStr) {
-  dateStr = dateStr || todayET();
+  dateStr = dateStr || todayStr();
   try {
     const settings = getSettings();
     let oddsRaw = [];
