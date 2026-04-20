@@ -1,5 +1,7 @@
 /** Model service â all settings from DB, no hardcoded constants */
-const PA_WEIGHTS = [4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77];
+// Fallback used when settings doesn't carry a valid PA_WEIGHTS array
+// (should never happen in the Render deploy — getSettings seeds it).
+const PA_WEIGHTS_DEFAULT = [4.7,4.3,4.1,4.0,3.8,3.6,3.5,3.4,3.2];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
 
@@ -138,6 +140,12 @@ function runModel(game, wobaIdx, settings) {
   // Fall back to league-average BULLPEN_AVG if the per-team value is null/missing.
   const awayVsBullpen = game.homeBullpenWoba ?? BULLPEN_AVG;
   const homeVsBullpen = game.awayBullpenWoba ?? BULLPEN_AVG;
+
+  // Lineup-order PA weights — pulled from settings so they're tunable.
+  // Falls back to defaults if the setting is missing/malformed.
+  const PA_WEIGHTS = (Array.isArray(settings.PA_WEIGHTS) && settings.PA_WEIGHTS.length === 9)
+    ? settings.PA_WEIGHTS
+    : PA_WEIGHTS_DEFAULT;
 
   // Dynamic SP/RP pitcher-side split per starter. If an SP is projected for
   // more IP than baseline, weight his wOBA more; deep-start teams lean SP,

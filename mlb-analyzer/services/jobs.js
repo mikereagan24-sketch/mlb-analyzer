@@ -63,6 +63,14 @@ function getSettings() {
     UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
     SP_IP_BASELINE:    num('sp_ip_baseline',    5.5),
     SP_IP_WEIGHT_PER:  num('sp_ip_weight_per',  0.03),
+    PA_WEIGHTS:        (function(){
+      var raw = s['pa_weights'] || '[4.7,4.3,4.1,4.0,3.8,3.6,3.5,3.4,3.2]';
+      try {
+        var parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length === 9 && parsed.every(function(x){return typeof x === 'number' && !isNaN(x);})) return parsed;
+      } catch(e) {}
+      return [4.7,4.3,4.1,4.0,3.8,3.6,3.5,3.4,3.2];
+    })(),
     odds_api_key: s['odds_api_key'] || null,
   };
 }

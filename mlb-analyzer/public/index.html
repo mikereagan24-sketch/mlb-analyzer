@@ -399,6 +399,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
       <div class="setting-row"><label title="Average innings a starter is projected to pitch. Used to scale SP/RP weight dynamically.">SP IP baseline</label><input type="number" id="s-sp-ip-baseline" step="0.5" min="3.0" max="8.0"></div>
       <div class="setting-row"><label title="How much to adjust SP weight for each inning above/below baseline. 0.03 = 3 percentage points per inning.">SP weight per IP</label><input type="number" id="s-sp-ip-weight-per" step="0.01" min="0" max="0.20"></div>
+      <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.7,4.3,4.1,4.0,3.8,3.6,3.5,3.4,3.2"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
@@ -1619,6 +1620,11 @@ async function loadSettings(){
     set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
     set('s-sp-ip-baseline',   s.sp_ip_baseline);
     set('s-sp-ip-weight-per', s.sp_ip_weight_per);
+    // pa_weights is stored as a JSON array string — display as comma-sep
+    try {
+      var _paw = s.pa_weights ? JSON.parse(s.pa_weights) : null;
+      if (Array.isArray(_paw)) set('s-pa-weights', _paw.join(','));
+    } catch(e) { /* leave input blank if malformed */ }
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
     set('s-ml-3star',      s.ml_3star_edge);
@@ -1632,6 +1638,14 @@ async function loadSettings(){
 
 async function saveSettings(){
   const get = id => (document.getElementById(id)||{}).value;
+  // pa_weights: convert comma-sep input to JSON array string. If the input
+  // doesn't parse to exactly 9 numeric values, leave the key undefined so
+  // JSON.stringify drops it and the server keeps whatever's in app_settings.
+  var _paWeightsJson;
+  try {
+    var _pawArr = (get('s-pa-weights') || '').split(',').map(function(x){ return parseFloat(x.trim()); }).filter(function(n){ return !isNaN(n); });
+    if (_pawArr.length === 9) _paWeightsJson = JSON.stringify(_pawArr);
+  } catch(e) { /* fall through — key stays undefined */ }
   const pairs = {
     odds_api_key:       get('s-odds-api-key'),
     run_mult:           get('s-run-mult'),
@@ -1658,6 +1672,7 @@ async function saveSettings(){
         unknown_pitcher_woba: get('s-unknown-pitcher-woba'),
         sp_ip_baseline:     get('s-sp-ip-baseline'),
         sp_ip_weight_per:   get('s-sp-ip-weight-per'),
+        pa_weights:         _paWeightsJson,
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
     ml_3star_edge:      get('s-ml-3star'),
