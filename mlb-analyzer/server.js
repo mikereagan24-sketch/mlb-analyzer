@@ -33,6 +33,17 @@ app.use('/api', require('./routes/api'));
 // Health check for Render
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
+// JSON error handler for anything under /api that escaped a route's try/catch
+// (malformed JSON bodies, unhandled promise rejections bubbling up, etc).
+// Express's default handler returns an HTML stack trace — clients expect JSON.
+app.use('/api', (err, req, res, next) => {
+  console.error('[api-error]', req.method, req.path, '-', err && err.stack || err);
+  if (res.headersSent) return next(err);
+  res.status(err && err.status || 500).json({
+    error: err && err.message || 'Internal server error',
+  });
+});
+
 // SPA fallback — serve index.html with no-cache headers
 app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
