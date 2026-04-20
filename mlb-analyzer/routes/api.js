@@ -1361,6 +1361,23 @@ router.get('/debug/bullpen-report', (req, res) => {
   }
 });
 
+// Odds sanity flags — returns all games on a date where runOddsJob flagged
+// the moneyline pair as impossible (both favs / both dogs) or extreme
+// (implied prob > 0.80). Useful for a quick "should I trust these prices?" check.
+router.get('/odds-flags', (req, res) => {
+  try {
+    const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const rows = db.prepare(
+      "SELECT game_id, away_team, home_team, market_away_ml, market_home_ml, " +
+      "market_total, over_price, under_price, odds_flag_reason " +
+      "FROM game_log WHERE game_date=? AND odds_flagged=1 ORDER BY game_id"
+    ).all(date);
+    res.json({ date, count: rows.length, flagged: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
 
 

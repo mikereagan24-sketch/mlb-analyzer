@@ -104,6 +104,25 @@ function tryParse(str) {
   try { return str ? JSON.parse(str) : null; } catch { return null; }
 }
 
+// Sanity-check a game's two-outcome moneyline pair. Returns a reason string
+// when the lines look wrong, or null when they look sane. Two classes of
+// failure:
+//   - impossible:  same-sign pair (both favorites or both dogs)
+//   - suspicious:  either side's implied probability exceeds 0.80
+//                  (≈ -400 or worse — real but very rare, often a data bug)
+// Missing or zero lines skip the check entirely.
+function checkOddsSanity(awayML, homeML) {
+  const a = parseFloat(awayML), h = parseFloat(homeML);
+  if (isNaN(a) || isNaN(h) || a === 0 || h === 0) return null;
+  if (a > 0 && h > 0) return 'both_positive: away=+' + a + ' / home=+' + h + ' (two favorites impossible)';
+  if (a < 0 && h < 0) return 'both_negative: away=' + a + ' / home=' + h + ' (two underdogs impossible)';
+  const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
+  const pa = impP(a), ph = impP(h);
+  if (pa > 0.80) return 'extreme_fav: away=' + a + ' (implied p=' + pa.toFixed(3) + ' > 0.80)';
+  if (ph > 0.80) return 'extreme_fav: home=' + h + ' (implied p=' + ph.toFixed(3) + ' > 0.80)';
+  return null;
+}
+
 function processGameSignals(gameRow, wobaIdx, settings) {
   // Per-team bullpen wOBA from pit-act data
   const awayParts = (gameRow.game_id||'').split('-');
@@ -700,12 +719,19 @@ async function runOddsJob(dateStr) {
         }
         continue;
       }
+      const oddsReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
+      const oddsFlagged = oddsReason ? 1 : 0;
+      if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
       db.prepare(`UPDATE game_log SET
         market_away_ml=?, market_home_ml=?, market_total=?,
-        over_price=?, under_price=?, updated_at=datetime('now')
+        over_price=?, under_price=?,
+        odds_flagged=?, odds_flag_reason=?,
+        updated_at=datetime('now')
         WHERE game_date=? AND game_id=?`)
         .run(o.market_away_ml, o.market_home_ml, o.market_total,
-             o.over_price, o.under_price, dateStr, o.game_id);
+             o.over_price, o.under_price,
+             oddsFlagged, oddsReason,
+             dateStr, o.game_id);
       const gameRow = q.getGameById.get(dateStr, o.game_id);
       if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
     }
