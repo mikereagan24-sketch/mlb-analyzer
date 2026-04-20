@@ -213,8 +213,11 @@ async function fetchLineups(dateStr) {
     const awayPit = parseP($(el).find('.lineup__list.is-visit .lineup__player-highlight-name').text());
     const homePit = parseP($(el).find('.lineup__list.is-home .lineup__player-highlight-name').text());
     const time = $(el).find('.lineup__time').first().text().trim();
-    const statusText = $(el).find('.lineup__status').text().trim().toLowerCase();
-    const lineup_status = statusText.includes('confirm') ? 'confirmed' : 'projected';
+    // Use RotoWire's DOM class rather than free-text substring — projected
+    // blurbs like "not yet confirmed" / "confirmed closer to game time" were
+    // matching .includes('confirm') and flipping tomorrow's rows to
+    // 'confirmed' even when the lineup was clearly projected.
+    const lineup_status = $(el).find('.lineup__status.is-confirmed').length > 0 ? 'confirmed' : 'projected';
 
     const parsePlayers = (side) => {
       const players = [];
