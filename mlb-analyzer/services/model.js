@@ -1,7 +1,7 @@
 /** Model service â all settings from DB, no hardcoded constants */
 // Fallback used when settings doesn't carry a valid PA_WEIGHTS array
 // (should never happen in the Render deploy — getSettings seeds it).
-const PA_WEIGHTS_DEFAULT = [4.7,4.3,4.1,4.0,3.8,3.6,3.5,3.4,3.2];
+const PA_WEIGHTS_DEFAULT = [4.60,4.60,4.60,4.60,4.30,4.13,4.01,3.90,3.77];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
 
