@@ -444,15 +444,17 @@ async function runScoreJob(dateStr) {
 }
 
 
-// Run weather for all games on a given date
+// Run weather for all games on a given date. Returns { success, updated, date }.
 async function runWeatherJob(date) {
   console.log('[weather] running for '+date);
+  let updated = 0;
   try {
     const games = q.getGamesByDate.all(date);
-    if (!games.length) { console.log('[weather] no games for '+date); return; }
+    if (!games.length) { console.log('[weather] no games for '+date); return { success: true, updated: 0, date: date, note: 'no games' }; }
     const { calcWindFactor, PARKS } = require('./weather');
+    const settings = getSettings();
+    const wobaIdx = getWobaIndex();
     const month = new Date(date).getMonth() + 1;
-    let updated = 0;
     for (const game of games) {
       const parts = game.game_id.split('-');
       const homeKey = parts[1];
@@ -503,12 +505,17 @@ async function runWeatherJob(date) {
           db.prepare('UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=? WHERE game_date=? AND game_id=?')
             .run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
         }
-        processGameSignals(game, q.getWobaIndex?.() || {}, {});
+        const latestRow = q.getGameById.get(date, game.game_id);
+        if (latestRow) processGameSignals(latestRow, wobaIdx, settings);
         updated++;
       } catch(e) { console.error('[weather] '+game.game_id+':', e.message); }
     }
     console.log('[weather] updated '+updated+' games for '+date);
-  } catch(e) { console.error('[weather] job error:', e.message); }
+    return { success: true, updated: updated, date: date };
+  } catch(e) {
+    console.error('[weather] job error:', e.message);
+    return { success: false, error: e.message, updated: updated, date: date };
+  }
 }
 
 function startCronJobs() {

@@ -21,7 +21,6 @@ const PARKS = {
   'cin': { lat:39.0979, lng:-84.5082, cfDir:45,  sens:1.0, name:'Great American' },
   'mil': { lat:43.0280, lng:-87.9712, cfDir:45,  sens:0.2, name:'American Family' },
   'stl': { lat:38.6226, lng:-90.1930, cfDir:25,  sens:1.0, name:'Busch Stadium' },
-  'chc': { lat:41.9484, lng:-87.6553, cfDir:60,  sens:2.0, name:'Wrigley Field' },
   'col': { lat:39.7559, lng:-104.9942,cfDir:45,  sens:0.5, name:'Coors Field' },
   'ari': { lat:33.4453, lng:-112.0667,cfDir:45,  sens:0.2, name:'Chase Field' },
   'lad': { lat:34.0739, lng:-118.2400,cfDir:45,  sens:0.5, name:'Dodger Stadium' },
@@ -36,7 +35,6 @@ const PARKS = {
   'kc':  { lat:39.0517, lng:-94.4803, cfDir:45,  sens:1.3, name:'Kauffman' },
   'sd':  { lat:32.7076, lng:-117.1570,cfDir:45,  sens:0.4, name:'Petco Park' },
   'tb':  { lat:27.7683, lng:-82.6534, cfDir:45,  sens:0.5, name:'Tropicana' },
-  'nyy': { lat:40.8296, lng:-73.9262, cfDir:45,  sens:1.0, name:'Yankee Stadium' },
 };
 
 // Wind factor: positive = blowing out (more runs), negative = blowing in (fewer runs)
