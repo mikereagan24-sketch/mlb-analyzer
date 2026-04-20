@@ -165,8 +165,13 @@ async function fetchLineups(dateStr) {
   // Verify date
   const detectedDate = extractRotoWireDate(htmlToText(html.substring(0, 5000)));
   console.log('[scraper] RotoWire detected date: ' + (detectedDate || 'UNKNOWN') + ' | requested: ' + dateStr);
-  if (detectedDate && detectedDate !== dateStr) {
-    return { skipped: true, reason: 'date_mismatch', message: 'RotoWire is showing ' + detectedDate + ' but you requested ' + dateStr + '. Page may not be available yet.' };
+  // Fail-closed: reject when either (a) RotoWire is showing the wrong date,
+  // or (b) we couldn't detect a date at all. The old `detectedDate && ...`
+  // silently passed when the regex missed, causing yesterday's HTML to get
+  // upserted under today's dateStr — root cause of the "yesterday's games
+  // showing with today's date" bug.
+  if (!detectedDate || detectedDate !== dateStr) {
+    return { skipped: true, reason: 'date_mismatch', message: 'RotoWire is showing ' + (detectedDate || 'UNKNOWN') + ' but you requested ' + dateStr + '. Page may not be available yet.' };
   }
 
   // Parse with cheerio

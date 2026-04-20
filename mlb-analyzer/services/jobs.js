@@ -258,6 +258,19 @@ async function runLineupJob(dateStr) {
       return { success: false, error: 'No games returned', date: dateStr };
     }
 
+    // Cleanup: drop any stale unplayed rows for this date before re-upserting.
+    // Prevents rows from accumulating when the scraper previously wrote to the
+    // wrong date. Wrapped in try/catch because bet_signals FK (REFERENCES
+    // game_log(id), no CASCADE) blocks the delete when a signal has a
+    // user-locked bet_line. In that case we log and continue — the upsert
+    // below will still update the stale row via ON CONFLICT.
+    try {
+      const info = db.prepare('DELETE FROM game_log WHERE game_date=? AND away_score IS NULL').run(dateStr);
+      if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' stale unplayed row(s) for ' + dateStr);
+    } catch (e) {
+      console.error('[lineup-job] Cleanup skipped (likely bet_signals FK):', e && e.message);
+    }
+
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
     const updateLineup = db.prepare(
