@@ -27,13 +27,29 @@ var db = new Database(DB_PATH, { readonly: true });
 
 // IMPORTANT: the MLB Stats /v1/schedule endpoint returns teams.{side}.team
 // as { id, name, link } — NO abbreviation field. Match by the numeric team
-// id instead (stable across seasons) and map to our lowercase game_id form.
-var TEAM_ID_TO_ABBR = {
-  108: 'laa', 109: 'ari', 110: 'bal', 111: 'bos', 112: 'chc', 113: 'cin',
-  114: 'cle', 115: 'col', 116: 'det', 117: 'hou', 118: 'kc',  119: 'lad',
-  120: 'was', 121: 'nym', 133: 'ath', 134: 'pit', 135: 'sd',  136: 'sea',
-  137: 'sf',  138: 'stl', 139: 'tb',  140: 'tex', 141: 'tor', 142: 'min',
-  143: 'phi', 144: 'atl', 145: 'cws', 146: 'mia', 147: 'nyy', 158: 'mil',
+// id (stable across seasons) on BOTH sides: map our game_id tokens to ids,
+// and compare against the schedule's team ids.
+//
+// Aliases matter because different parts of the app use different short
+// codes for the same club:
+//   sf / sfg    (team 137 — Giants)
+//   ath / oak   (team 133 — Athletics, pre/post-relocation)
+//   was / wsh   (team 120 — Nationals)
+//   kc / kan    (team 118 — Royals)
+// The PARKS map in public/index.html, for instance, uses 'sfg' for SF.
+// Covering both forms avoids silent skips.
+var ABBR_TO_TEAM_ID = {
+  laa: 108, ari: 109, bal: 110, bos: 111, chc: 112, cin: 113, cle: 114,
+  col: 115, det: 116, hou: 117,
+  kc:  118, kan: 118,
+  lad: 119,
+  was: 120, wsh: 120,
+  nym: 121,
+  ath: 133, oak: 133,
+  pit: 134, sd:  135, sea: 136,
+  sf:  137, sfg: 137,
+  stl: 138, tb:  139, tex: 140, tor: 141, min: 142, phi: 143, atl: 144,
+  cws: 145, mia: 146, nyy: 147, mil: 158,
 };
 
 // Set env DEBUG_MATCH=1 to log every schedule vs game_id mismatch.
@@ -128,6 +144,13 @@ async function getBoxscore(gamePk) {
   return await r.json();
 }
 function findGamePk(schedule, awayAbbr, homeAbbr, gameDateForLog, gameIdForLog) {
+  var wantAwayId = ABBR_TO_TEAM_ID[awayAbbr];
+  var wantHomeId = ABBR_TO_TEAM_ID[homeAbbr];
+  if (!wantAwayId || !wantHomeId) {
+    if (DEBUG) console.error('[debug] unknown abbr in game_id ' + gameIdForLog
+      + ' (away=' + awayAbbr + ' -> ' + wantAwayId + ', home=' + homeAbbr + ' -> ' + wantHomeId + ')');
+    return null;
+  }
   var days = schedule.dates || [];
   var candidates = []; // for debug
   for (var i = 0; i < days.length; i++) {
@@ -136,18 +159,16 @@ function findGamePk(schedule, awayAbbr, homeAbbr, gameDateForLog, gameIdForLog) 
       var g = gs[j];
       var awayId = g.teams && g.teams.away && g.teams.away.team && g.teams.away.team.id;
       var homeId = g.teams && g.teams.home && g.teams.home.team && g.teams.home.team.id;
-      var a = TEAM_ID_TO_ABBR[awayId] || '';
-      var h = TEAM_ID_TO_ABBR[homeId] || '';
-      candidates.push({ awayId: awayId, homeId: homeId, awayAbbr: a, homeAbbr: h, gamePk: g.gamePk });
-      if (a === awayAbbr && h === homeAbbr) return g.gamePk;
+      candidates.push({ awayId: awayId, homeId: homeId, gamePk: g.gamePk });
+      if (awayId === wantAwayId && homeId === wantHomeId) return g.gamePk;
     }
   }
   if (DEBUG) {
     console.error('[debug] no pk for ' + gameDateForLog + '/' + gameIdForLog
-      + ' (looking for ' + awayAbbr + '@' + homeAbbr + '); schedule had:');
+      + ' (looking for ids ' + wantAwayId + '@' + wantHomeId + ', from abbr ' + awayAbbr + '@' + homeAbbr + '); schedule had:');
     for (var k = 0; k < candidates.length; k++) {
       var c = candidates[k];
-      console.error('  ' + c.awayAbbr + '(' + c.awayId + ')@' + c.homeAbbr + '(' + c.homeId + ') pk=' + c.gamePk);
+      console.error('  ' + c.awayId + '@' + c.homeId + ' pk=' + c.gamePk);
     }
   }
   return null;
