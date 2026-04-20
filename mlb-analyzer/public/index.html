@@ -626,10 +626,10 @@ async function pullWeather(btn){
     try{return await api(path,Object.assign({},opts||{},{signal:c.signal}));}finally{clearTimeout(t);}
   }
   try{
-    const games=await apiT('/games?date='+date);
+    const games=await apiT('/games/'+date);
     const tom=new Date(date+'T12:00:00');tom.setDate(tom.getDate()+1);
     const tStr=tom.toISOString().split('T')[0];
-    const tmrwGames=await apiT('/games?date='+tStr);
+    const tmrwGames=await apiT('/games/'+tStr);
     const list=[...(Array.isArray(games)?games:(games.games||[])),
       ...(Array.isArray(tmrwGames)?tmrwGames:(tmrwGames.games||[])).map(g=>({...g,_date:tStr}))];
     const log=[];let updated=0,skipped=0;

@@ -44,6 +44,12 @@ app.use('/api', (err, req, res, next) => {
   });
 });
 
+// JSON 404 for unmatched /api paths — prevents falling through to the SPA
+// fallback, which would return text/html and break any client doing r.json().
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found', path: req.path });
+});
+
 // SPA fallback — serve index.html with no-cache headers
 app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
