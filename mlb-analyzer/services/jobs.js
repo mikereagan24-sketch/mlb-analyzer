@@ -722,25 +722,9 @@ async function runOddsJob(dateStr) {
       console.log('[odds] Fetching from Unabated...');
       oddsRaw = await fetchUnabatedOdds(dateStr);
       console.log('[odds] Unabated returned '+oddsRaw.length+' games');
-      // DIAG: dump raw fetcher output for targeted games
-      for (const targetId of ['pit-tex', 'min-nym', 'phi-chc']) {
-        const hit = oddsRaw.find(o => o.game_id === targetId);
-        if (hit) {
-          console.log('[diag-tot] jobs.js got ' + targetId + ': ' + JSON.stringify({
-            mkt_ml: hit.market_away_ml + '/' + hit.market_home_ml,
-            total: hit.market_total,
-            total_src: hit.total_source,
-            ml_src: hit.ml_source,
-            over: hit.over_price,
-            under: hit.under_price,
-          }));
-        } else {
-          console.log('[diag-tot] jobs.js got ' + targetId + ': NOT IN RESPONSE');
-        }
-      }
       if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
-      console.error("[diag-tot] UNABATED FETCH THREW — falling back to Odds API. err=" + e.message + " stack=" + e.stack);
+      console.log('[odds] Unabated failed: '+e.message+' → falling back to Odds API');
       try {
         oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
       } catch(e2) {
@@ -787,9 +771,18 @@ async function runOddsJob(dateStr) {
       const oddsReason = reasons.length ? reasons.join(' | ') : null;
       const oddsFlagged = oddsReason ? 1 : 0;
       if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
+      // Preserve existing non-null totals when incoming total is null.
+      // Unabated's feed can serve partial responses (observed 2026-04-21:
+      // two fetches seconds apart returned full totals then empty totals
+      // for the same 3 games). Previously the second call's null overwrote
+      // the first call's good data. COALESCE(incoming, existing) prevents
+      // that. Apply to total + over_price + under_price since those pair.
+      // Do NOT apply to ML — moneylines are volatile and we want fresh.
       db.prepare(`UPDATE game_log SET
-        market_away_ml=?, market_home_ml=?, market_total=?,
-        over_price=?, under_price=?,
+        market_away_ml=?, market_home_ml=?,
+        market_total=COALESCE(?, market_total),
+        over_price=COALESCE(?, over_price),
+        under_price=COALESCE(?, under_price),
         consensus_away_ml=?, consensus_home_ml=?,
         odds_flagged=?, odds_flag_reason=?,
         updated_at=datetime('now')
