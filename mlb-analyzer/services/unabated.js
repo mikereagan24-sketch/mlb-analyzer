@@ -1,14 +1,14 @@
 'use strict';
 const UB_URL = 'https://content.unabated.com/markets/game-odds/b_gameodds.json';
 const MLB_KEY = 'lg5:pt1:pregame';
-const ML_SOURCES = ['9','59','35','17','8','19','107','36','60','2','91','3'];
+const ML_SOURCES = ['91','59','35','17','8','19','107','36','60','2','67','3'];
 const TOTAL_SOURCES = ['91','105','59','35','17','102','19','3'];
 // Consensus lookup — broader than just Pinnacle so we still get a sharp
 // second opinion when Pinnacle lines are missing. Priority order:
 // Pinnacle → Pinnacle-d → BetOnline → NoVig → DK → FanDuel. Must not
 // include Kalshi (9) — the whole point is an independent check.
 const CONSENSUS_SOURCES = ['59','35','8','17','19','107'];
-const SOURCE_NAMES = {'9':'kalshi','3':'polymarket','59':'pinnacle','35':'pinnacle-d','105':'circa','102':'unabated','17':'novig','19':'dk','107':'fanduel','8':'betonline','36':'bookmaker','60':'sportsbetting','67':'unknown-67','91':'unknown-91'};
+const SOURCE_NAMES = {'9':'unknown-9','3':'polymarket','59':'pinnacle','35':'pinnacle-d','105':'circa','102':'unabated','17':'novig','19':'dk','107':'fanduel','8':'betonline','36':'bookmaker','60':'sportsbetting','67':'polymarket','91':'kalshi'};
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
 async function fetchUnabatedOdds(dateStr) {
@@ -49,7 +49,6 @@ async function fetchUnabatedOdds(dateStr) {
   console.log('[unabated] '+Object.keys(byMatchup).length+' games for '+dateStr);
 
   const results = [];
-  let _dbgLogged = false;
   for (const {g,away,home} of Object.values(byMatchup)) {
     const lines = g.gameOddsMarketSourcesLines||{};
     
@@ -77,27 +76,6 @@ async function fetchUnabatedOdds(dateStr) {
         }
       }
     });
-
-    // TEMP DEBUG — first game only: dump available sources and Kalshi (id=9) raw,
-    // plus a per-source american-price roll-up so unlabeled IDs (67, 91, 2, …)
-    // can be identified by matching their prices against known book lines.
-    if (!_dbgLogged) {
-      console.log('[debug] game ' + away + '-' + home);
-      console.log('[debug] sources available:', Object.keys(bySource));
-      console.log('[debug] kalshi away bt1:', JSON.stringify(bySource['9']?.away?.bt1));
-      console.log('[debug] kalshi home bt1:', JSON.stringify(bySource['9']?.home?.bt1));
-      const ids = Object.keys(bySource).sort((a,b)=>parseInt(a)-parseInt(b));
-      for (const id of ids) {
-        const s = bySource[id];
-        const ap = s?.away?.bt1?.americanPrice;
-        const hp = s?.home?.bt1?.americanPrice;
-        const label = SOURCE_NAMES[id] || 'src'+id;
-        console.log('[debug] ms'+id+' ('+label+'): away='+ap+' home='+hp);
-      }
-      console.log('[debug] bySource[67] raw:', JSON.stringify(bySource['67']));
-      console.log('[debug] bySource[91] raw:', JSON.stringify(bySource['91']));
-      _dbgLogged = true;
-    }
 
     // ML
     let awayML=null,homeML=null,mlSrc=null;
