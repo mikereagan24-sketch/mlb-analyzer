@@ -159,8 +159,15 @@ async function fetchUnabatedOdds(dateStr) {
     const key = away+'-'+home;
     const n = Object.keys(g.gameOddsMarketSourcesLines||{}).length;
     const start = g.eventStart || '';
-    // Keep the LATEST start time — the upcoming game, not the already-played one
-    if (!byMatchup[key] || start > byMatchup[key].start) byMatchup[key] = {g,away,home,n,start};
+    // Pick the event with the MOST market sources. The actively-traded
+    // game for this date has ~60+ book listings; placeholder listings for
+    // future days have only 4-8. Previously used "latest start" as the
+    // dedup heuristic, but Unabated serves future-day placeholder events
+    // that pass our date filter (e.g. on 4/22 query, both 4/22 00:05 UTC
+    // and 4/23 00:05 UTC PIT@TEX events match; the 4/23 one is tomorrow's
+    // placeholder with no totals). Source count is a robust signal for
+    // identifying the real traded listing.
+    if (!byMatchup[key] || n > byMatchup[key].n) byMatchup[key] = {g,away,home,n,start};
   });
 
   console.log('[unabated] '+Object.keys(byMatchup).length+' games for '+dateStr);
