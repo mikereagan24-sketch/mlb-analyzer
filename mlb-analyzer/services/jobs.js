@@ -124,35 +124,38 @@ function checkOddsSanity(awayML, homeML) {
 }
 
 // Flag when the primary ML (typically Kalshi) disagrees sharply with the
-// Pinnacle consensus line. Two escalating checks:
-//   1) Hard disagreement: Kalshi and Pinnacle pick different favorites —
+// sharp-consensus line. Two escalating checks:
+//   1) Hard disagreement: primary and consensus pick different favorites —
 //      that's almost always a bad primary price, regardless of magnitude.
 //   2) Soft disagreement: they agree on the favorite but the favorite's
 //      implied probability differs by more than 8 cents.
-// Returns null if either side is missing.
-function checkConsensusDivergence(awayML, homeML, consAwayML, consHomeML) {
+// consSrc is the consensus book name (e.g. 'pinnacle', 'dk') used only in
+// the error message so flags are self-describing. Returns null if either
+// side is missing.
+function checkConsensusDivergence(awayML, homeML, consAwayML, consHomeML, consSrc) {
   const a = parseFloat(awayML), h = parseFloat(homeML);
   const ca = parseFloat(consAwayML), ch = parseFloat(consHomeML);
   if (isNaN(a) || isNaN(h) || isNaN(ca) || isNaN(ch)) return null;
   if (a === 0 || h === 0 || ca === 0 || ch === 0) return null;
+  const consLabel = consSrc || 'consensus';
   // In American odds, lower number = bigger favorite (e.g. -150 < +130).
   const kalFav = a < h ? 'away' : 'home';
-  const pinFav = ca < ch ? 'away' : 'home';
-  if (kalFav !== pinFav) {
+  const conFav = ca < ch ? 'away' : 'home';
+  if (kalFav !== conFav) {
     const kalFavML = kalFav === 'away' ? a : h;
-    const pinFavML = pinFav === 'away' ? ca : ch;
-    return 'Kalshi vs Pinnacle disagree on favorite: Kalshi favors ' + kalFav +
-           ' (' + (kalFavML > 0 ? '+' + kalFavML : kalFavML) + ') Pinnacle favors ' +
-           pinFav + ' (' + (pinFavML > 0 ? '+' + pinFavML : pinFavML) + ')';
+    const conFavML = conFav === 'away' ? ca : ch;
+    return 'Kalshi vs ' + consLabel + ' disagree on favorite: Kalshi favors ' + kalFav +
+           ' (' + (kalFavML > 0 ? '+' + kalFavML : kalFavML) + ') ' + consLabel + ' favors ' +
+           conFav + ' (' + (conFavML > 0 ? '+' + conFavML : conFavML) + ')';
   }
   const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
   const pa = impP(a), ph = impP(h), pca = impP(ca), pch = impP(ch);
   const kalFavImpP = kalFav === 'away' ? pa : ph;
-  const pinFavImpP = pinFav === 'away' ? pca : pch;
-  const diff = Math.abs(kalFavImpP - pinFavImpP);
+  const conFavImpP = conFav === 'away' ? pca : pch;
+  const diff = Math.abs(kalFavImpP - conFavImpP);
   if (diff > 0.08) {
-    return 'Kalshi vs consensus divergence: Kalshi=' + awayML + '/' + homeML +
-           ' Pinnacle=' + consAwayML + '/' + consHomeML +
+    return 'Kalshi vs ' + consLabel + ' divergence: Kalshi=' + awayML + '/' + homeML +
+           ' ' + consLabel + '=' + consAwayML + '/' + consHomeML +
            ' (fav Δp=' + diff.toFixed(3) + ')';
   }
   return null;
@@ -757,7 +760,8 @@ async function runOddsJob(dateStr) {
       const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
       const divergenceReason = checkConsensusDivergence(
         o.market_away_ml, o.market_home_ml,
-        o.consensus_away_ml, o.consensus_home_ml
+        o.consensus_away_ml, o.consensus_home_ml,
+        o.consensus_source
       );
       const reasons = [sanityReason, divergenceReason].filter(Boolean);
       const oddsReason = reasons.length ? reasons.join(' | ') : null;

@@ -3,7 +3,11 @@ const UB_URL = 'https://content.unabated.com/markets/game-odds/b_gameodds.json';
 const MLB_KEY = 'lg5:pt1:pregame';
 const ML_SOURCES = ['9','59','35','17','8','19','107','36','60','2','91','3'];
 const TOTAL_SOURCES = ['91','105','59','35','17','102','19','3'];
-const PINNACLE_SOURCES = ['59','35'];
+// Consensus lookup — broader than just Pinnacle so we still get a sharp
+// second opinion when Pinnacle lines are missing. Priority order:
+// Pinnacle → Pinnacle-d → BetOnline → NoVig → DK → FanDuel. Must not
+// include Kalshi (9) — the whole point is an independent check.
+const CONSENSUS_SOURCES = ['59','35','8','17','19','107'];
 const SOURCE_NAMES = {'9':'kalshi','3':'polymarket','59':'pinnacle','35':'pinnacle-d','105':'circa','102':'unabated','17':'novig','19':'dk','107':'fanduel','8':'betonline','36':'bookmaker','60':'sportsbetting'};
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
@@ -91,10 +95,12 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
-    // Pinnacle consensus (sharp line) — looked up independently of the primary
-    // ML so we can flag divergence when primary (typically Kalshi) disagrees.
+    // Sharp consensus — looked up independently of the primary ML so we can
+    // flag divergence when primary (typically Kalshi) disagrees. Walks
+    // CONSENSUS_SOURCES in priority order and picks the first book that
+    // has both sides.
     let consAwayML=null, consHomeML=null, consSrc=null;
-    for(const msId of PINNACLE_SOURCES){
+    for(const msId of CONSENSUS_SOURCES){
       const s=bySource[msId];
       if(s?.away?.bt1?.americanPrice && s?.home?.bt1?.americanPrice){
         consAwayML=s.away.bt1.americanPrice; consHomeML=s.home.bt1.americanPrice;
