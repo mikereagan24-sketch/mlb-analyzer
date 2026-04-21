@@ -706,23 +706,35 @@ router.post('/signals/dedup', (req, res) => {
 // Lock your actual bet line for a signal
 router.post('/signals/recalc', (req, res) => {
   try {
-    // Recalculate pnl for all resolved signals using to-win-$100 logic
-    // Use bet_line if available, else market_line
-    const sigs = db.prepare(`SELECT * FROM bet_signals WHERE outcome IN ('win','loss')`).all();
+    // Recalculate pnl for all resolved signals using to-win-$100 logic.
+    // For ML: use bet_line (manual) else market_line as the American odds.
+    // For Total: bet_line/closing_line/market_line are the line NUMBER (e.g.
+    // 8.5), not the juice — so pull over_price/under_price from game_log
+    // and fall back to -110. Without this join, totals pnl is computed from
+    // the total line as if it were an American odds price (very wrong).
+    const sigs = db.prepare(
+      "SELECT bs.*, gl.over_price AS gl_over_price, gl.under_price AS gl_under_price " +
+      "FROM bet_signals bs " +
+      "LEFT JOIN game_log gl ON gl.id = bs.game_log_id " +
+      "WHERE bs.outcome IN ('win','loss')"
+    ).all();
     let updated = 0;
     const upd = db.prepare(`UPDATE bet_signals SET pnl=? WHERE id=?`);
     for (const sig of sigs) {
-      const ml = parseFloat(sig.bet_line || sig.market_line);
-      if (isNaN(ml) || ml === 0) continue;
       let pnl;
       if (sig.signal_type === 'ML') {
-        // To win $100: +odds stake=10000/odds, -odds stake=abs(odds)
+        const ml = parseFloat(sig.bet_line || sig.market_line);
+        if (isNaN(ml) || ml === 0) continue;
         const stake = ml > 0 ? parseFloat((10000/ml).toFixed(2)) : Math.abs(ml);
         pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
       } else {
-        // Total: use bet_line as the vig price (e.g. -110), else -110
-        const price = parseFloat(sig.bet_line) || -110;
-        const stake = price > 0 ? parseFloat((10000/price).toFixed(2)) : Math.abs(price);
+        // Total — price is on game_log, not on the signal. Side (over/under)
+        // picks which price applies; default -110 when neither is known.
+        const isOver = sig.signal_side === 'over';
+        const priceRaw = isOver ? sig.gl_over_price : sig.gl_under_price;
+        const price = parseFloat(priceRaw);
+        const p = (!isNaN(price) && price !== 0) ? price : -110;
+        const stake = p > 0 ? parseFloat((10000/p).toFixed(2)) : Math.abs(p);
         pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
       }
       upd.run(parseFloat(pnl.toFixed(2)), sig.id);
@@ -736,12 +748,15 @@ router.post('/signals/manual', (req, res) => {
   try {
     // If recalc:true, recalculate all resolved signal P&L with to-win-100 math
     if (req.body.recalc) {
-      const sigs = db.prepare("SELECT * FROM bet_signals WHERE outcome IN ('win','loss')").all();
+      const sigs = db.prepare(
+        "SELECT bs.*, gl.over_price AS gl_over_price, gl.under_price AS gl_under_price " +
+        "FROM bet_signals bs " +
+        "LEFT JOIN game_log gl ON gl.id = bs.game_log_id " +
+        "WHERE bs.outcome IN ('win','loss')"
+      ).all();
       let updated = 0;
       const upd = db.prepare("UPDATE bet_signals SET pnl=? WHERE id=?");
       for (const sig of sigs) {
-        const ml = parseFloat(sig.bet_line || sig.market_line);
-        if (isNaN(ml) || ml === 0) continue;
         let pnl;
         if (sig.signal_type === 'ML') {
           const ml2 = parseFloat(sig.bet_line || sig.market_line);
@@ -751,8 +766,14 @@ router.post('/signals/manual', (req, res) => {
           }
         } else {
           // Total: bet_line is the line number not the price ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ use closing_line as price or -110
-          const price = parseFloat(sig.closing_line) || -110;
-          const stake = price < 0 ? Math.abs(price) : parseFloat((10000/price).toFixed(2));
+          // Total — price is on game_log (over_price / under_price), not
+          // on the signal. bet_line/closing_line for totals store the line
+          // NUMBER (e.g. 8.5), which is not the juice. Default to -110.
+          const isOver = sig.signal_side === 'over';
+          const priceRaw = isOver ? sig.gl_over_price : sig.gl_under_price;
+          const price = parseFloat(priceRaw);
+          const p = (!isNaN(price) && price !== 0) ? price : -110;
+          const stake = p < 0 ? Math.abs(p) : parseFloat((10000/p).toFixed(2));
           pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
         }
         upd.run(parseFloat(pnl.toFixed(2)), sig.id);
@@ -780,7 +801,12 @@ router.post('/signals/manual', (req, res) => {
     const { calcPnl } = require('../services/model');
     let outcome='pending', pnl=0;
     if (gl.away_score!=null){
-      const r=calcPnl({type:signal_type,side:signal_side,marketLine:Number(market_line)},gl.away_score,gl.home_score,gl.market_total);
+      const r=calcPnl({
+        type:signal_type, side:signal_side,
+        marketLine:Number(market_line),
+        bet_line: bet_line != null ? Number(bet_line) : null,
+        overPrice: gl.over_price, underPrice: gl.under_price,
+      }, gl.away_score, gl.home_score, gl.market_total);
       outcome=r.outcome; pnl=r.pnl;
     }
     const info = db.prepare(`INSERT INTO bet_signals
