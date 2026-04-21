@@ -125,6 +125,30 @@ function checkOddsSanity(awayML, homeML) {
   return null;
 }
 
+// Flag when the primary ML (typically Kalshi) disagrees sharply with the
+// Pinnacle consensus line. We compare the favorite's implied probability
+// across the two books — if it differs by more than 10 cents of implied
+// probability the primary is probably wrong (wrong team favored, stale
+// price, orientation flip, etc.). Returns null if either side is missing.
+function checkConsensusDivergence(awayML, homeML, consAwayML, consHomeML) {
+  const a = parseFloat(awayML), h = parseFloat(homeML);
+  const ca = parseFloat(consAwayML), ch = parseFloat(consHomeML);
+  if (isNaN(a) || isNaN(h) || isNaN(ca) || isNaN(ch)) return null;
+  if (a === 0 || h === 0 || ca === 0 || ch === 0) return null;
+  const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
+  const pa = impP(a), ph = impP(h), pca = impP(ca), pch = impP(ch);
+  const primaryFavSide = pa >= ph ? 'away' : 'home';
+  const primaryFavImpP = primaryFavSide === 'away' ? pa : ph;
+  const consensusFavImpP = primaryFavSide === 'away' ? pca : pch;
+  const diff = Math.abs(primaryFavImpP - consensusFavImpP);
+  if (diff > 0.10) {
+    return 'Kalshi vs consensus divergence: Kalshi=' + awayML + '/' + homeML +
+           ' Pinnacle=' + consAwayML + '/' + consHomeML +
+           ' (fav Δp=' + diff.toFixed(3) + ')';
+  }
+  return null;
+}
+
 function processGameSignals(gameRow, wobaIdx, settings) {
   // Per-team bullpen wOBA from pit-act data
   const awayParts = (gameRow.game_id||'').split('-');
@@ -721,17 +745,26 @@ async function runOddsJob(dateStr) {
         }
         continue;
       }
-      const oddsReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
+      const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
+      const divergenceReason = checkConsensusDivergence(
+        o.market_away_ml, o.market_home_ml,
+        o.consensus_away_ml, o.consensus_home_ml
+      );
+      const reasons = [sanityReason, divergenceReason].filter(Boolean);
+      const oddsReason = reasons.length ? reasons.join(' | ') : null;
       const oddsFlagged = oddsReason ? 1 : 0;
       if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
       db.prepare(`UPDATE game_log SET
         market_away_ml=?, market_home_ml=?, market_total=?,
         over_price=?, under_price=?,
+        consensus_away_ml=?, consensus_home_ml=?,
         odds_flagged=?, odds_flag_reason=?,
         updated_at=datetime('now')
         WHERE game_date=? AND game_id=?`)
         .run(o.market_away_ml, o.market_home_ml, o.market_total,
              o.over_price, o.under_price,
+             o.consensus_away_ml != null ? o.consensus_away_ml : null,
+             o.consensus_home_ml != null ? o.consensus_home_ml : null,
              oddsFlagged, oddsReason,
              dateStr, o.game_id);
       const gameRow = q.getGameById.get(dateStr, o.game_id);

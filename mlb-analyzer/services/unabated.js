@@ -1,8 +1,9 @@
 'use strict';
 const UB_URL = 'https://content.unabated.com/markets/game-odds/b_gameodds.json';
 const MLB_KEY = 'lg5:pt1:pregame';
-const ML_SOURCES = ['107','9','8','2','36','60','3','59','35','17','91','19'];
+const ML_SOURCES = ['9','59','35','17','8','19','107','36','60','2','91','3'];
 const TOTAL_SOURCES = ['91','105','59','35','17','102','19','3'];
+const PINNACLE_SOURCES = ['59','35'];
 const SOURCE_NAMES = {'9':'kalshi','3':'polymarket','59':'pinnacle','35':'pinnacle-d','105':'circa','102':'unabated','17':'novig','19':'dk','107':'fanduel','8':'betonline','36':'bookmaker','60':'sportsbetting'};
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
@@ -90,6 +91,17 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
+    // Pinnacle consensus (sharp line) — looked up independently of the primary
+    // ML so we can flag divergence when primary (typically Kalshi) disagrees.
+    let consAwayML=null, consHomeML=null, consSrc=null;
+    for(const msId of PINNACLE_SOURCES){
+      const s=bySource[msId];
+      if(s?.away?.bt1?.americanPrice && s?.home?.bt1?.americanPrice){
+        consAwayML=s.away.bt1.americanPrice; consHomeML=s.home.bt1.americanPrice;
+        consSrc=SOURCE_NAMES[msId]||('src'+msId); break;
+      }
+    }
+
     // TOTAL: bt3 can be on si0 (over/away) OR si1 (under/home) depending on book
     let total=null,overPrice=null,underPrice=null,totalSrc=null;
     for(const msId of TOTAL_SOURCES){
@@ -118,8 +130,16 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
-    console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') tot='+total+'('+totalSrc+')');
-    results.push({game_id:away+'-'+home,market_away_ml:awayML,market_home_ml:homeML,market_total:total,over_price:overPrice,under_price:underPrice,source:'unabated'});
+    console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') cons='+consAwayML+'/'+consHomeML+'('+consSrc+') tot='+total+'('+totalSrc+')');
+    results.push({
+      game_id:away+'-'+home,
+      market_away_ml:awayML, market_home_ml:homeML,
+      market_total:total, over_price:overPrice, under_price:underPrice,
+      consensus_away_ml:consAwayML, consensus_home_ml:consHomeML,
+      ml_source:mlSrc||null, consensus_source:consSrc||null,
+      total_source:totalSrc||null,
+      source:'unabated',
+    });
   }
   return results;
 }

@@ -73,6 +73,8 @@ db.exec(`
   under_price INTEGER,
   odds_flagged INTEGER DEFAULT 0,
   odds_flag_reason TEXT,
+  consensus_away_ml INTEGER,
+  consensus_home_ml INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -210,6 +212,8 @@ db.exec(`
 // Migrations for existing DBs
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flagged INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flag_reason TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_away_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_home_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
