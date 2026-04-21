@@ -272,6 +272,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       edge_pct: sig.edge,
       outcome,
       pnl,
+      cohort: 'v2',
     });
   }
 

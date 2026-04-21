@@ -303,7 +303,7 @@ router.post('/jobs/fix-signals', (req, res) => {
 
 router.get('/backtest', (req, res) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, cohort } = req.query;
     // Model version floor: 2026-04-09 is when the current parameter set was
     // established. Signals from earlier dates were produced by older model
     // versions and must never appear in backtest output, no matter what
@@ -312,6 +312,13 @@ router.get('/backtest', (req, res) => {
     const requestedFrom = from || '2026-01-01';
     const fromDate = requestedFrom < MIN_MODEL_DATE ? MIN_MODEL_DATE : requestedFrom;
     const toDate = to || '2099-12-31';
+    // Cohort filter: default 'v2' (current model epoch). Pass ?cohort=all
+    // to include every cohort, or ?cohort=v1 / ?cohort=v2 explicitly.
+    const cohortArg = (cohort || 'v2').toString();
+    const filterByCohort = cohortArg !== 'all';
+    const cohortPred = filterByCohort ? ' AND cohort=?' : '';
+    const cohortPredBS = filterByCohort ? ' AND bs.cohort=?' : '';
+    const cohortParams = filterByCohort ? [cohortArg] : [];
     // One-time: null out CLV for Total signals (CLV not meaningful ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ bet_line is a price, not a total)
     db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' AND clv IS NOT NULL").run();
     // Auto-backfill closing_line from market_line for resolved signals that have none
@@ -326,24 +333,60 @@ router.get('/backtest', (req, res) => {
       WHERE closing_line IS NULL
         AND outcome != 'pending'
         AND market_line IS NOT NULL`).run();
-    const byCategory = q.getSummaryByCategory.all(fromDate, toDate);
-    const overall = q.getOverallSummary.get(fromDate, toDate);
-    const signals = db.prepare(`
-      SELECT bs.*,
-        COALESCE(bs.market_line,
-          CASE WHEN bs.signal_side='away' THEN gl.market_away_ml
-               WHEN bs.signal_side='home' THEN gl.market_home_ml
-               ELSE NULL END
-        ) as market_line,
-        gl.market_total, gl.away_score, gl.home_score
-      FROM bet_signals bs
-      LEFT JOIN game_log gl ON gl.game_date=bs.game_date AND gl.game_id=bs.game_id
-      WHERE bs.game_date BETWEEN ? AND ?
-        AND bs.game_date >= '2026-04-09'
-        AND (bs.is_active = 1 OR bs.outcome != 'pending')
-      ORDER BY bs.game_date, bs.id
-    `).all(fromDate, toDate);
-    res.json({ overall, byCategory, signals });
+    // Re-prepare summary queries inline because the pre-prepared versions in
+    // schema.js don't parameterize cohort. Cheap: two statement compiles per
+    // request. Keep the same math as getSummaryByCategory / getOverallSummary.
+    const byCategory = db.prepare(
+      "SELECT category, COUNT(*) as plays," +
+      " SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins," +
+      " SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses," +
+      " SUM(CASE WHEN outcome='push' THEN 1 ELSE 0 END) as pushes," +
+      " SUM(CASE WHEN outcome='pending' THEN 1 ELSE 0 END) as pending," +
+      " ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END), 2) as total_pnl," +
+      " ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END)" +
+      "  / NULLIF(SUM(CASE WHEN outcome NOT IN ('pending','push') THEN 1 ELSE 0 END) * 100.0, 0) * 100, 2) as roi" +
+      " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome != 'pending'" +
+      cohortPred +
+      " GROUP BY category ORDER BY category"
+    ).all(fromDate, toDate, ...cohortParams);
+
+    const overall = db.prepare(
+      "SELECT COUNT(*) as plays," +
+      " SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins," +
+      " SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) as losses," +
+      " SUM(CASE WHEN outcome='push' THEN 1 ELSE 0 END) as pushes," +
+      " ROUND(SUM(pnl), 2) as total_pnl," +
+      " ROUND(SUM(CASE" +
+      "   WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0" +
+      "     THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)" +
+      "   WHEN signal_type='ML' THEN ABS(COALESCE(bet_line,market_line))" +
+      "   ELSE 110.0 END), 2) as wagered," +
+      " ROUND(SUM(pnl) / NULLIF(SUM(CASE" +
+      "   WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0" +
+      "     THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)" +
+      "   WHEN signal_type='ML' THEN ABS(COALESCE(bet_line,market_line))" +
+      "   ELSE 110.0 END), 0) * 100, 2) as roi" +
+      " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome NOT IN ('pending','push')" +
+      cohortPred
+    ).get(fromDate, toDate, ...cohortParams);
+
+    const signals = db.prepare(
+      "SELECT bs.*," +
+      " COALESCE(bs.market_line," +
+      "  CASE WHEN bs.signal_side='away' THEN gl.market_away_ml" +
+      "       WHEN bs.signal_side='home' THEN gl.market_home_ml" +
+      "       ELSE NULL END) as market_line," +
+      " gl.market_total, gl.away_score, gl.home_score" +
+      " FROM bet_signals bs" +
+      " LEFT JOIN game_log gl ON gl.game_date=bs.game_date AND gl.game_id=bs.game_id" +
+      " WHERE bs.game_date BETWEEN ? AND ?" +
+      "   AND bs.game_date >= '2026-04-09'" +
+      "   AND (bs.is_active = 1 OR bs.outcome != 'pending')" +
+      cohortPredBS +
+      " ORDER BY bs.game_date, bs.id"
+    ).all(fromDate, toDate, ...cohortParams);
+
+    res.json({ overall, byCategory, signals, cohort: cohortArg });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -811,11 +854,11 @@ router.post('/signals/manual', (req, res) => {
     }
     const info = db.prepare(`INSERT INTO bet_signals
       (game_log_id,game_date,game_id,signal_type,signal_side,signal_label,category,
-       market_line,model_line,edge_pct,outcome,pnl,bet_line,bet_locked_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+       market_line,model_line,edge_pct,outcome,pnl,bet_line,cohort,bet_locked_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
       .run(gl.id,game_date,game_id,signal_type,signal_side,signal_label,category,
            Number(market_line),model_line,edge_pct,outcome,pnl,
-           bet_line!=null?Number(bet_line):null);
+           bet_line!=null?Number(bet_line):null,'v2');
     res.json({success:true,id:info.lastInsertRowid,outcome,pnl,category});
   } catch(e){res.status(500).json({error:e.message});}
 });

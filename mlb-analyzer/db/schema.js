@@ -99,7 +99,8 @@ db.exec(`
   closing_line INTEGER,      -- final pregame locked line (auto-set when odds lock)
   clv REAL,                  -- closing line value: how much better your line was
   is_active INTEGER NOT NULL DEFAULT 1, -- 1=show on Games tab, 0=locked bet no longer qualifies
-  notes TEXT                 -- explanation when signal state changes (e.g. line moved)
+  notes TEXT,                -- explanation when signal state changes (e.g. line moved)
+  cohort TEXT DEFAULT 'v1',  -- model/parameter epoch the signal was produced under
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_signals_date ON bet_signals(game_date);
@@ -214,6 +215,9 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flagged INTEGER DEFAULT 0");
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flag_reason TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_away_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_home_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN cohort TEXT DEFAULT 'v1'"); } catch(e) {}
+// One-time backfill: signals without a cohort value belong to v1 (pre-cohort era).
+try { db.exec("UPDATE bet_signals SET cohort='v1' WHERE cohort IS NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
@@ -298,10 +302,10 @@ const q = {
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
-      category, market_line, model_line, edge_pct, outcome, pnl
+      category, market_line, model_line, edge_pct, outcome, pnl, cohort
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
-      @category, @market_line, @model_line, @edge_pct, @outcome, @pnl
+      @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort
     )
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
