@@ -118,8 +118,6 @@ function checkOddsSanity(awayML, homeML) {
   const pa = impP(a), ph = impP(h);
   if (pa > 0.80) return 'extreme line: away at ' + (a > 0 ? '+' + a : a) + ' (implied p=' + pa.toFixed(3) + ')';
   if (ph > 0.80) return 'extreme line: home at ' + (h > 0 ? '+' + h : h) + ' (implied p=' + ph.toFixed(3) + ')';
-  const sum = pa + ph;
-  if (sum < 0.85 || sum > 1.15) return "implied probs don't sum correctly: away=" + pa.toFixed(3) + ' + home=' + ph.toFixed(3) + ' = ' + sum.toFixed(3);
   return null;
 }
 
@@ -737,6 +735,7 @@ async function runOddsJob(dateStr) {
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
+      console.log('[odds-consensus] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + ' consensus=' + o.consensus_away_ml + '/' + o.consensus_home_ml + ' (' + o.consensus_source + ')');
       // Skip if locked OR game has already started
       const existing = q.getGameById.get(dateStr, o.game_id);
       if (existing && existing.odds_locked_at) { console.log('[odds] Skipping locked: '+o.game_id); continue; }
