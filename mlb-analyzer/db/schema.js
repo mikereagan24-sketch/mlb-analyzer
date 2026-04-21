@@ -223,6 +223,10 @@ try { db.exec("UPDATE bet_signals SET cohort='v1' WHERE cohort IS NULL"); } catc
 // v2 rows have been retagged, future runs update 0 rows. New signals are
 // written as v3 (see services/jobs.js + routes/api.js).
 try { db.exec("UPDATE bet_signals SET cohort='v2-tainted' WHERE cohort='v2'"); } catch(e) {}
+// c7b2ffa deployed corrected-looking IDs that were still wrong (e.g. Kalshi
+// set to 9, which is BetOnline). Any v3 signals written between c7b2ffa
+// and this fix are also tainted. Idempotent.
+try { db.exec("UPDATE bet_signals SET cohort='v3-tainted' WHERE cohort='v3' AND created_at < datetime('now','-2 minutes')"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
