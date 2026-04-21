@@ -1,14 +1,45 @@
 'use strict';
 const UB_URL = 'https://content.unabated.com/markets/game-odds/b_gameodds.json';
 const MLB_KEY = 'lg5:pt1:pregame';
-const ML_SOURCES = ['91','59','35','17','8','19','107','36','60','2','67','3'];
-const TOTAL_SOURCES = ['91','105','59','35','17','102','19','3'];
-// Consensus lookup — broader than just Pinnacle so we still get a sharp
-// second opinion when Pinnacle lines are missing. Priority order:
-// Pinnacle → Pinnacle-d → BetOnline → NoVig → DK → FanDuel. Must not
-// include Kalshi (9) — the whole point is an independent check.
-const CONSENSUS_SOURCES = ['59','35','8','17','19','107'];
-const SOURCE_NAMES = {'9':'unknown-9','3':'polymarket','59':'pinnacle','35':'pinnacle-d','105':'circa','102':'unabated','17':'novig','19':'dk','107':'fanduel','8':'betonline','36':'bookmaker','60':'sportsbetting','67':'polymarket','91':'kalshi'};
+// IDs verified against https://content.unabated.com/markets/game-odds/b_gameodds.json
+// (marketSources object) on 2026-04-21. The previous mapping was almost
+// entirely wrong — e.g. 91 → Intertops (not Kalshi), 67 → Sharp Book Price
+// (not Polymarket), 60 → BetMGM Direct (not SportsBetting), 107 → 888sports
+// (not FanDuel), 36 → Circa Pool (not Bookmaker). Treat all bet_signals
+// written before this commit as tainted — they were chosen / flagged
+// against the wrong books.
+//
+// Primary ML: Kalshi first (id=9), then sharp books as fallback. Ordering
+// reflects confidence in the price when multiple sources have both sides.
+const ML_SOURCES = ['9','59','67','17','66','20','60','69','105','107','3'];
+// Totals: Pinnacle + sharp consensus first, Kalshi and exchanges next.
+const TOTAL_SOURCES = ['59','67','17','105','66','60','102','9','3'];
+// Consensus (NOT Kalshi) — used to flag Kalshi-vs-sharp divergence. Sharp
+// Book Price (67) is Unabated's own sharp consensus; we try it first so we
+// always get a second opinion even when individual sharp books are missing.
+const CONSENSUS_SOURCES = ['67','59','35','17','66','105','60'];
+const SOURCE_NAMES = {
+  '3':'polymarket',
+  '8':'hard-rock-s',
+  '9':'kalshi',
+  '11':'fanduel',
+  '17':'novig',
+  '19':'dk',
+  '20':'caesars',
+  '32':'betonline',
+  '35':'pinnacle-d',
+  '36':'circa-pool',
+  '56':'fliff',
+  '59':'pinnacle',
+  '60':'betmgm',
+  '66':'prophet',
+  '67':'sharp-book-price',
+  '69':'hard-rock',
+  '91':'intertops',
+  '102':'unabated',
+  '105':'circa',
+  '107':'888sports',
+};
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
 async function fetchUnabatedOdds(dateStr) {

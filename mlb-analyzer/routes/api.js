@@ -312,9 +312,9 @@ router.get('/backtest', (req, res) => {
     const requestedFrom = from || '2026-01-01';
     const fromDate = requestedFrom < MIN_MODEL_DATE ? MIN_MODEL_DATE : requestedFrom;
     const toDate = to || '2099-12-31';
-    // Cohort filter: default 'v2' (current model epoch). Pass ?cohort=all
-    // to include every cohort, or ?cohort=v1 / ?cohort=v2 explicitly.
-    const cohortArg = (cohort || 'v2').toString();
+    // Cohort filter: default 'v3' (current model epoch — post source-ID fix).
+    // Pass ?cohort=all for everything, or ?cohort=v1 / v2-tainted / v3 etc.
+    const cohortArg = (cohort || 'v3').toString();
     const filterByCohort = cohortArg !== 'all';
     const cohortPred = filterByCohort ? ' AND cohort=?' : '';
     const cohortPredBS = filterByCohort ? ' AND bs.cohort=?' : '';
@@ -858,7 +858,7 @@ router.post('/signals/manual', (req, res) => {
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
       .run(gl.id,game_date,game_id,signal_type,signal_side,signal_label,category,
            Number(market_line),model_line,edge_pct,outcome,pnl,
-           bet_line!=null?Number(bet_line):null,'v2');
+           bet_line!=null?Number(bet_line):null,'v3');
     res.json({success:true,id:info.lastInsertRowid,outcome,pnl,category});
   } catch(e){res.status(500).json({error:e.message});}
 });

@@ -218,6 +218,11 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_home_ml INTEGER"); } ca
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN cohort TEXT DEFAULT 'v1'"); } catch(e) {}
 // One-time backfill: signals without a cohort value belong to v1 (pre-cohort era).
 try { db.exec("UPDATE bet_signals SET cohort='v1' WHERE cohort IS NULL"); } catch(e) {}
+// v2 signals were produced against wrong Unabated source IDs — re-label as
+// tainted so they don't contaminate current numbers. Idempotent: once all
+// v2 rows have been retagged, future runs update 0 rows. New signals are
+// written as v3 (see services/jobs.js + routes/api.js).
+try { db.exec("UPDATE bet_signals SET cohort='v2-tainted' WHERE cohort='v2'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
