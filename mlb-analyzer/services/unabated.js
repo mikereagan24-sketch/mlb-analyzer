@@ -49,6 +49,7 @@ async function fetchUnabatedOdds(dateStr) {
   console.log('[unabated] '+Object.keys(byMatchup).length+' games for '+dateStr);
 
   const results = [];
+  let _dbgLogged = false;
   for (const {g,away,home} of Object.values(byMatchup)) {
     const lines = g.gameOddsMarketSourcesLines||{};
     
@@ -76,6 +77,15 @@ async function fetchUnabatedOdds(dateStr) {
         }
       }
     });
+
+    // TEMP DEBUG — first game only: dump available sources and Kalshi (id=9) raw
+    if (!_dbgLogged) {
+      console.log('[debug] game ' + away + '-' + home);
+      console.log('[debug] sources available:', Object.keys(bySource));
+      console.log('[debug] kalshi away bt1:', JSON.stringify(bySource['9']?.away?.bt1));
+      console.log('[debug] kalshi home bt1:', JSON.stringify(bySource['9']?.home?.bt1));
+      _dbgLogged = true;
+    }
 
     // ML
     let awayML=null,homeML=null,mlSrc=null;
