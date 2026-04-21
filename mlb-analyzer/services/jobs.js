@@ -136,18 +136,22 @@ function checkConsensusDivergence(awayML, homeML, consAwayML, consHomeML, consSr
   if (isNaN(a) || isNaN(h) || isNaN(ca) || isNaN(ch)) return null;
   if (a === 0 || h === 0 || ca === 0 || ch === 0) return null;
   const consLabel = consSrc || 'consensus';
+  const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
+  const pa = impP(a), ph = impP(h), pca = impP(ca), pch = impP(ch);
   // In American odds, lower number = bigger favorite (e.g. -150 < +130).
   const kalFav = a < h ? 'away' : 'home';
   const conFav = ca < ch ? 'away' : 'home';
   if (kalFav !== conFav) {
+    const conFavImpP = conFav === 'away' ? pca : pch;
+    // Pick-em games (consensus fav < ~-115 implied) flip favorites naturally
+    // between books — ignore disagreement in that noise zone.
+    if (conFavImpP <= 0.535) return null;
     const kalFavML = kalFav === 'away' ? a : h;
     const conFavML = conFav === 'away' ? ca : ch;
     return 'Kalshi vs ' + consLabel + ' disagree on favorite: Kalshi favors ' + kalFav +
            ' (' + (kalFavML > 0 ? '+' + kalFavML : kalFavML) + ') ' + consLabel + ' favors ' +
            conFav + ' (' + (conFavML > 0 ? '+' + conFavML : conFavML) + ')';
   }
-  const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
-  const pa = impP(a), ph = impP(h), pca = impP(ca), pch = impP(ch);
   const kalFavImpP = kalFav === 'away' ? pa : ph;
   const conFavImpP = conFav === 'away' ? pca : pch;
   const diff = Math.abs(kalFavImpP - conFavImpP);
