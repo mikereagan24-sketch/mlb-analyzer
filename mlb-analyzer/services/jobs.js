@@ -114,8 +114,6 @@ function tryParse(str) {
 function checkOddsSanity(awayML, homeML) {
   const a = parseFloat(awayML), h = parseFloat(homeML);
   if (isNaN(a) || isNaN(h) || a === 0 || h === 0) return null;
-  if (a > 0 && h > 0) return 'both teams same sign ML: away=+' + a + ' / home=+' + h;
-  if (a < 0 && h < 0) return 'both teams same sign ML: away=' + a + ' / home=' + h;
   const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
   const pa = impP(a), ph = impP(h);
   if (pa > 0.80) return 'extreme line: away at ' + (a > 0 ? '+' + a : a) + ' (implied p=' + pa.toFixed(3) + ')';
@@ -126,22 +124,33 @@ function checkOddsSanity(awayML, homeML) {
 }
 
 // Flag when the primary ML (typically Kalshi) disagrees sharply with the
-// Pinnacle consensus line. We compare the favorite's implied probability
-// across the two books — if it differs by more than 10 cents of implied
-// probability the primary is probably wrong (wrong team favored, stale
-// price, orientation flip, etc.). Returns null if either side is missing.
+// Pinnacle consensus line. Two escalating checks:
+//   1) Hard disagreement: Kalshi and Pinnacle pick different favorites —
+//      that's almost always a bad primary price, regardless of magnitude.
+//   2) Soft disagreement: they agree on the favorite but the favorite's
+//      implied probability differs by more than 8 cents.
+// Returns null if either side is missing.
 function checkConsensusDivergence(awayML, homeML, consAwayML, consHomeML) {
   const a = parseFloat(awayML), h = parseFloat(homeML);
   const ca = parseFloat(consAwayML), ch = parseFloat(consHomeML);
   if (isNaN(a) || isNaN(h) || isNaN(ca) || isNaN(ch)) return null;
   if (a === 0 || h === 0 || ca === 0 || ch === 0) return null;
+  // In American odds, lower number = bigger favorite (e.g. -150 < +130).
+  const kalFav = a < h ? 'away' : 'home';
+  const pinFav = ca < ch ? 'away' : 'home';
+  if (kalFav !== pinFav) {
+    const kalFavML = kalFav === 'away' ? a : h;
+    const pinFavML = pinFav === 'away' ? ca : ch;
+    return 'Kalshi vs Pinnacle disagree on favorite: Kalshi favors ' + kalFav +
+           ' (' + (kalFavML > 0 ? '+' + kalFavML : kalFavML) + ') Pinnacle favors ' +
+           pinFav + ' (' + (pinFavML > 0 ? '+' + pinFavML : pinFavML) + ')';
+  }
   const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
   const pa = impP(a), ph = impP(h), pca = impP(ca), pch = impP(ch);
-  const primaryFavSide = pa >= ph ? 'away' : 'home';
-  const primaryFavImpP = primaryFavSide === 'away' ? pa : ph;
-  const consensusFavImpP = primaryFavSide === 'away' ? pca : pch;
-  const diff = Math.abs(primaryFavImpP - consensusFavImpP);
-  if (diff > 0.10) {
+  const kalFavImpP = kalFav === 'away' ? pa : ph;
+  const pinFavImpP = pinFav === 'away' ? pca : pch;
+  const diff = Math.abs(kalFavImpP - pinFavImpP);
+  if (diff > 0.08) {
     return 'Kalshi vs consensus divergence: Kalshi=' + awayML + '/' + homeML +
            ' Pinnacle=' + consAwayML + '/' + consHomeML +
            ' (fav Δp=' + diff.toFixed(3) + ')';
