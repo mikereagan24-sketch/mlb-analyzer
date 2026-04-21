@@ -190,6 +190,24 @@ async function fetchUnabatedOdds(dateStr) {
       }
     });
 
+    // DIAG: dump bySourceTot for targeted games to track down null-total bug
+    if (away === 'pit' && home === 'tex' || away === 'min' && home === 'nym' || away === 'phi' && home === 'chc') {
+      const srcSummary = {};
+      for (const srcId of ['105','107','89','66','67','104','52','2','1']) {
+        const s = bySourceTot[srcId];
+        if (!s) { srcSummary[srcId + ':' + (SOURCE_NAMES[srcId]||'?')] = 'NO_ENTRY'; continue; }
+        srcSummary[srcId + ':' + (SOURCE_NAMES[srcId]||'?')] = {
+          away_pts: s.away?.bt3?.points,
+          away_price: s.away?.bt3?.americanPrice,
+          away_sane: isSaneTotal(s.away?.bt3),
+          home_pts: s.home?.bt3?.points,
+          home_price: s.home?.bt3?.americanPrice,
+          home_sane: isSaneTotal(s.home?.bt3),
+        };
+      }
+      console.log('[diag-tot] ' + away + '-' + home + ' bySourceTot: ' + JSON.stringify(srcSummary));
+    }
+
     // ML: walk priority list; skip source if either side is missing and
     // fall through. Prediction-market contracts can be one-sided when a
     // market maker pulls quotes — the correct behavior is to take the
@@ -307,6 +325,9 @@ async function fetchUnabatedOdds(dateStr) {
     }
 
     console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') cons='+consAwayML+'/'+consHomeML+'('+consSrc+') tot='+total+'('+totalSrc+')');
+    if ((away === 'pit' && home === 'tex') || (away === 'min' && home === 'nym') || (away === 'phi' && home === 'chc')) {
+      console.log('[diag-tot] ' + away + '-' + home + ' FINAL: total=' + total + ' totalSrc=' + totalSrc + ' overPrice=' + overPrice + ' underPrice=' + underPrice);
+    }
     results.push({
       game_id:away+'-'+home,
       market_away_ml:awayML, market_home_ml:homeML,

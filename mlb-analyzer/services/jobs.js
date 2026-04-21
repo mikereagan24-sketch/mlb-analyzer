@@ -722,9 +722,25 @@ async function runOddsJob(dateStr) {
       console.log('[odds] Fetching from Unabated...');
       oddsRaw = await fetchUnabatedOdds(dateStr);
       console.log('[odds] Unabated returned '+oddsRaw.length+' games');
+      // DIAG: dump raw fetcher output for targeted games
+      for (const targetId of ['pit-tex', 'min-nym', 'phi-chc']) {
+        const hit = oddsRaw.find(o => o.game_id === targetId);
+        if (hit) {
+          console.log('[diag-tot] jobs.js got ' + targetId + ': ' + JSON.stringify({
+            mkt_ml: hit.market_away_ml + '/' + hit.market_home_ml,
+            total: hit.market_total,
+            total_src: hit.total_source,
+            ml_src: hit.ml_source,
+            over: hit.over_price,
+            under: hit.under_price,
+          }));
+        } else {
+          console.log('[diag-tot] jobs.js got ' + targetId + ': NOT IN RESPONSE');
+        }
+      }
       if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
-      console.log('[odds] Unabated failed: '+e.message+' Ã¢ÂÂ falling back to Odds API');
+      console.error("[diag-tot] UNABATED FETCH THREW — falling back to Odds API. err=" + e.message + " stack=" + e.stack);
       try {
         oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
       } catch(e2) {
