@@ -92,6 +92,33 @@ function tryParse(str) {
 ;
 
 
+// Shared wOBA-CSV ingestion path. The manual upload route and the one-click
+// FanGraphs refresh both funnel through here so parse + expand + persist
+// logic stays in one place. Throws on empty parse; returns rows-inserted
+// count on success. Caller supplies raw CSV text (from file buffer or from
+// the FanGraphs fetcher) plus the 8-slot key and a filename for the log.
+function ingestWobaCSV(key, csvText, filename) {
+  const isPitcher = key.startsWith('pit');
+  const buf = Buffer.isBuffer(csvText) ? csvText : Buffer.from(csvText, 'utf-8');
+  const rows = parseCSV(buf, isPitcher);
+  if (!rows.length) throw new Error('No valid rows parsed. Check wOBA and Name columns.');
+  q.clearWobaKey.run(key);
+  // Store each player twice: by name alone AND by "name TEAM" for disambiguation
+  const expandedRows = [];
+  for (const r of rows) {
+    expandedRows.push(r);
+    if (r.team) {
+      expandedRows.push({...r, name: r.name+' '+r.team});
+      // Also store Jr/Sr-stripped + team so "bobby witt kc" matches "Bobby Witt" in lineup
+      const stripped = r.name.replace(/\b(Jr\.|Sr\.|II|III|IV)\b/gi,'').replace(/\s+/g,' ').trim();
+      if (stripped !== r.name) expandedRows.push({...r, name: stripped+' '+r.team});
+    }
+  }
+  q.upsertWobaBatch(key, expandedRows);
+  q.logUpload.run(key, filename, rows.length);
+  return rows.length;
+}
+
 router.post('/upload/:key?', upload.single('file'), (req, res) => {
 // Prevent browser caching on all API responses
 router.use((req, res, next) => {
@@ -105,26 +132,35 @@ router.use((req, res, next) => {
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
     const key = req.params.key || detectKey(file.originalname);
     if (!key) return res.status(400).json({ error: 'Cannot detect CSV type from filename: ' + file.originalname });
-    const isPitcher = key.startsWith('pit');
-    const rows = parseCSV(file.buffer, isPitcher);
-    if (!rows.length) return res.status(400).json({ error: 'No valid rows parsed. Check wOBA and Name columns.' });
-    q.clearWobaKey.run(key);
-    // Store each player twice: by name alone AND by "name|TEAM" for disambiguation
-    const expandedRows = [];
-    for (const r of rows) {
-      expandedRows.push(r); // plain name
-      if (r.team) {
-        expandedRows.push({...r, name: r.name+' '+r.team}); // "Bobby Witt Jr. KC" -> "bobby witt jr kc"
-        // Also store Jr/Sr-stripped + team so "bobby witt kc" matches "Bobby Witt" in lineup
-        const stripped = r.name.replace(/\b(Jr\.|Sr\.|II|III|IV)\b/gi,'').replace(/\s+/g,' ').trim();
-        if (stripped !== r.name) expandedRows.push({...r, name: stripped+' '+r.team});
-      }
-    }
-    q.upsertWobaBatch(key, expandedRows);
-    q.logUpload.run(key, file.originalname, rows.length);
-    res.json({ success: true, key, filename: file.originalname, rows: rows.length });
+    const rows = ingestWobaCSV(key, file.buffer, file.originalname);
+    res.json({ success: true, key, filename: file.originalname, rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// One-click FanGraphs refresh — pulls all 8 wOBA split CSVs using the user's
+// pasted fangraphs_session_cookie and ingests each via the shared path. Per-
+// file error isolation: a failed fetch or failed parse doesn't block others.
+router.post('/jobs/refresh-fangraphs', async (req, res) => {
+  try {
+    const row = q.getSetting.get('fangraphs_session_cookie');
+    const cookieValue = row && row.value ? String(row.value).trim() : '';
+    if (!cookieValue) return res.status(400).json({ error: 'fangraphs_session_cookie not configured. Paste from Model tab.' });
+    const { refreshAllFanGraphs } = require('../services/fangraphs');
+    const fetched = await refreshAllFanGraphs(cookieValue);
+    const results = fetched.map(r => {
+      if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
+      try {
+        const inserted = ingestWobaCSV(r.key, r.csv, r.name + '.csv');
+        return { name: r.name, key: r.key, success: true, rowCount: inserted };
+      } catch (e) {
+        return { name: r.name, key: r.key, success: false, error: 'ingest failed: ' + e.message };
+      }
+    });
+    res.json({ success: true, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

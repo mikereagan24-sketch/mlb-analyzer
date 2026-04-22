@@ -167,6 +167,7 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('pit_dflt_l_vs_lhb', '0.285');
   INSERT OR IGNORE INTO app_settings VALUES ('pit_dflt_l_vs_rhb', '0.330');
 INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
+  INSERT OR IGNORE INTO app_settings VALUES ('fangraphs_session_cookie', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
 `);
