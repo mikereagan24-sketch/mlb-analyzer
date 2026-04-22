@@ -17,16 +17,39 @@ function buildCookieHeader(cookieValue) {
 }
 
 function baseHeaders(cookieValue) {
+  // Origin + X-Requested-With are required by FanGraphs' API backend for the
+  // actuals POST (returns 500 without them) and are harmless on projection
+  // GETs, so both go here. Sent on every request.
   return {
     'Cookie': buildCookieHeader(cookieValue),
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
     'Referer': 'https://www.fangraphs.com/leaders/splits-leaderboards',
+    'Origin': 'https://www.fangraphs.com',
+    'X-Requested-With': 'XMLHttpRequest',
   };
 }
 
-// --- Projections (GET, response is CSV) ---
+// Generic JSON-array → CSV conversion. Column order is taken from the first
+// row; nullish values are emitted empty; values containing commas / quotes /
+// newlines are wrapped with RFC-4180-style double-quote escaping. Defined
+// above the fetchers so both projection and actual paths can use it.
+function jsonToCsv(rows) {
+  if (!rows.length) return '';
+  const cols = Object.keys(rows[0]);
+  const escape = v => {
+    if (v == null) return '';
+    const s = String(v);
+    if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const lines = [cols.join(',')];
+  for (const row of rows) lines.push(cols.map(c => escape(row[c])).join(','));
+  return lines.join('\n');
+}
+
+// --- Projections (GET, response is JSON despite download=1) ---
 
 async function fetchProjection(type, stats, cookieValue) {
   const url = PROJ_BASE + '?type=' + encodeURIComponent(type)
@@ -35,11 +58,17 @@ async function fetchProjection(type, stats, cookieValue) {
   const res = await fetch(url, { headers: baseHeaders(cookieValue) });
   if (!res.ok) throw new Error('Projection fetch ' + type + '/' + stats + ' failed: HTTP ' + res.status);
   const text = await res.text();
-  // Sanity check: expect CSV with a Name column somewhere in the header row.
-  if (!text.includes('Name,') && !text.includes('"Name"')) {
-    throw new Error('Projection ' + type + '/' + stats + ' did not return CSV (got ' + text.slice(0,200) + '). Cookie may be expired.');
+  // FanGraphs returns a JSON array here even with download=1. Transform to
+  // CSV so downstream ingestion (parseCSV) can treat it identically to the
+  // actuals path. Cookie expiry usually surfaces as HTML or an error string
+  // rather than an array — caller can tell from the slice-200 in the error.
+  let rows;
+  try { rows = JSON.parse(text); }
+  catch(e) { throw new Error('Projection ' + type + '/' + stats + ' returned non-JSON: ' + text.slice(0,200)); }
+  if (!Array.isArray(rows) || !rows.length) {
+    throw new Error('Projection ' + type + '/' + stats + ' returned empty/invalid: ' + text.slice(0,200));
   }
-  return text;
+  return jsonToCsv(rows);
 }
 
 // --- Actuals (POST returns JSON — transform to CSV) ---
@@ -88,23 +117,6 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     throw new Error('Actual split=' + splitCode + ' pos=' + position + ' returned no data array. Top keys: ' + Object.keys(json||{}).join(','));
   }
   return jsonToCsv(json.data);
-}
-
-// Generic JSON-array → CSV conversion. Column order is taken from the first
-// row; nullish values are emitted empty; values containing commas / quotes /
-// newlines are wrapped with RFC-4180-style double-quote escaping.
-function jsonToCsv(rows) {
-  if (!rows.length) return '';
-  const cols = Object.keys(rows[0]);
-  const escape = v => {
-    if (v == null) return '';
-    const s = String(v);
-    if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
-    return s;
-  };
-  const lines = [cols.join(',')];
-  for (const row of rows) lines.push(cols.map(c => escape(row[c])).join(','));
-  return lines.join('\n');
 }
 
 // --- Main orchestrator ---
