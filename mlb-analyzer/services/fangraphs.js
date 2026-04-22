@@ -70,11 +70,11 @@ const BAT_PROJ_MAP = {
 const PIT_PROJ_MAP = {
   'Name': 'PlayerName',
   'Team': 'Team',
-  'AB': 'AB', 'H': 'H', '1B': '1B', '2B': '2B', '3B': '3B', 'HR': 'HR',
+  'AB': null, 'H': 'H', '1B': '1B', '2B': '2B', '3B': '3B', 'HR': 'HR',
   'BB': 'BB', 'IBB': 'IBB', 'SO': 'SO', 'HBP': 'HBP', 'SF': 'SF', 'SH': 'SH',
   'AVG': 'AVG', 'BB%': 'BB%', 'K%': 'K%', 'OBP': 'OBP', 'SLG': 'SLG',
   'wOBA': 'wOBA', 'OPS': 'OPS', 'ISO': 'ISO', 'BABIP': 'BABIP',
-  'wRC+': 'wRC+', 'TBF': 'PA',  // RoS pitcher proj uses PA; preseason CSV calls it TBF
+  'wRC+': 'wRC+', 'TBF': 'TBF',
   'NameASCII': (row) => (row.PlayerName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
   'PlayerId': 'playerid',
   'MLBAMID': 'xMLBAMID',
@@ -203,8 +203,8 @@ async function refreshAllFanGraphs(cookieValue) {
   const tasks = [
     { name: 'bat-proj-lhp', fn: () => fetchProjection('rsteamer_vl_0', 'bat', cookieValue) },
     { name: 'bat-proj-rhp', fn: () => fetchProjection('rsteamer_vr_0', 'bat', cookieValue) },
-    { name: 'pit-proj-lhb', fn: () => fetchProjection('rsteamer_vl_0', 'pit', cookieValue) },
-    { name: 'pit-proj-rhb', fn: () => fetchProjection('rsteamer_vr_0', 'pit', cookieValue) },
+    { name: 'pit-proj-lhb', fn: () => fetchProjection('rsteamer_vl_p_1', 'pit', cookieValue) },
+    { name: 'pit-proj-rhb', fn: () => fetchProjection('rsteamer_vr_p_1', 'pit', cookieValue) },
     { name: 'bat-act-lhp',  fn: () => fetchActualSplit(1, 'B', cookieValue) },
     { name: 'bat-act-rhp',  fn: () => fetchActualSplit(2, 'B', cookieValue) },
     { name: 'pit-act-lhb',  fn: () => fetchActualSplit(5, 'P', cookieValue) },
