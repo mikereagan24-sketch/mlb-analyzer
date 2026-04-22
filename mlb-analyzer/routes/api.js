@@ -142,13 +142,33 @@ router.use((req, res, next) => {
 // One-click FanGraphs refresh — pulls all 8 wOBA split CSVs using the user's
 // pasted fangraphs_session_cookie and ingests each via the shared path. Per-
 // file error isolation: a failed fetch or failed parse doesn't block others.
+// ?dryRun=1 returns the header + first 5 data rows per file and writes
+// nothing — used to verify the column mapping before a live refresh.
 router.post('/jobs/refresh-fangraphs', async (req, res) => {
   try {
     const row = q.getSetting.get('fangraphs_session_cookie');
     const cookieValue = row && row.value ? String(row.value).trim() : '';
     if (!cookieValue) return res.status(400).json({ error: 'fangraphs_session_cookie not configured. Paste from Model tab.' });
+    const dryRun = req.query.dryRun === '1';
     const { refreshAllFanGraphs } = require('../services/fangraphs');
     const fetched = await refreshAllFanGraphs(cookieValue);
+
+    if (dryRun) {
+      const preview = fetched.map(r => {
+        if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
+        const lines = r.csv.split('\n');
+        return {
+          name: r.name,
+          key: r.key,
+          success: true,
+          rowCount: Math.max(0, lines.length - 1),
+          headers: lines[0],
+          sampleRows: lines.slice(1, 6),
+        };
+      });
+      return res.json({ dryRun: true, results: preview });
+    }
+
     const results = fetched.map(r => {
       if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
       try {
