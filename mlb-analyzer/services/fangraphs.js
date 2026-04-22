@@ -74,7 +74,7 @@ const PIT_PROJ_MAP = {
   'BB': 'BB', 'IBB': 'IBB', 'SO': 'SO', 'HBP': 'HBP', 'SF': 'SF', 'SH': 'SH',
   'AVG': 'AVG', 'BB%': 'BB%', 'K%': 'K%', 'OBP': 'OBP', 'SLG': 'SLG',
   'wOBA': 'wOBA', 'OPS': 'OPS', 'ISO': 'ISO', 'BABIP': 'BABIP',
-  'wRC+': 'wRC+', 'TBF': 'TBF',
+  'wRC+': 'wRC+', 'TBF': 'PA',  // RoS pitcher proj uses PA; preseason CSV calls it TBF
   'NameASCII': (row) => (row.PlayerName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
   'PlayerId': 'playerid',
   'MLBAMID': 'xMLBAMID',
