@@ -328,6 +328,9 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
   <div class="slabel">One-click refresh</div>
   <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Fetches all 8 FanGraphs split CSVs (Steamer RoS projections + 2-year trailing actuals) using the session cookie saved on the Model tab. Serial fetch, ~5–10s total.</div>
   <button class="btn btn-primary" id="fg-refresh-btn" onclick="refreshFangraphs()">🔄 Refresh FanGraphs (RoS projections + 2yr actuals)</button>
+  <label style="margin-left:12px;font-size:12px">
+    <input type="checkbox" id="fg-dry-run" checked> Dry run (preview only, don't write)
+  </label>
   <div id="fg-refresh-status" class="notice" style="margin-top:10px;font-size:11px;display:none"></div>
 </div>
 <div class="drop-zone" id="drop-zone" ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
@@ -1070,16 +1073,19 @@ function escapeHtmlIP(s){
 async function refreshFangraphs(){
   var btn=document.getElementById('fg-refresh-btn');
   var status=document.getElementById('fg-refresh-status');
+  var dryEl=document.getElementById('fg-dry-run');
+  var dryRun=!!(dryEl&&dryEl.checked);
   var origLabel=btn.textContent;
   btn.disabled=true;
-  btn.textContent='Refreshing... (~30s)';
+  btn.textContent=dryRun?'Previewing... (~30s)':'Refreshing... (~30s)';
   status.style.display='block';
   status.className='notice';
-  status.textContent='Fetching 8 CSVs from FanGraphs\u2026';
+  status.textContent=(dryRun?'Previewing':'Fetching')+' 8 CSVs from FanGraphs\u2026';
   try{
     var headers={'Content-Type':'application/json'};
     if(_appPassword) headers['x-app-password']=_appPassword;
-    var r=await fetch('/api/jobs/refresh-fangraphs',{method:'POST',headers:headers,body:'{}'});
+    var url='/api/jobs/refresh-fangraphs'+(dryRun?'?dryRun=1':'');
+    var r=await fetch(url,{method:'POST',headers:headers,body:'{}'});
     var j=await r.json();
     if(!r.ok){
       status.className='notice err';
@@ -1087,14 +1093,28 @@ async function refreshFangraphs(){
       return;
     }
     var okCount=j.results.filter(function(x){return x.success;}).length;
-    var lines=j.results.map(function(x){
-      if(x.success) return '\u2713 '+x.key+': '+x.rowCount+' rows';
-      return '\u2717 '+x.key+': '+x.error;
-    });
-    status.className=okCount===8?'notice ok':(okCount>0?'notice warn':'notice err');
-    status.innerHTML='<b>'+okCount+'/8 refreshed</b> at '+new Date().toLocaleString()+'<br>'
-      +lines.join('<br>');
-    if(typeof loadWobaStatus==='function') loadWobaStatus();
+    if(dryRun){
+      status.className=okCount===8?'notice ok':(okCount>0?'notice warn':'notice err');
+      var blocks=j.results.map(function(x){
+        if(!x.success) return '<div style="margin-bottom:8px"><b>\u2717 '+x.key+'</b>: '+x.error+'</div>';
+        var samp=(x.sampleRows||[]).map(function(row){return '<div style="white-space:pre;overflow-x:auto;font-size:10px;color:var(--text2)">'+row.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</div>';}).join('');
+        return '<div style="margin-bottom:10px"><b>\u2713 '+x.key+'</b> '+x.rowCount+' rows<br>'
+          +'<div style="white-space:pre;overflow-x:auto;font-size:10px;font-weight:600">'+x.headers.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</div>'
+          +samp+'</div>';
+      });
+      status.innerHTML='<b>DRY RUN — '+okCount+'/8 fetched</b> at '+new Date().toLocaleString()+' (no DB writes)<br>'
+        +'<div style="max-height:400px;overflow-y:auto;border:.5px solid var(--border);padding:8px;margin-top:6px;border-radius:4px">'
+        +blocks.join('')+'</div>';
+    } else {
+      var lines=j.results.map(function(x){
+        if(x.success) return '\u2713 '+x.key+': '+x.rowCount+' rows';
+        return '\u2717 '+x.key+': '+x.error;
+      });
+      status.className=okCount===8?'notice ok':(okCount>0?'notice warn':'notice err');
+      status.innerHTML='<b>'+okCount+'/8 refreshed</b> at '+new Date().toLocaleString()+'<br>'
+        +lines.join('<br>');
+      if(typeof loadWobaStatus==='function') loadWobaStatus();
+    }
   }catch(e){
     status.className='notice err';
     status.textContent='Error: '+e.message;

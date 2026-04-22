@@ -31,10 +31,86 @@ function baseHeaders(cookieValue) {
   };
 }
 
-// Generic JSON-array → CSV conversion. Column order is taken from the first
-// row; nullish values are emitted empty; values containing commas / quotes /
-// newlines are wrapped with RFC-4180-style double-quote escaping. Defined
-// above the fetchers so both projection and actual paths can use it.
+// Preseason CSV column order — taken verbatim from the user's own prior
+// FanGraphs downloads. Downstream ingestion (parseCSV, the name-matching
+// paths) is built against these headers, so any refreshed CSV must match
+// exactly or lookups silently target the wrong column.
+const BAT_PROJ_COLS = ['Name','Team','G','PA','AB','H','1B','2B','3B','HR','R','RBI','BB','IBB','SO','HBP','SF','SH','GDP','SB','CS','AVG','BB%','K%','BB/K','OBP','SLG','wOBA','OPS','ISO','Spd','BABIP','UBR','wSB','wRC','wRAA','wRC+','BsR','Fld','Off','Def','WAR','ADP','InterSD','InterSK','IntraSD','Vol','Skew','Dim','FPTS','FPTS/G','SPTS','SPTS/G','P10','P20','P30','P40','P50','P60','P70','P80','P90','TT10','TT20','TT30','TT40','TT50','TT60','TT70','TT80','TT90','NameASCII','PlayerId','MLBAMID'];
+
+const PIT_PROJ_COLS = ['Name','Team','AB','H','1B','2B','3B','HR','BB','IBB','SO','HBP','SF','SH','AVG','BB%','K%','OBP','SLG','wOBA','OPS','ISO','BABIP','wRC+','TBF','NameASCII','PlayerId','MLBAMID'];
+
+// Mapping from preseason column name → RoS JSON API key (or a function that
+// derives the value from the full row). `null` means the column isn't
+// present in the RoS response — emit an empty string to preserve schema.
+const BAT_PROJ_MAP = {
+  'Name': 'PlayerName',
+  'Team': 'Team',
+  'G': 'G', 'PA': 'PA', 'AB': 'AB', 'H': 'H', '1B': '1B', '2B': '2B', '3B': '3B',
+  'HR': 'HR', 'R': 'R', 'RBI': 'RBI', 'BB': 'BB', 'IBB': 'IBB', 'SO': 'SO',
+  'HBP': 'HBP', 'SF': 'SF', 'SH': 'SH', 'SB': 'SB', 'CS': 'CS', 'AVG': 'AVG',
+  'BB%': 'BB%', 'K%': 'K%', 'BB/K': 'BB/K', 'OBP': 'OBP', 'SLG': 'SLG',
+  'wOBA': 'wOBA', 'OPS': 'OPS', 'ISO': 'ISO', 'BABIP': 'BABIP',
+  'wRC': 'wRC', 'wRAA': 'wRAA', 'wRC+': 'wRC+', 'WAR': 'WAR',
+  'ADP': 'ADP', 'FPTS': 'FPTS', 'SPTS': 'SPTS',
+  'FPTS/G': 'FPTS_G',
+  'SPTS/G': 'SPTS_G',
+  'PlayerId': 'playerid',
+  'MLBAMID': 'xMLBAMID',
+  'NameASCII': (row) => (row.PlayerName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
+  // Preseason-only columns absent from RoS — kept for schema fidelity.
+  'GDP': null, 'Spd': null, 'UBR': null, 'wSB': null, 'BsR': null,
+  'Fld': null, 'Off': null, 'Def': null,
+  'InterSD': null, 'InterSK': null, 'IntraSD': null, 'Vol': null, 'Skew': null, 'Dim': null,
+  'P10': null, 'P20': null, 'P30': null, 'P40': null, 'P50': null,
+  'P60': null, 'P70': null, 'P80': null, 'P90': null,
+  'TT10': null, 'TT20': null, 'TT30': null, 'TT40': null, 'TT50': null,
+  'TT60': null, 'TT70': null, 'TT80': null, 'TT90': null,
+};
+
+const PIT_PROJ_MAP = {
+  'Name': 'PlayerName',
+  'Team': 'Team',
+  'AB': 'AB', 'H': 'H', '1B': '1B', '2B': '2B', '3B': '3B', 'HR': 'HR',
+  'BB': 'BB', 'IBB': 'IBB', 'SO': 'SO', 'HBP': 'HBP', 'SF': 'SF', 'SH': 'SH',
+  'AVG': 'AVG', 'BB%': 'BB%', 'K%': 'K%', 'OBP': 'OBP', 'SLG': 'SLG',
+  'wOBA': 'wOBA', 'OPS': 'OPS', 'ISO': 'ISO', 'BABIP': 'BABIP',
+  'wRC+': 'wRC+', 'TBF': 'PA',  // RoS pitcher proj uses PA; preseason CSV calls it TBF
+  'NameASCII': (row) => (row.PlayerName || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
+  'PlayerId': 'playerid',
+  'MLBAMID': 'xMLBAMID',
+};
+
+function mapRowToSchema(row, cols, mapping) {
+  return cols.map(col => {
+    const spec = mapping[col];
+    if (spec === null || spec === undefined) return '';
+    if (typeof spec === 'function') return spec(row);
+    const val = row[spec];
+    return val == null ? '' : val;
+  });
+}
+
+function toCsv(cols, mappedRows) {
+  const escape = v => {
+    if (v == null) return '';
+    const s = String(v);
+    if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const lines = [cols.join(',')];
+  for (const r of mappedRows) lines.push(r.map(escape).join(','));
+  return lines.join('\n');
+}
+
+function jsonToProjectionCsv(rows, stats) {
+  const cols    = stats === 'bat' ? BAT_PROJ_COLS : PIT_PROJ_COLS;
+  const mapping = stats === 'bat' ? BAT_PROJ_MAP  : PIT_PROJ_MAP;
+  return toCsv(cols, rows.map(r => mapRowToSchema(r, cols, mapping)));
+}
+
+// Generic JSON-array → CSV conversion, used by the actuals path which has
+// no preseason schema to match. Column order = keys of first row. Nullish
+// → empty; RFC-4180 double-quote escaping for commas/quotes/newlines.
 function jsonToCsv(rows) {
   if (!rows.length) return '';
   const cols = Object.keys(rows[0]);
@@ -58,17 +134,16 @@ async function fetchProjection(type, stats, cookieValue) {
   const res = await fetch(url, { headers: baseHeaders(cookieValue) });
   if (!res.ok) throw new Error('Projection fetch ' + type + '/' + stats + ' failed: HTTP ' + res.status);
   const text = await res.text();
-  // FanGraphs returns a JSON array here even with download=1. Transform to
-  // CSV so downstream ingestion (parseCSV) can treat it identically to the
-  // actuals path. Cookie expiry usually surfaces as HTML or an error string
-  // rather than an array — caller can tell from the slice-200 in the error.
   let rows;
   try { rows = JSON.parse(text); }
   catch(e) { throw new Error('Projection ' + type + '/' + stats + ' returned non-JSON: ' + text.slice(0,200)); }
   if (!Array.isArray(rows) || !rows.length) {
     throw new Error('Projection ' + type + '/' + stats + ' returned empty/invalid: ' + text.slice(0,200));
   }
-  return jsonToCsv(rows);
+  // Schema-aware transform — emit the preseason column order with RoS
+  // keys remapped. Generic jsonToCsv would leak raw API keys and break
+  // Name-based lookups downstream.
+  return jsonToProjectionCsv(rows, stats);
 }
 
 // --- Actuals (POST returns JSON — transform to CSV) ---
