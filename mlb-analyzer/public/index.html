@@ -405,8 +405,8 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Actual weight</label><input type="number" id="s-w-act" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter SP hand wt</label><input type="number" id="s-sp-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter relief wt</label><input type="number" id="s-relief-weight" step="0.01" min="0" max="1"></div>
-    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher SP hand wt</label><input type="number" id="s-sp-pit-weight" step="0.01" min="0" max="1"></div>
-    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher relief wt</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Share of pitcher-side wOBA attributed to the starting pitcher. SP + Bullpen auto-pair to 1.0 on edit.">SP wOBA</label><input type="number" id="s-sp-pit-weight" step="0.01" min="0" max="1" oninput="pairSpBullpen('sp')"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Share of pitcher-side wOBA attributed to the bullpen. SP + Bullpen auto-pair to 1.0 on edit.">Bullpen wOBA</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1" oninput="pairSpBullpen('relief')"></div>
       <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains RHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs RHB</label><div style="display:flex;gap:6px;flex:1"><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Strong</span><input type="number" id="s-bp-strong-r" step="0.01" min="0" max="1" oninput="pairBpWeights('r','strong')"></div><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Weak</span><input type="number" id="s-bp-weak-r" step="0.01" min="0" max="1" oninput="pairBpWeights('r','weak')"></div></div></div>
       <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains LHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs LHB</label><div style="display:flex;gap:6px;flex:1"><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Strong</span><input type="number" id="s-bp-strong-l" step="0.01" min="0" max="1" oninput="pairBpWeights('l','strong')"></div><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Weak</span><input type="number" id="s-bp-weak-l" step="0.01" min="0" max="1" oninput="pairBpWeights('l','weak')"></div></div></div>
       <div class="setting-section-header" style="margin:12px 0 4px;font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Formula parameters</div>
@@ -420,8 +420,6 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Default batter wOBA vs same-handed starter when no CSV data found. Used as fallback only.">Batter dflt (same hand)</label><input type="number" id="s-bat-dflt-start" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="Default batter wOBA vs opposite-handed reliever when no CSV data found. Used as fallback only.">Batter dflt (opp hand)</label><input type="number" id="s-bat-dflt-opp" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
-      <div class="setting-row"><label title="Average innings a starter is projected to pitch. Used to scale SP/RP weight dynamically.">SP IP baseline</label><input type="number" id="s-sp-ip-baseline" step="0.5" min="3.0" max="8.0"></div>
-      <div class="setting-row"><label title="How much to adjust SP weight for each inning above/below baseline. 0.03 = 3 percentage points per inning.">SP weight per IP</label><input type="number" id="s-sp-ip-weight-per" step="0.01" min="0" max="0.20"></div>
       <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7"></div>
       <div class="setting-row"><label title="Lower bound for win probability clamp. Caps extreme ML output. Default 0.25 (cap ≈ ±300).">Win prob clamp lo</label><input type="number" id="s-wp-clamp-lo" step="0.01" min="0.05" max="0.45"></div>
       <div class="setting-row"><label title="Upper bound for win probability clamp. Caps extreme ML output. Default 0.75 (cap ≈ ±300).">Win prob clamp hi</label><input type="number" id="s-wp-clamp-hi" step="0.01" min="0.55" max="0.95"></div>
@@ -1694,6 +1692,19 @@ async function loadCronLog(){
 // Auto-pair the bullpen strong/weak inputs so the two sum to 1.0. Fires on
 // edit of either field; user can still override the paired value afterward.
 // hand = 'r'|'l', which = 'strong'|'weak' — IDs are s-bp-{which}-{hand}.
+// Auto-pair the SP / Bullpen pitcher-side weights so the two sum to 1.0.
+// Fires on edit of either field. src = 'sp' | 'relief' — IDs are
+// s-{src}-pit-weight (keeping the old pre-relabel IDs so load/save stays
+// wired to sp_pit_weight / relief_pit_weight keys in app_settings).
+function pairSpBullpen(src) {
+  const srcEl = document.getElementById('s-' + src + '-pit-weight');
+  const other = src === 'sp' ? 'relief' : 'sp';
+  const dstEl = document.getElementById('s-' + other + '-pit-weight');
+  if (!srcEl || !dstEl) return;
+  const v = parseFloat(srcEl.value);
+  if (!isNaN(v) && v >= 0 && v <= 1) dstEl.value = parseFloat((1 - v).toFixed(4));
+}
+
 function pairBpWeights(hand, which) {
   const pairWhich = which === 'strong' ? 'weak' : 'strong';
   const src = document.getElementById('s-bp-' + which + '-' + hand);
@@ -1733,8 +1744,6 @@ async function loadSettings(){
     set('s-bat-dflt-start',  s.bat_dflt_start);
     set('s-bat-dflt-opp',    s.bat_dflt_opp);
     set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
-    set('s-sp-ip-baseline',   s.sp_ip_baseline);
-    set('s-sp-ip-weight-per', s.sp_ip_weight_per);
     set('s-wp-clamp-lo',      s.wp_clamp_lo);
     set('s-wp-clamp-hi',      s.wp_clamp_hi);
     set('s-tot-prob-lo',      s.tot_prob_lo);
@@ -1801,8 +1810,6 @@ async function saveSettings(){
         bat_dflt_start:     get('s-bat-dflt-start'),
         bat_dflt_opp:       get('s-bat-dflt-opp'),
         unknown_pitcher_woba: get('s-unknown-pitcher-woba'),
-        sp_ip_baseline:     get('s-sp-ip-baseline'),
-        sp_ip_weight_per:   get('s-sp-ip-weight-per'),
         pa_weights:         _paWeightsJson,
         wp_clamp_lo:        get('s-wp-clamp-lo'),
         wp_clamp_hi:        get('s-wp-clamp-hi'),

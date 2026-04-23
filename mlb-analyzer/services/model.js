@@ -156,8 +156,6 @@ function runModel(game, wobaIdx, settings) {
   const MIN_BF         = num(settings.MIN_BF,          100);
   const BAT_DFLT_START = num(settings.BAT_DFLT_START,  0.315);
   const BAT_DFLT_OPP   = num(settings.BAT_DFLT_OPP,   0.320);
-  const SP_IP_BASELINE   = num(settings.SP_IP_BASELINE,   5.5);
-  const SP_IP_WEIGHT_PER = num(settings.SP_IP_WEIGHT_PER, 0.03);
   // Probability clamp bounds (win prob for ML, over prob for totals).
   const WP_CLAMP_LO = num(settings.WP_CLAMP_LO, 0.25);
   const WP_CLAMP_HI = num(settings.WP_CLAMP_HI, 0.75);
@@ -179,24 +177,17 @@ function runModel(game, wobaIdx, settings) {
     ? settings.PA_WEIGHTS
     : PA_WEIGHTS_DEFAULT;
 
-  // Dynamic SP/RP pitcher-side split per starter. If an SP is projected for
-  // more IP than baseline, weight his wOBA more; deep-start teams lean SP,
-  // opener teams lean RP. Null projIP -> use flat SP_PIT_WEIGHT as before.
-  function spWeightFor(projIP) {
-    if (projIP == null) return SP_PIT_WEIGHT;
-    const adj = SP_PIT_WEIGHT + (projIP - SP_IP_BASELINE) * SP_IP_WEIGHT_PER;
-    return Math.max(0.50, Math.min(0.95, adj));
-  }
-  // Away batters face home SP; home batters face away SP.
-  const awaySpPitW = spWeightFor(game.homeSpProjIP);
-  const awayRelPitW = 1 - awaySpPitW;
-  const homeSpPitW = spWeightFor(game.awaySpProjIP);
-  const homeRelPitW = 1 - homeSpPitW;
+  // Fixed SP/RP pitcher-side split from settings. The UI contract is that
+  // spPitW + relPitW = 1.0 (auto-paired in the form), so they're applied
+  // uniformly to both teams — no per-game adjustment based on starter
+  // projected IP anymore.
+  const spPitW  = SP_PIT_WEIGHT;
+  const relPitW = RELIEF_PIT_WEIGHT;
 
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,awaySpPitW,awayRelPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,homeSpPitW,homeRelPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;

@@ -71,8 +71,6 @@ function getSettings() {
     BAT_DFLT_START: num('bat_dflt_start', 0.315),
     BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
     UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
-    SP_IP_BASELINE:    num('sp_ip_baseline',    5.5),
-    SP_IP_WEIGHT_PER:  num('sp_ip_weight_per',  0.03),
     PA_WEIGHTS:        (function(){
       var raw = s['pa_weights'] || '[4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7]';
       try {
