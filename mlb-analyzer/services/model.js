@@ -128,7 +128,13 @@ function impliedP(ml) {
 }
 
 function runModel(game, wobaIdx, settings) {
-    const num = (v, def) => { const n = Number(v); return isNaN(n) ? def : n; };
+    // Treat null/undefined/'' as missing — see note in services/jobs.js. An
+    // empty string in app_settings would otherwise coerce via Number('')===0.
+    const num = (v, def) => {
+      if (v == null || v === '') return def;
+      const n = Number(v);
+      return isNaN(n) ? def : n;
+    };
   const RUN_MULT  = num(settings.RUN_MULT,  48);
   const HFA_BOOST = num(settings.HFA_BOOST, 0.02);
   const FAV_ADJ   = num(settings.FAV_ADJ,   0);
