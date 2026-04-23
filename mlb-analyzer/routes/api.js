@@ -537,7 +537,12 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const settings = getSettings();
     const W_PROJ = settings.W_PROJ || 0.65;
     const W_ACT  = settings.W_ACT  || 0.35;
-      const num = (v,d) => { const n=Number(v); return isNaN(n)?d:n; };
+      // Treat null/undefined/'' as missing — see note in services/jobs.js.
+      const num = (v,d) => {
+        if (v == null || v === '') return d;
+        const n = Number(v);
+        return isNaN(n) ? d : n;
+      };
       const SP_WT  = num(settings.SP_WEIGHT,   0.77);
       const REL_WT     = num(settings.RELIEF_WEIGHT,     0.23);
       const SP_PIT_WT  = num(settings.SP_PIT_WEIGHT,     0.80);

@@ -29,7 +29,15 @@ function getSettings() {
   const s = {};
   rows.forEach(r => { s[r.key] = r.value; });
   // Use Number() and ?? so 0 is valid (|| would replace 0 with default)
-  const num = (key, def) => { const v = Number(s[key]); return isNaN(v) ? def : v; };
+  // Treat null/undefined/empty-string as missing so an accidentally-blanked
+  // form field falls back to the default instead of Number('')===0 silently
+  // zeroing out load-bearing params (e.g. RELIEF_WEIGHT → no bullpen at all).
+  const num = (key, def) => {
+    const raw = s[key];
+    if (raw == null || raw === '') return def;
+    const v = Number(raw);
+    return isNaN(v) ? def : v;
+  };
   return {
     RUN_MULT:       num('run_mult', 48),
     HFA_BOOST:      num('hfa_boost', 0.02),
