@@ -136,8 +136,10 @@ INSERT OR IGNORE INTO app_settings VALUES ('sp_weight', '0.77');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_weight', '0.23');
 INSERT OR IGNORE INTO app_settings VALUES ('sp_pit_weight', '0.80');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
-  INSERT OR IGNORE INTO app_settings VALUES ('bp_strong_weight', '0.60');
-  INSERT OR IGNORE INTO app_settings VALUES ('bp_weak_weight', '0.40');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_strong_weight_r', '0.55');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_weak_weight_r',   '0.45');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_strong_weight_l', '0.35');
+  INSERT OR IGNORE INTO app_settings VALUES ('bp_weak_weight_l',   '0.65');
   INSERT OR IGNORE INTO app_settings VALUES ('bullpen_avg', '0.318');
   INSERT OR IGNORE INTO app_settings VALUES ('woba_baseline', '0.230');
   INSERT OR IGNORE INTO app_settings VALUES ('pyth_exp', '1.83');
@@ -212,6 +214,26 @@ db.exec(`
 
 
 // Migrations for existing DBs
+
+// One-time migration: bp_strong_weight / bp_weak_weight → 4 per-handedness keys.
+// On pre-upgrade DBs both legacy keys exist; copy each value into both R and L
+// slots (user's handedness split preference is unknown at this point), then
+// drop the legacy rows. INSERT OR REPLACE so we overwrite the default seeds
+// above. Fresh installs and re-runs are no-ops because the old keys are gone.
+try {
+  const _oldBpS = db.prepare("SELECT value FROM app_settings WHERE key='bp_strong_weight'").get();
+  const _oldBpW = db.prepare("SELECT value FROM app_settings WHERE key='bp_weak_weight'").get();
+  if (_oldBpS) {
+    db.prepare("INSERT OR REPLACE INTO app_settings (key,value) VALUES ('bp_strong_weight_r', ?)").run(_oldBpS.value);
+    db.prepare("INSERT OR REPLACE INTO app_settings (key,value) VALUES ('bp_strong_weight_l', ?)").run(_oldBpS.value);
+  }
+  if (_oldBpW) {
+    db.prepare("INSERT OR REPLACE INTO app_settings (key,value) VALUES ('bp_weak_weight_r', ?)").run(_oldBpW.value);
+    db.prepare("INSERT OR REPLACE INTO app_settings (key,value) VALUES ('bp_weak_weight_l', ?)").run(_oldBpW.value);
+  }
+  db.prepare("DELETE FROM app_settings WHERE key IN ('bp_strong_weight','bp_weak_weight')").run();
+} catch(e) { /* no-op on fresh installs */ }
+
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flagged INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flag_reason TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_away_ml INTEGER"); } catch(e) {}
@@ -574,34 +596,46 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWt, bpWeakWt, wProj, wAct, gameDate, unknownWoba) => {
-  // Compute bullpen wOBA blended by actual opposing lineup handedness
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba) => {
+  // Blend the team's bullpen-allowed wOBA using per-handedness strong/weak
+  // manager-assumption weights. For each batter in the opposing lineup the
+  // manager is assumed to deploy `strongWt` share of the better-matched
+  // reliever (min wOBA) and `weakWt` share of the worse-matched one, with
+  // the R/L split tuned separately because righty vs lefty matchup leverage
+  // differs in practice. Fallback (no lineup) averages R and L weights.
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
   const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba);
   const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   if (!vsRHB && !vsLHB) return null;
-  const strongWt = (bpStrongWt != null) ? bpStrongWt : 0.60;
-  const weakWt = (bpWeakWt != null) ? bpWeakWt : 0.40;
+  // Defaults mirror the seed values so standalone callers (scripts/) still
+  // produce sane results if they forget to pass weights.
+  const sR = (bpStrongWtR != null) ? bpStrongWtR : 0.55;
+  const wR = (bpWeakWtR   != null) ? bpWeakWtR   : 0.45;
+  const sL = (bpStrongWtL != null) ? bpStrongWtL : 0.35;
+  const wL = (bpWeakWtL   != null) ? bpWeakWtL   : 0.65;
   if (vsRHB && vsLHB && lineup && lineup.length > 0) {
-    // Use actual lineup handedness composition
-    let pctR = 0;
+    const strongWoba = Math.min(vsRHB, vsLHB);
+    const weakWoba   = Math.max(vsRHB, vsLHB);
+    let sum = 0;
     for (const b of lineup) {
-      if (b.hand === 'R') pctR += 1;
-      else if (b.hand === 'L') pctR += 0;
-      else pctR += 0.5; // switch hitter
+      let sW, wW;
+      if (b.hand === 'R')      { sW = sR;            wW = wR;            }
+      else if (b.hand === 'L') { sW = sL;            wW = wL;            }
+      else                     { sW = (sR + sL) / 2; wW = (wR + wL) / 2; }
+      sum += sW * strongWoba + wW * weakWoba;
     }
-    pctR = pctR / lineup.length;
-    const pctL = 1 - pctR;
-    const blended = parseFloat((pctR * vsRHB + pctL * vsLHB).toFixed(4));
-    return { woba: blended, vsRHB, vsLHB, pctR: parseFloat(pctR.toFixed(3)), pctL: parseFloat(pctL.toFixed(3)), source: 'lineup-weighted' };
+    const blended = parseFloat((sum / lineup.length).toFixed(4));
+    return { woba: blended, vsRHB, vsLHB, strongWoba, weakWoba, source: 'strong-weak-by-hand' };
   }
-  // Fallback: use strong/weak manager assumption
+  // No lineup: average the two handedness weight pairs.
   if (vsRHB && vsLHB) {
     const strongWoba = Math.min(vsRHB, vsLHB);
-    const weakWoba = Math.max(vsRHB, vsLHB);
-    const blended = parseFloat((strongWt * strongWoba + weakWt * weakWoba).toFixed(4));
+    const weakWoba   = Math.max(vsRHB, vsLHB);
+    const avgStrong = (sR + sL) / 2;
+    const avgWeak   = (wR + wL) / 2;
+    const blended = parseFloat((avgStrong * strongWoba + avgWeak * weakWoba).toFixed(4));
     return { woba: blended, vsRHB, vsLHB, source: 'strong-weak-fallback' };
   }
   return { woba: vsRHB || vsLHB, vsRHB, vsLHB, source: 'single-side' };

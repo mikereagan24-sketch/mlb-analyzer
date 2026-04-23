@@ -43,8 +43,10 @@ function buildGame(gameRow, settings) {
   var homeSp = gameRow.home_sp || '';
   var wProj = settings.W_PROJ != null ? settings.W_PROJ : 0.65;
   var wAct  = settings.W_ACT  != null ? settings.W_ACT  : 0.35;
-  var bpS   = settings.BP_STRONG_WEIGHT != null ? settings.BP_STRONG_WEIGHT : 0.60;
-  var bpW   = settings.BP_WEAK_WEIGHT   != null ? settings.BP_WEAK_WEIGHT   : 0.40;
+  var bpSR  = settings.BP_STRONG_WEIGHT_R != null ? settings.BP_STRONG_WEIGHT_R : 0.55;
+  var bpWR  = settings.BP_WEAK_WEIGHT_R   != null ? settings.BP_WEAK_WEIGHT_R   : 0.45;
+  var bpSL  = settings.BP_STRONG_WEIGHT_L != null ? settings.BP_STRONG_WEIGHT_L : 0.35;
+  var bpWL  = settings.BP_WEAK_WEIGHT_L   != null ? settings.BP_WEAK_WEIGHT_L   : 0.65;
   var LEAGUE_BP = 0.318;
   var awayVsR = LEAGUE_BP, awayVsL = LEAGUE_BP, homeVsR = LEAGUE_BP, homeVsL = LEAGUE_BP;
   var awayBpWoba = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
@@ -52,8 +54,8 @@ function buildGame(gameRow, settings) {
     if (q.getBullpenWobaBlended) {
       var hLU = tryParse(gameRow.home_lineup_json) || [];
       var aLU = tryParse(gameRow.away_lineup_json) || [];
-      var aBp = q.getBullpenWobaBlended(awayAbbr, awaySp, hLU, bpS, bpW, wProj, wAct, gameRow.game_date);
-      var hBp = q.getBullpenWobaBlended(homeAbbr, homeSp, aLU, bpS, bpW, wProj, wAct, gameRow.game_date);
+      var aBp = q.getBullpenWobaBlended(awayAbbr, awaySp, hLU, bpSR, bpWR, bpSL, bpWL, wProj, wAct, gameRow.game_date);
+      var hBp = q.getBullpenWobaBlended(homeAbbr, homeSp, aLU, bpSR, bpWR, bpSL, bpWL, wProj, wAct, gameRow.game_date);
       if (aBp && aBp.vsRHB) awayVsR = aBp.vsRHB;
       if (aBp && aBp.vsLHB) awayVsL = aBp.vsLHB;
       if (hBp && hBp.vsRHB) homeVsR = hBp.vsRHB;

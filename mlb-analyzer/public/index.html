@@ -404,8 +404,8 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter relief wt</label><input type="number" id="s-relief-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher SP hand wt</label><input type="number" id="s-sp-pit-weight" step="0.01" min="0" max="1"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher relief wt</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1"></div>
-      <div class="setting-row"><label title="Used only when the opposing lineup is unavailable (lineup-weighted blend overrides this when lineups are posted).">Bullpen strong side wt</label><input type="number" id="s-bp-strong" step="0.01" min="0" max="1"></div>
-      <div class="setting-row"><label title="Used only when the opposing lineup is unavailable (lineup-weighted blend overrides this when lineups are posted).">Bullpen weak side wt</label><input type="number" id="s-bp-weak" step="0.01" min="0" max="1"></div>
+      <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains RHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs RHB</label><div style="display:flex;gap:6px;flex:1"><input type="number" id="s-bp-strong-r" step="0.01" min="0" max="1" placeholder="Strong" oninput="pairBpWeights('r','strong')"><input type="number" id="s-bp-weak-r" step="0.01" min="0" max="1" placeholder="Weak" oninput="pairBpWeights('r','weak')"></div></div>
+      <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains LHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs LHB</label><div style="display:flex;gap:6px;flex:1"><input type="number" id="s-bp-strong-l" step="0.01" min="0" max="1" placeholder="Strong" oninput="pairBpWeights('l','strong')"><input type="number" id="s-bp-weak-l" step="0.01" min="0" max="1" placeholder="Weak" oninput="pairBpWeights('l','weak')"></div></div>
       <div class="setting-section-header" style="margin:12px 0 4px;font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Formula parameters</div>
       <div class="setting-row"><label title="League-average bullpen wOBA used when no roster data is available. Applied at RELIEF_PIT_WEIGHT% of pitcher side exposure.">Bullpen avg wOBA</label><input type="number" id="s-bullpen-avg" step="0.001" min="0.200" max="0.450"></div>
       <div class="setting-row"><label title="The wOBA value subtracted before scaling to run expectancy. Lower = more runs generated from same wOBA. Default: 0.230 (league floor).">wOBA baseline</label><input type="number" id="s-woba-baseline" step="0.001" min="0.150" max="0.300"></div>
@@ -1671,6 +1671,18 @@ async function loadCronLog(){
 </div>
 <script>
 
+// Auto-pair the bullpen strong/weak inputs so the two sum to 1.0. Fires on
+// edit of either field; user can still override the paired value afterward.
+// hand = 'r'|'l', which = 'strong'|'weak' — IDs are s-bp-{which}-{hand}.
+function pairBpWeights(hand, which) {
+  const pairWhich = which === 'strong' ? 'weak' : 'strong';
+  const src = document.getElementById('s-bp-' + which + '-' + hand);
+  const dst = document.getElementById('s-bp-' + pairWhich + '-' + hand);
+  if (!src || !dst) return;
+  const v = parseFloat(src.value);
+  if (!isNaN(v) && v >= 0 && v <= 1) dst.value = parseFloat((1 - v).toFixed(4));
+}
+
 async function loadSettings(){
   try{
     const s = await api('/settings');
@@ -1687,8 +1699,10 @@ async function loadSettings(){
     set('s-relief-weight', s.relief_weight);
     set('s-sp-pit-weight', s.sp_pit_weight);
     set('s-relief-pit-weight', s.relief_pit_weight);
-    set('s-bp-strong',       s.bp_strong_weight);
-    set('s-bp-weak',         s.bp_weak_weight);
+    set('s-bp-strong-r',     s.bp_strong_weight_r);
+    set('s-bp-weak-r',       s.bp_weak_weight_r);
+    set('s-bp-strong-l',     s.bp_strong_weight_l);
+    set('s-bp-weak-l',       s.bp_weak_weight_l);
     set('s-bullpen-avg',     s.bullpen_avg);
     set('s-woba-baseline',   s.woba_baseline);
     set('s-pyth-exp',        s.pyth_exp);
@@ -1753,8 +1767,10 @@ async function saveSettings(){
     relief_weight:      get('s-relief-weight'),
     sp_pit_weight:      get('s-sp-pit-weight'),
     relief_pit_weight:  get('s-relief-pit-weight'),
-        bp_strong_weight:   get('s-bp-strong'),
-        bp_weak_weight:     get('s-bp-weak'),
+        bp_strong_weight_r: get('s-bp-strong-r'),
+        bp_weak_weight_r:   get('s-bp-weak-r'),
+        bp_strong_weight_l: get('s-bp-strong-l'),
+        bp_weak_weight_l:   get('s-bp-weak-l'),
         bullpen_avg:        get('s-bullpen-avg'),
         woba_baseline:      get('s-woba-baseline'),
         pyth_exp:           get('s-pyth-exp'),

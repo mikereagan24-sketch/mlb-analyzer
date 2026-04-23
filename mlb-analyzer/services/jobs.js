@@ -57,8 +57,10 @@ function getSettings() {
     RELIEF_WEIGHT:     num('relief_weight',     0.23),
     SP_PIT_WEIGHT:     num('sp_pit_weight',     0.80),
     RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
-    BP_STRONG_WEIGHT: num('bp_strong_weight', 0.60),
-    BP_WEAK_WEIGHT: num('bp_weak_weight', 0.40),
+    BP_STRONG_WEIGHT_R: num('bp_strong_weight_r', 0.55),
+    BP_WEAK_WEIGHT_R:   num('bp_weak_weight_r',   0.45),
+    BP_STRONG_WEIGHT_L: num('bp_strong_weight_l', 0.35),
+    BP_WEAK_WEIGHT_L:   num('bp_weak_weight_l',   0.65),
     BULLPEN_AVG:    num('bullpen_avg',    0.318),
     WOBA_BASELINE:  num('woba_baseline',  0.230),
     PYTH_EXP:       num('pyth_exp',       1.83),
@@ -180,8 +182,10 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const homeSpName = gameRow.home_pitcher||'';
   const _wProj = (settings && settings.W_PROJ != null) ? parseFloat(settings.W_PROJ) : 0.65;
   const _wAct = (settings && settings.W_ACT != null) ? parseFloat(settings.W_ACT) : 0.35;
-  const _bpStrong = (settings && settings.BP_STRONG_WEIGHT != null) ? parseFloat(settings.BP_STRONG_WEIGHT) : 0.60;
-  const _bpWeak = (settings && settings.BP_WEAK_WEIGHT != null) ? parseFloat(settings.BP_WEAK_WEIGHT) : 0.40;
+  const _bpStrongR = (settings && settings.BP_STRONG_WEIGHT_R != null) ? parseFloat(settings.BP_STRONG_WEIGHT_R) : 0.55;
+  const _bpWeakR   = (settings && settings.BP_WEAK_WEIGHT_R   != null) ? parseFloat(settings.BP_WEAK_WEIGHT_R)   : 0.45;
+  const _bpStrongL = (settings && settings.BP_STRONG_WEIGHT_L != null) ? parseFloat(settings.BP_STRONG_WEIGHT_L) : 0.35;
+  const _bpWeakL   = (settings && settings.BP_WEAK_WEIGHT_L   != null) ? parseFloat(settings.BP_WEAK_WEIGHT_L)   : 0.65;
   const _unknownWoba = (settings && settings.UNKNOWN_PITCHER_WOBA != null) ? parseFloat(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
   const LEAGUE_BP = 0.318;
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
@@ -191,8 +195,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     if (q.getBullpenWobaBlended) {
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date, _unknownWoba);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrong, _bpWeak, _wProj, _wAct, gameRow.game_date, _unknownWoba);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba);
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;
