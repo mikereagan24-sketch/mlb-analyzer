@@ -1354,6 +1354,13 @@ router.get('/debug/bullpen-report', (req, res) => {
     const settings = getSettings();
     const W_PROJ = settings.W_PROJ != null ? Number(settings.W_PROJ) : 0.65;
     const W_ACT  = settings.W_ACT  != null ? Number(settings.W_ACT)  : 0.35;
+    // Per-handedness bullpen strong/weak weights — the blended wOBA below
+    // mirrors the primary branch of q.getBullpenWobaBlended so the report
+    // number matches what runModel will feed into perBatterEW for this game.
+    const BP_SR = settings.BP_STRONG_WEIGHT_R != null ? Number(settings.BP_STRONG_WEIGHT_R) : 0.55;
+    const BP_WR = settings.BP_WEAK_WEIGHT_R   != null ? Number(settings.BP_WEAK_WEIGHT_R)   : 0.45;
+    const BP_SL = settings.BP_STRONG_WEIGHT_L != null ? Number(settings.BP_STRONG_WEIGHT_L) : 0.35;
+    const BP_WL = settings.BP_WEAK_WEIGHT_L   != null ? Number(settings.BP_WEAK_WEIGHT_L)   : 0.65;
     const UNKNOWN_PITCHER_WOBA = settings.UNKNOWN_PITCHER_WOBA != null ? Number(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
 
     const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
@@ -1389,7 +1396,7 @@ router.get('/debug/bullpen-report', (req, res) => {
     // "7:05 PM". NULL game_times sort last. Matches the q.getGamesByDate
     // pattern in schema.js.
     const games = db.prepare(
-      "SELECT game_id, away_team, home_team, away_sp, home_sp, game_time FROM game_log " +
+      "SELECT game_id, away_team, home_team, away_sp, home_sp, game_time, away_lineup_json, home_lineup_json FROM game_log " +
       "WHERE game_date=? " +
       "ORDER BY " +
       "  CASE " +
@@ -1404,7 +1411,7 @@ router.get('/debug/bullpen-report', (req, res) => {
     ).all(date);
     const rosterStmt = db.prepare('SELECT player_name, role, hand FROM team_rosters WHERE team=? ORDER BY role, player_name');
 
-    const buildTeamReport = (teamAbbr, spName) => {
+    const buildTeamReport = (teamAbbr, spName, opposingLineup) => {
       const teamU = (teamAbbr||'').toUpperCase();
       const spNorm = normName(spName);
       const spLast = spNorm.split(' ').pop();
@@ -1456,13 +1463,30 @@ router.get('/debug/bullpen-report', (req, res) => {
       const poolR = pitchers.filter(p => p.in_pool && p.blended_vs_rhb != null).map(p => p.blended_vs_rhb);
       const vsLHB = mean(poolL);
       const vsRHB = mean(poolR);
-      // Strong/weak manager blend: the side the pen is better on (lower wOBA) gets 65%,
-      // the side it's worse on gets 35%. This is the single number the model will use.
+      // Per-handedness strong/weak blend — mirrors q.getBullpenWobaBlended's
+      // primary branch. Walk the opposing lineup and apply the R/L weight
+      // pair per batter (switch hitters average the two). When no lineup is
+      // available (preseason, very early am) fall back to averaging the R
+      // and L weight pairs, mirroring the function's fallback branch.
       let bullpenWoba = null;
       if (vsLHB != null && vsRHB != null) {
         const strong = Math.min(vsLHB, vsRHB);
         const weak   = Math.max(vsLHB, vsRHB);
-        bullpenWoba = parseFloat((strong * 0.60 + weak * 0.40).toFixed(4));
+        if (opposingLineup && opposingLineup.length > 0) {
+          let sum = 0;
+          for (const b of opposingLineup) {
+            let sW, wW;
+            if (b.hand === 'R')      { sW = BP_SR;            wW = BP_WR;            }
+            else if (b.hand === 'L') { sW = BP_SL;            wW = BP_WL;            }
+            else                     { sW = (BP_SR + BP_SL)/2; wW = (BP_WR + BP_WL)/2; }
+            sum += sW * strong + wW * weak;
+          }
+          bullpenWoba = parseFloat((sum / opposingLineup.length).toFixed(4));
+        } else {
+          const avgS = (BP_SR + BP_SL) / 2;
+          const avgW = (BP_WR + BP_WL) / 2;
+          bullpenWoba = parseFloat((avgS * strong + avgW * weak).toFixed(4));
+        }
       } else if (vsLHB != null) {
         bullpenWoba = vsLHB;
       } else if (vsRHB != null) {
@@ -1477,15 +1501,26 @@ router.get('/debug/bullpen-report', (req, res) => {
       };
     };
 
-    const report = games.map(g => ({
-      game_id: g.game_id,
-      away_team: g.away_team,
-      home_team: g.home_team,
-      away: buildTeamReport(g.away_team, g.away_sp),
-      home: buildTeamReport(g.home_team, g.home_sp),
-    }));
+    const tryParseLineup = j => { try { return j ? JSON.parse(j) : null; } catch(e) { return null; } };
+    const report = games.map(g => {
+      // Away bullpen faces home batters; home bullpen faces away batters.
+      const homeLU = tryParseLineup(g.home_lineup_json) || [];
+      const awayLU = tryParseLineup(g.away_lineup_json) || [];
+      return {
+        game_id: g.game_id,
+        away_team: g.away_team,
+        home_team: g.home_team,
+        away: buildTeamReport(g.away_team, g.away_sp, homeLU),
+        home: buildTeamReport(g.home_team, g.home_sp, awayLU),
+      };
+    });
 
-    res.json({ date, weights: { W_PROJ, W_ACT }, game_count: games.length, games: report });
+    res.json({
+      date,
+      weights: { W_PROJ, W_ACT, BP_SR, BP_WR, BP_SL, BP_WL },
+      game_count: games.length,
+      games: report,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message, stack: err.stack });
   }
