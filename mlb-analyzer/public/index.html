@@ -453,11 +453,16 @@ const KEY_LABELS={'bat-proj-lhp':'Batters vs LHP (Steamer)','bat-proj-rhp':'Batt
 const FILE_KEY_TESTS=[{key:'bat-proj-lhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-proj-rhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-proj-lhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-proj-rhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/rhb|_rh/i.test(n)},{key:'bat-act-lhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-act-rhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-act-lhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-act-rhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/rhb|_rh/i.test(n)}];
 function detectKey(fn){const n=fn.toLowerCase();for(const{key,t}of FILE_KEY_TESTS)if(t(n))return key;return null;}
 function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
-// Render the totals pair (O/U line + over/under juice), dual-labeled when the
-// primary (Kalshi) source disagrees materially with the edge-calc xcheck
-// source. Agreement = same line AND both prices within 5 cents. Null xcheck
-// → show primary with "(no xcheck)" indicator so user knows edge calc is
-// running blind against venue juice that may be unreliable.
+// Render the totals pair (O/U line + over/under juice) with four states:
+//   - both null       → 'O/U —' (nothing to show)
+//   - only xcheck     → xcheck as displayed price + 'xcheck (no primary)'
+//     label. Means the primary (Kalshi) waterfall failed the matching-line
+//     check but an xcheck source returned a coherent pair — that's the
+//     only sensible price we have, so it's what the user sees.
+//   - only primary    → primary + '(no xcheck)' indicator (edge calc is
+//     running against venue juice without a sharp cross-check to calibrate).
+//   - both present    → collapse to one line when they agree (same line +
+//     |juice Δ| ≤ 5 cents on both sides), else dual-render labeling each.
 function fmtTotalsBlock(g, style) {
   style = style || {};
   var small = style.small || 'font-size:10px;color:var(--text3)';
@@ -465,14 +470,24 @@ function fmtTotalsBlock(g, style) {
     if (total == null) return 'O/U —';
     return 'O/U ' + total + (over != null ? ' ('+fmtML(over)+'/'+fmtML(under)+')' : '');
   };
-  var primaryHtml = line(g.market_total, g.over_price, g.under_price);
-  var haveXcheck = g.xcheck_total != null && g.xcheck_over_price != null && g.xcheck_under_price != null;
-  if (!haveXcheck) {
-    return primaryHtml + '<span style="'+small+';margin-left:4px">(no xcheck)</span>';
+  var havePrimary = g.market_total != null && g.over_price != null && g.under_price != null;
+  var haveXcheck  = g.xcheck_total != null && g.xcheck_over_price != null && g.xcheck_under_price != null;
+
+  if (!havePrimary && !haveXcheck) return 'O/U —';
+
+  if (!havePrimary && haveXcheck) {
+    var xSrcLbl = g.xcheck_total_source ? ' <span style="'+small+'">'+g.xcheck_total_source+' · xcheck (no primary)</span>' : ' <span style="'+small+'">xcheck (no primary)</span>';
+    return line(g.xcheck_total, g.xcheck_over_price, g.xcheck_under_price) + xSrcLbl;
   }
+
+  if (havePrimary && !haveXcheck) {
+    return line(g.market_total, g.over_price, g.under_price) + '<span style="'+small+';margin-left:4px">(no xcheck)</span>';
+  }
+
   var sameLine = g.xcheck_total === g.market_total;
   var juiceClose = Math.abs((g.xcheck_over_price||0) - (g.over_price||0)) <= 5
                 && Math.abs((g.xcheck_under_price||0) - (g.under_price||0)) <= 5;
+  var primaryHtml = line(g.market_total, g.over_price, g.under_price);
   if (sameLine && juiceClose) return primaryHtml;
   var primSrc = g.total_source ? ' <span style="'+small+'">'+g.total_source+'</span>' : '';
   var xSrc   = g.xcheck_total_source ? ' <span style="'+small+'">'+g.xcheck_total_source+' · edge calc</span>' : '';

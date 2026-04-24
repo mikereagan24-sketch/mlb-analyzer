@@ -307,95 +307,87 @@ async function fetchUnabatedOdds(dateStr) {
     }
 
     // TOTAL: walk priority list. bt3 on si0 carries the Over contract,
-    // bt3 on si1 carries the Under — both reference the same line via
-    // points. Apply isSaneTotal to reject outlier *lines* (e.g. Kalshi's
-    // "Over 2.5 @ -4900" primary pick for PHI@CHC on 2026-04-21) AND
-    // isSaneTotalJuice to both sides' prices (rejects the 99900-class
-    // sentinel and anything else outside ±200 — see isSaneTotalJuice
-    // comment). Both sides' juice must pass; never mix one real price
-    // with one sentinel.
+    // bt3 on si1 carries the Under — both MUST reference the same line
+    // via points. Rules for accepting a source (all must pass, else
+    // fall through):
+    //   - Both sides pass isSaneTotal (line in [5, 13.5], |price| ≤ 400).
+    //   - awayBt3.points === homeBt3.points — strict equality, no float
+    //     tolerance, no numeric coercion. Feed returns numeric
+    //     half-integers; anything else we want to fall through. Rejects
+    //     Polymarket-style contracts where Over and Under sit on
+    //     different lines (e.g. Over 8.5 @ -117 / Under 9.5 @ -124).
+    //   - Both juices pass isSaneTotalJuice (|price| ≤ 200, no 99900
+    //     sentinel).
     let total=null,overPrice=null,underPrice=null,totalSrc=null;
     for(const msId of TOTAL_SOURCES){
       const s=bySourceTot[msId];
       if (!s) continue;
       const awayBt3 = s?.away?.bt3;
       const homeBt3 = s?.home?.bt3;
-      const awayLineOk = isSaneTotal(awayBt3);
-      const homeLineOk = isSaneTotal(homeBt3);
-      if (!awayLineOk && !homeLineOk) {
+      if (!isSaneTotal(awayBt3) || !isSaneTotal(homeBt3)) {
         if (awayBt3?.points != null || homeBt3?.points != null) {
-          console.log('[unabated] '+away+'-'+home+': rejected outlier total line from src '+(SOURCE_NAMES[msId]||msId)+' (pts='+(awayBt3?.points ?? homeBt3?.points)+', price='+(awayBt3?.americanPrice ?? homeBt3?.americanPrice)+')');
+          console.log('[unabated] '+away+'-'+home+': rejected outlier total line from src '+(SOURCE_NAMES[msId]||msId)+' (over-pts='+awayBt3?.points+', under-pts='+homeBt3?.points+')');
         }
         continue;
       }
-      const oP = awayBt3?.americanPrice ?? null;
-      const uP = homeBt3?.americanPrice ?? null;
+      if (awayBt3.points !== homeBt3.points) {
+        console.log('[unabated] '+away+'-'+home+': rejected split-line from src '+(SOURCE_NAMES[msId]||msId)+' (over-line='+awayBt3.points+', under-line='+homeBt3.points+')');
+        continue;
+      }
+      const oP = awayBt3.americanPrice ?? null;
+      const uP = homeBt3.americanPrice ?? null;
       if (!isSaneTotalJuice(oP) || !isSaneTotalJuice(uP)) {
         console.log('[unabated] '+away+'-'+home+': rejected insane juice from src '+(SOURCE_NAMES[msId]||msId)+' (over='+oP+', under='+uP+')');
         continue;
       }
-      total = awayLineOk ? awayBt3.points : homeBt3.points;
+      total = awayBt3.points;  // safe — both sides agree
       overPrice = oP;
       underPrice = uP;
       totalSrc = SOURCE_NAMES[msId] || msId;
       break;
     }
     if(total==null){
-      // Fallback total sweep — broader set of retail + sharp books in case
-      // none of the priority TOTAL_SOURCES had a sane line. Same isSaneTotal
-      // guard applies.
-      const SHARP=[
-        '36',  // TheScore US
-        '89',  // Novig
-        '98',  // Wagershack
-        '95',  // Bet105
-        '52',  // Matchbook
-        '66',  // Prophet Exchange
-        '104', // SxBet
-        '27',  // Sugarhouse
-        '25',  // Parx
-        '24',  // Hard Rock
-        '9',   // BetOnline
-        '10',  // Bovada
-        '4',   // BetMGM
-      ];
-      for(const msId of SHARP){
-        const s=bySourceTot[msId];
+      // Fallback sweep — any source in bySourceTot (not just the priority
+      // list) with a coherent matching-line pair. Same strict guard.
+      // Silent on rejection since this is last-ditch and noise isn't
+      // useful when 29 sources may all be malformed.
+      for(const [msId,s] of Object.entries(bySourceTot)){
         if (!s) continue;
         const awayBt3 = s?.away?.bt3;
         const homeBt3 = s?.home?.bt3;
-        const awayLineOk = isSaneTotal(awayBt3);
-        const homeLineOk = isSaneTotal(homeBt3);
-        if (!awayLineOk && !homeLineOk) continue;
-        const oP = awayBt3?.americanPrice ?? null;
-        const uP = homeBt3?.americanPrice ?? null;
+        if (!isSaneTotal(awayBt3) || !isSaneTotal(homeBt3)) continue;
+        if (awayBt3.points !== homeBt3.points) continue;
+        const oP = awayBt3.americanPrice ?? null;
+        const uP = homeBt3.americanPrice ?? null;
         if (!isSaneTotalJuice(oP) || !isSaneTotalJuice(uP)) continue;
-        total = awayLineOk ? awayBt3.points : homeBt3.points;
+        total = awayBt3.points;
         overPrice = oP;
         underPrice = uP;
-        totalSrc='src'+msId+'(fb)';
+        totalSrc = 'src'+msId+'(fb)';
         break;
       }
     }
 
-    // Second (xcheck) totals waterfall — independent of Kalshi. Picks the
-    // first non-Kalshi source whose bt3 contract yields a sane line AND
-    // sane juice on both sides. Line + over + under travel as a group
-    // (they may differ from the primary's line), so downstream never mixes
-    // Kalshi's line with xcheck's juice or vice versa.
+    // Second (xcheck) totals waterfall — independent of Kalshi. Same
+    // matching-line + juice rules as the primary. Line + over + under
+    // travel as a group; they may differ from the primary's line so
+    // downstream never mixes xcheck's line with primary's juice. Log
+    // split-line rejections for greppability (primary logs them too).
     let xcheckTotal=null, xcheckOverPrice=null, xcheckUnderPrice=null, xcheckTotalSrc=null;
     for (const msId of XCHECK_TOTAL_SOURCES) {
       const s = bySourceTot[msId];
       if (!s) continue;
       const awayBt3 = s?.away?.bt3;
       const homeBt3 = s?.home?.bt3;
-      const awayLineOk = isSaneTotal(awayBt3);
-      const homeLineOk = isSaneTotal(homeBt3);
-      if (!awayLineOk && !homeLineOk) continue;
-      const oP = awayBt3?.americanPrice ?? null;
-      const uP = homeBt3?.americanPrice ?? null;
+      if (!isSaneTotal(awayBt3) || !isSaneTotal(homeBt3)) continue;
+      if (awayBt3.points !== homeBt3.points) {
+        console.log('[unabated] '+away+'-'+home+': xcheck rejected split-line from src '+(SOURCE_NAMES[msId]||msId)+' (over-line='+awayBt3.points+', under-line='+homeBt3.points+')');
+        continue;
+      }
+      const oP = awayBt3.americanPrice ?? null;
+      const uP = homeBt3.americanPrice ?? null;
       if (!isSaneTotalJuice(oP) || !isSaneTotalJuice(uP)) continue;
-      xcheckTotal = awayLineOk ? awayBt3.points : homeBt3.points;
+      xcheckTotal = awayBt3.points;
       xcheckOverPrice = oP;
       xcheckUnderPrice = uP;
       xcheckTotalSrc = SOURCE_NAMES[msId] || ('src'+msId);

@@ -76,6 +76,7 @@ db.exec(`
   xcheck_over_price INTEGER,
   xcheck_under_price INTEGER,
   xcheck_total_source TEXT,
+  total_source TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -249,6 +250,7 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_total REAL"); } catch(e) {
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_over_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_under_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_total_source TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN total_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
 // check replaces the old "sharp consensus" terminology — the column holds
