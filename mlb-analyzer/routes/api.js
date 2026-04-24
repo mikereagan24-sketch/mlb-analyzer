@@ -1233,9 +1233,14 @@ router.get('/model-compare', (req, res) => {
 
       const oldEst = gm.model_total;
       const newEst = oldEst + pfRunDelta + tempDelta;
-      const mkt    = gm.market_total;
-      const overP  = gm.over_price  || -110;
-      const underP = gm.under_price || -110;
+      // Calibration path: mirror services/model.js — use xcheck totals as a
+      // group when all three are present (sharp consensus juice is what the
+      // model's edge calc is supposed to measure against), else fall back
+      // to primary. Never mix xcheck's line with primary's juice.
+      const useXcheck = gm.xcheck_total != null && gm.xcheck_over_price != null && gm.xcheck_under_price != null;
+      const mkt    = useXcheck ? gm.xcheck_total       : gm.market_total;
+      const overP  = useXcheck ? gm.xcheck_over_price  : (gm.over_price  || -110);
+      const underP = useXcheck ? gm.xcheck_under_price : (gm.under_price || -110);
       const overImp  = impliedP(overP);
       const underImp = impliedP(underP);
 

@@ -72,6 +72,10 @@ db.exec(`
   odds_flag_reason TEXT,
   xcheck_away_ml INTEGER,
   xcheck_home_ml INTEGER,
+  xcheck_total REAL,
+  xcheck_over_price INTEGER,
+  xcheck_under_price INTEGER,
+  xcheck_total_source TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -241,6 +245,10 @@ try {
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flagged INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flag_reason TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_away_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_total REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_over_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_under_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_total_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
 // check replaces the old "sharp consensus" terminology — the column holds

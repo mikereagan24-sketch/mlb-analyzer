@@ -52,6 +52,32 @@ const TOTAL_SOURCES = [
   '4',   // BetMGM
 ];
 
+// Independent cross-check source for totals. Excludes Kalshi because Kalshi's
+// thin MLB O/U order book routinely prices out of line with sportsbook
+// consensus — that outlier juice is what pollutes the edge calc when used as
+// the model's only input. The xcheck waterfall picks the first source with a
+// sane two-sided total quote so the edge calc has a second opinion.
+// Ordered: sharp sportsbooks (deep books, tight spreads) first, then liquid
+// retail, then exchanges, with Polymarket last as a prediction-market
+// fallback carrying the same thin-book risk as Kalshi but in the opposite
+// direction. Pinnacle / Circa / Caesars were considered — Pinnacle and Circa
+// are not in the Unabated feed's active set for game odds, and Caesars is
+// under an ambiguous source ID (our existing SOURCE_NAMES['24']='hardrock'
+// but marketSources[24] currently labels it "Caesars"; untangling that is
+// out of scope for this branch).
+const XCHECK_TOTAL_SOURCES = [
+  '67',  // sporttrade       — sharp exchange, deep on MLB
+  '4',   // betmgm           — retail, very liquid
+  '2',   // fanduel          — retail, very liquid
+  '1',   // draftkings       — retail, very liquid
+  '78',  // bet365           — retail, liquid internationally
+  '52',  // matchbook        — exchange
+  '66',  // prophetexchange  — exchange
+  '104', // sxbet            — exchange
+  '89',  // novig            — exchange
+  '107', // polymarket       — prediction market, last-resort (thin-book risk)
+];
+
 // Consensus lookup — independent sharp cross-check used to flag Kalshi-vs-
 // sharp divergence. Pure prediction-market / exchange list: these are the
 // markets that most directly compete with Kalshi's pricing, so disagreement
@@ -124,6 +150,22 @@ function isSaneTotal(bt3) {
   if (bt3.points < MLB_TOTAL_MIN_POINTS || bt3.points > MLB_TOTAL_MAX_POINTS) return false;
   if (bt3.americanPrice != null && Math.abs(bt3.americanPrice) > MLB_TOTAL_MAX_ABS_PRICE) return false;
   return true;
+}
+
+// Tighter juice bound for totals prices (vs isSaneTotal's line-focused check).
+// Real sportsbook juice on MLB O/U essentially never exceeds ±200 — every book
+// in the feed today sits in [−127, +117] on 8.5 lines. Anything outside ±200
+// is either the 99900-class sentinel or a corrupt contract. Reject null,
+// non-numeric, zero, and |price| > 200. A candidate source must have BOTH
+// sides passing this guard to be selected (no mixing one sane side with one
+// sentinel side — see primary/xcheck totals waterfalls below).
+const MLB_TOTAL_MAX_JUICE_ABS = 200;
+function isSaneTotalJuice(price) {
+  if (price == null) return false;
+  const n = Number(price);
+  if (!Number.isFinite(n)) return false;
+  if (n === 0) return false;
+  return Math.abs(n) <= MLB_TOTAL_MAX_JUICE_ABS;
 }
 
 // Sanity bound for moneyline prices. Real MLB MLs essentially never exceed
@@ -264,32 +306,37 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
-    // TOTAL: walk priority list. bt3 can be on si0 (over/away) OR si1
-    // (under/home) depending on book. Apply isSaneTotal to reject outlier
-    // contracts (e.g. Kalshi's "Over 2.5 @ -4900" primary pick for
-    // PHI@CHC on 2026-04-21, which is a valid contract but a garbage
-    // signal). Failing the sanity check, fall through to next source.
+    // TOTAL: walk priority list. bt3 on si0 carries the Over contract,
+    // bt3 on si1 carries the Under — both reference the same line via
+    // points. Apply isSaneTotal to reject outlier *lines* (e.g. Kalshi's
+    // "Over 2.5 @ -4900" primary pick for PHI@CHC on 2026-04-21) AND
+    // isSaneTotalJuice to both sides' prices (rejects the 99900-class
+    // sentinel and anything else outside ±200 — see isSaneTotalJuice
+    // comment). Both sides' juice must pass; never mix one real price
+    // with one sentinel.
     let total=null,overPrice=null,underPrice=null,totalSrc=null;
     for(const msId of TOTAL_SOURCES){
       const s=bySourceTot[msId];
       if (!s) continue;
       const awayBt3 = s?.away?.bt3;
       const homeBt3 = s?.home?.bt3;
-      const awayOk = isSaneTotal(awayBt3);
-      const homeOk = isSaneTotal(homeBt3);
-      if (!awayOk && !homeOk) {
+      const awayLineOk = isSaneTotal(awayBt3);
+      const homeLineOk = isSaneTotal(homeBt3);
+      if (!awayLineOk && !homeLineOk) {
         if (awayBt3?.points != null || homeBt3?.points != null) {
-          console.log('[unabated] '+away+'-'+home+': rejected outlier total from src '+(SOURCE_NAMES[msId]||msId)+' (pts='+(awayBt3?.points ?? homeBt3?.points)+', price='+(awayBt3?.americanPrice ?? homeBt3?.americanPrice)+')');
+          console.log('[unabated] '+away+'-'+home+': rejected outlier total line from src '+(SOURCE_NAMES[msId]||msId)+' (pts='+(awayBt3?.points ?? homeBt3?.points)+', price='+(awayBt3?.americanPrice ?? homeBt3?.americanPrice)+')');
         }
         continue;
       }
-      if (awayOk) {
-        total = awayBt3.points; overPrice = awayBt3.americanPrice ?? null;
-        underPrice = homeBt3?.americanPrice ?? null;
-      } else {
-        total = homeBt3.points; overPrice = awayBt3?.americanPrice ?? null;
-        underPrice = homeBt3.americanPrice ?? null;
+      const oP = awayBt3?.americanPrice ?? null;
+      const uP = homeBt3?.americanPrice ?? null;
+      if (!isSaneTotalJuice(oP) || !isSaneTotalJuice(uP)) {
+        console.log('[unabated] '+away+'-'+home+': rejected insane juice from src '+(SOURCE_NAMES[msId]||msId)+' (over='+oP+', under='+uP+')');
+        continue;
       }
+      total = awayLineOk ? awayBt3.points : homeBt3.points;
+      overPrice = oP;
+      underPrice = uP;
       totalSrc = SOURCE_NAMES[msId] || msId;
       break;
     }
@@ -317,29 +364,57 @@ async function fetchUnabatedOdds(dateStr) {
         if (!s) continue;
         const awayBt3 = s?.away?.bt3;
         const homeBt3 = s?.home?.bt3;
-        const awayOk = isSaneTotal(awayBt3);
-        const homeOk = isSaneTotal(homeBt3);
-        if (!awayOk && !homeOk) continue;
-        if (awayOk) {
-          total=awayBt3.points; overPrice=awayBt3.americanPrice??null;
-          underPrice=homeBt3?.americanPrice??null;
-        } else {
-          total=homeBt3.points; overPrice=awayBt3?.americanPrice??null;
-          underPrice=homeBt3.americanPrice??null;
-        }
+        const awayLineOk = isSaneTotal(awayBt3);
+        const homeLineOk = isSaneTotal(homeBt3);
+        if (!awayLineOk && !homeLineOk) continue;
+        const oP = awayBt3?.americanPrice ?? null;
+        const uP = homeBt3?.americanPrice ?? null;
+        if (!isSaneTotalJuice(oP) || !isSaneTotalJuice(uP)) continue;
+        total = awayLineOk ? awayBt3.points : homeBt3.points;
+        overPrice = oP;
+        underPrice = uP;
         totalSrc='src'+msId+'(fb)';
         break;
       }
     }
 
-    console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') xcheck='+xcheckAwayML+'/'+xcheckHomeML+'('+xcheckSrc+') tot='+total+'('+totalSrc+')');
+    // Second (xcheck) totals waterfall — independent of Kalshi. Picks the
+    // first non-Kalshi source whose bt3 contract yields a sane line AND
+    // sane juice on both sides. Line + over + under travel as a group
+    // (they may differ from the primary's line), so downstream never mixes
+    // Kalshi's line with xcheck's juice or vice versa.
+    let xcheckTotal=null, xcheckOverPrice=null, xcheckUnderPrice=null, xcheckTotalSrc=null;
+    for (const msId of XCHECK_TOTAL_SOURCES) {
+      const s = bySourceTot[msId];
+      if (!s) continue;
+      const awayBt3 = s?.away?.bt3;
+      const homeBt3 = s?.home?.bt3;
+      const awayLineOk = isSaneTotal(awayBt3);
+      const homeLineOk = isSaneTotal(homeBt3);
+      if (!awayLineOk && !homeLineOk) continue;
+      const oP = awayBt3?.americanPrice ?? null;
+      const uP = homeBt3?.americanPrice ?? null;
+      if (!isSaneTotalJuice(oP) || !isSaneTotalJuice(uP)) continue;
+      xcheckTotal = awayLineOk ? awayBt3.points : homeBt3.points;
+      xcheckOverPrice = oP;
+      xcheckUnderPrice = uP;
+      xcheckTotalSrc = SOURCE_NAMES[msId] || ('src'+msId);
+      break;
+    }
+
+    console.log('[unabated] '+away+'-'+home
+      +': ml='+awayML+'/'+homeML+'('+mlSrc+')'
+      +' ml-xcheck='+xcheckAwayML+'/'+xcheckHomeML+'('+xcheckSrc+')'
+      +' tot='+total+'@'+overPrice+'/'+underPrice+'('+totalSrc+')'
+      +' tot-xcheck='+xcheckTotal+'@'+xcheckOverPrice+'/'+xcheckUnderPrice+'('+xcheckTotalSrc+')');
     results.push({
       game_id:away+'-'+home,
       market_away_ml:awayML, market_home_ml:homeML,
       market_total:total, over_price:overPrice, under_price:underPrice,
       xcheck_away_ml:xcheckAwayML, xcheck_home_ml:xcheckHomeML,
+      xcheck_total:xcheckTotal, xcheck_over_price:xcheckOverPrice, xcheck_under_price:xcheckUnderPrice,
       ml_source:mlSrc||null, xcheck_source:xcheckSrc||null,
-      total_source:totalSrc||null,
+      total_source:totalSrc||null, xcheck_total_source:xcheckTotalSrc||null,
       source:'unabated',
     });
   }
