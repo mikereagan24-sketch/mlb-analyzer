@@ -174,7 +174,8 @@ function countFatigued(pitchers) {
   return n;
 }
 
-function renderTeam(team, teamAbbr) {
+function renderTeam(team, teamAbbr, weights) {
+  weights = weights || {};
   var allPitchers = team.pitchers || [];
   var pitchers = poolOnly.checked
     ? allPitchers.filter(function(p) { return p.in_pool; })
@@ -253,7 +254,7 @@ function renderTeam(team, teamAbbr) {
     +     '<div class="team-footer-hero">'
     +       '<span class="hl">Model wOBA</span>'
     +       '<span class="hv">' + model + '</span>'
-    +       '<div class="hsub">strong 60% \u00b7 weak 40%</div>'
+    +       '<div class="hsub">vs R: S' + Math.round((weights.BP_SR||0.55)*100) + '/W' + Math.round((weights.BP_WR||0.45)*100) + ' \u00b7 vs L: S' + Math.round((weights.BP_SL||0.35)*100) + '/W' + Math.round((weights.BP_WL||0.65)*100) + '</div>'
     +     '</div>'
     +     '<div class="team-footer-row">'
     +       '<div><span class="fl">Pool vs LHB</span><span class="fv">' + lhb + '</span></div>'
@@ -274,7 +275,9 @@ function render(data) {
     return;
   }
   var weights = data.weights || {};
-  metaEl.innerHTML = data.game_count + ' games \u00b7 W_PROJ=' + weights.W_PROJ + ' \u00b7 W_ACT=' + weights.W_ACT;
+  metaEl.innerHTML = data.game_count + ' games \u00b7 W_PROJ=' + weights.W_PROJ + ' \u00b7 W_ACT=' + weights.W_ACT
+    + ' · Bullpen vs RHB S' + weights.BP_SR + '/W' + weights.BP_WR
+    + ' · Bullpen vs LHB S' + weights.BP_SL + '/W' + weights.BP_WL;
 
   var html = '';
   for (var i = 0; i < data.games.length; i++) {
@@ -286,8 +289,8 @@ function render(data) {
       +     '<div class="game-id">' + escapeHtml(g.game_id) + '</div>'
       +   '</div>'
       +   '<div class="teams">'
-      +     renderTeam(g.away, g.away_team)
-      +     renderTeam(g.home, g.home_team)
+      +     renderTeam(g.away, g.away_team, weights)
+      +     renderTeam(g.home, g.home_team, weights)
       +   '</div>'
       + '</div>';
   }
