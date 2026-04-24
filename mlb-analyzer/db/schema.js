@@ -147,8 +147,6 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_start', '0.315');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_opp', '0.320');
   INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
-  INSERT OR IGNORE INTO app_settings VALUES ('sp_ip_baseline', '5.5');
-  INSERT OR IGNORE INTO app_settings VALUES ('sp_ip_weight_per', '0.03');
   INSERT OR IGNORE INTO app_settings VALUES ('pa_weights', '[4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7]');
   INSERT OR IGNORE INTO app_settings VALUES ('wp_clamp_lo', '0.25');
   INSERT OR IGNORE INTO app_settings VALUES ('wp_clamp_hi', '0.75');
@@ -230,6 +228,15 @@ try {
   }
   db.prepare("DELETE FROM app_settings WHERE key IN ('bp_strong_weight','bp_weak_weight')").run();
 } catch(e) { /* no-op on fresh installs */ }
+
+// One-time cleanup: the dynamic SP/RP weight adjustment that keyed off
+// starter projected IP was removed — the two settings that fed it are no
+// longer consulted by runModel, so drop them to keep app_settings honest.
+// Fresh installs never seeded them either; this is purely for DBs that
+// were created while the old seeds were in place.
+try {
+  db.prepare("DELETE FROM app_settings WHERE key IN ('sp_ip_baseline','sp_ip_weight_per')").run();
+} catch(e) { /* no-op */ }
 
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flagged INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flag_reason TEXT"); } catch(e) {}
