@@ -256,9 +256,16 @@ function getSignals(game, modelResult, settings) {
   if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
   if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
 
-  const mktTotal   = game.market_total || MARKET_TOTAL_DFLT;
-  const overPrice  = game.over_price   || -110;
-  const underPrice = game.under_price  || -110;
+  // Prefer the xcheck source for the total-side edge calc. Kalshi (the
+  // primary source) has a thin MLB O/U book and routinely posts outlier
+  // juice; using it as the model's only input produces false Over/Under
+  // edges. The xcheck source is an independent sharp/liquid book with
+  // consensus-shaped juice. Line + over + under travel as a group — never
+  // mix xcheck's line with the primary's juice or vice versa.
+  const haveXcheckTot = game.xcheck_total != null && game.xcheck_over_price != null && game.xcheck_under_price != null;
+  const mktTotal   = haveXcheckTot ? game.xcheck_total       : (game.market_total || MARKET_TOTAL_DFLT);
+  const overPrice  = haveXcheckTot ? game.xcheck_over_price  : (game.over_price   || -110);
+  const underPrice = haveXcheckTot ? game.xcheck_under_price : (game.under_price  || -110);
   const estTot     = modelResult.estTot;
 
   const overImplied  = overPrice  < 0 ? Math.abs(overPrice) /(Math.abs(overPrice) +100) : 100/(overPrice +100);
@@ -278,10 +285,23 @@ function getSignals(game, modelResult, settings) {
     return null;
   }
 
+  // Carry both the primary (venue) and xcheck (edge-calc) totals on every
+  // Total signal so the UI / logs can show "model used xcheck line=X.X
+  // from <source>" without losing the user's actual betting venue price.
+  const totSigExtras = {
+    xcheck_total: game.xcheck_total ?? null,
+    xcheck_over_price: game.xcheck_over_price ?? null,
+    xcheck_under_price: game.xcheck_under_price ?? null,
+    xcheck_total_source: game.xcheck_total_source ?? null,
+    // Primary (venue) fields — always include so downstream can compare.
+    primary_total: game.market_total ?? null,
+    primary_over_price: game.over_price ?? null,
+    primary_under_price: game.under_price ?? null,
+  };
   const oLabel = totLabel(overEdge);
   const uLabel = totLabel(underEdge);
-  if (oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4))});
-  if (uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4))});
+  if (oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
+  if (uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
 
   return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
 }

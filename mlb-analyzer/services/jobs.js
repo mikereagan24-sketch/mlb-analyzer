@@ -783,11 +783,11 @@ async function runOddsJob(dateStr) {
       //     divergence check; union their reasons.
       const haveMarket = o.market_away_ml != null && o.market_home_ml != null;
       const singleSource = haveMarket && (!o.xcheck_source || o.xcheck_source === o.ml_source);
-      let oddsReason = null;
+      const reasons = [];
       if (!haveMarket) {
-        oddsReason = 'no sane odds';
+        reasons.push('no sane odds');
       } else if (singleSource) {
-        oddsReason = 'single-source, no cross-check available';
+        reasons.push('single-source, no cross-check available');
       } else {
         const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
         const divergenceReason = checkBookDivergence(
@@ -795,9 +795,32 @@ async function runOddsJob(dateStr) {
           o.xcheck_away_ml, o.xcheck_home_ml,
           o.xcheck_source
         );
-        const reasons = [sanityReason, divergenceReason].filter(Boolean);
-        oddsReason = reasons.length ? reasons.join(' | ') : null;
+        if (sanityReason) reasons.push(sanityReason);
+        if (divergenceReason) reasons.push(divergenceReason);
       }
+      // Totals flag reasons — independent of the ML checks above, concatenated
+      // into the same odds_flag_reason field with ' | ' separator.
+      const haveTot = o.market_total != null && o.over_price != null && o.under_price != null;
+      const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
+      if (haveTot && !haveXcheckTot) {
+        reasons.push('single-source total, no cross-check available');
+      } else if (haveTot && haveXcheckTot) {
+        if (Math.abs(o.market_total - o.xcheck_total) >= 1.0) {
+          reasons.push('totals line divergence: ' + (o.total_source||'primary') + '=' + o.market_total + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_total);
+        } else {
+          // Same-line juice divergence — compare over-side implied prob on both
+          // sources. If either side's implied prob differs by > 0.08, flag.
+          // Mirrors checkBookDivergence's 8-cent threshold for MLs.
+          const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
+          const dOver  = Math.abs(impP(o.over_price)  - impP(o.xcheck_over_price));
+          const dUnder = Math.abs(impP(o.under_price) - impP(o.xcheck_under_price));
+          if (dOver > 0.08 || dUnder > 0.08) {
+            const d = Math.max(dOver, dUnder);
+            reasons.push('totals juice divergence: ' + (o.total_source||'primary') + '=' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
+          }
+        }
+      }
+      const oddsReason = reasons.length ? reasons.join(' | ') : null;
       const oddsFlagged = oddsReason ? 1 : 0;
       if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
       // Preserve existing non-null totals when incoming total is null.
@@ -813,6 +836,10 @@ async function runOddsJob(dateStr) {
         over_price=COALESCE(?, over_price),
         under_price=COALESCE(?, under_price),
         xcheck_away_ml=?, xcheck_home_ml=?,
+        xcheck_total=COALESCE(?, xcheck_total),
+        xcheck_over_price=COALESCE(?, xcheck_over_price),
+        xcheck_under_price=COALESCE(?, xcheck_under_price),
+        xcheck_total_source=COALESCE(?, xcheck_total_source),
         odds_flagged=?, odds_flag_reason=?,
         updated_at=datetime('now')
         WHERE game_date=? AND game_id=?`)
@@ -820,6 +847,10 @@ async function runOddsJob(dateStr) {
              o.over_price, o.under_price,
              o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
              o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
+             o.xcheck_total != null ? o.xcheck_total : null,
+             o.xcheck_over_price != null ? o.xcheck_over_price : null,
+             o.xcheck_under_price != null ? o.xcheck_under_price : null,
+             o.xcheck_total_source || null,
              oddsFlagged, oddsReason,
              dateStr, o.game_id);
       const gameRow = q.getGameById.get(dateStr, o.game_id);
