@@ -70,8 +70,8 @@ db.exec(`
   under_price INTEGER,
   odds_flagged INTEGER DEFAULT 0,
   odds_flag_reason TEXT,
-  consensus_away_ml INTEGER,
-  consensus_home_ml INTEGER,
+  xcheck_away_ml INTEGER,
+  xcheck_home_ml INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -240,8 +240,28 @@ try {
 
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flagged INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_flag_reason TEXT"); } catch(e) {}
-try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_away_ml INTEGER"); } catch(e) {}
-try { db.exec("ALTER TABLE game_log ADD COLUMN consensus_home_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_away_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
+// Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
+// check replaces the old "sharp consensus" terminology — the column holds
+// the same data shape (one secondary source's raw price) but the field
+// name was misleading. RENAME COLUMN preserves any values already saved;
+// the try/catch no-ops on fresh installs (no legacy columns) and on re-
+// runs (already renamed). If both the new and old columns somehow exist
+// simultaneously (interrupted migration), we copy then drop.
+try {
+  const cols = db.prepare("PRAGMA table_info(game_log)").all().map(c => c.name);
+  const hasLegacy = cols.includes('consensus_away_ml') || cols.includes('consensus_home_ml');
+  const hasNew    = cols.includes('xcheck_away_ml')    && cols.includes('xcheck_home_ml');
+  if (hasLegacy && !hasNew) {
+    db.exec("ALTER TABLE game_log RENAME COLUMN consensus_away_ml TO xcheck_away_ml");
+    db.exec("ALTER TABLE game_log RENAME COLUMN consensus_home_ml TO xcheck_home_ml");
+  } else if (hasLegacy && hasNew) {
+    db.exec("UPDATE game_log SET xcheck_away_ml=COALESCE(xcheck_away_ml,consensus_away_ml), xcheck_home_ml=COALESCE(xcheck_home_ml,consensus_home_ml)");
+    db.exec("ALTER TABLE game_log DROP COLUMN consensus_away_ml");
+    db.exec("ALTER TABLE game_log DROP COLUMN consensus_home_ml");
+  }
+} catch(e) { /* no-op on fresh installs */ }
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN cohort TEXT DEFAULT 'v1'"); } catch(e) {}
 // One-time backfill: signals without a cohort value belong to v1 (pre-cohort era).
 try { db.exec("UPDATE bet_signals SET cohort='v1' WHERE cohort IS NULL"); } catch(e) {}
