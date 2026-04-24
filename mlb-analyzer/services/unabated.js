@@ -62,7 +62,7 @@ const TOTAL_SOURCES = [
 // "Pinnacle - Delayed" and "Pinnacle - 3838" respectively but both are
 // gated / inactive for game odds. The exchanges below are the closest
 // available sharp proxies.
-const CONSENSUS_SOURCES = [
+const XCHECK_SOURCES = [
   '107', // Polymarket  ← most directly comparable to Kalshi (prediction market)
   '89',  // Novig       ← sharp exchange
   '104', // SxBet
@@ -124,6 +124,21 @@ function isSaneTotal(bt3) {
   if (bt3.points < MLB_TOTAL_MIN_POINTS || bt3.points > MLB_TOTAL_MAX_POINTS) return false;
   if (bt3.americanPrice != null && Math.abs(bt3.americanPrice) > MLB_TOTAL_MAX_ABS_PRICE) return false;
   return true;
+}
+
+// Sanity bound for moneyline prices. Real MLB MLs essentially never exceed
+// +/-400 but we leave headroom to 1000 because the purpose of this check is
+// to reject the 99900 "no active contract" sentinel that Unabated sometimes
+// returns when a book's side is delisted — not to police legitimate market
+// prices. Null / non-numeric / zero also fail (0 is nonsense as a price).
+const ML_MAX_ABS_PRICE = 1000;
+
+function isSaneML(price) {
+  if (price == null) return false;
+  const n = Number(price);
+  if (!Number.isFinite(n)) return false;
+  if (n === 0) return false;
+  return Math.abs(n) <= ML_MAX_ABS_PRICE;
 }
 
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
@@ -197,33 +212,34 @@ async function fetchUnabatedOdds(dateStr) {
       }
     });
 
-    // ML: walk priority list; skip source if either side is missing and
-    // fall through. Prediction-market contracts can be one-sided when a
-    // market maker pulls quotes — the correct behavior is to take the
-    // next source's clean two-sided quote, not to reconstruct a synthetic
-    // line from one side of a potentially stale book.
+    // ML: walk priority list; require both sides to pass isSaneML before
+    // accepting a source. Rejects one-sided quotes (market maker pulled
+    // quotes mid-fetch) AND the 99900 sentinel that silently poisoned
+    // market_home_ml before this guard was added. Falls through to the
+    // next source if current one's quote is partial or out-of-range.
     let awayML=null,homeML=null,mlSrc=null;
     for(const msId of ML_SOURCES){
       const s=bySource[msId];
       const aPrice = s?.away?.bt1?.americanPrice;
       const hPrice = s?.home?.bt1?.americanPrice;
-      if(aPrice != null && hPrice != null){
+      const aOk = isSaneML(aPrice);
+      const hOk = isSaneML(hPrice);
+      if(aOk && hOk){
         awayML=aPrice; homeML=hPrice;
         mlSrc=SOURCE_NAMES[msId]||msId;
         break;
       }
-      // If one side exists but not the other, log and fall through
-      if(aPrice != null || hPrice != null){
-        console.log('[unabated] '+away+'-'+home+': skipping one-sided ML from src '+(SOURCE_NAMES[msId]||msId)+' (away='+aPrice+', home='+hPrice+')');
+      if(aOk || hOk || aPrice != null || hPrice != null){
+        console.log('[unabated] '+away+'-'+home+': skipping partial/insane ML from src '+(SOURCE_NAMES[msId]||msId)+' (away='+aPrice+', home='+hPrice+')');
       }
     }
 
-    // Last-ditch ML: ANY source with both sides (same skip-if-one-sided rule)
+    // Last-ditch ML: ANY source with both sides passing isSaneML.
     if(!awayML||!homeML){
       for(const [msId,sides] of Object.entries(bySource)){
         const aPrice = sides.away?.bt1?.americanPrice;
         const hPrice = sides.home?.bt1?.americanPrice;
-        if(aPrice != null && hPrice != null){
+        if(isSaneML(aPrice) && isSaneML(hPrice)){
           awayML=aPrice; homeML=hPrice;
           mlSrc='src'+msId;
           break;
@@ -231,16 +247,19 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
-    // Sharp consensus — independent cross-check, excludes Kalshi.
-    // Same skip-if-one-sided rule applies.
-    let consAwayML=null, consHomeML=null, consSrc=null;
-    for(const msId of CONSENSUS_SOURCES){
+    // Book-vs-book cross-check source — excludes Kalshi (the market source)
+    // so the divergence check has something to compare against. Same
+    // isSaneML filter as the primary waterfall. Note: if Kalshi is absent
+    // and Polymarket wins both waterfalls, mlSrc === xcheckSrc and the
+    // downstream flag logic treats the game as single-source.
+    let xcheckAwayML=null, xcheckHomeML=null, xcheckSrc=null;
+    for(const msId of XCHECK_SOURCES){
       const s=bySource[msId];
       const aPrice = s?.away?.bt1?.americanPrice;
       const hPrice = s?.home?.bt1?.americanPrice;
-      if(aPrice != null && hPrice != null){
-        consAwayML=aPrice; consHomeML=hPrice;
-        consSrc=SOURCE_NAMES[msId]||('src'+msId);
+      if(isSaneML(aPrice) && isSaneML(hPrice)){
+        xcheckAwayML=aPrice; xcheckHomeML=hPrice;
+        xcheckSrc=SOURCE_NAMES[msId]||('src'+msId);
         break;
       }
     }
@@ -313,13 +332,13 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
-    console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') cons='+consAwayML+'/'+consHomeML+'('+consSrc+') tot='+total+'('+totalSrc+')');
+    console.log('[unabated] '+away+'-'+home+': ml='+awayML+'/'+homeML+'('+mlSrc+') xcheck='+xcheckAwayML+'/'+xcheckHomeML+'('+xcheckSrc+') tot='+total+'('+totalSrc+')');
     results.push({
       game_id:away+'-'+home,
       market_away_ml:awayML, market_home_ml:homeML,
       market_total:total, over_price:overPrice, under_price:underPrice,
-      consensus_away_ml:consAwayML, consensus_home_ml:consHomeML,
-      ml_source:mlSrc||null, consensus_source:consSrc||null,
+      xcheck_away_ml:xcheckAwayML, xcheck_home_ml:xcheckHomeML,
+      ml_source:mlSrc||null, xcheck_source:xcheckSrc||null,
       total_source:totalSrc||null,
       source:'unabated',
     });

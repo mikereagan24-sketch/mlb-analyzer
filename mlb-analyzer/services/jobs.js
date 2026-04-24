@@ -129,43 +129,44 @@ function checkOddsSanity(awayML, homeML) {
   return null;
 }
 
-// Flag when the primary ML (typically Kalshi) disagrees sharply with the
-// sharp-consensus line. Two escalating checks:
-//   1) Hard disagreement: primary and consensus pick different favorites —
-//      that's almost always a bad primary price, regardless of magnitude.
-//   2) Soft disagreement: they agree on the favorite but the favorite's
-//      implied probability differs by more than 8 cents.
-// consSrc is the consensus book name (e.g. 'pinnacle', 'dk') used only in
+// Flag when the primary ML source (typically Kalshi) disagrees sharply with
+// the secondary cross-check book (typically Polymarket). Two escalating
+// checks:
+//   1) Hard disagreement: the two books pick different favorites — almost
+//      always a bad primary price, regardless of magnitude.
+//   2) Soft disagreement: same favorite but implied probability differs by
+//      more than 8 cents.
+// xcheckSrc is the cross-check book name (e.g. 'polymarket') used only in
 // the error message so flags are self-describing. Returns null if either
-// side is missing.
-function checkConsensusDivergence(awayML, homeML, consAwayML, consHomeML, consSrc) {
+// side's four prices is missing.
+function checkBookDivergence(awayML, homeML, xcheckAwayML, xcheckHomeML, xcheckSrc) {
   const a = parseFloat(awayML), h = parseFloat(homeML);
-  const ca = parseFloat(consAwayML), ch = parseFloat(consHomeML);
+  const ca = parseFloat(xcheckAwayML), ch = parseFloat(xcheckHomeML);
   if (isNaN(a) || isNaN(h) || isNaN(ca) || isNaN(ch)) return null;
   if (a === 0 || h === 0 || ca === 0 || ch === 0) return null;
-  const consLabel = consSrc || 'consensus';
+  const xcheckLabel = xcheckSrc || 'xcheck';
   const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
   const pa = impP(a), ph = impP(h), pca = impP(ca), pch = impP(ch);
   // In American odds, lower number = bigger favorite (e.g. -150 < +130).
   const kalFav = a < h ? 'away' : 'home';
-  const conFav = ca < ch ? 'away' : 'home';
-  if (kalFav !== conFav) {
-    const conFavImpP = conFav === 'away' ? pca : pch;
-    // Pick-em games (consensus fav < ~-115 implied) flip favorites naturally
+  const xcheckFav = ca < ch ? 'away' : 'home';
+  if (kalFav !== xcheckFav) {
+    const xcheckFavImpP = xcheckFav === 'away' ? pca : pch;
+    // Pick-em games (xcheck fav < ~-115 implied) flip favorites naturally
     // between books — ignore disagreement in that noise zone.
-    if (conFavImpP <= 0.535) return null;
+    if (xcheckFavImpP <= 0.535) return null;
     const kalFavML = kalFav === 'away' ? a : h;
-    const conFavML = conFav === 'away' ? ca : ch;
-    return 'Kalshi vs ' + consLabel + ' disagree on favorite: Kalshi favors ' + kalFav +
-           ' (' + (kalFavML > 0 ? '+' + kalFavML : kalFavML) + ') ' + consLabel + ' favors ' +
-           conFav + ' (' + (conFavML > 0 ? '+' + conFavML : conFavML) + ')';
+    const xcheckFavML = xcheckFav === 'away' ? ca : ch;
+    return 'Kalshi vs ' + xcheckLabel + ' disagree on favorite: Kalshi favors ' + kalFav +
+           ' (' + (kalFavML > 0 ? '+' + kalFavML : kalFavML) + ') ' + xcheckLabel + ' favors ' +
+           xcheckFav + ' (' + (xcheckFavML > 0 ? '+' + xcheckFavML : xcheckFavML) + ')';
   }
   const kalFavImpP = kalFav === 'away' ? pa : ph;
-  const conFavImpP = conFav === 'away' ? pca : pch;
-  const diff = Math.abs(kalFavImpP - conFavImpP);
+  const xcheckFavImpP = xcheckFav === 'away' ? pca : pch;
+  const diff = Math.abs(kalFavImpP - xcheckFavImpP);
   if (diff > 0.08) {
-    return 'Kalshi vs ' + consLabel + ' divergence: Kalshi=' + awayML + '/' + homeML +
-           ' ' + consLabel + '=' + consAwayML + '/' + consHomeML +
+    return 'Kalshi vs ' + xcheckLabel + ' divergence: Kalshi=' + awayML + '/' + homeML +
+           ' ' + xcheckLabel + '=' + xcheckAwayML + '/' + xcheckHomeML +
            ' (fav Δp=' + diff.toFixed(3) + ')';
   }
   return null;
@@ -750,7 +751,7 @@ async function runOddsJob(dateStr) {
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
-      console.log('[odds-consensus] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + ' consensus=' + o.consensus_away_ml + '/' + o.consensus_home_ml + ' (' + o.consensus_source + ')');
+      console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_source + ')');
       // Skip if locked OR game has already started
       const existing = q.getGameById.get(dateStr, o.game_id);
       if (existing && existing.odds_locked_at) { console.log('[odds] Skipping locked: '+o.game_id); continue; }
@@ -771,14 +772,32 @@ async function runOddsJob(dateStr) {
         }
         continue;
       }
-      const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
-      const divergenceReason = checkConsensusDivergence(
-        o.market_away_ml, o.market_home_ml,
-        o.consensus_away_ml, o.consensus_home_ml,
-        o.consensus_source
-      );
-      const reasons = [sanityReason, divergenceReason].filter(Boolean);
-      const oddsReason = reasons.length ? reasons.join(' | ') : null;
+      // Build the list of flag reasons. Order of precedence:
+      //   - No sane odds at all: overrides everything; market_* will be null.
+      //   - Single-source: only one book returned a sane two-sided price, so
+      //     the book-vs-book divergence check has nothing to compare against
+      //     (detected as xcheck_source missing OR equal to ml_source — the
+      //     latter happens when Kalshi is absent and the xcheck waterfall
+      //     falls through to the same book the market waterfall picked).
+      //   - Otherwise: run the per-side sanity check and the book-vs-book
+      //     divergence check; union their reasons.
+      const haveMarket = o.market_away_ml != null && o.market_home_ml != null;
+      const singleSource = haveMarket && (!o.xcheck_source || o.xcheck_source === o.ml_source);
+      let oddsReason = null;
+      if (!haveMarket) {
+        oddsReason = 'no sane odds';
+      } else if (singleSource) {
+        oddsReason = 'single-source, no cross-check available';
+      } else {
+        const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
+        const divergenceReason = checkBookDivergence(
+          o.market_away_ml, o.market_home_ml,
+          o.xcheck_away_ml, o.xcheck_home_ml,
+          o.xcheck_source
+        );
+        const reasons = [sanityReason, divergenceReason].filter(Boolean);
+        oddsReason = reasons.length ? reasons.join(' | ') : null;
+      }
       const oddsFlagged = oddsReason ? 1 : 0;
       if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
       // Preserve existing non-null totals when incoming total is null.
@@ -793,14 +812,14 @@ async function runOddsJob(dateStr) {
         market_total=COALESCE(?, market_total),
         over_price=COALESCE(?, over_price),
         under_price=COALESCE(?, under_price),
-        consensus_away_ml=?, consensus_home_ml=?,
+        xcheck_away_ml=?, xcheck_home_ml=?,
         odds_flagged=?, odds_flag_reason=?,
         updated_at=datetime('now')
         WHERE game_date=? AND game_id=?`)
         .run(o.market_away_ml, o.market_home_ml, o.market_total,
              o.over_price, o.under_price,
-             o.consensus_away_ml != null ? o.consensus_away_ml : null,
-             o.consensus_home_ml != null ? o.consensus_home_ml : null,
+             o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
+             o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
              oddsFlagged, oddsReason,
              dateStr, o.game_id);
       const gameRow = q.getGameById.get(dateStr, o.game_id);
