@@ -799,10 +799,19 @@ async function runOddsJob(dateStr) {
         if (divergenceReason) reasons.push(divergenceReason);
       }
       // Totals flag reasons — independent of the ML checks above, concatenated
-      // into the same odds_flag_reason field with ' | ' separator.
+      // into the same odds_flag_reason field with ' | ' separator. Order of
+      // precedence when primary is null: first 'no sane totals' (nothing
+      // passed the matching-line check in EITHER waterfall), then 'no primary
+      // totals; edge calc using xcheck only' (primary failed but xcheck
+      // found a coherent source — edge math still runs). 'single-source'
+      // applies only when primary is present but xcheck isn't.
       const haveTot = o.market_total != null && o.over_price != null && o.under_price != null;
       const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
-      if (haveTot && !haveXcheckTot) {
+      if (!haveTot && !haveXcheckTot) {
+        reasons.push('no sane totals: no source provided matching-line O/U');
+      } else if (!haveTot && haveXcheckTot) {
+        reasons.push('no primary totals; edge calc using xcheck only');
+      } else if (haveTot && !haveXcheckTot) {
         reasons.push('single-source total, no cross-check available');
       } else if (haveTot && haveXcheckTot) {
         if (Math.abs(o.market_total - o.xcheck_total) >= 1.0) {
@@ -830,11 +839,17 @@ async function runOddsJob(dateStr) {
       // the first call's good data. COALESCE(incoming, existing) prevents
       // that. Apply to total + over_price + under_price since those pair.
       // Do NOT apply to ML — moneylines are volatile and we want fresh.
+      // Primary totals fields (market_total/over_price/under_price/total_source)
+      // are written unconditionally — no COALESCE. With the new matching-line
+      // guard in services/unabated.js, "null" from the waterfall now means
+      // "no source provided a coherent O/U pair" (an observable state the UI
+      // falls back on by showing xcheck as the displayed price). COALESCE
+      // would preserve stale Kalshi data past the guard's rejection and
+      // mask this state. xcheck fields keep COALESCE so a transient refresh
+      // that finds no non-Kalshi book doesn't wipe prior xcheck values.
       db.prepare(`UPDATE game_log SET
         market_away_ml=?, market_home_ml=?,
-        market_total=COALESCE(?, market_total),
-        over_price=COALESCE(?, over_price),
-        under_price=COALESCE(?, under_price),
+        market_total=?, over_price=?, under_price=?, total_source=?,
         xcheck_away_ml=?, xcheck_home_ml=?,
         xcheck_total=COALESCE(?, xcheck_total),
         xcheck_over_price=COALESCE(?, xcheck_over_price),
@@ -843,8 +858,8 @@ async function runOddsJob(dateStr) {
         odds_flagged=?, odds_flag_reason=?,
         updated_at=datetime('now')
         WHERE game_date=? AND game_id=?`)
-        .run(o.market_away_ml, o.market_home_ml, o.market_total,
-             o.over_price, o.under_price,
+        .run(o.market_away_ml, o.market_home_ml,
+             o.market_total, o.over_price, o.under_price, o.total_source || null,
              o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
              o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
              o.xcheck_total != null ? o.xcheck_total : null,
