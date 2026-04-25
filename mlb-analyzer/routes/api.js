@@ -1548,6 +1548,419 @@ router.get('/odds-flags', (req, res) => {
   }
 });
 
+// Daily slate health check — runs 12 diagnostics over today's game_log + odds
+// + cron_log + app_settings state and returns a structured report. Designed
+// to be polled from the UI on page load + date change so the user sees a
+// status pill before betting (vs discovering the problem mid-bet). No auth.
+// On-demand only in phase 1 — no cron, no webhook, no persistence. Phase 2
+// would add a 10AM PT cron that POSTs results to a configured webhook URL
+// when overall_status is non-healthy.
+router.get('/health/:date', (req, res) => {
+  try {
+    const date = req.params.date;
+    const checks = [];
+
+    // Helper: short list of game_ids when an issue affects only some games.
+    // Caps at 8 to keep the JSON readable; overflow shown as '+N more'.
+    const cap = arr => {
+      const ids = arr.slice(0, 8);
+      const overflow = arr.length - ids.length;
+      return overflow > 0 ? ids.concat(['+' + overflow + ' more']) : ids;
+    };
+
+    // ---- summary counters (computed once, referenced by checks) ----
+    const games = db.prepare(
+      "SELECT game_id, away_team, home_team, away_sp, home_sp, " +
+      "  away_lineup_status, home_lineup_status, " +
+      "  market_away_ml, market_home_ml, market_total, " +
+      "  xcheck_total, total_source, xcheck_total_source, " +
+      "  odds_flagged, odds_flag_reason, updated_at " +
+      "FROM game_log WHERE game_date=? ORDER BY game_id"
+    ).all(date);
+
+    const summary = {
+      games_total: games.length,
+      games_with_sp: games.filter(g => g.away_sp && g.home_sp).length,
+      games_with_lineups_confirmed: games.filter(g =>
+        g.away_lineup_status === 'confirmed' && g.home_lineup_status === 'confirmed'
+      ).length,
+      games_with_ml: games.filter(g => g.market_away_ml != null && g.market_home_ml != null).length,
+      games_with_totals_primary: games.filter(g => g.market_total != null).length,
+      games_with_totals_xcheck: games.filter(g => g.xcheck_total != null).length,
+      games_flagged: games.filter(g => g.odds_flagged === 1).length,
+    };
+
+    // ---- check 1: games_loaded ----
+    if (games.length === 0) {
+      checks.push({ id: 'games_loaded', status: 'fail', severity: 'error',
+        message: 'No games loaded for ' + date });
+    } else {
+      checks.push({ id: 'games_loaded', status: 'pass', severity: 'error',
+        message: games.length + ' games loaded' });
+    }
+
+    // ---- check 2: sp_coverage ----
+    {
+      const missing = games.filter(g => !g.away_sp || !g.home_sp).map(g => g.game_id);
+      if (missing.length === 0 && games.length > 0) {
+        checks.push({ id: 'sp_coverage', status: 'pass', severity: 'error',
+          message: 'All ' + games.length + ' games have probable SPs' });
+      } else if (missing.length === 0) {
+        checks.push({ id: 'sp_coverage', status: 'pass', severity: 'error',
+          message: 'No games to check' });
+      } else {
+        checks.push({ id: 'sp_coverage', status: 'warn', severity: 'error',
+          message: missing.length + ' game(s) missing SP', affected_games: cap(missing) });
+      }
+    }
+
+    // ---- check 3: ml_coverage ----
+    {
+      const missing = games.filter(g => g.market_away_ml == null || g.market_home_ml == null).map(g => g.game_id);
+      checks.push({
+        id: 'ml_coverage',
+        status: missing.length === 0 ? 'pass' : 'warn',
+        severity: 'warn',
+        message: missing.length === 0
+          ? 'All ' + games.length + ' games have ML odds'
+          : missing.length + ' game(s) missing ML odds',
+        ...(missing.length ? { affected_games: cap(missing) } : {}),
+      });
+    }
+
+    // ---- check 4: totals_primary ----
+    {
+      const missing = games.filter(g => g.market_total == null).map(g => g.game_id);
+      checks.push({
+        id: 'totals_primary',
+        status: missing.length === 0 ? 'pass' : 'warn',
+        severity: 'warn',
+        message: missing.length === 0
+          ? 'All ' + games.length + ' games have primary totals'
+          : missing.length + ' game(s) missing primary totals',
+        ...(missing.length ? { affected_games: cap(missing) } : {}),
+      });
+    }
+
+    // ---- check 5: totals_xcheck ----
+    {
+      const missing = games.filter(g => g.xcheck_total == null).map(g => g.game_id);
+      checks.push({
+        id: 'totals_xcheck',
+        status: missing.length === 0 ? 'pass' : 'warn',
+        severity: 'warn',
+        message: missing.length === 0
+          ? 'All ' + games.length + ' games have xcheck totals'
+          : missing.length + ' game(s) missing xcheck totals',
+        ...(missing.length ? { affected_games: cap(missing) } : {}),
+      });
+    }
+
+    // ---- check 6: odds_flags (categorize by reason) ----
+    {
+      const flagged = games.filter(g => g.odds_flagged === 1);
+      // Categorize on the leading word(s) of each ' | '-joined reason fragment.
+      // Multi-reason rows get counted in every category they hit.
+      const cat = { line_div: 0, juice_div: 0, single_source: 0, no_sane: 0, sanity: 0, ml_div: 0 };
+      for (const g of flagged) {
+        const r = g.odds_flag_reason || '';
+        if (/totals line divergence/i.test(r)) cat.line_div++;
+        if (/totals juice divergence/i.test(r)) cat.juice_div++;
+        if (/single-source/i.test(r)) cat.single_source++;
+        if (/no sane/i.test(r)) cat.no_sane++;
+        if (/Kalshi vs .* divergence|disagree on favorite/i.test(r)) cat.ml_div++;
+        if (/extreme line/i.test(r)) cat.sanity++;
+      }
+      const parts = [];
+      if (cat.line_div)      parts.push(cat.line_div + ' line divergence');
+      if (cat.juice_div)     parts.push(cat.juice_div + ' juice divergence');
+      if (cat.single_source) parts.push(cat.single_source + ' single-source');
+      if (cat.no_sane)       parts.push(cat.no_sane + ' no-sane-odds');
+      if (cat.sanity)        parts.push(cat.sanity + ' extreme-line');
+      if (cat.ml_div)        parts.push(cat.ml_div + ' ML divergence');
+      checks.push({
+        id: 'odds_flags',
+        status: flagged.length === 0 ? 'pass' : 'warn',
+        severity: 'info',
+        message: flagged.length === 0
+          ? 'No odds flags'
+          : flagged.length + ' game(s) flagged' + (parts.length ? ': ' + parts.join(', ') : ''),
+        ...(flagged.length ? { affected_games: cap(flagged.map(g => g.game_id)) } : {}),
+      });
+    }
+
+    // ---- helpers for freshness checks ----
+    const fmtAge = ms => {
+      const min = Math.floor(ms / 60000);
+      if (min < 60) return min + ' minutes ago';
+      const h = Math.floor(min / 60);
+      const m = min % 60;
+      return h + 'h ' + m + 'm ago';
+    };
+    const cronLatest = (jobType, runDate) => {
+      // Latest run-row for a job_type optionally scoped to run_date. Returns
+      // {ran_at_iso, status, ageMs} or null when the job has never run with
+      // that scope. ran_at is stored as datetime('now') text — convert via
+      // Date constructor with explicit 'Z' since SQLite uses UTC.
+      const sql = runDate
+        ? "SELECT ran_at, status FROM cron_log WHERE job_type=? AND run_date=? ORDER BY ran_at DESC LIMIT 1"
+        : "SELECT ran_at, status FROM cron_log WHERE job_type=? ORDER BY ran_at DESC LIMIT 1";
+      const row = runDate
+        ? db.prepare(sql).get(jobType, runDate)
+        : db.prepare(sql).get(jobType);
+      if (!row) return null;
+      const t = new Date(row.ran_at + 'Z').getTime();
+      return { ran_at_iso: row.ran_at, status: row.status, ageMs: Date.now() - t };
+    };
+
+    // ---- check 7: data_freshness_odds ----
+    {
+      const r = cronLatest('odds', date);
+      if (!r) {
+        checks.push({ id: 'data_freshness_odds', status: 'fail', severity: 'warn',
+          message: 'Last odds refresh: never (no cron_log entry for this date)' });
+      } else {
+        const h1 = 60 * 60 * 1000, h3 = 3 * h1;
+        const status = r.ageMs < h1 ? 'pass' : r.ageMs < h3 ? 'warn' : 'fail';
+        const tag = r.ageMs >= h3 ? ' — stale' : '';
+        checks.push({ id: 'data_freshness_odds', status, severity: 'warn',
+          message: 'Last odds refresh: ' + fmtAge(r.ageMs) + tag });
+      }
+    }
+
+    // ---- check 8: data_freshness_lineups ----
+    {
+      const r = cronLatest('lineups', date);
+      if (!r) {
+        checks.push({ id: 'data_freshness_lineups', status: 'fail', severity: 'warn',
+          message: 'Last lineup pull: never (no cron_log entry for this date)' });
+      } else {
+        const h1 = 60 * 60 * 1000, h3 = 3 * h1;
+        const status = r.ageMs < h1 ? 'pass' : r.ageMs < h3 ? 'warn' : 'fail';
+        const tag = r.ageMs >= h3 ? ' — stale' : '';
+        checks.push({ id: 'data_freshness_lineups', status, severity: 'warn',
+          message: 'Last lineup pull: ' + fmtAge(r.ageMs) + tag });
+      }
+    }
+
+    // ---- check 9: cron_health (any job that hasn't successfully run in 25h) ----
+    {
+      const window25h = "datetime('now','-25 hours')";
+      const recent = db.prepare(
+        "SELECT job_type, status, MAX(ran_at) as ran_at FROM cron_log " +
+        "WHERE ran_at > " + window25h + " GROUP BY job_type"
+      ).all();
+      const byJob = {};
+      for (const r of recent) byJob[r.job_type] = r;
+      const requiredJobs = ['odds', 'lineups', 'scores'];
+      const failures = [], warnings = [];
+      for (const j of requiredJobs) {
+        const row = byJob[j];
+        if (!row) { failures.push(j + ': no run in last 25h'); continue; }
+        // 'bootstrap-only' counts as success-ish for lineups (statsapi rows
+        // landed even when RotoWire skipped); 'success' is full success.
+        if (row.status === 'success' || row.status === 'bootstrap-only') continue;
+        warnings.push(j + ': last run ' + row.status);
+      }
+      const status = failures.length ? 'fail' : (warnings.length ? 'warn' : 'pass');
+      const msg = failures.length || warnings.length
+        ? failures.concat(warnings).join('; ')
+        : 'odds, lineups, scores all ran successfully in last 24h';
+      checks.push({ id: 'cron_health', status, severity: 'warn', message: msg });
+    }
+
+    // ---- check 10: sources_active ----
+    {
+      // ml_source / xcheck_source aren't persisted in game_log today (only
+      // total_source / xcheck_total_source were added in PR #10). So this
+      // check counts total-side sources only. The detail keys ml/totals
+      // mirror what a future schema-extended version would emit.
+      const totSrc = {}, xchTotSrc = {};
+      for (const g of games) {
+        if (g.total_source) totSrc[g.total_source] = (totSrc[g.total_source] || 0) + 1;
+        if (g.xcheck_total_source) xchTotSrc[g.xcheck_total_source] = (xchTotSrc[g.xcheck_total_source] || 0) + 1;
+      }
+      const totParts = Object.entries(totSrc).map(([k, v]) => k + '×' + v);
+      const xchParts = Object.entries(xchTotSrc).map(([k, v]) => k + '×' + v);
+      checks.push({
+        id: 'sources_active',
+        status: 'pass',
+        severity: 'info',
+        message: 'totals: ' + (totParts.join(', ') || 'none')
+          + ' · xcheck-totals: ' + (xchParts.join(', ') || 'none'),
+        detail: {
+          totals: totSrc,
+          totals_xcheck: xchTotSrc,
+          note: 'ml_source not persisted in game_log; only totals sources tracked',
+        },
+      });
+    }
+
+    // ---- check 11: sources_missing (today vs yesterday) ----
+    {
+      const yest = new Date(date + 'T00:00:00Z');
+      yest.setUTCDate(yest.getUTCDate() - 1);
+      const yestStr = yest.toISOString().slice(0, 10);
+      const yestRows = db.prepare(
+        "SELECT total_source, xcheck_total_source FROM game_log WHERE game_date=?"
+      ).all(yestStr);
+      if (yestRows.length === 0) {
+        checks.push({ id: 'sources_missing', status: 'pass', severity: 'info',
+          message: 'no comparison baseline (' + yestStr + ' had 0 games)' });
+      } else {
+        const todaySrcSet = new Set();
+        for (const g of games) {
+          if (g.total_source) todaySrcSet.add(g.total_source);
+          if (g.xcheck_total_source) todaySrcSet.add(g.xcheck_total_source);
+        }
+        const yestSrcSet = new Set();
+        for (const r of yestRows) {
+          if (r.total_source) yestSrcSet.add(r.total_source);
+          if (r.xcheck_total_source) yestSrcSet.add(r.xcheck_total_source);
+        }
+        const missing = [...yestSrcSet].filter(s => !todaySrcSet.has(s));
+        checks.push({
+          id: 'sources_missing',
+          status: missing.length === 0 ? 'pass' : 'warn',
+          severity: 'info',
+          message: missing.length === 0
+            ? 'all sources from ' + yestStr + ' still active'
+            : missing.length + ' source(s) contributed ' + yestStr + ' but not today: ' + missing.join(', '),
+        });
+      }
+    }
+
+    // ---- check 12: settings_sanity ----
+    {
+      const settingsRows = db.prepare("SELECT key, value FROM app_settings").all();
+      const s = {};
+      for (const r of settingsRows) s[r.key] = r.value;
+      const violations = [];
+
+      // Numeric range checker: handles blank/missing/non-numeric/out-of-range.
+      // Returns the parsed number on pass, null on fail (so sum checks can
+      // skip cleanly when an individual value already failed). Lo/hi are
+      // inclusive when prefixed by '=' in opts; default exclusive both sides.
+      const range = (key, lo, hi, opts) => {
+        opts = opts || {};
+        const v = s[key];
+        if (v == null || v === '') {
+          violations.push({ key, value: v == null ? null : '', expected: opts.includeLo ? '['+lo : '('+lo + ', ' + hi + (opts.includeHi ? ']' : ')'), reason: 'blank' });
+          return null;
+        }
+        const n = Number(v);
+        if (!Number.isFinite(n)) {
+          violations.push({ key, value: v, expected: '(' + lo + ', ' + hi + ')', reason: 'not_numeric' });
+          return null;
+        }
+        const failLo = opts.includeLo ? n < lo : n <= lo;
+        const failHi = opts.includeHi ? n > hi : n >= hi;
+        if (failLo || failHi) {
+          violations.push({
+            key, value: n,
+            expected: (opts.includeLo ? '[' : '(') + lo + ', ' + hi + (opts.includeHi ? ']' : ')'),
+            reason: 'out_of_range',
+          });
+          return null;
+        }
+        return n;
+      };
+
+      // Pair-sum checker: validates two keys sum to target within tolerance.
+      // Skips silently if either key already failed range — caller catches
+      // those individually.
+      const sumTo = (k1, k2, target, tol) => {
+        target = target == null ? 1.0 : target;
+        tol = tol == null ? 0.02 : tol;
+        const v1 = Number(s[k1]), v2 = Number(s[k2]);
+        if (!Number.isFinite(v1) || !Number.isFinite(v2)) return;
+        if (Math.abs(v1 + v2 - target) >= tol) {
+          violations.push({
+            key: k1 + '+' + k2,
+            value: v1 + ' + ' + v2 + ' = ' + (v1 + v2).toFixed(4),
+            expected: '≈ ' + target + ' (±' + tol + ')',
+            reason: 'sum_off',
+          });
+        }
+      };
+
+      range('w_pit',                 0.4,  0.7);
+      range('w_bat',                 0.4,  0.7);
+      sumTo('w_pit', 'w_bat');
+      range('sp_pit_weight',         0.5,  0.95);
+      range('relief_pit_weight',     0.05, 0.50);
+      sumTo('sp_pit_weight', 'relief_pit_weight');
+      range('sp_weight',             0.5,  0.95);
+      range('relief_weight',         0.05, 0.50);
+      sumTo('sp_weight', 'relief_weight');
+      range('run_mult',              30,   60);
+      range('tot_slope',             0.05, 0.15);
+      range('wp_clamp_lo',           0.20, 0.50, { includeLo: true });
+      range('wp_clamp_hi',           0.50, 0.80, { includeHi: true });
+      // Cross-key ordering check
+      {
+        const lo = Number(s['wp_clamp_lo']), hi = Number(s['wp_clamp_hi']);
+        if (Number.isFinite(lo) && Number.isFinite(hi) && !(lo < hi)) {
+          violations.push({ key: 'wp_clamp_lo<wp_clamp_hi', value: lo + ' vs ' + hi, expected: 'lo < hi', reason: 'ordering' });
+        }
+      }
+      range('tot_prob_lo',           0.20, 0.50, { includeLo: true });
+      range('tot_prob_hi',           0.50, 0.80, { includeHi: true });
+      range('hfa_boost',             0.0,  0.10);
+      range('bullpen_avg',           0.25, 0.40);
+      range('woba_baseline',         0.20, 0.30);
+      range('pyth_exp',              1.5,  2.5);
+      range('w_proj',                0.5,  1.0);
+      range('w_act',                 0.0,  0.5);
+      sumTo('w_proj', 'w_act');
+      range('bp_strong_weight_r',    0.3,  0.8);
+      range('bp_weak_weight_r',      0.2,  0.7);
+      sumTo('bp_strong_weight_r', 'bp_weak_weight_r');
+      range('bp_strong_weight_l',    0.2,  0.7);
+      range('bp_weak_weight_l',      0.3,  0.8);
+      sumTo('bp_strong_weight_l', 'bp_weak_weight_l');
+
+      const status = violations.length ? 'fail' : 'pass';
+      const message = violations.length === 0
+        ? 'All settings invariants pass'
+        : violations.length + ' settings violation(s): ' + violations.slice(0, 5).map(v => v.key + '=' + v.value + ' (' + v.reason + ')').join('; ') + (violations.length > 5 ? '; +' + (violations.length - 5) + ' more' : '');
+      checks.push({ id: 'settings_sanity', status, severity: 'error', message, detail: { violations } });
+    }
+
+    // ---- aggregate overall_status ----
+    // - any fail with severity 'error' → 'broken'
+    // - any (fail|warn) with severity 'warn' → 'degraded'
+    // - any fail with severity 'info' → 'degraded'
+    // - else → 'healthy'
+    let overall_status = 'healthy';
+    for (const c of checks) {
+      if (c.status === 'fail' && c.severity === 'error') { overall_status = 'broken'; break; }
+    }
+    if (overall_status === 'healthy') {
+      for (const c of checks) {
+        if ((c.status === 'fail' || c.status === 'warn') && c.severity === 'warn') {
+          overall_status = 'degraded';
+          break;
+        }
+        if (c.status === 'fail' && c.severity === 'info') {
+          overall_status = 'degraded';
+          break;
+        }
+      }
+    }
+
+    res.json({
+      date,
+      generated_at: new Date().toISOString(),
+      overall_status,
+      summary,
+      checks,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 module.exports = router;
 
 

@@ -224,9 +224,14 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <!-- TODAY'S GAMES -->
 <div id="sec-games" class="sec active">
 <div id="games-warn" class="card-warn" style="display:none">No games found for this date.</div>
+<div id="health-panel" style="display:none;background:rgba(0,0,0,0.04);border:1px solid rgba(150,150,150,0.25);border-radius:6px;padding:10px 12px;margin-bottom:1rem;font-size:12px"></div>
 <div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
-<input type="date" id="games-date" style="width:150px" onchange="loadGamesFromDB()">
+<input type="date" id="games-date" style="width:150px" onchange="loadGamesFromDB(); refreshHealth();">
 <button class="btn btn-primary btn-sm" onclick="loadGamesFromDB()">Load Games</button>
+<span id="health-pill" onclick="toggleHealthPanel()" title="Slate health — click for details" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;padding:4px 10px;border-radius:12px;background:rgba(150,150,150,0.12);font-size:11px;color:var(--text2);user-select:none">
+  <span id="health-dot" style="width:10px;height:10px;border-radius:50%;background:#9ca3af;display:inline-block"></span>
+  <span id="health-label">Health …</span>
+</span>
 <button class="btn btn-ghost btn-sm" onclick="refreshLineups()">→³ Refresh Lineups</button>
 <button class="btn btn-ghost btn-sm" onclick="triggerScores()">Pull Scores</button>
         <button class="btn btn-ghost btn-sm" onclick="triggerRosters()">👥 Pull Rosters</button>
@@ -535,6 +540,8 @@ async function init(){
   await refreshWobaStatus();
   await loadGamesFromDB();
   await fetchServerWoba();
+  // Slate health is fire-and-forget — never blocks games render.
+  refreshHealth();
   // Populate window.PA_WEIGHTS (and the rest of the Model form) from
   // the live settings so Matchup-tab previews match what the server
   // uses. Fire-and-forget — loadSettings has its own error handling.
@@ -609,6 +616,69 @@ async function processFiles(files){
   await refreshWobaStatus();
   st.className=err?'notice warn':'notice ok';
   st.textContent='✓ '+ok+' file(s) uploaded'+( err?' · '+err+' failed':'')+'';
+}
+
+// Slate health pill — async-fetched, never blocks page render. Background
+// refresh ~every page load + every date change. Endpoint failure shows a
+// gray dot with the error in the tooltip; the pill click expands a panel
+// listing all 12 checks with their messages.
+var _healthData = null;
+function setHealthDot(color, label, title) {
+  var dot = document.getElementById('health-dot');
+  var lbl = document.getElementById('health-label');
+  var pill = document.getElementById('health-pill');
+  if (dot) dot.style.background = color;
+  if (lbl) lbl.textContent = label;
+  if (pill && title) pill.title = title;
+}
+function renderHealthPanel() {
+  var panel = document.getElementById('health-panel');
+  if (!panel) return;
+  if (!_healthData) {
+    panel.innerHTML = '<span style="color:var(--text2)">Health data unavailable</span>';
+    return;
+  }
+  var d = _healthData;
+  var sumKeys = ['games_total','games_with_sp','games_with_lineups_confirmed','games_with_ml','games_with_totals_primary','games_with_totals_xcheck','games_flagged'];
+  var sumLine = sumKeys.map(function(k){ return k.replace(/_/g,' ') + ': ' + d.summary[k]; }).join(' · ');
+  var rows = (d.checks || []).map(function(c) {
+    var color = c.status === 'pass' ? '#16a34a' : c.status === 'warn' ? '#d97706' : '#dc2626';
+    var dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:8px;vertical-align:middle"></span>';
+    var aff = c.affected_games && c.affected_games.length
+      ? '<div style="font-size:10px;color:var(--text2);margin-left:18px;margin-top:2px">' + c.affected_games.join(', ') + '</div>'
+      : '';
+    return '<div style="margin:4px 0">' + dot + '<b>' + c.id + '</b> <span style="color:var(--text2)">[' + c.severity + ']</span> — ' + c.message + aff + '</div>';
+  }).join('');
+  panel.innerHTML =
+    '<div style="font-weight:600;margin-bottom:6px">Slate health: ' + d.overall_status.toUpperCase() + ' <span style="color:var(--text2);font-weight:400;font-size:11px">(' + d.date + ', generated ' + d.generated_at.slice(11,19) + 'Z)</span></div>'
+    + '<div style="font-size:11px;color:var(--text2);margin-bottom:8px">' + sumLine + '</div>'
+    + rows;
+}
+function toggleHealthPanel() {
+  var p = document.getElementById('health-panel');
+  if (!p) return;
+  if (p.style.display === 'none') { renderHealthPanel(); p.style.display = 'block'; }
+  else { p.style.display = 'none'; }
+}
+async function refreshHealth() {
+  var d = (document.getElementById('games-date') || {}).value || todayStr();
+  setHealthDot('#9ca3af', 'Health …', 'Loading');
+  try {
+    var resp = await fetch('/api/health/' + encodeURIComponent(d));
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var j = await resp.json();
+    _healthData = j;
+    var color = j.overall_status === 'healthy' ? '#16a34a'
+              : j.overall_status === 'degraded' ? '#d97706'
+              : '#dc2626';
+    setHealthDot(color, j.overall_status, j.overall_status + ' — click for details');
+    // If the panel is currently open, re-render with fresh data.
+    var p = document.getElementById('health-panel');
+    if (p && p.style.display !== 'none') renderHealthPanel();
+  } catch (e) {
+    _healthData = null;
+    setHealthDot('#9ca3af', 'Health ?', 'health check failed: ' + e.message);
+  }
 }
 
 // Load games from DB only — no scraping
