@@ -937,23 +937,37 @@ async function runOddsJob(dateStr) {
       } else if (haveTot && !haveXcheckTot) {
         reasons.push('single-source total, no cross-check available');
       } else if (haveTot && haveXcheckTot) {
-        // Compare books on PROBABILITY space, not LINE space. Different
-        // books can quote different lines (one at 7.5, another at 8.5) but
-        // imply nearly the same true total via their juice — that's not
-        // disagreement, that's a pivot choice. The previous check flagged
-        // any |line - line| >= 1.0 unconditionally and tripped false
-        // positives (e.g. ATH@TEX 2026-04-25: kalshi 7.5 -133/+108 vs
-        // sporttrade 8.5 +100/-120, max(|0.571-0.500|, |0.481-0.545|) =
-        // 0.071 — within typical book noise but flagged as divergence).
+        // Project xcheck's P(over) / P(under) onto primary's line before
+        // comparing. PR #27 fixed the line-distance threshold by switching
+        // to probability space, but compared P(over X.5) directly to
+        // P(over Y.5) — those are probabilities of DIFFERENT events when
+        // the lines differ, so two books that genuinely agree about the
+        // distribution still showed a large raw Δp.
         //
-        // Unified rule: take max(|Δover-prob|, |Δunder-prob|) across the
-        // two books. Flag when > 0.08, same threshold as the same-line
-        // juice divergence check. The flag-reason string distinguishes
-        // cross-line from same-line cases for readability but the
-        // threshold is identical.
+        // Concrete failure pre-projection: BOS@BAL 2026-04-26 with
+        // polymarket 8.5 +133/-138 (P(over 8.5)=0.429) vs sporttrade
+        // 7.5 -122/-111 (P(over 7.5)=0.550). Raw Δp=0.121 → flagged, but
+        // the books actually agree: Polymarket's 0.429 over 8.5 maps to
+        // ~0.55 over 7.5 via the empirical curve, matching Sporttrade.
+        //
+        // Heuristic: dropping the line by 1.0 lifts P(over) by roughly
+        // 0.12 in the 7-9 run range (RUNS_TO_PROB). To compare books on a
+        // common line, project xcheck onto primary's line:
+        //   xchkP_over_at_primary = xchkP_over - lineDelta * 0.12
+        //   xchkP_under_at_primary = xchkP_under + lineDelta * 0.12
+        // where lineDelta = primary_line - xcheck_line. Same threshold
+        // (0.08) and same flag-reason strings as PR #27.
+        const RUNS_TO_PROB = 0.12;
         const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
-        const dOver  = Math.abs(impP(o.over_price)  - impP(o.xcheck_over_price));
-        const dUnder = Math.abs(impP(o.under_price) - impP(o.xcheck_under_price));
+        const lineDelta = o.market_total - o.xcheck_total;
+        const primP_over  = impP(o.over_price);
+        const xchkP_over  = impP(o.xcheck_over_price);
+        const xchkP_over_at_primary = xchkP_over - lineDelta * RUNS_TO_PROB;
+        const dOver  = Math.abs(primP_over - xchkP_over_at_primary);
+        const primP_under = impP(o.under_price);
+        const xchkP_under = impP(o.xcheck_under_price);
+        const xchkP_under_at_primary = xchkP_under + lineDelta * RUNS_TO_PROB;
+        const dUnder = Math.abs(primP_under - xchkP_under_at_primary);
         const d = Math.max(dOver, dUnder);
         if (d > 0.08) {
           if (o.market_total !== o.xcheck_total) {
