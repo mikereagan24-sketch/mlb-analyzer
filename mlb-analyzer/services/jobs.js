@@ -400,6 +400,8 @@ async function runLineupJob(dateStr) {
           model_home_ml:  existingRow ? existingRow.model_home_ml : null,
           model_total:    existingRow ? existingRow.model_total : null,
           lineup_source:  existingRow ? existingRow.lineup_source : 'auto',
+          venue_id:       g.venue_id != null ? g.venue_id : (existingRow ? existingRow.venue_id : null),
+          venue_name:     g.venue_name != null ? g.venue_name : (existingRow ? existingRow.venue_name : null),
         });
       }
       console.log('[lineup-job] statsapi bootstrap upserted ' + bootstrapRows.length + ' rows for ' + dateStr);
@@ -525,6 +527,10 @@ async function runLineupJob(dateStr) {
         model_home_ml: existingRow ? existingRow.model_home_ml : null,
         model_total:   existingRow ? existingRow.model_total   : null,
         lineup_source: 'auto',
+        // RotoWire payload doesn't carry venue, so fall back to the existing
+        // bootstrapped venue. Statsapi-bootstrapped venue_id wins when set.
+        venue_id:   g.venue_id != null ? g.venue_id : (existingRow ? existingRow.venue_id : null),
+        venue_name: g.venue_name != null ? g.venue_name : (existingRow ? existingRow.venue_name : null),
           away_lineup_status: g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
       home_lineup_status: g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
       lineup_status: g.lineup_status || 'projected',

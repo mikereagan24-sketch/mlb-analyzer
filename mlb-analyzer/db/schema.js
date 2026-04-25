@@ -79,6 +79,8 @@ db.exec(`
   total_source TEXT,
   ml_source TEXT,
   xcheck_ml_source TEXT,
+  venue_id INTEGER,
+  venue_name TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -255,6 +257,8 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_total_source TEXT"); } cat
 try { db.exec("ALTER TABLE game_log ADD COLUMN total_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN venue_name TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
 // check replaces the old "sharp consensus" terminology — the column holds
@@ -331,12 +335,14 @@ const q = {
       game_date, game_id, away_team, home_team, game_time,
       away_sp, away_sp_hand, home_sp, home_sp_hand,
       market_away_ml, market_home_ml, market_total, park_factor,
-      model_away_ml, model_home_ml, model_total, lineup_source, updated_at
+      model_away_ml, model_home_ml, model_total, lineup_source,
+      venue_id, venue_name, updated_at
     ) VALUES (
       @game_date, @game_id, @away_team, @home_team, @game_time,
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
-      @model_away_ml, @model_home_ml, @model_total, @lineup_source, datetime('now')
+      @model_away_ml, @model_home_ml, @model_total, @lineup_source,
+      @venue_id, @venue_name, datetime('now')
     )
     ON CONFLICT(game_date, game_id) DO UPDATE SET
       -- COALESCE SP fields so a later upsert with null SP (e.g. RotoWire
@@ -352,6 +358,10 @@ const q = {
       market_total = excluded.market_total, park_factor = excluded.park_factor,
       model_away_ml = excluded.model_away_ml, model_home_ml = excluded.model_home_ml,
       model_total = excluded.model_total, lineup_source = excluded.lineup_source,
+      -- COALESCE venue fields so a RotoWire-only upsert (which doesn't
+      -- carry venue from statsapi) doesn't wipe a bootstrapped venue_id.
+      venue_id = COALESCE(excluded.venue_id, game_log.venue_id),
+      venue_name = COALESCE(excluded.venue_name, game_log.venue_name),
       updated_at = datetime('now')
   `),
   updateScores: db.prepare(`

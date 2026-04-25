@@ -727,6 +727,8 @@ async function fetchSchedule(dateStr) {
       away_lineup: [],
       home_lineup: [],
       lineup_status: 'projected',
+      venue_id: g.venue?.id ?? null,
+      venue_name: g.venue?.name ?? null,
     });
   }
   console.log('[scraper] statsapi: ' + results.length + ' games for ' + dateStr);
