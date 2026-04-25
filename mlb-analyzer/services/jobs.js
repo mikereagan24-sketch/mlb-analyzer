@@ -858,29 +858,38 @@ async function runOddsJob(dateStr) {
     if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' Ã¢ÂÂ '+odds.length+' results');
     const wobaIdx = getWobaIndex();
     let updated = 0;
+    // Label-only UPDATE for locked games. Writes the 6 source/flag columns
+    // (ml_source, xcheck_ml_source, total_source, xcheck_total_source,
+    // odds_flagged, odds_flag_reason) using the fresh waterfall result.
+    // Does NOT touch market_*_ml / market_total / over/under_price / xcheck
+    // prices — those remain frozen at lock time so CLV calculations and
+    // existing bet_signals reference a stable snapshot. processGameSignals
+    // is NOT called: bet_signals on locked rows stay pinned.
+    //
+    // Hard write (no COALESCE) per spec — stale labels (e.g. pre-PR-#21
+    // 'single-source' strings written before the xcheck-skip-primary fix)
+    // get correctly overwritten with the post-fix waterfall result.
+    //
+    // CAVEAT: ml_source on a locked row reflects "the source Unabated's
+    // current waterfall would pick", not "the source the frozen prices
+    // originally came from." For strict provenance correctness we'd need
+    // a frozen_ml_source column written at lock time — out of scope here.
+    const refreshLockedLabels = db.prepare(`UPDATE game_log SET
+      ml_source=?, xcheck_ml_source=?,
+      total_source=?, xcheck_total_source=?,
+      odds_flagged=?, odds_flag_reason=?,
+      updated_at=datetime('now')
+      WHERE game_date=? AND game_id=?`);
+
     for (const o of odds) {
       console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_ml_source + ')');
-      // Skip if locked OR game has already started
       const existing = q.getGameById.get(dateStr, o.game_id);
-      if (existing && existing.odds_locked_at) { console.log('[odds] Skipping locked: '+o.game_id); continue; }
-      if (existing && gameHasStarted(existing, dateStr)) {
-        // Lock it now to prevent future updates
-        db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
-        console.log('[odds] Skipping started game: '+o.game_id);
-        // Auto-set closing lines on ML signals
-        const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, o.game_id);
-        for (const sig of mlSigsO) {
-          const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
-          let clv = null;
-          if (sig.bet_line != null && closingLine != null) {
-            const isFav = sig.bet_line < 0;
-            clv = isFav ? (closingLine - sig.bet_line) : (sig.bet_line - closingLine);
-          }
-          db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
-        }
-        continue;
-      }
-      // Build the list of flag reasons. Order of precedence:
+
+      // Build the list of flag reasons — hoisted above the lock checks so
+      // both locked-row label refresh and the regular unlocked UPDATE can
+      // share the same computed flag. Reasons are derived purely from o
+      // (the fresh fetch); no dependency on existing row state.
+      // Order of precedence:
       //   - No sane odds at all: overrides everything; market_* will be null.
       //   - Single-source: only one book returned a sane two-sided price, so
       //     the book-vs-book divergence check has nothing to compare against
@@ -940,6 +949,46 @@ async function runOddsJob(dateStr) {
       const oddsReason = reasons.length ? reasons.join(' | ') : null;
       const oddsFlagged = oddsReason ? 1 : 0;
       if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
+
+      // Locked: refresh source labels + flag, leave prices + bet_signals
+      // pinned. See refreshLockedLabels comment block above.
+      if (existing && existing.odds_locked_at) {
+        refreshLockedLabels.run(
+          o.ml_source || null, o.xcheck_ml_source || null,
+          o.total_source || null, o.xcheck_total_source || null,
+          oddsFlagged, oddsReason,
+          dateStr, o.game_id
+        );
+        console.log('[odds] Locked '+o.game_id+': refreshed source labels (prices frozen)');
+        continue;
+      }
+      if (existing && gameHasStarted(existing, dateStr)) {
+        // Lock it now to prevent future updates
+        db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
+        console.log('[odds] Skipping started game: '+o.game_id);
+        // Auto-set closing lines on ML signals
+        const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, o.game_id);
+        for (const sig of mlSigsO) {
+          const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
+          let clv = null;
+          if (sig.bet_line != null && closingLine != null) {
+            const isFav = sig.bet_line < 0;
+            clv = isFav ? (closingLine - sig.bet_line) : (sig.bet_line - closingLine);
+          }
+          db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+        }
+        // Same label refresh as the already-locked branch — first runOddsJob
+        // run after start time gets a chance to populate labels at the same
+        // moment the lock fires, so subsequent runs (which hit the locked
+        // branch) just keep refreshing the same values.
+        refreshLockedLabels.run(
+          o.ml_source || null, o.xcheck_ml_source || null,
+          o.total_source || null, o.xcheck_total_source || null,
+          oddsFlagged, oddsReason,
+          dateStr, o.game_id
+        );
+        continue;
+      }
       // Preserve existing non-null totals when incoming total is null.
       // Unabated's feed can serve partial responses (observed 2026-04-21:
       // two fetches seconds apart returned full totals then empty totals
