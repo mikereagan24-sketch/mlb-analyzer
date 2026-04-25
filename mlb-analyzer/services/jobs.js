@@ -858,6 +858,7 @@ async function runOddsJob(dateStr) {
     if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' Ã¢ÂÂ '+odds.length+' results');
     const wobaIdx = getWobaIndex();
     let updated = 0;
+    let lockedRefreshed = 0;
     // Label-only UPDATE for locked games. Writes the 6 source/flag columns
     // (ml_source, xcheck_ml_source, total_source, xcheck_total_source,
     // odds_flagged, odds_flag_reason) using the fresh waterfall result.
@@ -866,17 +867,32 @@ async function runOddsJob(dateStr) {
     // existing bet_signals reference a stable snapshot. processGameSignals
     // is NOT called: bet_signals on locked rows stay pinned.
     //
-    // Hard write (no COALESCE) per spec — stale labels (e.g. pre-PR-#21
-    // 'single-source' strings written before the xcheck-skip-primary fix)
-    // get correctly overwritten with the post-fix waterfall result.
+    // Mixed write semantics by intent:
+    //   - Source labels (ml_source/xcheck_ml_source/total_source/
+    //     xcheck_total_source): COALESCE(incoming, existing). When a
+    //     game is in progress and Unabated has pulled bt1 books, the
+    //     fresh fetch returns null sources for that game; hard write
+    //     would clobber the legitimate pre-lock label. COALESCE
+    //     preserves accurate provenance set when the row was last
+    //     refreshed against a complete feed.
+    //   - odds_flagged/odds_flag_reason: hard write. Stale flag strings
+    //     (e.g. pre-PR-#21 'single-source' written before the xcheck-
+    //     skip-primary fix) MUST overwrite cleanly — COALESCE would
+    //     keep the old buggy text. Flag is recomputed against the
+    //     fresh waterfall every run, so a transient null fetch
+    //     correctly emits 'no sane odds' rather than preserving stale
+    //     divergence text.
     //
-    // CAVEAT: ml_source on a locked row reflects "the source Unabated's
-    // current waterfall would pick", not "the source the frozen prices
-    // originally came from." For strict provenance correctness we'd need
-    // a frozen_ml_source column written at lock time — out of scope here.
+    // CAVEAT: ml_source on a locked row reflects "the source the most
+    // recent complete fetch picked", not strictly "the source the
+    // frozen prices originally came from." For strict provenance
+    // correctness we'd need a frozen_ml_source column written at lock
+    // time — out of scope here.
     const refreshLockedLabels = db.prepare(`UPDATE game_log SET
-      ml_source=?, xcheck_ml_source=?,
-      total_source=?, xcheck_total_source=?,
+      ml_source=COALESCE(?, ml_source),
+      xcheck_ml_source=COALESCE(?, xcheck_ml_source),
+      total_source=COALESCE(?, total_source),
+      xcheck_total_source=COALESCE(?, xcheck_total_source),
       odds_flagged=?, odds_flag_reason=?,
       updated_at=datetime('now')
       WHERE game_date=? AND game_id=?`);
@@ -959,6 +975,7 @@ async function runOddsJob(dateStr) {
           oddsFlagged, oddsReason,
           dateStr, o.game_id
         );
+        lockedRefreshed++;
         console.log('[odds] Locked '+o.game_id+': refreshed source labels (prices frozen)');
         continue;
       }
@@ -987,6 +1004,7 @@ async function runOddsJob(dateStr) {
           oddsFlagged, oddsReason,
           dateStr, o.game_id
         );
+        lockedRefreshed++;
         continue;
       }
       // Preserve existing non-null totals when incoming total is null.
@@ -1032,8 +1050,8 @@ async function runOddsJob(dateStr) {
       const gameRow = q.getGameById.get(dateStr, o.game_id);
       if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
     }
-    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + (odds.length ? odds[0].source || 'odds' : 'no source'), updated);
-    return { success: true, updated, date: dateStr };
+    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) (+' + lockedRefreshed + ' locked-row label refreshes) from ' + (odds.length ? odds[0].source || 'odds' : 'no source'), updated);
+    return { success: true, updated, locked_refreshed: lockedRefreshed, date: dateStr };
   } catch(err) {
     console.error('[odds-job]', err.message);
     q.logCron.run('odds', dateStr, 'error', err.message, 0);

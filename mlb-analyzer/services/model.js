@@ -246,6 +246,17 @@ function getSignals(game, modelResult, settings) {
   // or partial lineups — see runModel). modelResult.aML / .estTot are
   // null in that case, so even attempting to push signals would crash.
   if (modelResult && modelResult._suppressed) return [];
+  // No signals when the market side is null. Mirrors the empty-lineup
+  // suppression: with no market price to anchor against, the edge calc
+  // either falls to MARKET_TOTAL_DFLT (totals) or computes |model|+|0|
+  // garbage edge (ML), producing degenerate high-edge signals on rows
+  // where Unabated never delivered sane prices (e.g. games already in
+  // progress when the row was first written, books pulling bt1
+  // contracts mid-game, or postponed games with no live market).
+  // ML and totals are gated independently — a row with valid ML but
+  // null total can still emit ML signals.
+  const haveMlMarket  = game.market_away_ml != null && game.market_home_ml != null;
+  const haveTotMarket = game.market_total != null;
   const ML_1STAR = typeof settings.ML_LEAN_EDGE    !== 'undefined' ? Number(settings.ML_LEAN_EDGE)    : 15;
   const ML_2STAR = typeof settings.ML_VALUE_EDGE   !== 'undefined' ? Number(settings.ML_VALUE_EDGE)   : 30;
   const ML_3STAR = typeof settings.ML_3STAR_EDGE   !== 'undefined' ? Number(settings.ML_3STAR_EDGE)   : 60;
@@ -281,8 +292,8 @@ function getSignals(game, modelResult, settings) {
 
   const aLabel = mlLabel(awayEdge);
   const hLabel = mlLabel(homeEdge);
-  if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
-  if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
+  if (haveMlMarket && aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
+  if (haveMlMarket && hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
 
   // Prefer the xcheck source for the total-side edge calc. Kalshi (the
   // primary source) has a thin MLB O/U book and routinely posts outlier
@@ -328,8 +339,8 @@ function getSignals(game, modelResult, settings) {
   };
   const oLabel = totLabel(overEdge);
   const uLabel = totLabel(underEdge);
-  if (oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
-  if (uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
+  if (haveTotMarket && oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
+  if (haveTotMarket && uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
 
   return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
 }
