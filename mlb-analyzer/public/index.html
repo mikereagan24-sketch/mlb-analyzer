@@ -900,8 +900,9 @@ function renderGameGrid(games,date){
     return'<div class="'+cardClass+'" id="gc-'+g.game_id+'">'+
       (ptTime?'<div class="gtime">'+ptTime+'</div>':'')+
       '<div class="gteams">'+g.away_team+' @ '+g.home_team+
+      (g.is_postponed?' <span style="background:#cc3333;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px;letter-spacing:0.5px">POSTPONED</span>':'')+
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
-      (sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
+      (!g.is_postponed&&sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
       '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+(g.temp_f!=null ? (function(){
         var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
@@ -958,8 +959,8 @@ function renderGameGrid(games,date){
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
       '</div>'+
-      '<div class="gresult '+(g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
-      (g.model_away_ml?renderGameResult(g):'')+
+      '<div class="gresult '+(!g.is_postponed&&g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
+      (!g.is_postponed&&g.model_away_ml?renderGameResult(g):'')+
       '</div></div>';
   }).join('');
 }
@@ -1124,7 +1125,7 @@ async function renderMatchupGame(id){
   const aL=gw(pA,'vsLHB'),aR=gw(pA,'vsRHB'),hL=gw(pH,'vsLHB'),hR=gw(pH,'vsRHB');
   const gid=g.game_id;
   document.getElementById('mu-content').innerHTML=
-    '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap"><span style="font-size:16px;font-weight:500">'+g.away_team+' @ '+g.home_team+'</span><span style="font-size:12px;color:var(--text2)">'+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' O/U '+g.market_total+'</span>'+(g.away_score!=null?'<span style="font-size:12px;font-weight:500;color:var(--navy)">Final: '+g.away_score+'-'+g.home_score+'</span>':'')+(g.game_time?'<span style="font-size:11px;color:var(--text3)">'+etToPT(g.game_time)+'</span>':'')+'</div>'+nt
+    '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap"><span style="font-size:16px;font-weight:500">'+g.away_team+' @ '+g.home_team+'</span>'+(g.is_postponed?'<span style="background:#cc3333;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;letter-spacing:0.5px">POSTPONED</span>':'')+'<span style="font-size:12px;color:var(--text2)">'+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' O/U '+g.market_total+'</span>'+(g.away_score!=null?'<span style="font-size:12px;font-weight:500;color:var(--navy)">Final: '+g.away_score+'-'+g.home_score+'</span>':'')+(g.game_time?'<span style="font-size:11px;color:var(--text3)">'+etToPT(g.game_time)+'</span>':'')+'</div>'+nt
     +'<div class="grid-2" style="margin-bottom:14px"><div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Away SP vs home batters</div><div style="font-size:13px;font-weight:500">'+(g.away_sp||'TBD')+' '+sb(g.away_sp_hand||'R')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wc(aL)+';padding:1px 5px">'+aL.toFixed(3)+'</span> vsRHB <span style="'+wc(aR)+';padding:1px 5px">'+aR.toFixed(3)+'</span></div></div><div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Home SP vs away batters</div><div style="font-size:13px;font-weight:500">'+(g.home_sp||'TBD')+' '+sb(g.home_sp_hand||'R')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wc(hL)+';padding:1px 5px">'+hL.toFixed(3)+'</span> vsRHB <span style="'+wc(hR)+';padding:1px 5px">'+hR.toFixed(3)+'</span></div></div></div>'
     
     +renderModelOutput(g)
