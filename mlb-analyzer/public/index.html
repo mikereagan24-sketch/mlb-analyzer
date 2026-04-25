@@ -1084,6 +1084,58 @@ function renderModelOutput(g) {
     +'<div style="border-top:1px solid var(--border);padding-top:8px"><div style="font-size:10px;font-weight:500;color:var(--green);margin-bottom:4px">&#10003; Confirmed Lineup</div>'+confRow+'</div>'
     +'</div>';
 }
+function renderWobaBreakdown(g, wd){
+  if(!wd) return '<details style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px"><summary style="cursor:pointer;font-weight:600;font-size:12px;color:var(--text2);user-select:none">&#9654; wOBA Breakdown</summary><div style="margin-top:8px;font-size:11px;color:var(--text3);font-style:italic">No CSV wOBA data &#8212; upload FanGraphs CSVs in Data Import.</div></details>';
+  const fmt3 = v => (v==null)?'—':(typeof v==='number'?v.toFixed(3):v);
+  const fmtAct = (v, pa) => v==null ? '—' : v.toFixed(3) + ' <span style="color:var(--text3);font-size:10px">('+pa+')</span>';
+  const moveStyle = (blend, proj) => (proj!=null && blend!=null && Math.abs(blend-proj) > 0.015) ? 'font-weight:600;color:var(--yellow)' : '';
+  const batterRow = (b,i) => {
+    const moveSP  = moveStyle(b.wobaVsSP,  b.wobaProj_vsSP);
+    const moveOpp = moveStyle(b.wobaVsOpp, b.wobaProj_vsOpp);
+    return '<tr>'+
+      '<td style="padding:2px 4px;text-align:center">'+(i+1)+'</td>'+
+      '<td style="padding:2px 4px;text-align:left">'+b.name+' <span style="color:var(--text3);font-size:10px">('+(b.hand||'?')+')</span></td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmt3(b.wobaProj_vsSP)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmtAct(b.wobaActual_vsSP, b.wobaActual_PA_vsSP)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right;'+moveSP+'">'+fmt3(b.wobaVsSP)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmt3(b.wobaProj_vsOpp)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmtAct(b.wobaActual_vsOpp, b.wobaActual_PA_vsOpp)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right;'+moveOpp+'">'+fmt3(b.wobaVsOpp)+'</td>'+
+      '<td style="padding:2px 4px;text-align:center;color:var(--text3);font-size:10px">'+(b.source||'—')+'</td>'+
+    '</tr>';
+  };
+  const batterHeader = '<thead><tr style="font-size:10px;color:var(--text2);background:var(--bg2)"><th style="padding:3px 4px">#</th><th style="padding:3px 4px;text-align:left">Batter (Hand)</th><th style="padding:3px 4px;text-align:right">vsSP Proj</th><th style="padding:3px 4px;text-align:right">vsSP Actual (PA)</th><th style="padding:3px 4px;text-align:right">vsSP Blend</th><th style="padding:3px 4px;text-align:right">vsOpp Proj</th><th style="padding:3px 4px;text-align:right">vsOpp Actual (PA)</th><th style="padding:3px 4px;text-align:right">vsOpp Blend</th><th style="padding:3px 4px">Source</th></tr></thead>';
+  const batterTable = (lu, label) =>
+    '<div style="font-size:11px;color:var(--text2);font-weight:500;margin:10px 0 4px">'+label+'</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums">'+batterHeader+'<tbody>'+(lu.length?lu.map(batterRow).join(''):'<tr><td colspan="9" style="padding:6px;text-align:center;color:var(--text3);font-style:italic">No lineup</td></tr>')+'</tbody></table>';
+  const spRow = (name, hand, sp) => {
+    const lhb = (sp && sp.vsLHB) || {}, rhb = (sp && sp.vsRHB) || {};
+    const moveL = moveStyle(lhb.woba, lhb.wobaProj);
+    const moveR = moveStyle(rhb.woba, rhb.wobaProj);
+    return '<tr>'+
+      '<td style="padding:2px 4px;text-align:left">'+(name||'TBD')+' <span style="color:var(--text3);font-size:10px">('+(hand||'?')+')</span></td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmt3(lhb.wobaProj)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmtAct(lhb.wobaActual, lhb.wobaActual_TBF)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right;'+moveL+'">'+fmt3(lhb.woba)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmt3(rhb.wobaProj)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right">'+fmtAct(rhb.wobaActual, rhb.wobaActual_TBF)+'</td>'+
+      '<td style="padding:2px 4px;text-align:right;'+moveR+'">'+fmt3(rhb.woba)+'</td>'+
+      '<td style="padding:2px 4px;text-align:center;color:var(--text3);font-size:10px">'+(lhb.source||'—')+'</td>'+
+    '</tr>';
+  };
+  const spHeader = '<thead><tr style="font-size:10px;color:var(--text2);background:var(--bg2)"><th style="padding:3px 4px;text-align:left">SP</th><th style="padding:3px 4px;text-align:right">vsLHB Proj</th><th style="padding:3px 4px;text-align:right">vsLHB Actual (TBF)</th><th style="padding:3px 4px;text-align:right">vsLHB Blend</th><th style="padding:3px 4px;text-align:right">vsRHB Proj</th><th style="padding:3px 4px;text-align:right">vsRHB Actual (TBF)</th><th style="padding:3px 4px;text-align:right">vsRHB Blend</th><th style="padding:3px 4px">Source</th></tr></thead>';
+  const spTable = '<div style="font-size:11px;color:var(--text2);font-weight:500;margin:12px 0 4px">Starting Pitchers</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums">'+spHeader+'<tbody>'+
+      spRow(g.away_sp, g.away_sp_hand, wd.away_sp_woba)+
+      spRow(g.home_sp, g.home_sp_hand, wd.home_sp_woba)+
+    '</tbody></table>';
+  return '<details style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px"><summary style="cursor:pointer;font-weight:600;font-size:12px;color:var(--text2);user-select:none">&#9654; wOBA Breakdown <span style="font-weight:400;color:var(--text3);font-size:11px">(Steamer / FanGraphs Actual / Blend per batter and SP)</span></summary><div style="margin-top:8px">'+
+    batterTable(wd.away_batters||[], (g.away_team||'AWAY')+' Batters')+
+    batterTable(wd.home_batters||[], (g.home_team||'HOME')+' Batters')+
+    spTable+
+    '<div style="margin-top:8px;font-size:10px;color:var(--text3)">Bold blend cell = differs from Steamer projection by &gt;.015 wOBA. Actual is null and shown as — if PA/TBF below MIN_PA / MIN_BF threshold.</div>'+
+    '</div></details>';
+}
 async function renderMatchupGame(id){
   const g=currentGames.find(x=>x.game_id===id);
   if(!g){document.getElementById('mu-content').innerHTML='<div class="notice">Select a game above</div>';
@@ -1130,6 +1182,7 @@ async function renderMatchupGame(id){
     
     +renderModelOutput(g)
     +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
+    +renderWobaBreakdown(g, wd)
     +'<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(\'' +gid+ '\')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(\'' +gid+ '\')">Rerun Model</button></div>';
 }
 

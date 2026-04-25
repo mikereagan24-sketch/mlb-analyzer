@@ -21,9 +21,12 @@ function blendWoba(proj, act, minSample, wProj, wAct) {
   const ha = act && !isNaN(act.woba) && act.sample >= minSample;
   const wp = wProj || 0.65;
   const wa = wAct  || 0.35;
-  if (hp && ha) return { woba: proj.woba*wp + act.woba*wa, source:'blend' };
-  if (hp) return { woba: proj.woba, source:'steamer' };
-  if (ha) return { woba: act.woba, source:'actual' };
+  const projWoba = hp ? proj.woba : null;
+  const actWoba  = ha ? act.woba  : null;
+  const actPA    = ha ? act.sample : 0;
+  if (hp && ha) return { woba: proj.woba*wp + act.woba*wa, source:'blend',  proj: projWoba, actual: actWoba, actualPA: actPA };
+  if (hp)       return { woba: proj.woba,                  source:'steamer', proj: projWoba, actual: null,    actualPA: 0     };
+  if (ha)       return { woba: act.woba,                   source:'actual',  proj: null,     actual: actWoba, actualPA: actPA };
   return null;
 }
 
@@ -53,11 +56,22 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) 
   } else {
     d = BAT_DFLT[eff] || BAT_DFLT['R'];
   }
+  const fb = (def) => ({ proj: null, actual: null, actualPA: 0, source: 'fallback', defaultWoba: def });
   if (bL || bR) {
     const src = bL&&bR ? (bL.source===bR.source?bL.source:'blend') : (bL?.source||bR?.source);
-    return { vsLHP: bL?.woba??d.vsLHP, vsRHP: bR?.woba??d.vsRHP, source: src };
+    return {
+      vsLHP: bL?.woba??d.vsLHP,
+      vsRHP: bR?.woba??d.vsRHP,
+      source: src,
+      vsLHP_breakdown: bL ? { proj: bL.proj, actual: bL.actual, actualPA: bL.actualPA, source: bL.source } : fb(d.vsLHP),
+      vsRHP_breakdown: bR ? { proj: bR.proj, actual: bR.actual, actualPA: bR.actualPA, source: bR.source } : fb(d.vsRHP),
+    };
   }
-  return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback' };
+  return {
+    vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback',
+    vsLHP_breakdown: fb(d.vsLHP),
+    vsRHP_breakdown: fb(d.vsRHP),
+  };
 }
 
 function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings) {
@@ -83,7 +97,14 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings)
     d = PIT_DFLT[hand] || PIT_DFLT['R'];
   }
   const src = bL||bR ? (bL?.source===bR?.source?bL?.source||'steamer':'blend') : 'fallback';
-  return { vsLHB: bL?.woba??d.vsLHB, vsRHB: bR?.woba??d.vsRHB, source: src };
+  const fb = (def) => ({ proj: null, actual: null, actualPA: 0, source: 'fallback', defaultWoba: def });
+  return {
+    vsLHB: bL?.woba??d.vsLHB,
+    vsRHB: bR?.woba??d.vsRHB,
+    source: src,
+    vsLHB_breakdown: bL ? { proj: bL.proj, actual: bL.actual, actualPA: bL.actualPA, source: bL.source } : fb(d.vsLHB),
+    vsRHB_breakdown: bR ? { proj: bR.proj, actual: bR.actual, actualPA: bR.actualPA, source: bR.source } : fb(d.vsRHB),
+  };
 }
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }

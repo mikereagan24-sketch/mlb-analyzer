@@ -556,6 +556,7 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
+    const MIN_PA = num(settings.MIN_PA, 60);
     function lookupBatter(name, hand, oppSpHand, teamHint) {
         const vsKey  = oppSpHand==='R' ? 'bat-proj-rhp' : 'bat-proj-lhp';
         const actKey = oppSpHand==='R' ? 'bat-act-rhp'  : 'bat-act-lhp';
@@ -568,58 +569,81 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         const parts=key.split(' ');
         const isAbbrev=parts.length>=2&&parts[0].length===1;
         function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-        function findIn(idx,k,tHint){
+        // Returns the full index entry {woba, sample} so callers can also expose sample size.
+        function findEntryIn(idx,k,tHint){
           if(!idx)return null;
           const tl=tHint?tHint.toLowerCase():null;
-          // 1. Exact team key: "bobby witt kc"
-          if(tl&&idx[k+' '+tl])return idx[k+' '+tl].woba;
-          // 2. Exact name
-          if(idx[k])return idx[k].woba;
-          // 3. Search index entries where stripJr(indexKey w/o team) === k, same team
-          // Catches "bobby witt jr kc" when looking up "bobby witt" + "kc"
+          if(tl&&idx[k+' '+tl])return idx[k+' '+tl];
+          if(idx[k])return idx[k];
           if(tl){
             const jrEntry=Object.entries(idx).find(([n])=>{
               if(!n.endsWith(' '+tl))return false;
               const base=n.slice(0,n.length-tl.length-1).trim();
               return stripJr(base)===k;
             });
-            if(jrEntry)return jrEntry[1].woba;
+            if(jrEntry)return jrEntry[1];
           }
-          // 4. Abbreviated name (M. Busch style)
           if(isAbbrev){
             const initial=parts[0],last=parts[parts.length-1];
-            if(tl){const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1].woba;}
+            if(tl){const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1];}
             const matches=Object.entries(idx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripJr(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
-            if(matches.length===1)return matches[0][1].woba;
+            if(matches.length===1)return matches[0][1];
           }
-          // 5. Jr-stripped exact key
           const sk=stripJr(k);
-          if(tl&&idx[sk+' '+tl])return idx[sk+' '+tl].woba;
+          if(tl&&idx[sk+' '+tl])return idx[sk+' '+tl];
           const e2=Object.entries(idx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
-          return e2?e2[1].woba:null;
+          return e2?e2[1]:null;
         }
+        function woba(entry){ return entry ? entry.woba : null; }
+        function sample(entry){ return entry ? (entry.sample||0) : 0; }
         // Look up vs SP hand
-        const projV    = findIn(wobaIdx[vsKey],  key, teamHint);
-        const actV     = findIn(wobaIdx[actKey], key, teamHint);
+        const projVe = findEntryIn(wobaIdx[vsKey],  key, teamHint);
+        const actVe  = findEntryIn(wobaIdx[actKey], key, teamHint);
+        const projV  = woba(projVe), actV = woba(actVe);
         const wobaVsSP = (projV&&actV) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
                        : projV ? +projV.toFixed(3) : actV ? +actV.toFixed(3) : +dfltV.toFixed(3);
         const srcVsSP  = (projV&&actV)?'blend':projV?'proj':actV?'act':'default';
         // Look up vs opposite hand (for bullpen blend)
-        const projO    = findIn(wobaIdx[oppKey],    key, teamHint);
-        const actO     = findIn(wobaIdx[oppActKey], key, teamHint);
+        const projOe = findEntryIn(wobaIdx[oppKey],    key, teamHint);
+        const actOe  = findEntryIn(wobaIdx[oppActKey], key, teamHint);
+        const projO  = woba(projOe), actO = woba(actOe);
         const wobaVsOpp = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
                         : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : +dfltVOpp.toFixed(3);
         // Blended wOBA: SP_WT% vs SP hand + REL_WT% vs opposite
         const blended = +(wobaVsSP*SP_WT + wobaVsOpp*REL_WT).toFixed(3);
-        return {woba:blended, wobaVsSP, wobaVsOpp, source:srcVsSP};
+        // MIN_PA filter for the exposed actual fields. Existing wobaVsSP/wobaVsOpp
+        // values are unfiltered (preserves prior behavior for callers that don't care).
+        const actVPA = sample(actVe);
+        const actOPA = sample(actOe);
+        const actVExposed = (actV != null && actVPA >= MIN_PA) ? +actV.toFixed(3) : null;
+        const actOExposed = (actO != null && actOPA >= MIN_PA) ? +actO.toFixed(3) : null;
+        return {
+          woba: blended, wobaVsSP, wobaVsOpp, source: srcVsSP,
+          wobaProj_vsSP:  projV != null ? +projV.toFixed(3) : null,
+          wobaProj_vsOpp: projO != null ? +projO.toFixed(3) : null,
+          wobaActual_vsSP:  actVExposed,
+          wobaActual_vsOpp: actOExposed,
+          wobaActual_PA_vsSP:  actVExposed != null ? actVPA : 0,
+          wobaActual_PA_vsOpp: actOExposed != null ? actOPA : 0,
+        };
       }
     function lookupPitcher(name, hand) {
       // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback
       const { getPitcherWoba } = require('../services/model');
       const result = getPitcherWoba(wobaIdx, name, hand||'R', null, W_PROJ, W_ACT);
+      const MIN_BF = num(settings.MIN_BF, 100);
+      const round = v => v != null ? +v.toFixed(3) : null;
+      const expose = (bd) => {
+        const proj   = round(bd && bd.proj);
+        const passes = bd && bd.actual != null && (bd.actualPA||0) >= MIN_BF;
+        const actual = passes ? round(bd.actual) : null;
+        return { wobaProj: proj, wobaActual: actual, wobaActual_TBF: passes ? bd.actualPA : 0 };
+      };
+      const lhB = expose(result.vsLHB_breakdown);
+      const rhB = expose(result.vsRHB_breakdown);
       return {
-        vsLHB: { woba: result.vsLHB, rawWoba: result.vsLHB, source: result.source },
-        vsRHB: { woba: result.vsRHB, rawWoba: result.vsRHB, source: result.source },
+        vsLHB: { woba: result.vsLHB, rawWoba: result.vsLHB, source: result.source, ...lhB },
+        vsRHB: { woba: result.vsRHB, rawWoba: result.vsRHB, source: result.source, ...rhB },
       };
     }
     const awayLineup=tryParse(game.away_lineup_json)||[];
