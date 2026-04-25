@@ -257,12 +257,18 @@ router.get('/games/:date', (req, res) => {
       if (!signalsByGame[s.game_id]) signalsByGame[s.game_id] = [];
       signalsByGame[s.game_id].push(s);
     });
-    const result = games.map(g => ({
-      ...g,
-      away_lineup: tryParse(g.away_lineup_json) || [],
-      home_lineup: tryParse(g.home_lineup_json) || [],
-      signals: signalsByGame[g.game_id] || [],
-    }));
+    const result = games.map(g => {
+      const awayLU = tryParse(g.away_lineup_json);
+      const homeLU = tryParse(g.home_lineup_json);
+      const isPostponed = (awayLU?.length === 0) && (homeLU?.length === 0) && g.away_sp != null;
+      return {
+        ...g,
+        away_lineup: awayLU || [],
+        home_lineup: homeLU || [],
+        is_postponed: isPostponed,
+        signals: signalsByGame[g.game_id] || [],
+      };
+    });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
