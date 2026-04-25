@@ -5,6 +5,20 @@ const PA_WEIGHTS_DEFAULT = [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
 
+// Special-event venues outside the regular 30-stadium set. Keyed by
+// statsapi venue.id (captured in services/scraper.js fetchSchedule and
+// persisted to game_log.venue_id). When a game is at one of these
+// venues, the override's parkFactor wins over the home-team default
+// in services/scraper.js PARK_FACTORS — necessary because the home team
+// for a Mexico City series is still ARI but Chase Field's 1.10 factor
+// understates run scoring at altitude.
+const VENUE_OVERRIDES = {
+  // Estadio Alfredo Harp Helú — Mexico City series. ~7800 ft elevation.
+  // Coors (~5200 ft) plays to ~1.10 park factor; scaling by elevation
+  // (each ~1000 ft ≈ +2% factor) puts Mexico City around 1.20.
+  5340: { parkFactor: 1.20, name: 'Estadio Alfredo Harp Helú (Mexico City)' },
+};
+
 const { normName, fuzzyLookup } = require('../utils/names');
 
 function buildWobaIndex(rows) {
@@ -215,7 +229,12 @@ function runModel(game, wobaIdx, settings) {
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
-  const pf = game.park_factor||1.0;
+  // Venue override (Mexico City, future special-event venues) wins over
+  // the home-team default park factor. game.park_factor was set from the
+  // home team's PARK_FACTORS entry — for a Mexico City series the home
+  // team is ARI (1.10) but the actual venue plays much hotter.
+  const venueOverride = game.venue_id != null ? VENUE_OVERRIDES[game.venue_id] : null;
+  const pf = venueOverride ? venueOverride.parkFactor : (game.park_factor || 1.0);
   const aRuns = Math.max(0,(aTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
   const hRuns = Math.max(0,(hTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
 
