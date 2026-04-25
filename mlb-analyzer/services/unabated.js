@@ -452,7 +452,7 @@ async function fetchUnabatedOdds(dateStr) {
       market_total:total, over_price:overPrice, under_price:underPrice,
       xcheck_away_ml:xcheckAwayML, xcheck_home_ml:xcheckHomeML,
       xcheck_total:xcheckTotal, xcheck_over_price:xcheckOverPrice, xcheck_under_price:xcheckUnderPrice,
-      ml_source:mlSrc||null, xcheck_source:xcheckSrc||null,
+      ml_source:mlSrc||null, xcheck_ml_source:xcheckSrc||null,
       total_source:totalSrc||null, xcheck_total_source:xcheckTotalSrc||null,
       source:'unabated',
     });

@@ -859,7 +859,7 @@ async function runOddsJob(dateStr) {
     const wobaIdx = getWobaIndex();
     let updated = 0;
     for (const o of odds) {
-      console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_source + ')');
+      console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_ml_source + ')');
       // Skip if locked OR game has already started
       const existing = q.getGameById.get(dateStr, o.game_id);
       if (existing && existing.odds_locked_at) { console.log('[odds] Skipping locked: '+o.game_id); continue; }
@@ -884,13 +884,13 @@ async function runOddsJob(dateStr) {
       //   - No sane odds at all: overrides everything; market_* will be null.
       //   - Single-source: only one book returned a sane two-sided price, so
       //     the book-vs-book divergence check has nothing to compare against
-      //     (detected as xcheck_source missing OR equal to ml_source — the
+      //     (detected as xcheck_ml_source missing OR equal to ml_source — the
       //     latter happens when Kalshi is absent and the xcheck waterfall
       //     falls through to the same book the market waterfall picked).
       //   - Otherwise: run the per-side sanity check and the book-vs-book
       //     divergence check; union their reasons.
       const haveMarket = o.market_away_ml != null && o.market_home_ml != null;
-      const singleSource = haveMarket && (!o.xcheck_source || o.xcheck_source === o.ml_source);
+      const singleSource = haveMarket && (!o.xcheck_ml_source || o.xcheck_ml_source === o.ml_source);
       const reasons = [];
       if (!haveMarket) {
         reasons.push('no sane odds');
@@ -901,7 +901,7 @@ async function runOddsJob(dateStr) {
         const divergenceReason = checkBookDivergence(
           o.market_away_ml, o.market_home_ml,
           o.xcheck_away_ml, o.xcheck_home_ml,
-          o.xcheck_source
+          o.xcheck_ml_source
         );
         if (sanityReason) reasons.push(sanityReason);
         if (divergenceReason) reasons.push(divergenceReason);
@@ -958,6 +958,8 @@ async function runOddsJob(dateStr) {
       db.prepare(`UPDATE game_log SET
         market_away_ml=?, market_home_ml=?,
         market_total=?, over_price=?, under_price=?, total_source=?,
+        ml_source=COALESCE(?, ml_source),
+        xcheck_ml_source=COALESCE(?, xcheck_ml_source),
         xcheck_away_ml=?, xcheck_home_ml=?,
         xcheck_total=COALESCE(?, xcheck_total),
         xcheck_over_price=COALESCE(?, xcheck_over_price),
@@ -968,6 +970,8 @@ async function runOddsJob(dateStr) {
         WHERE game_date=? AND game_id=?`)
         .run(o.market_away_ml, o.market_home_ml,
              o.market_total, o.over_price, o.under_price, o.total_source || null,
+             o.ml_source || null,
+             o.xcheck_ml_source || null,
              o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
              o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
              o.xcheck_total != null ? o.xcheck_total : null,

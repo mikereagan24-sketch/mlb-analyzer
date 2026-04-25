@@ -1777,10 +1777,10 @@ router.get('/health/:date', (req, res) => {
 
     // ---- check 10: sources_active ----
     {
-      // ml_source / xcheck_source aren't persisted in game_log today (only
-      // total_source / xcheck_total_source were added in PR #10). So this
-      // check counts total-side sources only. The detail keys ml/totals
-      // mirror what a future schema-extended version would emit.
+      // This check currently counts total-side sources only. ml_source /
+      // xcheck_ml_source are now persisted (added in fix/persist-ml-source)
+      // but extending the check to include them is left for a follow-up so
+      // the persistence change can be validated in isolation.
       const totSrc = {}, xchTotSrc = {};
       for (const g of games) {
         if (g.total_source) totSrc[g.total_source] = (totSrc[g.total_source] || 0) + 1;
@@ -1797,7 +1797,7 @@ router.get('/health/:date', (req, res) => {
         detail: {
           totals: totSrc,
           totals_xcheck: xchTotSrc,
-          note: 'ml_source not persisted in game_log; only totals sources tracked',
+          note: 'this check counts totals sources only; ml_source / xcheck_ml_source are now persisted but not yet aggregated here',
         },
       });
     }
