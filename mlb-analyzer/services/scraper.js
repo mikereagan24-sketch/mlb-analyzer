@@ -196,11 +196,11 @@ async function fetchLineups(dateStr) {
   // Every other team uses the straight FanGraphs R factor. Keys are the
   // uppercase abbreviations FanGraphs / scraper produce.
   const PARK_FACTORS = {
-    COL:1.25, ARI:1.10, CIN:1.10, CHC:1.08, NYY:1.07, BOS:1.06,
+    COL:1.28, ARI:1.08, CIN:1.06, CHC:1.08, NYY:1.07, BOS:1.08,
     PHI:1.05, ATL:1.04, CWS:1.03, TEX:1.03, WAS:1.02, TOR:1.02,
-    KC:1.02,  MIA:1.01, LAD:1.00, HOU:1.00, STL:0.99, DET:0.98,
-    TB:0.95,  MIN:0.97, PIT:0.97, LAA:0.97, MIL:0.96, BAL:0.96,
-    CLE:0.95, SEA:0.95, NYM:0.94, SD:0.94,  SF:0.92,  ATH:1.19
+    KC:1.02,  MIA:1.02, LAD:1.00, HOU:1.00, STL:0.99, DET:1.02,
+    TB:0.95,  MIN:1.06, PIT:1.00, LAA:0.97, MIL:0.96, BAL:1.05,
+    CLE:0.95, SEA:0.88, NYM:0.94, SD:0.94,  SF:0.92,  ATH:1.19
   };
 
   const games = [];
