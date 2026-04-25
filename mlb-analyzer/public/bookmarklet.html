@@ -65,7 +65,7 @@
   <li>Each iframe renders the splits leaderboard page, which client-side generates an <code>&lt;a download&gt;</code> with a <code>data:</code>-URL CSV.</li>
   <li>The bookmarklet decodes each CSV and POSTs it as <code>multipart/form-data</code> to <code>mlb-analyzer.onrender.com/api/upload/&lt;data-key&gt;</code>.</li>
   <li>Failures on one split (timeout, upload error) are shown in the overlay but don't block the other three.</li>
-  <li>Uses <code>groupBy=career</code> and <code>startDate=2024-01-01</code> so players who split time across seasons aggregate into one row rather than one-per-season.</li>
+  <li>Uses <code>groupBy=career</code> and a rolling 2-year window ending yesterday (so players who split time across seasons aggregate into one row rather than one-per-season, and today's in-progress games are excluded).</li>
 </ul>
 
 <h2>Caveats</h2>
@@ -90,7 +90,17 @@ function bookmarklet() {
     return;
   }
   var API = 'https://mlb-analyzer.onrender.com/api/upload/';
-  var today = new Date().toISOString().slice(0, 10);
+  function fmt(d) {
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var dd = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + dd;
+  }
+  var todayDate = new Date();
+  var endDateObj = new Date(todayDate); endDateObj.setDate(endDateObj.getDate() - 1);
+  var startDateObj = new Date(endDateObj); startDateObj.setFullYear(startDateObj.getFullYear() - 2); startDateObj.setDate(startDateObj.getDate() + 1);
+  var startDateStr = fmt(startDateObj);
+  var endDateStr = fmt(endDateObj);
   var SPECS = [
     { key: 'pit-act-rhb', splitArr: 6, pos: 'P', sg: 1, label: 'Pit vs RHB' },
     { key: 'pit-act-lhb', splitArr: 5, pos: 'P', sg: 1, label: 'Pit vs LHB' },
@@ -102,7 +112,7 @@ function bookmarklet() {
       + '?splitArr=' + s.splitArr
       + '&autoPt=true&splitTeams=false&statType=player'
       + '&statgroup=' + s.sg
-      + '&startDate=2024-01-01&endDate=' + today
+      + '&startDate=' + startDateStr + '&endDate=' + endDateStr
       + '&position=' + s.pos
       + '&sort=22,1&splitArrPitch=&players=&filter='
       + '&groupBy=career'
