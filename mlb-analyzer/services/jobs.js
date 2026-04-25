@@ -937,17 +937,28 @@ async function runOddsJob(dateStr) {
       } else if (haveTot && !haveXcheckTot) {
         reasons.push('single-source total, no cross-check available');
       } else if (haveTot && haveXcheckTot) {
-        if (Math.abs(o.market_total - o.xcheck_total) >= 1.0) {
-          reasons.push('totals line divergence: ' + (o.total_source||'primary') + '=' + o.market_total + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_total);
-        } else {
-          // Same-line juice divergence — compare over-side implied prob on both
-          // sources. If either side's implied prob differs by > 0.08, flag.
-          // Mirrors checkBookDivergence's 8-cent threshold for MLs.
-          const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
-          const dOver  = Math.abs(impP(o.over_price)  - impP(o.xcheck_over_price));
-          const dUnder = Math.abs(impP(o.under_price) - impP(o.xcheck_under_price));
-          if (dOver > 0.08 || dUnder > 0.08) {
-            const d = Math.max(dOver, dUnder);
+        // Compare books on PROBABILITY space, not LINE space. Different
+        // books can quote different lines (one at 7.5, another at 8.5) but
+        // imply nearly the same true total via their juice — that's not
+        // disagreement, that's a pivot choice. The previous check flagged
+        // any |line - line| >= 1.0 unconditionally and tripped false
+        // positives (e.g. ATH@TEX 2026-04-25: kalshi 7.5 -133/+108 vs
+        // sporttrade 8.5 +100/-120, max(|0.571-0.500|, |0.481-0.545|) =
+        // 0.071 — within typical book noise but flagged as divergence).
+        //
+        // Unified rule: take max(|Δover-prob|, |Δunder-prob|) across the
+        // two books. Flag when > 0.08, same threshold as the same-line
+        // juice divergence check. The flag-reason string distinguishes
+        // cross-line from same-line cases for readability but the
+        // threshold is identical.
+        const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
+        const dOver  = Math.abs(impP(o.over_price)  - impP(o.xcheck_over_price));
+        const dUnder = Math.abs(impP(o.under_price) - impP(o.xcheck_under_price));
+        const d = Math.max(dOver, dUnder);
+        if (d > 0.08) {
+          if (o.market_total !== o.xcheck_total) {
+            reasons.push('totals divergence: ' + (o.total_source||'primary') + '=' + o.market_total + '@' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_total + '@' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
+          } else {
             reasons.push('totals juice divergence: ' + (o.total_source||'primary') + '=' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
           }
         }
