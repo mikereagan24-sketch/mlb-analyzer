@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MLB Analyzer — FG Actuals Bookmarklet</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  .lede { color: #666; margin-top: 0; }
+  h2 { font-size: 1.1rem; margin-top: 1.75rem; }
+  .drag {
+    display: inline-block;
+    padding: 10px 16px;
+    background: #2563eb;
+    color: #fff !important;
+    border-radius: 6px;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: 0 2px 6px rgba(37,99,235,0.35);
+    user-select: none;
+  }
+  .drag:hover { background: #1d4ed8; }
+  .drag-row { background: #f6f8fa; border: 1px dashed #ccc; padding: 16px; border-radius: 6px; margin: 12px 0 20px; text-align: center; }
+  code { background: #f1f3f5; padding: 1px 5px; border-radius: 3px; font-size: 0.9em; }
+  ol li, ul li { margin-bottom: 0.35rem; }
+  .muted { color: #777; font-size: 0.9em; }
+  details { margin-top: 1.25rem; }
+  summary { cursor: pointer; font-weight: 600; }
+  pre { background: #0d1117; color: #c9d1d9; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; line-height: 1.4; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0d1117; color: #c9d1d9; }
+    h2 { color: #e6edf3; }
+    .lede { color: #9ba3af; }
+    .muted { color: #8b949e; }
+    .drag-row { background: #161b22; border-color: #30363d; }
+    code { background: #161b22; }
+  }
+</style>
+</head>
+<body>
+
+<h1>FG Actuals Bookmarklet</h1>
+<p class="lede">One-click upload of the four split-leaderboard CSVs from FanGraphs to mlb-analyzer.</p>
+
+<h2>Install</h2>
+<p>Drag this link to your bookmarks bar:</p>
+<div class="drag-row">
+  <a id="bm" class="drag" href="#">📊 Upload FG Actuals</a>
+</div>
+<p class="muted">(If the link doesn't drag, right-click it → "Bookmark Link…".)</p>
+
+<h2>How to use</h2>
+<ol>
+  <li>Open any <a href="https://www.fangraphs.com/" target="_blank" rel="noopener">fangraphs.com</a> page.</li>
+  <li>Click the bookmark.</li>
+  <li>A small overlay appears in the top-right of the FanGraphs tab and walks through the four splits. Each takes 5–10 seconds.</li>
+  <li>When all four finish, hit <em>Close</em> on the overlay. Your mlb-analyzer actuals are up to date.</li>
+</ol>
+
+<h2>What it does</h2>
+<ul>
+  <li>Opens four hidden iframes on the FanGraphs tab, one per split (bat vs LHP/RHP, pit vs LHB/RHB).</li>
+  <li>Each iframe renders the splits leaderboard page, which client-side generates an <code>&lt;a download&gt;</code> with a <code>data:</code>-URL CSV.</li>
+  <li>The bookmarklet decodes each CSV and POSTs it as <code>multipart/form-data</code> to <code>mlb-analyzer.onrender.com/api/upload/&lt;data-key&gt;</code>.</li>
+  <li>Failures on one split (timeout, upload error) are shown in the overlay but don't block the other three.</li>
+  <li>Uses <code>groupBy=career</code> and <code>startDate=2024-01-01</code> so players who split time across seasons aggregate into one row rather than one-per-season.</li>
+</ul>
+
+<h2>Caveats</h2>
+<ul>
+  <li>The bookmarklet refuses to run on any page that isn't <code>fangraphs.com</code> (it alerts and exits).</li>
+  <li>FanGraphs must render the Export link client-side. If the site ships a CSP that blocks inline JS on that page or wraps the leaderboards in an iframe-busting header, the bookmarklet will time out with <em>no Export link</em> — in which case fall back to the manual refresh button on the Model tab.</li>
+  <li>Logged-in / logged-out: the splits leaderboard CSVs render the same for both, so this works without a FanGraphs Member session. The upload target is always the production host; edit the <code>API</code> constant in the source below to point at a local dev server if needed.</li>
+</ul>
+
+<details>
+  <summary>View bookmarklet source</summary>
+  <pre id="src"></pre>
+</details>
+
+<script>
+// The bookmarklet, as a named function so we can serialize its source for the
+// anchor href AND display it in the <details> above. Everything the bookmarklet
+// needs lives inside the function body — no closure over page scope.
+function bookmarklet() {
+  if (!/(^|\.)fangraphs\.com$/.test(location.hostname)) {
+    alert('MLB Analyzer bookmarklet: open a fangraphs.com page first, then click the bookmark.');
+    return;
+  }
+  var API = 'https://mlb-analyzer.onrender.com/api/upload/';
+  var today = new Date().toISOString().slice(0, 10);
+  var SPECS = [
+    { key: 'pit-act-rhb', splitArr: 6, pos: 'P', sg: 1, label: 'Pit vs RHB' },
+    { key: 'pit-act-lhb', splitArr: 5, pos: 'P', sg: 1, label: 'Pit vs LHB' },
+    { key: 'bat-act-rhp', splitArr: 2, pos: 'B', sg: 8, label: 'Bat vs RHP' },
+    { key: 'bat-act-lhp', splitArr: 1, pos: 'B', sg: 8, label: 'Bat vs LHP' }
+  ];
+  function buildUrl(s) {
+    return 'https://www.fangraphs.com/leaders/splits-leaderboards'
+      + '?splitArr=' + s.splitArr
+      + '&autoPt=true&splitTeams=false&statType=player'
+      + '&statgroup=' + s.sg
+      + '&startDate=2024-01-01&endDate=' + today
+      + '&position=' + s.pos
+      + '&sort=22,1&splitArrPitch=&players=&filter='
+      + '&groupBy=career'
+      + '&wxTemperature=&wxPressure=&wxAirDensity=&wxElevation=&wxWindSpeed=';
+  }
+  var overlay = document.createElement('div');
+  overlay.setAttribute('data-mlb-analyzer-overlay', '1');
+  overlay.style.cssText = 'position:fixed;top:16px;right:16px;background:#1e1e2e;color:#fff;padding:14px 16px;border-radius:8px;font:13px/1.45 -apple-system,system-ui,sans-serif;z-index:2147483647;box-shadow:0 4px 22px rgba(0,0,0,0.45);min-width:280px;max-width:360px';
+  overlay.innerHTML = '<div style="font-weight:600;margin-bottom:8px">MLB Analyzer — Upload Actuals</div><div id="mlb-an-status"></div>';
+  document.body.appendChild(overlay);
+  var statusEl = overlay.querySelector('#mlb-an-status');
+  var results = SPECS.map(function(){ return { msg: '…', done: false, ok: null }; });
+  function render() {
+    statusEl.innerHTML = SPECS.map(function(s, i) {
+      var r = results[i];
+      var dot = r.done ? (r.ok ? '✓' : '✗') : '•';
+      var color = r.done ? (r.ok ? '#4ade80' : '#f87171') : '#9ca3af';
+      return '<div style="margin:2px 0"><span style="display:inline-block;width:14px;color:' + color + '">' + dot + '</span>'
+        + '<span style="color:#9ca3af">' + s.label + ' <code style="background:#2a2a3a;padding:1px 4px;border-radius:2px;font-size:11px">' + s.key + '</code></span> '
+        + '<span>' + r.msg + '</span></div>';
+    }).join('');
+  }
+  function finalize() {
+    if (overlay.querySelector('button')) return;
+    var btn = document.createElement('button');
+    btn.textContent = 'Close';
+    btn.style.cssText = 'margin-top:10px;padding:5px 12px;background:#3b82f6;color:#fff;border:0;border-radius:4px;cursor:pointer;font:inherit';
+    btn.onclick = function() { overlay.remove(); };
+    overlay.appendChild(btn);
+  }
+  function finishOne(i, ok, msg) {
+    if (results[i].done) return;
+    results[i] = { msg: msg, ok: ok, done: true };
+    render();
+    if (results.every(function(r) { return r.done; })) finalize();
+  }
+  render();
+  SPECS.forEach(function(spec, i) {
+    var iframe = document.createElement('iframe');
+    iframe.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:1280px;height:900px;border:0';
+    iframe.src = buildUrl(spec);
+    document.body.appendChild(iframe);
+    var timeout = setTimeout(function() {
+      finishOne(i, false, 'timeout (no Export link in 30s)');
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+    }, 30000);
+    var poll = setInterval(function() {
+      var doc;
+      try { doc = iframe.contentDocument; } catch (e) { return; }
+      if (!doc || !doc.body) return;
+      var anchors = doc.querySelectorAll('a[download][href^="data:"]');
+      var link = null;
+      for (var j = 0; j < anchors.length; j++) {
+        var name = anchors[j].getAttribute('download') || '';
+        if (/\.csv$/i.test(name)) { link = anchors[j]; break; }
+      }
+      if (!link) return;
+      clearInterval(poll);
+      clearTimeout(timeout);
+      var href = link.getAttribute('href') || '';
+      var m = href.match(/^data:([^,]*),(.*)$/);
+      if (!m) {
+        finishOne(i, false, 'could not parse data URL');
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        return;
+      }
+      var meta = m[1], payload = m[2], csv;
+      try {
+        csv = /;base64/i.test(meta) ? atob(payload) : decodeURIComponent(payload);
+      } catch (e) {
+        finishOne(i, false, 'decode failed: ' + e.message);
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        return;
+      }
+      var fd = new FormData();
+      fd.append('file', new Blob([csv], { type: 'text/csv' }), spec.key + '.csv');
+      fetch(API + spec.key, { method: 'POST', body: fd })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(x) {
+          if (x.status >= 200 && x.status < 300 && x.body && x.body.success) {
+            finishOne(i, true, x.body.rows + ' rows uploaded');
+          } else {
+            finishOne(i, false, 'upload error: ' + ((x.body && x.body.error) || ('HTTP ' + x.status)));
+          }
+        })
+        .catch(function(e) { finishOne(i, false, 'network: ' + e.message); })
+        .then(function() { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); });
+    }, 500);
+  });
+}
+
+// Build the javascript: href. Wrap with ()() so the function fires on click,
+// strip line indentation (safe — every statement ends with ; or a block
+// terminator, no continuation-line semicolon-insertion traps), and
+// encodeURIComponent so special chars survive being pasted into an href
+// attribute (Chrome URL-decodes javascript: URLs before evaluating).
+var readableSrc = '(' + bookmarklet.toString() + ')()';
+var compactSrc = readableSrc.replace(/\n[ \t]+/g, '\n');
+document.getElementById('bm').href = 'javascript:' + encodeURIComponent(compactSrc);
+document.getElementById('src').textContent = readableSrc;
+</script>
+
+</body>
+</html>
