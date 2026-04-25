@@ -279,7 +279,7 @@ async function fetchUnabatedOdds(dateStr) {
     // quotes mid-fetch) AND the 99900 sentinel that silently poisoned
     // market_home_ml before this guard was added. Falls through to the
     // next source if current one's quote is partial or out-of-range.
-    let awayML=null,homeML=null,mlSrc=null;
+    let awayML=null,homeML=null,mlSrc=null,mlMsId=null;
     for(const msId of ML_SOURCES){
       const s=bySource[msId];
       const aBt1 = s?.away?.bt1, hBt1 = s?.home?.bt1;
@@ -304,6 +304,7 @@ async function fetchUnabatedOdds(dateStr) {
       if(aOk && hOk){
         awayML=aPrice; homeML=hPrice;
         mlSrc=SOURCE_NAMES[msId]||msId;
+        mlMsId=msId;
         break;
       }
       if(aOk || hOk || aPrice != null || hPrice != null){
@@ -321,6 +322,7 @@ async function fetchUnabatedOdds(dateStr) {
         if(isSaneML(aPrice) && isSaneML(hPrice)){
           awayML=aPrice; homeML=hPrice;
           mlSrc='src'+msId;
+          mlMsId=msId;
           break;
         }
       }
@@ -328,11 +330,18 @@ async function fetchUnabatedOdds(dateStr) {
 
     // Book-vs-book cross-check source — excludes Kalshi (the market source)
     // so the divergence check has something to compare against. Same
-    // isSaneML filter as the primary waterfall. Note: if Kalshi is absent
-    // and Polymarket wins both waterfalls, mlSrc === xcheckSrc and the
-    // downstream flag logic treats the game as single-source.
+    // isSaneML filter as the primary waterfall.
+    //
+    // Skip msId === mlMsId so the xcheck never lands on the same source the
+    // primary already used. Without this skip, when Kalshi is absent or
+    // one-sided, the primary ML waterfall falls through to Polymarket (107)
+    // and the xcheck waterfall — whose first entry is also Polymarket —
+    // re-picks Polymarket, making xcheckSrc === mlSrc and tripping the
+    // downstream "single-source, no cross-check available" flag despite
+    // 5+ other exchanges in XCHECK_SOURCES having sane two-sided quotes.
     let xcheckAwayML=null, xcheckHomeML=null, xcheckSrc=null;
     for(const msId of XCHECK_SOURCES){
+      if (msId === mlMsId) continue;
       const s=bySource[msId];
       const aBt1 = s?.away?.bt1, hBt1 = s?.home?.bt1;
       if (!isLiveContract(aBt1) || !isLiveContract(hBt1)) continue;
@@ -357,7 +366,7 @@ async function fetchUnabatedOdds(dateStr) {
     //     different lines (e.g. Over 8.5 @ -117 / Under 9.5 @ -124).
     //   - Both juices pass isSaneTotalJuice (|price| ≤ 200, no 99900
     //     sentinel).
-    let total=null,overPrice=null,underPrice=null,totalSrc=null;
+    let total=null,overPrice=null,underPrice=null,totalSrc=null,totalMsId=null;
     for(const msId of TOTAL_SOURCES){
       const s=bySourceTot[msId];
       if (!s) continue;
@@ -389,6 +398,7 @@ async function fetchUnabatedOdds(dateStr) {
       overPrice = oP;
       underPrice = uP;
       totalSrc = SOURCE_NAMES[msId] || msId;
+      totalMsId = msId;
       break;
     }
     if(total==null){
@@ -410,6 +420,7 @@ async function fetchUnabatedOdds(dateStr) {
         overPrice = oP;
         underPrice = uP;
         totalSrc = 'src'+msId+'(fb)';
+        totalMsId = msId;
         break;
       }
     }
@@ -419,8 +430,16 @@ async function fetchUnabatedOdds(dateStr) {
     // travel as a group; they may differ from the primary's line so
     // downstream never mixes xcheck's line with primary's juice. Log
     // split-line rejections for greppability (primary logs them too).
+    //
+    // Skip msId === totalMsId so xcheck never lands on the same source the
+    // primary used. TOTAL_SOURCES and XCHECK_TOTAL_SOURCES are already
+    // disjoint by design (Kalshi excluded from xcheck totals), but the
+    // primary's fallback sweep iterates Object.entries(bySourceTot) and can
+    // pick a source that ALSO appears in XCHECK_TOTAL_SOURCES — defensive
+    // skip catches that collision parallel to the ML xcheck fix.
     let xcheckTotal=null, xcheckOverPrice=null, xcheckUnderPrice=null, xcheckTotalSrc=null;
     for (const msId of XCHECK_TOTAL_SOURCES) {
+      if (msId === totalMsId) continue;
       const s = bySourceTot[msId];
       if (!s) continue;
       const awayBt3 = s?.away?.bt3;
