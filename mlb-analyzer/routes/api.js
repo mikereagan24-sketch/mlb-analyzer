@@ -1884,14 +1884,18 @@ router.get('/health/:date', (req, res) => {
         }
       };
 
-      range('w_pit',                 0.4,  0.7);
-      range('w_bat',                 0.4,  0.7);
+      // Bound inclusivity choices reflect documented default values that
+      // sit exactly on a boundary — we want a configured value matching
+      // the default to pass, not flag as out_of_range. See PR description
+      // for the per-key reasoning.
+      range('w_pit',                 0.4,  0.7,  { includeLo: true });   // default 0.5; allow 0.4
+      range('w_bat',                 0.4,  0.7,  { includeLo: true });   // default 0.5; allow 0.4
       sumTo('w_pit', 'w_bat');
       range('sp_pit_weight',         0.5,  0.95);
-      range('relief_pit_weight',     0.05, 0.50);
+      range('relief_pit_weight',     0.05, 0.50, { includeHi: true });   // default 0.20-0.25; allow 0.50
       sumTo('sp_pit_weight', 'relief_pit_weight');
       range('sp_weight',             0.5,  0.95);
-      range('relief_weight',         0.05, 0.50);
+      range('relief_weight',         0.05, 0.50, { includeHi: true });   // same logic as relief_pit_weight
       sumTo('sp_weight', 'relief_weight');
       range('run_mult',              30,   60);
       range('tot_slope',             0.05, 0.15);
@@ -1906,12 +1910,12 @@ router.get('/health/:date', (req, res) => {
       }
       range('tot_prob_lo',           0.20, 0.50, { includeLo: true });
       range('tot_prob_hi',           0.50, 0.80, { includeHi: true });
-      range('hfa_boost',             0.0,  0.10);
+      range('hfa_boost',             0.0,  0.10, { includeLo: true });   // default 0.025; allow 0.0 (no HFA)
       range('bullpen_avg',           0.25, 0.40);
       range('woba_baseline',         0.20, 0.30);
       range('pyth_exp',              1.5,  2.5);
       range('w_proj',                0.5,  1.0);
-      range('w_act',                 0.0,  0.5);
+      range('w_act',                 0.0,  0.5,  { includeLo: true });   // default 0.35; allow 0.0 (proj-only)
       sumTo('w_proj', 'w_act');
       range('bp_strong_weight_r',    0.3,  0.8);
       range('bp_weak_weight_r',      0.2,  0.7);
