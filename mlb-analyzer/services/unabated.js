@@ -133,6 +133,26 @@ const SOURCE_NAMES = {
   '107': 'polymarket',
 };
 
+// Reject contracts the feed has flagged as not live. Kalshi (and likely
+// other books) leaves the last numeric price in the feed even after pulling
+// the contract from active trading — these flags are the feed's explicit
+// "don't use this" signal:
+//   - overrideType === 'disabled': the contract has been suspended.
+//     Observed 2026-04-24 on DET@CIN where Kalshi's bt3 8.5 contract was
+//     marked disabled but still emitting +127/-156, ~25 cents off market
+//     consensus on a 9.0 line.
+//   - includePeg === false: the price isn't tied to the live order book
+//     (off-peg). Empirically pairs with overrideType=disabled on Kalshi
+//     but checked separately so either flag triggers rejection.
+// Applied at every bt1 (ML) and bt3 (totals) selection site so primary,
+// fallback, and xcheck waterfalls all skip non-live contracts uniformly.
+function isLiveContract(bt) {
+  if (!bt) return false;
+  if (bt.overrideType === 'disabled') return false;
+  if (bt.includePeg === false) return false;
+  return true;
+}
+
 // Sanity bounds for totals. MLB game totals essentially never sit below 5
 // or above 13.5 runs. More critically, a prediction market can have an
 // "Over 2.5 runs" contract priced at -4900 (near-deterministic); that is
@@ -262,8 +282,23 @@ async function fetchUnabatedOdds(dateStr) {
     let awayML=null,homeML=null,mlSrc=null;
     for(const msId of ML_SOURCES){
       const s=bySource[msId];
-      const aPrice = s?.away?.bt1?.americanPrice;
-      const hPrice = s?.home?.bt1?.americanPrice;
+      const aBt1 = s?.away?.bt1, hBt1 = s?.home?.bt1;
+      const aPrice = aBt1?.americanPrice;
+      const hPrice = hBt1?.americanPrice;
+      if (!isLiveContract(aBt1) || !isLiveContract(hBt1)) {
+        // Distinguish missing-side vs disabled flags in the log so log
+        // readers can tell whether the source pulled a contract or just
+        // didn't post both sides.
+        const aMissing = !aBt1, hMissing = !hBt1;
+        const aDisabled = aBt1 && (aBt1.overrideType === 'disabled' || aBt1.includePeg === false);
+        const hDisabled = hBt1 && (hBt1.overrideType === 'disabled' || hBt1.includePeg === false);
+        if (aDisabled || hDisabled) {
+          console.log('[unabated] '+away+'-'+home+': rejected disabled ML from src '+(SOURCE_NAMES[msId]||msId)+' (away.overrideType='+aBt1?.overrideType+'/peg='+aBt1?.includePeg+', home.overrideType='+hBt1?.overrideType+'/peg='+hBt1?.includePeg+')');
+        } else if ((aMissing || hMissing) && (aPrice != null || hPrice != null)) {
+          console.log('[unabated] '+away+'-'+home+': skipping one-sided ML from src '+(SOURCE_NAMES[msId]||msId)+' (away='+(aMissing?'(missing)':aPrice)+', home='+(hMissing?'(missing)':hPrice)+')');
+        }
+        continue;
+      }
       const aOk = isSaneML(aPrice);
       const hOk = isSaneML(hPrice);
       if(aOk && hOk){
@@ -276,11 +311,13 @@ async function fetchUnabatedOdds(dateStr) {
       }
     }
 
-    // Last-ditch ML: ANY source with both sides passing isSaneML.
+    // Last-ditch ML: ANY source with both sides passing isSaneML AND live.
     if(!awayML||!homeML){
       for(const [msId,sides] of Object.entries(bySource)){
-        const aPrice = sides.away?.bt1?.americanPrice;
-        const hPrice = sides.home?.bt1?.americanPrice;
+        const aBt1 = sides.away?.bt1, hBt1 = sides.home?.bt1;
+        if (!isLiveContract(aBt1) || !isLiveContract(hBt1)) continue;
+        const aPrice = aBt1?.americanPrice;
+        const hPrice = hBt1?.americanPrice;
         if(isSaneML(aPrice) && isSaneML(hPrice)){
           awayML=aPrice; homeML=hPrice;
           mlSrc='src'+msId;
@@ -297,8 +334,10 @@ async function fetchUnabatedOdds(dateStr) {
     let xcheckAwayML=null, xcheckHomeML=null, xcheckSrc=null;
     for(const msId of XCHECK_SOURCES){
       const s=bySource[msId];
-      const aPrice = s?.away?.bt1?.americanPrice;
-      const hPrice = s?.home?.bt1?.americanPrice;
+      const aBt1 = s?.away?.bt1, hBt1 = s?.home?.bt1;
+      if (!isLiveContract(aBt1) || !isLiveContract(hBt1)) continue;
+      const aPrice = aBt1?.americanPrice;
+      const hPrice = hBt1?.americanPrice;
       if(isSaneML(aPrice) && isSaneML(hPrice)){
         xcheckAwayML=aPrice; xcheckHomeML=hPrice;
         xcheckSrc=SOURCE_NAMES[msId]||('src'+msId);
@@ -324,6 +363,12 @@ async function fetchUnabatedOdds(dateStr) {
       if (!s) continue;
       const awayBt3 = s?.away?.bt3;
       const homeBt3 = s?.home?.bt3;
+      if (!isLiveContract(awayBt3) || !isLiveContract(homeBt3)) {
+        if (awayBt3?.points != null || homeBt3?.points != null) {
+          console.log('[unabated] '+away+'-'+home+': rejected disabled total contract from src '+(SOURCE_NAMES[msId]||msId)+' (over.overrideType='+awayBt3?.overrideType+'/peg='+awayBt3?.includePeg+', under.overrideType='+homeBt3?.overrideType+'/peg='+homeBt3?.includePeg+')');
+        }
+        continue;
+      }
       if (!isSaneTotal(awayBt3) || !isSaneTotal(homeBt3)) {
         if (awayBt3?.points != null || homeBt3?.points != null) {
           console.log('[unabated] '+away+'-'+home+': rejected outlier total line from src '+(SOURCE_NAMES[msId]||msId)+' (over-pts='+awayBt3?.points+', under-pts='+homeBt3?.points+')');
@@ -355,6 +400,7 @@ async function fetchUnabatedOdds(dateStr) {
         if (!s) continue;
         const awayBt3 = s?.away?.bt3;
         const homeBt3 = s?.home?.bt3;
+        if (!isLiveContract(awayBt3) || !isLiveContract(homeBt3)) continue;
         if (!isSaneTotal(awayBt3) || !isSaneTotal(homeBt3)) continue;
         if (awayBt3.points !== homeBt3.points) continue;
         const oP = awayBt3.americanPrice ?? null;
@@ -379,6 +425,7 @@ async function fetchUnabatedOdds(dateStr) {
       if (!s) continue;
       const awayBt3 = s?.away?.bt3;
       const homeBt3 = s?.home?.bt3;
+      if (!isLiveContract(awayBt3) || !isLiveContract(homeBt3)) continue;
       if (!isSaneTotal(awayBt3) || !isSaneTotal(homeBt3)) continue;
       if (awayBt3.points !== homeBt3.points) {
         console.log('[unabated] '+away+'-'+home+': xcheck rejected split-line from src '+(SOURCE_NAMES[msId]||msId)+' (over-line='+awayBt3.points+', under-line='+homeBt3.points+')');
