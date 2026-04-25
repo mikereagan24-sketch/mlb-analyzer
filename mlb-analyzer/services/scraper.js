@@ -626,4 +626,111 @@ async function fetchActiveRosters() {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchScores, makeGameId };
+// Statsapi schedule bootstrap. RotoWire only publishes today + tomorrow, and
+// only after their page rolls over (often late in the day). Statsapi has the
+// canonical schedule available a week+ ahead, so we use it to pre-create
+// game_log skeleton rows (matchup + scheduled time + probable SPs) that
+// RotoWire then enriches with confirmed lineups when available.
+//
+// Returns array shaped like fetchLineups so runLineupJob can consume both
+// with the same upsert loop. Probable SP hand isn't surfaced inline by the
+// schedule endpoint even with deep hydrate — we batch /api/v1/people for
+// every probable pitcher in a single follow-up call (vs N round-trips).
+async function fetchSchedule(dateStr) {
+  console.log('[scraper] fetchSchedule requested for ' + dateStr);
+  const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=' +
+    encodeURIComponent(dateStr) + '&hydrate=' + encodeURIComponent('probablePitcher(note),team');
+  const resp = await fetch(url + '&_t=' + Date.now(), {
+    headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache' },
+  });
+  if (!resp.ok) throw new Error('statsapi schedule HTTP ' + resp.status);
+  const data = await resp.json();
+  const games = data.dates?.[0]?.games || [];
+  if (!games.length) {
+    console.log('[scraper] statsapi returned 0 games for ' + dateStr);
+    return [];
+  }
+
+  // statsapi → app abbr normalization. Mirrors the TEAM_NORM map in
+  // services/jobs.js so bootstrap rows produce the SAME game_id RotoWire
+  // and the Unabated odds path would compute for the same matchup.
+  // Known divergences:
+  //   WSH (statsapi)  → WAS (us)
+  //   OAK (statsapi)  → ATH (us, post-2025 venue change)
+  //   AZ  (statsapi)  → ARI (us — sportsbook + FanGraphs convention)
+  // Verified 2026-04-25 by spot-checking a slate where SD@AZ surfaced as
+  // sd-az under statsapi's raw abbr but the Unabated odds path keyed on
+  // sd-ari, breaking the join.
+  const ABBR_NORM = { 'WSH': 'WAS', 'OAK': 'ATH', 'AZ': 'ARI' };
+  const norm = a => (ABBR_NORM[a] || a || '').toUpperCase();
+
+  // Format gameDate ISO → "h:MM AM/PM" in Pacific time, matching the
+  // existing game_time column convention RotoWire writes. The lock-time
+  // parser at services/jobs.js ~382 expects /(\d+):(\d+)\s*(AM|PM)/ so we
+  // hold to that exact format.
+  const fmtPT = iso => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleTimeString('en-US', {
+      timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true,
+    });
+  };
+
+  // Bulk-fetch pitcher hand info. /api/v1/people?personIds=A,B,C in one call
+  // beats N round-trips against the schedule's per-pitcher endpoints.
+  const pitcherIds = new Set();
+  for (const g of games) {
+    const a = g.teams?.away?.probablePitcher?.id;
+    const h = g.teams?.home?.probablePitcher?.id;
+    if (a) pitcherIds.add(a);
+    if (h) pitcherIds.add(h);
+  }
+  const handById = {};
+  if (pitcherIds.size > 0) {
+    const ids = [...pitcherIds].join(',');
+    try {
+      const pr = await fetch('https://statsapi.mlb.com/api/v1/people?personIds=' + ids);
+      if (pr.ok) {
+        const pj = await pr.json();
+        for (const p of (pj.people || [])) {
+          handById[p.id] = p.pitchHand?.code || null;  // 'R' | 'L' | null
+        }
+      } else {
+        console.log('[scraper] statsapi people lookup failed: HTTP ' + pr.status + ' (proceeding without SP hand)');
+      }
+    } catch (e) {
+      console.log('[scraper] statsapi people lookup error: ' + e.message + ' (proceeding without SP hand)');
+    }
+  }
+
+  const results = [];
+  for (const g of games) {
+    const awayAbbr = norm(g.teams?.away?.team?.abbreviation);
+    const homeAbbr = norm(g.teams?.home?.team?.abbreviation);
+    if (!awayAbbr || !homeAbbr) {
+      console.log('[scraper] schedule: skipping unmapped teams (away=' + g.teams?.away?.team?.abbreviation + ', home=' + g.teams?.home?.team?.abbreviation + ')');
+      continue;
+    }
+    // Bootstrap path is for upcoming/in-progress games — finals are handled
+    // by fetchScores via the same statsapi endpoint.
+    if (g.status?.detailedState === 'Final') continue;
+    const aPP = g.teams?.away?.probablePitcher;
+    const hPP = g.teams?.home?.probablePitcher;
+    results.push({
+      game_id: (awayAbbr + '-' + homeAbbr).toLowerCase(),
+      away_team: awayAbbr,
+      home_team: homeAbbr,
+      time: fmtPT(g.gameDate),
+      away_sp: aPP ? { name: aPP.fullName || null, hand: handById[aPP.id] || null } : null,
+      home_sp: hPP ? { name: hPP.fullName || null, hand: handById[hPP.id] || null } : null,
+      away_lineup: [],
+      home_lineup: [],
+      lineup_status: 'projected',
+    });
+  }
+  console.log('[scraper] statsapi: ' + results.length + ' games for ' + dateStr);
+  return results;
+}
+
+module.exports = { fetchActiveRosters, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchScores, fetchSchedule, makeGameId };

@@ -1,7 +1,7 @@
 // jobs.js v2026-04-12T19:57:39.540Z
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters } = require('./scraper');
+const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSchedule } = require('./scraper');
 const { fetchUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
@@ -326,13 +326,79 @@ async function runLineupJob(dateStr) {
   console.log('[lineup-job] Starting for ' + dateStr);
   let gamesUpdated = 0;
   try {
+    // Step 1: bootstrap game_log from statsapi schedule. statsapi has the
+    // canonical schedule (matchups + scheduled time + probable SPs) for
+    // dates well before RotoWire publishes. Bootstrap rows are upserted
+    // immediately; if the chained RotoWire fetch later fails or skips, the
+    // bootstrap rows remain — which is exactly what the caller needs for
+    // future-date "Load Games" UI clicks. Bootstrap failure is logged but
+    // not fatal: we still proceed to RotoWire so an error in statsapi
+    // doesn't block confirmed-lineup ingestion when both sources are alive.
+    let bootstrapRows = [];
+    try {
+      bootstrapRows = await fetchSchedule(dateStr);
+    } catch (e) {
+      console.warn('[lineup-job] statsapi bootstrap failed for ' + dateStr + ': ' + e.message);
+    }
+    if (bootstrapRows.length > 0) {
+      // Cleanup matches the RotoWire path below: drop stale unplayed rows
+      // before upsert so a previous mistaken date can't survive. Wrapped in
+      // try/catch because bet_signals FK blocks the delete when a signal
+      // has a user-locked bet_line — the upsert below still updates via
+      // ON CONFLICT in that case.
+      try {
+        const info = db.prepare('DELETE FROM game_log WHERE game_date=? AND away_score IS NULL').run(dateStr);
+        if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' stale unplayed row(s) for ' + dateStr + ' (pre-bootstrap)');
+      } catch (e) {
+        console.warn('[lineup-job] Pre-bootstrap cleanup skipped (likely bet_signals FK):', e && e.message);
+      }
+      for (const g of bootstrapRows) {
+        const existingRow = q.getGameById.get(dateStr, g.game_id);
+        q.upsertGame.run({
+          game_date: dateStr,
+          game_id: g.game_id,
+          away_team: g.away_team,
+          home_team: g.home_team,
+          game_time: g.time || null,
+          away_sp: g.away_sp ? g.away_sp.name : null,
+          away_sp_hand: g.away_sp ? g.away_sp.hand : null,
+          home_sp: g.home_sp ? g.home_sp.name : null,
+          home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+          // Preserve all downstream-written fields when the row already
+          // exists. Bootstrap is matchup + SP only; everything else is owned
+          // by other jobs (odds, model, lineup confirmations).
+          market_away_ml: existingRow ? (existingRow.market_away_ml || null) : null,
+          market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
+          market_total:   existingRow ? existingRow.market_total : null,
+          park_factor:    existingRow ? existingRow.park_factor : 1.0,
+          model_away_ml:  existingRow ? existingRow.model_away_ml : null,
+          model_home_ml:  existingRow ? existingRow.model_home_ml : null,
+          model_total:    existingRow ? existingRow.model_total : null,
+          lineup_source:  existingRow ? existingRow.lineup_source : 'auto',
+        });
+      }
+      console.log('[lineup-job] statsapi bootstrap upserted ' + bootstrapRows.length + ' rows for ' + dateStr);
+    }
+
+    // Step 2: RotoWire enrichment. If RotoWire skips (date mismatch / past
+    // / future), we still consider the job a success when bootstrap rows
+    // landed — the user gets matchups + probable SPs even without
+    // confirmed lineups.
     const result = await fetchLineups(dateStr);
 
-    // Handle skipped cases: past date, date mismatch, future beyond tomorrow
     if (result && result.skipped) {
-      console.log('[lineup-job] Skipped: ' + result.message);
-      q.logCron.run('lineups', dateStr, 'skipped', result.message, 0);
-      return { success: false, skipped: true, reason: result.reason, message: result.message, date: dateStr };
+      console.log('[lineup-job] RotoWire skipped: ' + result.message);
+      const successFromBootstrap = bootstrapRows.length > 0;
+      const cronStatus = successFromBootstrap ? 'bootstrap-only' : 'skipped';
+      q.logCron.run('lineups', dateStr, cronStatus, result.message + (successFromBootstrap ? ' (statsapi bootstrap kept ' + bootstrapRows.length + ' rows)' : ''), bootstrapRows.length);
+      return {
+        success: successFromBootstrap,
+        skipped: !successFromBootstrap,
+        reason: result.reason,
+        message: result.message,
+        bootstrap: bootstrapRows.length,
+        date: dateStr,
+      };
     }
 
     const games = Array.isArray(result) ? result : [];
@@ -348,21 +414,31 @@ async function runLineupJob(dateStr) {
   const seen = {}; for (const g of games) seen[g.game_id] = g;
   games.length = 0; Object.values(seen).forEach(g => games.push(g));
     if (!games.length) {
-      q.logCron.run('lineups', dateStr, 'error', 'No games returned from scraper', 0);
-      return { success: false, error: 'No games returned', date: dateStr };
+      // RotoWire returned an empty list. If statsapi bootstrap landed rows,
+      // the call still succeeded for the caller's purpose (game_log has
+      // matchups + probable SPs). Otherwise the job genuinely failed.
+      const successFromBootstrap = bootstrapRows.length > 0;
+      const status = successFromBootstrap ? 'bootstrap-only' : 'error';
+      const msg = 'No games returned from RotoWire' + (successFromBootstrap ? ' (statsapi bootstrap kept ' + bootstrapRows.length + ' rows)' : '');
+      q.logCron.run('lineups', dateStr, status, msg, bootstrapRows.length);
+      return successFromBootstrap
+        ? { success: true, skipped: false, bootstrap: bootstrapRows.length, gamesUpdated: 0, date: dateStr }
+        : { success: false, error: 'No games returned', date: dateStr };
     }
 
-    // Cleanup: drop any stale unplayed rows for this date before re-upserting.
-    // Prevents rows from accumulating when the scraper previously wrote to the
-    // wrong date. Wrapped in try/catch because bet_signals FK (REFERENCES
-    // game_log(id), no CASCADE) blocks the delete when a signal has a
-    // user-locked bet_line. In that case we log and continue — the upsert
-    // below will still update the stale row via ON CONFLICT.
-    try {
-      const info = db.prepare('DELETE FROM game_log WHERE game_date=? AND away_score IS NULL').run(dateStr);
-      if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' stale unplayed row(s) for ' + dateStr);
-    } catch (e) {
-      console.error('[lineup-job] Cleanup skipped (likely bet_signals FK):', e && e.message);
+    // Stale-row cleanup runs only when statsapi bootstrap didn't fire (it
+    // already cleaned up there before its own upsert). Skipping the second
+    // cleanup is critical: with bootstrap rows in place, this DELETE would
+    // wipe them all (they have away_score IS NULL) before the RotoWire
+    // upsert loop could enrich. The pre-bootstrap cleanup already covered
+    // the wrong-date-write scenario this guard was protecting against.
+    if (bootstrapRows.length === 0) {
+      try {
+        const info = db.prepare('DELETE FROM game_log WHERE game_date=? AND away_score IS NULL').run(dateStr);
+        if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' stale unplayed row(s) for ' + dateStr);
+      } catch (e) {
+        console.error('[lineup-job] Cleanup skipped (likely bet_signals FK):', e && e.message);
+      }
     }
 
     const settings = getSettings();
@@ -666,10 +742,17 @@ function startCronJobs() {
       runOddsJob(todayStr());
     }, { timezone: 'America/Los_Angeles' });
   });
-  cron.schedule('0 20 * * *', () => {
+  cron.schedule('0 20 * * *', async () => {
     const d = tomorrowStr();
-    console.log('[cron] 8PM PT tomorrow odds pull for ' + d);
-    runOddsJob(d);
+    console.log('[cron] 8PM PT tomorrow prep for ' + d);
+    // Bootstrap tomorrow's game_log from statsapi schedule first so the
+    // 8PM odds pull has rows to attach to. RotoWire usually doesn't have
+    // tomorrow's lineups yet at this hour, so runLineupJob will skip
+    // RotoWire and return success purely from the statsapi bootstrap.
+    try { await runLineupJob(d); }
+    catch(e) { console.error('[cron-8pm] lineups failed:', e && e.message); }
+    try { await runOddsJob(d); }
+    catch(e) { console.error('[cron-8pm] odds failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
   // --- Scores: 4AM PT ---

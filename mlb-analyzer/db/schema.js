@@ -335,8 +335,14 @@ const q = {
       @model_away_ml, @model_home_ml, @model_total, @lineup_source, datetime('now')
     )
     ON CONFLICT(game_date, game_id) DO UPDATE SET
-      away_sp = excluded.away_sp, away_sp_hand = excluded.away_sp_hand,
-      home_sp = excluded.home_sp, home_sp_hand = excluded.home_sp_hand,
+      -- COALESCE SP fields so a later upsert with null SP (e.g. RotoWire
+      -- supplying lineup_json only) doesn't wipe statsapi-bootstrapped
+      -- probable pitchers. Non-null values still overwrite — RotoWire's
+      -- confirmed SP, when provided, supersedes the statsapi probable.
+      away_sp = COALESCE(excluded.away_sp, game_log.away_sp),
+      away_sp_hand = COALESCE(excluded.away_sp_hand, game_log.away_sp_hand),
+      home_sp = COALESCE(excluded.home_sp, game_log.home_sp),
+      home_sp_hand = COALESCE(excluded.home_sp_hand, game_log.home_sp_hand),
       game_time = COALESCE(excluded.game_time, game_log.game_time),
       market_away_ml = excluded.market_away_ml, market_home_ml = excluded.market_home_ml,
       market_total = excluded.market_total, park_factor = excluded.park_factor,
