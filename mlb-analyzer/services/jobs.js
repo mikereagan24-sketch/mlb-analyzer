@@ -226,15 +226,33 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     awaySpProjIP: awaySpProjIP, homeSpProjIP: homeSpProjIP,
   };
   const model = runModel(game, wobaIdx, settings);
-  const signals = getSignals(game, model, settings);
-  // If lineup is projected (not yet confirmed), save as proj_model snapshot
+  // Empty/partial lineups → runModel returned a sentinel. Skip ALL DB
+  // writes downstream: model_* would be null (and .toFixed would throw),
+  // and signals would crash on null marketLine math. Locked bet_lines
+  // remain untouched in bet_signals — they survive by no-op. When the
+  // lineup re-populates and processGameSignals runs again, the normal
+  // path takes over and refreshes signals as usual.
+  const suppressed = !!(model && model._suppressed);
+  if (suppressed) {
+    console.log('[model] Suppressed signals for ' + gameRow.game_id + ': ' + model._suppressed_detail);
+  }
+  // When suppressed, emit empty signals — the bet_signals lifecycle below
+  // still runs (DELETE unlocked, deactivate locked-but-no-longer-qualifying)
+  // so stale signals from a prior run get cleaned up. Locked bet_lines are
+  // preserved by the existing locked-line restore loop.
+  const signals = suppressed ? [] : getSignals(game, model, settings);
+  // If lineup is projected (not yet confirmed), save as proj_model snapshot.
+  // Skip the model_* UPDATE entirely when suppressed (model values are null
+  // and .toFixed would throw; we'd rather leave prior values than null them
+  // out — the lineups_complete health check + the empty signals array
+  // already communicate the suppression state to the UI).
   const isProjected = !gameRow.away_lineup_status || gameRow.away_lineup_status === 'projected';
   const hasProjSnapshot = gameRow.proj_model_away_ml != null;
-  if (isProjected) {
+  if (!suppressed && isProjected) {
     // Lineup still projected Ã¢ÂÂ keep proj snapshot current
     db.prepare(`UPDATE game_log SET proj_model_away_ml=?, proj_model_home_ml=?, proj_model_total=?, model_away_ml=?, model_home_ml=?, model_total=?, proj_market_away_ml=COALESCE(proj_market_away_ml, ?), proj_market_home_ml=COALESCE(proj_market_home_ml, ?), proj_market_total=COALESCE(proj_market_total, ?), updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.market_away_ml||null, gameRow.market_home_ml||null, gameRow.market_total||null, gameRow.game_date, gameRow.game_id);
-  } else {
+  } else if (!suppressed) {
     // Confirmed lineup Ã¢ÂÂ proj snapshot is frozen, update current model only
     db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
@@ -299,14 +317,21 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     for (const locked of lockedLines) {
       if (!newSigKeys.has(locked.signal_type+'|'+locked.signal_side)) {
         // Signal no longer qualifies Ã¢ÂÂ deactivate with a note
-        const finalMdl = locked.signal_type === 'Total' ? parseFloat(model.estTot.toFixed(2)) :
-                         (locked.signal_side === 'away' ? model.aML : model.hML);
+        // When suppressed (incomplete lineup), model_* values are null;
+        // skip .toFixed and write a suppression note instead.
+        const finalMdl = suppressed
+          ? null
+          : (locked.signal_type === 'Total'
+              ? parseFloat(model.estTot.toFixed(2))
+              : (locked.signal_side === 'away' ? model.aML : model.hML));
         const mktRef = locked.signal_type === 'Total'
           ? (gameRow.market_total != null ? ', mkt=' + gameRow.market_total : '')
           : (locked.signal_side === 'away'
               ? (gameRow.market_away_ml != null ? ', mkt=' + gameRow.market_away_ml : '')
               : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
-        const note = 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' Ã¢ÂÂ edge no longer meets threshold.';
+        const note = suppressed
+          ? 'Lineup incomplete (' + (model._suppressed_detail || 'no batters') + ') — model output suppressed, signal deactivated.'
+          : 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' Ã¢ÂÂ edge no longer meets threshold.';
         db.prepare("UPDATE bet_signals SET is_active=0, notes=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
           .run(note, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
         console.log('[model] Deactivated stale signal: '+locked.signal_type+'/'+locked.signal_side+' | '+note);
