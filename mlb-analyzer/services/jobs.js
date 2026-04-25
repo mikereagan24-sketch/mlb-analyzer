@@ -954,9 +954,11 @@ async function runOddsJob(dateStr) {
       const gameRow = q.getGameById.get(dateStr, o.game_id);
       if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
     }
+    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + (odds.length ? odds[0].source || 'odds' : 'no source'), updated);
     return { success: true, updated, date: dateStr };
   } catch(err) {
     console.error('[odds-job]', err.message);
+    q.logCron.run('odds', dateStr, 'error', err.message, 0);
     return { success: false, error: err.message };
   }
 }
