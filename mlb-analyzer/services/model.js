@@ -303,16 +303,21 @@ function getSignals(game, modelResult, settings) {
   if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
   if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
 
-  // Prefer the xcheck source for the total-side edge calc. Kalshi (the
-  // primary source) has a thin MLB O/U book and routinely posts outlier
-  // juice; using it as the model's only input produces false Over/Under
-  // edges. The xcheck source is an independent sharp/liquid book with
-  // consensus-shaped juice. Line + over + under travel as a group — never
-  // mix xcheck's line with the primary's juice or vice versa.
-  const haveXcheckTot = game.xcheck_total != null && game.xcheck_over_price != null && game.xcheck_under_price != null;
-  const mktTotal   = haveXcheckTot ? game.xcheck_total       : (game.market_total || MARKET_TOTAL_DFLT);
-  const overPrice  = haveXcheckTot ? game.xcheck_over_price  : (game.over_price   || -110);
-  const underPrice = haveXcheckTot ? game.xcheck_under_price : (game.under_price  || -110);
+  // Use the PRIMARY source for the total-side edge calc. The user bets at
+  // the primary venue (typically Kalshi); EV is what's available at the
+  // book they actually transact on, not at sharp consensus. Previously
+  // this preferred xcheck on the theory that Kalshi's thin book produced
+  // outlier juice and a sharp consensus was a more honest model input —
+  // but that hides genuine venue-specific +EV (e.g. Kalshi at +104 over
+  // a 51% model is +EV at Kalshi regardless of what Sporttrade thinks).
+  // xcheck is still STORED and DISPLAYED in the UI and still drives the
+  // line/juice divergence flag in services/jobs.js — it just no longer
+  // anchors the edge calculation here. Line + over + under travel as a
+  // group — never mix xcheck's line with primary's juice or vice versa.
+  const havePrimaryTot = game.market_total != null && game.over_price != null && game.under_price != null;
+  const mktTotal   = havePrimaryTot ? game.market_total : (game.xcheck_total       ?? MARKET_TOTAL_DFLT);
+  const overPrice  = havePrimaryTot ? game.over_price   : (game.xcheck_over_price  ?? -110);
+  const underPrice = havePrimaryTot ? game.under_price  : (game.xcheck_under_price ?? -110);
   const estTot     = modelResult.estTot;
 
   const overImplied  = overPrice  < 0 ? Math.abs(overPrice) /(Math.abs(overPrice) +100) : 100/(overPrice +100);
