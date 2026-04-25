@@ -128,6 +128,30 @@ function impliedP(ml) {
 }
 
 function runModel(game, wobaIdx, settings) {
+  // Empty/incomplete lineups → suppress. Model run estimates require a
+  // full 9-batter lineup to integrate over PA_WEIGHTS; with 0 or partial
+  // lineups, the per-batter EW loop produces 0 contributions, aWp/hWp
+  // collapse to 0, and the BAT_DFLT_START fallback produces an
+  // artificially flat run estimate that drives confidently-wrong signals
+  // (e.g. COL@NYM 2026-04-25 was postponed; empty lineups → 4.52 model
+  // total vs 7.5 market → false 3★ Total/Under). Threshold of <8 catches
+  // both empty and partially-posted lineups; downstream getSignals and
+  // processGameSignals key off _suppressed to skip signal generation +
+  // DB writes.
+  const awayLineupCount = (game.awayLineup || []).length;
+  const homeLineupCount = (game.homeLineup || []).length;
+  if (awayLineupCount < 8 || homeLineupCount < 8) {
+    return {
+      aTeamWoba: null, hTeamWoba: null,
+      aRuns: null, hRuns: null,
+      rawHW: null, adjHW: null, adjAW: null,
+      aML: null, hML: null,
+      estTot: null,
+      windFactor: 0, windRunAdj: 0,
+      _suppressed: 'incomplete_lineup',
+      _suppressed_detail: 'away=' + awayLineupCount + ' batters, home=' + homeLineupCount + ' batters',
+    };
+  }
     // Treat null/undefined/'' as missing — see note in services/jobs.js. An
     // empty string in app_settings would otherwise coerce via Number('')===0.
     const num = (v, def) => {
@@ -218,6 +242,10 @@ function catKey(signalType, signalSide, signalLabel, marketLine) {
 }
 
 function getSignals(game, modelResult, settings) {
+  // No signals when the upstream model_result was suppressed (e.g. empty
+  // or partial lineups — see runModel). modelResult.aML / .estTot are
+  // null in that case, so even attempting to push signals would crash.
+  if (modelResult && modelResult._suppressed) return [];
   const ML_1STAR = typeof settings.ML_LEAN_EDGE    !== 'undefined' ? Number(settings.ML_LEAN_EDGE)    : 15;
   const ML_2STAR = typeof settings.ML_VALUE_EDGE   !== 'undefined' ? Number(settings.ML_VALUE_EDGE)   : 30;
   const ML_3STAR = typeof settings.ML_3STAR_EDGE   !== 'undefined' ? Number(settings.ML_3STAR_EDGE)   : 60;

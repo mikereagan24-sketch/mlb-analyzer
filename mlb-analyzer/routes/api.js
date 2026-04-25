@@ -1830,7 +1830,43 @@ router.get('/health/:date', (req, res) => {
       }
     }
 
-    // ---- check 12: settings_sanity ----
+    // ---- check 12: lineups_complete ----
+    // Counts batters in each game's lineup_json. <8 batters either side
+    // means runModel will suppress signals (empty array → 0 contributions
+    // from forEach, run estimates collapse, false signals fire). Surfacing
+    // this in the health pill lets the user see "signals suppressed for X
+    // games" before betting.
+    {
+      const incomplete = [];
+      const tryParse = j => { try { return j ? JSON.parse(j) : null; } catch(e) { return null; } };
+      for (const g of games) {
+        const aRow = db.prepare('SELECT away_lineup_json, home_lineup_json FROM game_log WHERE game_date=? AND game_id=?').get(date, g.game_id);
+        if (!aRow) continue;
+        const aLU = tryParse(aRow.away_lineup_json) || [];
+        const hLU = tryParse(aRow.home_lineup_json) || [];
+        if (aLU.length < 8 || hLU.length < 8) {
+          incomplete.push({ game_id: g.game_id, away: aLU.length, home: hLU.length });
+        }
+      }
+      if (incomplete.length === 0 && games.length > 0) {
+        checks.push({ id: 'lineups_complete', status: 'pass', severity: 'warn',
+          message: 'All ' + games.length + ' games have complete lineups' });
+      } else if (incomplete.length === 0) {
+        checks.push({ id: 'lineups_complete', status: 'pass', severity: 'warn',
+          message: 'No games to check' });
+      } else {
+        const detail = incomplete.map(x => x.game_id + ' (away=' + x.away + ', home=' + x.home + ')').join(', ');
+        checks.push({
+          id: 'lineups_complete',
+          status: 'warn',
+          severity: 'warn',
+          message: incomplete.length + ' game(s) have incomplete lineups (signals suppressed): ' + detail,
+          affected_games: cap(incomplete.map(x => x.game_id)),
+        });
+      }
+    }
+
+    // ---- check 13: settings_sanity ----
     {
       const settingsRows = db.prepare("SELECT key, value FROM app_settings").all();
       const s = {};
