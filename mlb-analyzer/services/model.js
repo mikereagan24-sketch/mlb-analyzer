@@ -265,6 +265,22 @@ function getSignals(game, modelResult, settings) {
   // or partial lineups — see runModel). modelResult.aML / .estTot are
   // null in that case, so even attempting to push signals would crash.
   if (modelResult && modelResult._suppressed) return [];
+
+  // Null-market suppression. Don't emit ML signals when the market
+  // moneylines are missing — there's nothing to calculate edge against.
+  // mkt vs model comparison silently misbehaves on null and produces
+  // bogus large edges (null > 0 is false; null > -100 is false; etc.).
+  const haveAnyML = game.market_away_ml != null && game.market_home_ml != null;
+
+  // Null-market suppression for totals. When both primary AND xcheck
+  // totals are missing, MARKET_TOTAL_DFLT used to mask this — producing
+  // phantom edges against an arbitrary 8.5 default. Suppress instead.
+  // Reproducer pre-fix: SD@ARI 2026-04-25 (Mexico City — Unabated has no
+  // totals contract) emitted Total/over 3★ mkt=null mdl=10.35 edge=0.124
+  // against the 8.5 default. ML and totals are independent — a game can
+  // have valid ML but null totals (suppress only Total) or vice versa.
+  const haveAnyTot = (game.market_total != null && game.over_price != null && game.under_price != null) ||
+                     (game.xcheck_total != null && game.xcheck_over_price != null && game.xcheck_under_price != null);
   const ML_1STAR = typeof settings.ML_LEAN_EDGE    !== 'undefined' ? Number(settings.ML_LEAN_EDGE)    : 15;
   const ML_2STAR = typeof settings.ML_VALUE_EDGE   !== 'undefined' ? Number(settings.ML_VALUE_EDGE)   : 30;
   const ML_3STAR = typeof settings.ML_3STAR_EDGE   !== 'undefined' ? Number(settings.ML_3STAR_EDGE)   : 60;
@@ -300,8 +316,8 @@ function getSignals(game, modelResult, settings) {
 
   const aLabel = mlLabel(awayEdge);
   const hLabel = mlLabel(homeEdge);
-  if (aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
-  if (hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
+  if (haveAnyML && aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
+  if (haveAnyML && hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
 
   // Use the PRIMARY source for the total-side edge calc. The user bets at
   // the primary venue (typically Kalshi); EV is what's available at the
@@ -352,8 +368,8 @@ function getSignals(game, modelResult, settings) {
   };
   const oLabel = totLabel(overEdge);
   const uLabel = totLabel(underEdge);
-  if (oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
-  if (uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
+  if (haveAnyTot && oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
+  if (haveAnyTot && uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
 
   return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
 }
