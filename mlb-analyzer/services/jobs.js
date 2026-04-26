@@ -303,7 +303,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       edge_pct: sig.edge,
       outcome,
       pnl,
-      cohort: 'v3',
+      cohort: gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',
     });
   }
 
