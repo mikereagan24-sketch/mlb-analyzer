@@ -141,6 +141,35 @@ function impliedP(ml) {
   return ml<0 ? Math.abs(ml)/(Math.abs(ml)+100) : 100/(ml+100);
 }
 
+/**
+ * runModel — compute model probabilities and run estimates for a single game.
+ *
+ * @param {Object} game — game_log row
+ * @param {Object} wobaIdx — { byKey: { 'data_key:player_name': row } } from getWobaIndex()
+ * @param {Object} settings — app_settings keyed values (validated by services/settings-schema.js)
+ * @returns {ModelResult} See type below. Has _suppressed when output is invalid (empty lineups).
+ *
+ * Pipeline:
+ *   1. Build per-batter wOBA blends (Steamer × actual via w_proj/w_act)
+ *   2. Apply park factor (or venue override per PR #24)
+ *   3. Apply weather adjustments (temp_run_adj, wind_factor)
+ *   4. Compute pitching component (sp_pit_weight × SP + relief_pit_weight × bullpen)
+ *   5. Compute batting component
+ *   6. Blend pitching + batting (w_pit × pit + w_bat × bat) → run-rate
+ *   7. Convert to runs/game via run_mult
+ *   8. Pythagorean win prob (pyth_exp) clamped via wp_clamp_lo/hi
+ *   9. Total over/under prob via tot_slope clamped via tot_prob_lo/hi
+ *
+ * @typedef {Object} ModelResult
+ * @property {number|null} aTeamWoba — away team aggregate wOBA
+ * @property {number|null} hTeamWoba — home team aggregate wOBA
+ * @property {number|null} aRuns — away runs estimate
+ * @property {number|null} hRuns — home runs estimate
+ * @property {number|null} estTot — total runs estimate
+ * @property {number|null} aML — model away American ML
+ * @property {number|null} hML — model home American ML
+ * @property {string} [_suppressed] — present iff model invalid; values: 'incomplete_lineup'
+ */
 function runModel(game, wobaIdx, settings) {
   // Empty/incomplete lineups → suppress. Model run estimates require a
   // full 9-batter lineup to integrate over PA_WEIGHTS; with 0 or partial
@@ -260,6 +289,15 @@ function catKey(signalType, signalSide, signalLabel, marketLine) {
   return lbl+'-'+signalSide;
 }
 
+/**
+ * getSignals — convert a runModel() result + game state into emittable bet signals.
+ *
+ * @param {Object} game — game_log row
+ * @param {ModelResult} modelResult — output from runModel()
+ * @param {Object} settings — app_settings keyed values
+ * @returns {Signal[]} Empty array if model._suppressed OR market data is null
+ *   (PR #26: null-market suppression for ML and Total independently).
+ */
 function getSignals(game, modelResult, settings) {
   // No signals when the upstream model_result was suppressed (e.g. empty
   // or partial lineups — see runModel). modelResult.aML / .estTot are

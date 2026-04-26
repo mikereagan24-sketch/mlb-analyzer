@@ -1,4 +1,44 @@
 // @deployed 2026-04-12T18:07:38.335Z
+
+/**
+ * GAME_LOG FIELD SEMANTICS
+ *
+ * Primary odds (the price you'd actually bet at the venue):
+ *   market_away_ml, market_home_ml — venue ML (kalshi if available, else next in priority)
+ *   market_total, over_price, under_price — venue totals line + juice
+ *   ml_source, total_source — which book provided primary
+ *
+ * xcheck odds (calibration / divergence detection — NOT used in edge calc as of PR #25):
+ *   xcheck_away_ml, xcheck_home_ml — second-source ML for ML divergence flag
+ *   xcheck_total, xcheck_over_price, xcheck_under_price — second-source totals
+ *   xcheck_ml_source, xcheck_total_source — which book provided xcheck
+ *   xcheck must be a DIFFERENT source than primary (PR #21 enforces skip-self).
+ *
+ * Model output (computed from settings + lineups + odds + park/weather):
+ *   model_away_ml, model_home_ml — model's "fair" ML
+ *   model_total — model's projected total runs
+ *   model values are computed in services/model.js runModel().
+ *
+ * Provenance / data quality (PR #35):
+ *   odds_quality, lineups_quality, weather_quality, scores_quality —
+ *     'fresh' | 'stale_within_grace' | 'expired' | 'never_loaded' | 'locked'
+ *   *_quality_at — ISO timestamp of last fresh write
+ *   Computed lazily on read in GET /api/games/:date.
+ *
+ * Doubleheader handling (PR #36):
+ *   game_id is base 'away-home' for single games, 'away-home-g2' for second leg.
+ *   game_number: 1 or 2.
+ *   game_pk: statsapi unique identifier; use this for cross-system lookups.
+ *
+ * Locking:
+ *   odds_locked_at — set when game time approaches; price columns frozen after this.
+ *   PR #22 introduced label-only refresh on locked rows: source labels and flag
+ *   reasons still update; price columns do not.
+ *
+ * is_postponed: derived boolean (PR #18). True iff both lineup_json arrays are empty
+ *   AND away_sp is non-null (game was scheduled and never received lineups).
+ */
+
 const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
