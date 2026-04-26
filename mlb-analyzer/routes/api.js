@@ -251,6 +251,27 @@ router.get('/pit-proj-ip', (req, res) => {
   }
 });
 
+// Quality buckets: stored *_quality_at is the moment of last successful fetch.
+// Display state is recomputed lazily here so the UI reflects time-of-read,
+// not time-of-write — a game whose cron didn't run for 4h shows 'expired'
+// even though the stored row still says 'fresh' from the last successful run.
+const _QUALITY_GRACE_MS = 60 * 60 * 1000;       // 1h
+const _QUALITY_EXPIRED_MS = 3 * 60 * 60 * 1000; // 3h
+function _ageMs(isoLike, now) {
+  if (!isoLike) return null;
+  // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no Z.
+  // Node's Date.parse would otherwise treat it as local time.
+  const norm = isoLike.indexOf('T') === -1 ? isoLike.replace(' ', 'T') + 'Z' : isoLike;
+  const t = Date.parse(norm);
+  return isNaN(t) ? null : now - t;
+}
+function _classifyAge(ms) {
+  if (ms == null) return 'never_loaded';
+  if (ms < _QUALITY_GRACE_MS) return 'fresh';
+  if (ms < _QUALITY_EXPIRED_MS) return 'stale_within_grace';
+  return 'expired';
+}
+
 router.get('/games/:date', (req, res) => {
   try {
     const { date } = req.params;
@@ -261,16 +282,26 @@ router.get('/games/:date', (req, res) => {
       if (!signalsByGame[s.game_id]) signalsByGame[s.game_id] = [];
       signalsByGame[s.game_id].push(s);
     });
+    const now = Date.now();
     const result = games.map(g => {
       const awayLU = tryParse(g.away_lineup_json);
       const homeLU = tryParse(g.home_lineup_json);
       const isPostponed = (awayLU?.length === 0) && (homeLU?.length === 0) && g.away_sp != null;
+      // Locked games short-circuit odds quality: once odds_locked_at is set,
+      // the prices are intentionally frozen and shouldn't degrade by age.
+      const oddsQuality = g.odds_locked_at
+        ? 'locked'
+        : _classifyAge(_ageMs(g.odds_quality_at, now));
       return {
         ...g,
         away_lineup: awayLU || [],
         home_lineup: homeLU || [],
         is_postponed: isPostponed,
         signals: signalsByGame[g.game_id] || [],
+        odds_quality: oddsQuality,
+        lineups_quality: _classifyAge(_ageMs(g.lineups_quality_at, now)),
+        weather_quality: _classifyAge(_ageMs(g.weather_quality_at, now)),
+        scores_quality: _classifyAge(_ageMs(g.scores_quality_at, now)),
       };
     });
     res.json(result);
@@ -1757,7 +1788,8 @@ router.get('/health/:date', (req, res) => {
       "  away_lineup_status, home_lineup_status, " +
       "  market_away_ml, market_home_ml, market_total, " +
       "  xcheck_total, total_source, xcheck_total_source, " +
-      "  odds_flagged, odds_flag_reason, updated_at " +
+      "  odds_flagged, odds_flag_reason, updated_at, odds_locked_at, " +
+      "  odds_quality_at, lineups_quality_at, weather_quality_at, scores_quality_at " +
       "FROM game_log WHERE game_date=? ORDER BY game_id"
     ).all(date);
 
@@ -1872,61 +1904,67 @@ router.get('/health/:date', (req, res) => {
       });
     }
 
-    // ---- helpers for freshness checks ----
-    const fmtAge = ms => {
-      const min = Math.floor(ms / 60000);
-      if (min < 60) return min + ' minutes ago';
-      const h = Math.floor(min / 60);
-      const m = min % 60;
-      return h + 'h ' + m + 'm ago';
-    };
-    const cronLatest = (jobType, runDate) => {
-      // Latest run-row for a job_type optionally scoped to run_date. Returns
-      // {ran_at_iso, status, ageMs} or null when the job has never run with
-      // that scope. ran_at is stored as datetime('now') text — convert via
-      // Date constructor with explicit 'Z' since SQLite uses UTC.
-      const sql = runDate
-        ? "SELECT ran_at, status FROM cron_log WHERE job_type=? AND run_date=? ORDER BY ran_at DESC LIMIT 1"
-        : "SELECT ran_at, status FROM cron_log WHERE job_type=? ORDER BY ran_at DESC LIMIT 1";
-      const row = runDate
-        ? db.prepare(sql).get(jobType, runDate)
-        : db.prepare(sql).get(jobType);
-      if (!row) return null;
-      const t = new Date(row.ran_at + 'Z').getTime();
-      return { ran_at_iso: row.ran_at, status: row.status, ageMs: Date.now() - t };
-    };
-
-    // ---- check 7: data_freshness_odds ----
+    // ---- check 7: data_quality_summary (replaces data_freshness_odds + _lineups) ----
+    // Per-game, per-field-group quality computed lazily from *_quality_at age.
+    // Locked games are excluded from the odds slice — once odds_locked_at is
+    // set the prices are intentionally frozen, not stale. Weather is checked
+    // for 'expired' only since same-day weather staleness rarely matters.
     {
-      const r = cronLatest('odds', date);
-      if (!r) {
-        checks.push({ id: 'data_freshness_odds', status: 'fail', severity: 'warn',
-          message: 'Last odds refresh: never (no cron_log entry for this date)' });
+      const now = Date.now();
+      const _ageMs = iso => {
+        if (!iso) return null;
+        const norm = iso.indexOf('T') === -1 ? iso.replace(' ', 'T') + 'Z' : iso;
+        const t = Date.parse(norm);
+        return isNaN(t) ? null : now - t;
+      };
+      const _classify = ms => {
+        if (ms == null) return 'never_loaded';
+        if (ms < 60*60*1000) return 'fresh';
+        if (ms < 3*60*60*1000) return 'stale_within_grace';
+        return 'expired';
+      };
+      const _fmtAge = ms => {
+        if (ms == null) return '—';
+        const m = Math.round(ms / 60000);
+        if (m < 60) return m + 'm';
+        return Math.floor(m/60) + 'h ' + (m % 60).toString().padStart(2,'0') + 'm';
+      };
+      const issues = []; // { game_id, field, quality, ageMs }
+      for (const g of games) {
+        const oddsQ = g.odds_locked_at ? 'locked' : _classify(_ageMs(g.odds_quality_at));
+        if (oddsQ !== 'fresh' && oddsQ !== 'locked') {
+          issues.push({ game_id: g.game_id, field: 'odds', quality: oddsQ, ageMs: _ageMs(g.odds_quality_at) });
+        }
+        const lineupsQ = _classify(_ageMs(g.lineups_quality_at));
+        if (lineupsQ !== 'fresh') {
+          issues.push({ game_id: g.game_id, field: 'lineups', quality: lineupsQ, ageMs: _ageMs(g.lineups_quality_at) });
+        }
+        const weatherQ = _classify(_ageMs(g.weather_quality_at));
+        if (weatherQ === 'expired') {
+          issues.push({ game_id: g.game_id, field: 'weather', quality: weatherQ, ageMs: _ageMs(g.weather_quality_at) });
+        }
+        // scores_quality intentionally excluded: an unfinished game lacking
+        // scores is the normal mid-slate state, not a quality issue.
+      }
+      const expired = issues.filter(i => i.quality === 'expired' || i.quality === 'never_loaded');
+      const stale = issues.filter(i => i.quality === 'stale_within_grace');
+      if (issues.length === 0) {
+        checks.push({ id: 'data_quality_summary', status: 'pass', severity: 'warn',
+          message: 'All odds, lineups, and weather data fresh across ' + games.length + ' game(s)' });
       } else {
-        const h1 = 60 * 60 * 1000, h3 = 3 * h1;
-        const status = r.ageMs < h1 ? 'pass' : r.ageMs < h3 ? 'warn' : 'fail';
-        const tag = r.ageMs >= h3 ? ' — stale' : '';
-        checks.push({ id: 'data_freshness_odds', status, severity: 'warn',
-          message: 'Last odds refresh: ' + fmtAge(r.ageMs) + tag });
+        const status = expired.length > 0 ? 'fail' : 'warn';
+        const sample = (s, label) => s.slice(0, 4).map(i => i.game_id + ' ' + i.field + ' ' + _fmtAge(i.ageMs) + ' ago').join(', ')
+          + (s.length > 4 ? ' +' + (s.length - 4) + ' more' : '');
+        const parts = [];
+        if (expired.length) parts.push(expired.length + ' expired/never_loaded: ' + sample(expired));
+        if (stale.length) parts.push(stale.length + ' stale: ' + sample(stale));
+        const affected = cap(Array.from(new Set(issues.map(i => i.game_id))));
+        checks.push({ id: 'data_quality_summary', status, severity: 'warn',
+          message: parts.join(' | '), affected_games: affected });
       }
     }
 
-    // ---- check 8: data_freshness_lineups ----
-    {
-      const r = cronLatest('lineups', date);
-      if (!r) {
-        checks.push({ id: 'data_freshness_lineups', status: 'fail', severity: 'warn',
-          message: 'Last lineup pull: never (no cron_log entry for this date)' });
-      } else {
-        const h1 = 60 * 60 * 1000, h3 = 3 * h1;
-        const status = r.ageMs < h1 ? 'pass' : r.ageMs < h3 ? 'warn' : 'fail';
-        const tag = r.ageMs >= h3 ? ' — stale' : '';
-        checks.push({ id: 'data_freshness_lineups', status, severity: 'warn',
-          message: 'Last lineup pull: ' + fmtAge(r.ageMs) + tag });
-      }
-    }
-
-    // ---- check 9: cron_health (any job that hasn't successfully run in 25h) ----
+    // ---- check 8: cron_health (any job that hasn't successfully run in 25h) ----
     {
       const window25h = "datetime('now','-25 hours')";
       const recent = db.prepare(

@@ -870,12 +870,36 @@ function triggerRosters(){
     .catch(e=>st.innerHTML='<span style="color:var(--red)">'+e.message+'</span>');
 }
 
+// Quality decoration: subtle cue so the user can tell at a glance which
+// data is current. fresh+locked render unchanged. stale_within_grace mutes
+// the color. expired adds a warning badge on top of the muted color.
+// never_loaded renders an em-dash in place of the value.
+function _qStyle(q){
+  if(q==='stale_within_grace'||q==='expired') return 'color:var(--text2)';
+  return '';
+}
+function _qBadge(q,opts){
+  if(q==='expired') return '<span title="data older than 3h" style="color:#cc8833;font-weight:bold;margin-left:3px;font-size:11px">!</span>';
+  if(q==='never_loaded' && opts && opts.inlineDash) return '';
+  return '';
+}
+function _isNeverLoaded(q){ return q==='never_loaded'; }
+
 function renderGameGrid(games,date){
   if(!games.length){document.getElementById('game-grid').innerHTML='';return;}
   document.getElementById('game-grid').innerHTML=games.map(g=>{
     const sigs=g.signals||[];
     const score=g.away_score!=null?g.away_score+'-'+g.home_score:'';
     const ptTime=etToPT(g.game_time||'');
+    const oddsQ=g.odds_quality||'fresh';
+    const lineupsQ=g.lineups_quality||'fresh';
+    const weatherQ=g.weather_quality||'fresh';
+    const oddsStyle=_qStyle(oddsQ);
+    const oddsBadge=_qBadge(oddsQ);
+    const lineupsStyle=_qStyle(lineupsQ);
+    const lineupsBadge=_qBadge(lineupsQ);
+    // Weather only flags expired — same-day staleness rarely matters.
+    const weatherBadge=weatherQ==='expired'?_qBadge('expired'):'';
     const star3=sigs.some(s=>s.signal_label==='3★');
     const star2=sigs.some(s=>s.signal_label==='2★');
     const star1=sigs.some(s=>s.signal_label==='1★');
@@ -887,7 +911,7 @@ function renderGameGrid(games,date){
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (!g.is_postponed&&sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
-      '<div class="gsp">'+(g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+(g.temp_f!=null ? (function(){
+      '<div class="gsp"'+(lineupsStyle?' style="'+lineupsStyle+'"':'')+'>'+(_isNeverLoaded(lineupsQ)?'<span title="lineups never loaded">— vs —</span>':((g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')))+lineupsBadge+weatherBadge+(g.temp_f!=null ? (function(){
         var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
         var roofClosed=(roofSt==='closed');
         var roofPartial=(roofSt==='partial');
@@ -936,7 +960,7 @@ function renderGameGrid(games,date){
         }
         return tempBadge+windBadge+roofBadge;
       })() : '')+'</div>'+
-      '<div class="godds"><span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">'+fmtTotalsBlock(g)+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span></div>'+
+      '<div class="godds"'+(oddsStyle?' style="'+oddsStyle+'"':'')+'>'+(_isNeverLoaded(oddsQ)?'<span class="gml" title="odds never loaded">—</span><span class="gtot">—</span><span class="gml">—</span>':'<span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">'+fmtTotalsBlock(g)+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span>')+oddsBadge+'</div>'+
       (g.odds_flagged?'<div style="background:rgba(220,40,40,0.15);border:1px solid #cc3333;color:#ff6666;font-size:10px;font-weight:600;padding:3px 6px;margin:3px 0;border-radius:3px;text-align:center">⚠ ODDS FLAG: '+(g.odds_flag_reason||'unknown')+'</div>':'')+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
