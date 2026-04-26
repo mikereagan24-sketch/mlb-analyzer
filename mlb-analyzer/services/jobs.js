@@ -183,6 +183,58 @@ function checkBookDivergence(awayML, homeML, xcheckAwayML, xcheckHomeML, xcheckS
   return null;
 }
 
+/**
+ * BET_SIGNALS FIELD SEMANTICS
+ *
+ * signal_type: 'ML' | 'Total'
+ * signal_side: 'away' | 'home' for ML, 'over' | 'under' for Total
+ * signal_label: '1★' | '2★' | '3★'
+ * category: 'Nstar-fav' | 'Nstar-dog' | 'Nstar-over' | 'Nstar-under' | '0star-...'
+ *
+ * market_line: the price USED IN EDGE CALC.
+ *   For ML: that side's American moneyline at primary venue.
+ *   For Total: the total runs line at primary venue (not the price).
+ *   PR #25: this is always the primary venue value, never xcheck.
+ *
+ * model_line: the model's "fair" value for that side.
+ *   For ML: model_away_ml or model_home_ml (American odds).
+ *   For Total: model_total (runs).
+ *
+ * edge_pct: percentage-point gap between implied probability of market_line
+ *   and model_line. Threshold for 1★/2★/3★ comes from settings
+ *   (ml_lean_edge, tot_lean_edge, etc.).
+ *
+ * bet_line: NULL until user locks via /api/signals/:id/bet-line.
+ *   The price the user actually got. May differ from market_line if line
+ *   moved between signal generation and lock.
+ *
+ * bet_locked_at: timestamp of lock (NULL if not locked).
+ *
+ * closing_line: market_line at game start, written by closing-lock cron.
+ *
+ * clv: implied-probability percentage points. Positive = market moved your
+ *   way after lock. PR #31: handles cross-side scenarios (lock dog → close
+ *   fav etc.) via implied-prob math. ML signals only — Total signals stay
+ *   clv=NULL.
+ *
+ * outcome: 'pending' | 'win' | 'loss' | 'push' | 'void'
+ *   Set by score-grading job after game finals.
+ *
+ * pnl: $ on $100 stake. Computed at grading using bet_line if set, else
+ *   market_line.
+ *
+ * cohort: 'v1' | 'v2-tainted' | 'v3-pretuning' | 'v3-tainted' | 'v3'
+ *   v3 starts 2026-04-24 (PR #33). Prior model versions and tainted periods
+ *   preserved for historical reference, excluded from default 'v3 (current)'
+ *   Backtest filter.
+ *
+ * is_active: 1 = currently emitting signal; 0 = deactivated (model no longer
+ *   recommends this side, but bet_line was already locked so row is preserved
+ *   for grading + audit). PR #34: every is_active transition is recorded in
+ *   bet_signal_audit.
+ *
+ * notes: free-form deactivation reason or manual annotation.
+ */
 function processGameSignals(gameRow, wobaIdx, settings) {
   // Per-team bullpen wOBA from pit-act data
   const awayParts = (gameRow.game_id||'').split('-');
