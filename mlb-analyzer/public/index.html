@@ -907,6 +907,7 @@ function renderGameGrid(games,date){
     return'<div class="'+cardClass+'" id="gc-'+g.game_id+'">'+
       (ptTime?'<div class="gtime">'+ptTime+'</div>':'')+
       '<div class="gteams">'+g.away_team+' @ '+g.home_team+
+      ((g.game_number||1)>1?' <span style="color:var(--text2);font-size:11px;font-weight:500;margin-left:4px">(G'+g.game_number+')</span>':'')+
       (g.is_postponed?' <span style="background:#cc3333;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px;letter-spacing:0.5px">POSTPONED</span>':'')+
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (!g.is_postponed&&sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+

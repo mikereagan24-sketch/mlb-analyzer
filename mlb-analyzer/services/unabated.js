@@ -237,7 +237,15 @@ function parseUnabatedOdds(data, dateStr) {
     return false;
   });
 
-  const byMatchup = {};
+  // Step 1: gather every event by team-pair (don't dedup yet — doubleheader
+  // legs share the team-pair). Step 2: within each team-pair, cluster events
+  // by eventStart proximity (>2h gap = different leg). Step 3: within each
+  // cluster, pick the event with the MOST market sources to filter out the
+  // future-day placeholder events Unabated also serves (~60+ books on the
+  // real listing vs ~4-8 on a placeholder). Step 4: sort clusters by start;
+  // first leg keeps the bare team-pair game_id, subsequent legs append
+  // '-g{N}' to match the suffix convention from statsapi/fetchSchedule.
+  const byTeamPair = {};
   dateGames.forEach(g=>{
     const awayUb = teamMap[g.eventTeams['0']?.id];
     const homeUb = teamMap[g.eventTeams['1']?.id];
@@ -247,21 +255,46 @@ function parseUnabatedOdds(data, dateStr) {
     const key = away+'-'+home;
     const n = Object.keys(g.gameOddsMarketSourcesLines||{}).length;
     const start = g.eventStart || '';
-    // Pick the event with the MOST market sources. The actively-traded
-    // game for this date has ~60+ book listings; placeholder listings for
-    // future days have only 4-8. Previously used "latest start" as the
-    // dedup heuristic, but Unabated serves future-day placeholder events
-    // that pass our date filter (e.g. on 4/22 query, both 4/22 00:05 UTC
-    // and 4/23 00:05 UTC PIT@TEX events match; the 4/23 one is tomorrow's
-    // placeholder with no totals). Source count is a robust signal for
-    // identifying the real traded listing.
-    if (!byMatchup[key] || n > byMatchup[key].n) byMatchup[key] = {g,away,home,n,start};
+    if (!byTeamPair[key]) byTeamPair[key] = [];
+    byTeamPair[key].push({g, away, home, n, start});
   });
+  const byMatchup = {};
+  // Doubleheader legs are never scheduled <90min apart at first pitch.
+  // A tighter gap means something else is going on (suspended-game resumption,
+  // split admission, schedule glitch) and we'd rather fail loud than silently
+  // merge two listings into one.
+  const LEG_GAP_MS = 90*60*1000;
+  for (const [teamKey, events] of Object.entries(byTeamPair)) {
+    // Sort by start time (lex sort works on ISO-8601 strings).
+    events.sort((a,b) => (a.start||'').localeCompare(b.start||''));
+    // Cluster events whose starts are within LEG_GAP_MS of each other.
+    // Anything past that threshold is treated as a separate leg.
+    const clusters = [];
+    for (const ev of events) {
+      const evMs = Date.parse(ev.start);
+      const last = clusters[clusters.length-1];
+      const lastMs = last ? Date.parse(last[last.length-1].start) : NaN;
+      if (last && !isNaN(evMs) && !isNaN(lastMs) && Math.abs(evMs - lastMs) < LEG_GAP_MS) {
+        last.push(ev);
+      } else {
+        clusters.push([ev]);
+      }
+    }
+    clusters.forEach((cluster, idx) => {
+      // Within this leg, pick the event with the most market sources — same
+      // placeholder-filter the original single-game dedup applied.
+      cluster.sort((a,b) => b.n - a.n);
+      const best = cluster[0];
+      const gameNumber = idx + 1;
+      const finalKey = gameNumber > 1 ? teamKey + '-g' + gameNumber : teamKey;
+      byMatchup[finalKey] = { ...best, gameNumber, finalKey };
+    });
+  }
 
   console.log('[unabated] '+Object.keys(byMatchup).length+' games for '+dateStr);
 
   const results = [];
-  for (const {g,away,home} of Object.values(byMatchup)) {
+  for (const {g, away, home, gameNumber, finalKey} of Object.values(byMatchup)) {
     const lines = g.gameOddsMarketSourcesLines||{};
 
     // Build bySource for ML (an0 only) and totals (all an values)
@@ -477,7 +510,9 @@ function parseUnabatedOdds(data, dateStr) {
       +' tot='+total+'@'+overPrice+'/'+underPrice+'('+totalSrc+')'
       +' tot-xcheck='+xcheckTotal+'@'+xcheckOverPrice+'/'+xcheckUnderPrice+'('+xcheckTotalSrc+')');
     results.push({
-      game_id:away+'-'+home,
+      game_id: finalKey,
+      game_number: gameNumber,
+      event_start: g.eventStart || null,
       market_away_ml:awayML, market_home_ml:homeML,
       market_total:total, over_price:overPrice, under_price:underPrice,
       xcheck_away_ml:xcheckAwayML, xcheck_home_ml:xcheckHomeML,

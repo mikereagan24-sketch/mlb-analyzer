@@ -92,6 +92,8 @@ db.exec(`
   weather_quality_at TEXT,
   scores_quality TEXT,
   scores_quality_at TEXT,
+  game_number INTEGER DEFAULT 1,
+  game_pk INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -299,6 +301,14 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN weather_quality TEXT"); } catch(e
 try { db.exec("ALTER TABLE game_log ADD COLUMN weather_quality_at TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN scores_quality TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN scores_quality_at TEXT"); } catch(e) {}
+// Doubleheader support. game_id alone collided across legs of a doubleheader
+// (UNIQUE(game_date, game_id) silently kept only one row); game_id now
+// includes a -g{N} suffix from gameNumber > 1, and game_number/game_pk
+// give us a stable handle off statsapi for cross-source matching.
+try { db.exec("ALTER TABLE game_log ADD COLUMN game_number INTEGER DEFAULT 1"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN game_pk INTEGER"); } catch(e) {}
+// Historical backfill: rows created before this migration default to G1.
+try { db.exec("UPDATE game_log SET game_number = 1 WHERE game_number IS NULL"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
 // check replaces the old "sharp consensus" terminology — the column holds
 // the same data shape (one secondary source's raw price) but the field
@@ -415,13 +425,13 @@ const q = {
       away_sp, away_sp_hand, home_sp, home_sp_hand,
       market_away_ml, market_home_ml, market_total, park_factor,
       model_away_ml, model_home_ml, model_total, lineup_source,
-      venue_id, venue_name, updated_at
+      venue_id, venue_name, game_number, game_pk, updated_at
     ) VALUES (
       @game_date, @game_id, @away_team, @home_team, @game_time,
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
       @model_away_ml, @model_home_ml, @model_total, @lineup_source,
-      @venue_id, @venue_name, datetime('now')
+      @venue_id, @venue_name, COALESCE(@game_number, 1), @game_pk, datetime('now')
     )
     ON CONFLICT(game_date, game_id) DO UPDATE SET
       -- COALESCE SP fields so a later upsert with null SP (e.g. RotoWire
@@ -441,6 +451,11 @@ const q = {
       -- carry venue from statsapi) doesn't wipe a bootstrapped venue_id.
       venue_id = COALESCE(excluded.venue_id, game_log.venue_id),
       venue_name = COALESCE(excluded.venue_name, game_log.venue_name),
+      -- COALESCE game_number/game_pk so a RotoWire-only upsert (no statsapi
+      -- doubleheader markers) doesn't wipe the gameNumber/gamePk the
+      -- statsapi bootstrap already wrote.
+      game_number = COALESCE(excluded.game_number, game_log.game_number),
+      game_pk = COALESCE(excluded.game_pk, game_log.game_pk),
       updated_at = datetime('now')
   `),
   updateScores: db.prepare(`
