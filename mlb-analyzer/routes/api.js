@@ -6,6 +6,7 @@ const { q, db } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const { normName, stripSfx } = require('../utils/names');
+const { calcCLV } = require('../services/clv');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -349,13 +350,20 @@ router.post('/jobs/fix-signals', (req, res) => {
       SELECT MAX(id) FROM bet_signals GROUP BY game_date, game_id, signal_type, signal_side
     )`).run();
     // 2. Backfill closing_line from market_line for all resolved signals
+    // CLV in implied-probability percentage points; mirrors services/clv.js
+    // calcCLV(). Total signals stay clv=NULL — bet_line is a total, not a
+    // price, and implied-prob doesn't apply.
     db.prepare(`UPDATE bet_signals SET
       closing_line = market_line,
       clv = CASE
-        WHEN bet_line IS NOT NULL AND market_line IS NOT NULL THEN
-          CASE WHEN signal_type='ML' THEN
-            CASE WHEN market_line < 0 THEN market_line - bet_line ELSE bet_line - market_line END
-          ELSE bet_line - market_line END
+        WHEN signal_type='ML' AND bet_line IS NOT NULL AND market_line IS NOT NULL THEN
+          ROUND(
+            ((CASE WHEN market_line < 0 THEN ABS(market_line)*1.0/(ABS(market_line)+100)
+                                        ELSE 100.0/(market_line+100) END)
+             -
+             (CASE WHEN bet_line < 0    THEN ABS(bet_line)*1.0/(ABS(bet_line)+100)
+                                        ELSE 100.0/(bet_line+100)    END)
+            ) * 1000) / 10.0
         ELSE NULL END
       WHERE closing_line IS NULL AND outcome != 'pending' AND market_line IS NOT NULL`).run();
     const fixed = db.prepare('SELECT COUNT(*) as n FROM bet_signals WHERE closing_line IS NOT NULL').get();
@@ -384,13 +392,22 @@ router.get('/backtest', (req, res) => {
     // One-time: null out CLV for Total signals (CLV not meaningful ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ bet_line is a price, not a total)
     db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' AND clv IS NOT NULL").run();
     // Auto-backfill closing_line from market_line for resolved signals that have none
+    // CLV in implied-probability percentage points; mirrors services/clv.js
+    // calcCLV(). Note: this query already runs after the explicit
+    // 'UPDATE bet_signals SET clv=NULL WHERE signal_type=Total' above, but
+    // belt-and-suspenders we still gate on signal_type='ML' here so the
+    // formula is never applied to totals even if call ordering changes.
     db.prepare(`UPDATE bet_signals SET
       closing_line = market_line,
       clv = CASE
-        WHEN bet_line IS NOT NULL AND market_line IS NOT NULL THEN
-          CASE WHEN market_line < 0
-               THEN market_line - bet_line
-               ELSE bet_line - market_line END
+        WHEN signal_type='ML' AND bet_line IS NOT NULL AND market_line IS NOT NULL THEN
+          ROUND(
+            ((CASE WHEN market_line < 0 THEN ABS(market_line)*1.0/(ABS(market_line)+100)
+                                        ELSE 100.0/(market_line+100) END)
+             -
+             (CASE WHEN bet_line < 0    THEN ABS(bet_line)*1.0/(ABS(bet_line)+100)
+                                        ELSE 100.0/(bet_line+100)    END)
+            ) * 1000) / 10.0
         ELSE NULL END
       WHERE closing_line IS NULL
         AND outcome != 'pending'
@@ -938,16 +955,8 @@ router.post('/signals/:id/bet-line', (req, res) => {
     // Recalculate CLV if closing_line already exists
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
-    let clv = null;
-    if (sig.closing_line != null && sig.signal_type === 'ML') {
-      // CLV = how much better your line is vs closing (ML only ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ not meaningful for totals)
-      const isFav = bet_line < 0;
-      if (isFav) {
-        clv = sig.closing_line - bet_line; // e.g. closed at -150, you got -130 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ clv = +20
-      } else {
-        clv = bet_line - sig.closing_line; // e.g. closed at +120, you got +135 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ clv = +15
-      }
-    }
+    // CLV in implied-prob percentage points; ML only — Total signals stay clv=NULL.
+    const clv = (sig.signal_type === 'ML') ? calcCLV(bet_line, sig.closing_line) : null;
     db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
       .run(bet_line, clv, id);
     res.json({success:true, id, bet_line, clv});
@@ -963,11 +972,8 @@ router.post('/signals/:id/closing-line', (req, res) => {
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
     // Recalculate CLV if bet_line exists (ML only ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ not meaningful for totals)
-    let clv = null;
-    if (sig.bet_line != null && sig.signal_type === 'ML') {
-      const isFav = sig.bet_line < 0;
-      clv = isFav ? (closing_line - sig.bet_line) : (sig.bet_line - closing_line);
-    }
+    // CLV in implied-prob percentage points; ML only — Total signals stay clv=NULL.
+    const clv = (sig.signal_type === 'ML') ? calcCLV(sig.bet_line, closing_line) : null;
     db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?")
       .run(closing_line, clv, id);
     res.json({success:true, id, closing_line, clv});
@@ -981,11 +987,8 @@ router.post('/signals/closing-lines', (req, res) => {
     const sigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL AND signal_type='ML'").all(game_date, game_id);
     let updated = 0;
     for (const sig of sigs) {
-      let clv = null;
-      if (sig.bet_line != null) {
-        const isFav = sig.bet_line < 0;
-        clv = isFav ? (closing_line - sig.bet_line) : (sig.bet_line - closing_line);
-      }
+      // CLV in implied-prob pp; SELECT above already filters to signal_type=ML.
+      const clv = calcCLV(sig.bet_line, closing_line);
       db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closing_line, clv, sig.id);
       updated++;
     }
