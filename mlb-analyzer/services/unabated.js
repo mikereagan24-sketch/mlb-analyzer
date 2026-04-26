@@ -259,18 +259,22 @@ function parseUnabatedOdds(data, dateStr) {
     byTeamPair[key].push({g, away, home, n, start});
   });
   const byMatchup = {};
-  const TWO_HOURS_MS = 2*60*60*1000;
+  // Doubleheader legs are never scheduled <90min apart at first pitch.
+  // A tighter gap means something else is going on (suspended-game resumption,
+  // split admission, schedule glitch) and we'd rather fail loud than silently
+  // merge two listings into one.
+  const LEG_GAP_MS = 90*60*1000;
   for (const [teamKey, events] of Object.entries(byTeamPair)) {
     // Sort by start time (lex sort works on ISO-8601 strings).
     events.sort((a,b) => (a.start||'').localeCompare(b.start||''));
-    // Cluster events whose starts are within 2h of each other. Anything past
-    // that is treated as a separate leg (typical doubleheaders are 3-4h apart).
+    // Cluster events whose starts are within LEG_GAP_MS of each other.
+    // Anything past that threshold is treated as a separate leg.
     const clusters = [];
     for (const ev of events) {
       const evMs = Date.parse(ev.start);
       const last = clusters[clusters.length-1];
       const lastMs = last ? Date.parse(last[last.length-1].start) : NaN;
-      if (last && !isNaN(evMs) && !isNaN(lastMs) && Math.abs(evMs - lastMs) < TWO_HOURS_MS) {
+      if (last && !isNaN(evMs) && !isNaN(lastMs) && Math.abs(evMs - lastMs) < LEG_GAP_MS) {
         last.push(ev);
       } else {
         clusters.push([ev]);
