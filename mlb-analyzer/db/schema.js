@@ -81,6 +81,17 @@ db.exec(`
   xcheck_ml_source TEXT,
   venue_id INTEGER,
   venue_name TEXT,
+  -- Per-field-group freshness markers. Set inline at successful ingest.
+  -- Read-time logic in /api/games/:date computes the actual displayable
+  -- state from age + odds_locked_at (lock state short-circuits to 'locked').
+  odds_quality TEXT,
+  odds_quality_at TEXT,
+  lineups_quality TEXT,
+  lineups_quality_at TEXT,
+  weather_quality TEXT,
+  weather_quality_at TEXT,
+  scores_quality TEXT,
+  scores_quality_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -278,6 +289,16 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_name TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
+// Per-field-group quality columns. Stored value is set inline at ingest;
+// /api/games/:date computes the displayable state from age + odds_locked_at.
+try { db.exec("ALTER TABLE game_log ADD COLUMN odds_quality TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN odds_quality_at TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN lineups_quality TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN lineups_quality_at TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN weather_quality TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN weather_quality_at TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN scores_quality TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN scores_quality_at TEXT"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
 // check replaces the old "sharp consensus" terminology — the column holds
 // the same data shape (one secondary source's raw price) but the field
@@ -426,7 +447,9 @@ const q = {
     UPDATE game_log SET
       away_score = @away_score, home_score = @home_score,
       actual_total = @away_score + @home_score,
-      scores_source = @scores_source, updated_at = datetime('now')
+      scores_source = @scores_source,
+      scores_quality = 'fresh', scores_quality_at = datetime('now'),
+      updated_at = datetime('now')
     WHERE game_date = @game_date AND game_id = @game_id
   `),
   getGamesByDate: db.prepare(`SELECT * FROM game_log WHERE game_date = ?
@@ -621,7 +644,7 @@ q.upsertWobaBatch = (key, rows) => {
 
 // Initialize prepared statements that need new columns
 try {
-  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=? WHERE game_date=? AND game_id=?`);
+  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now') WHERE game_date=? AND game_id=?`);
 } catch(e) { console.error('updateWindData init failed:', e.message); }
 
 

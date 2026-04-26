@@ -527,7 +527,7 @@ async function runLineupJob(dateStr) {
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
     const updateLineup = db.prepare(
-    `UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, away_lineup_status=?, home_lineup_status=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`
+    `UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, away_lineup_status=?, home_lineup_status=?, lineups_quality='fresh', lineups_quality_at=datetime('now'), updated_at=datetime('now') WHERE game_date=? AND game_id=?`
   );
 
     for (const g of games) {
@@ -805,7 +805,7 @@ async function runWeatherJob(date) {
         if (q.updateWindData) {
           q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
         } else {
-          db.prepare('UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=? WHERE game_date=? AND game_id=?')
+          db.prepare("UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now') WHERE game_date=? AND game_id=?")
             .run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
         }
         const latestRow = q.getGameById.get(date, game.game_id);
@@ -1020,17 +1020,22 @@ function processOddsArray(dateStr, oddsRaw, settings) {
       );
       continue;
     }
+    // Null-write rule (PR #10 pattern): values flow through transparently so
+    // a transient null isn't masked. Pre-lock provenance labels (ml_source,
+    // xcheck_ml_source, xcheck_total_source) keep COALESCE so a single null
+    // fetch on a near-locked game doesn't lose the correct source label.
     db.prepare(`UPDATE game_log SET
       market_away_ml=?, market_home_ml=?,
       market_total=?, over_price=?, under_price=?, total_source=?,
       ml_source=COALESCE(?, ml_source),
       xcheck_ml_source=COALESCE(?, xcheck_ml_source),
       xcheck_away_ml=?, xcheck_home_ml=?,
-      xcheck_total=COALESCE(?, xcheck_total),
-      xcheck_over_price=COALESCE(?, xcheck_over_price),
-      xcheck_under_price=COALESCE(?, xcheck_under_price),
+      xcheck_total=?,
+      xcheck_over_price=?,
+      xcheck_under_price=?,
       xcheck_total_source=COALESCE(?, xcheck_total_source),
       odds_flagged=?, odds_flag_reason=?,
+      odds_quality='fresh', odds_quality_at=datetime('now'),
       updated_at=datetime('now')
       WHERE game_date=? AND game_id=?`)
       .run(o.market_away_ml, o.market_home_ml,
