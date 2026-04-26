@@ -308,6 +308,31 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   }
 
   // Remove any duplicate signals (same type+side) Ã¢ÂÂ keep highest ID
+  // Audit which rows are about to be deleted, for forensic "where did my lock go?" queries.
+  const dupRows = db.prepare(
+    "SELECT id, signal_type, signal_side, bet_line, closing_line, clv, " +
+    "(SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=outer.signal_type AND signal_side=outer.signal_side) AS keep_id " +
+    "FROM bet_signals AS outer WHERE game_date=? AND game_id=? AND id NOT IN (" +
+    "  SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side" +
+    ")"
+  ).all(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
+  for (const dup of dupRows) {
+    try {
+      q.insertBetSignalAudit({
+        signal_id: dup.id,
+        game_date: gameRow.game_date,
+        game_id: gameRow.game_id,
+        signal_type: dup.signal_type,
+        signal_side: dup.signal_side,
+        action: 'auto_delete',
+        bet_line: dup.bet_line,
+        closing_line: dup.closing_line,
+        clv: dup.clv,
+        source: 'process_game_signals_dedupe',
+        detail: 'duplicate type+side, keeping max(id)=' + dup.keep_id,
+      });
+    } catch(e) { /* audit failure must not block lifecycle */ }
+  }
   db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
     SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
   )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
@@ -336,6 +361,24 @@ function processGameSignals(gameRow, wobaIdx, settings) {
           : 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' Ã¢ÂÂ edge no longer meets threshold.';
         db.prepare("UPDATE bet_signals SET is_active=0, notes=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
           .run(note, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
+        try {
+          const deact = db.prepare(
+            "SELECT id FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?"
+          ).get(gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
+          q.insertBetSignalAudit({
+            signal_id: deact ? deact.id : null,
+            game_date: gameRow.game_date,
+            game_id: gameRow.game_id,
+            signal_type: locked.signal_type,
+            signal_side: locked.signal_side,
+            action: 'auto_deactivate',
+            bet_line: locked.bet_line,
+            closing_line: locked.closing_line,
+            clv: locked.clv,
+            source: 'process_game_signals_deactivate',
+            detail: note,
+          });
+        } catch(e) { /* audit failure must not block lifecycle */ }
         console.log('[model] Deactivated stale signal: '+locked.signal_type+'/'+locked.signal_side+' | '+note);
         continue;
       }
@@ -512,6 +555,21 @@ async function runLineupJob(dateStr) {
                   const closingLine = sig.signal_side === 'away' ? gameForClose.market_away_ml : gameForClose.market_home_ml;
                   const clv = calcCLV(sig.bet_line, closingLine);
                   db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+                  try {
+                    q.insertBetSignalAudit({
+                      signal_id: sig.id,
+                      game_date: dateStr,
+                      game_id: gameId,
+                      signal_type: sig.signal_type,
+                      signal_side: sig.signal_side,
+                      action: 'set_closing_line',
+                      bet_line: sig.bet_line,
+                      closing_line: closingLine,
+                      clv: clv,
+                      source: 'cron_closing_lock',
+                      detail: 'odds locked at game start gate',
+                    });
+                  } catch(e) { /* audit failure must not block lifecycle */ }
                 }
               }
             }
@@ -938,6 +996,21 @@ function processOddsArray(dateStr, oddsRaw, settings) {
         const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
         const clv = calcCLV(sig.bet_line, closingLine);
         db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+        try {
+          q.insertBetSignalAudit({
+            signal_id: sig.id,
+            game_date: dateStr,
+            game_id: o.game_id,
+            signal_type: sig.signal_type,
+            signal_side: sig.signal_side,
+            action: 'set_closing_line',
+            bet_line: sig.bet_line,
+            closing_line: closingLine,
+            clv: clv,
+            source: 'cron_closing_lock',
+            detail: 'odds-job started-game close',
+          });
+        } catch(e) { /* audit failure must not block lifecycle */ }
       }
       refreshLockedLabels.run(
         o.ml_source || null, o.xcheck_ml_source || null,

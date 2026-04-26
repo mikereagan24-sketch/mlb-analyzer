@@ -1056,6 +1056,21 @@ router.post('/signals/manual', (req, res) => {
       .run(gl.id,game_date,game_id,signal_type,signal_side,signal_label,category,
            Number(market_line),model_line,edge_pct,outcome,pnl,
            bet_line!=null?Number(bet_line):null,'v3');
+    try {
+      q.insertBetSignalAudit({
+        signal_id: info.lastInsertRowid,
+        game_date,
+        game_id,
+        signal_type,
+        signal_side,
+        action: 'manual_log',
+        bet_line: bet_line != null ? Number(bet_line) : null,
+        closing_line: null,
+        clv: null,
+        source: 'api_signals_post',
+        detail: 'category=' + category + (bet_price != null ? ', bet_price=' + bet_price : ''),
+      });
+    } catch(e) { /* audit failure must not block insert */ }
     res.json({success:true,id:info.lastInsertRowid,outcome,pnl,category});
   } catch(e){res.status(500).json({error:e.message});}
 });
@@ -1072,7 +1087,53 @@ router.post('/signals/:id/bet-line', (req, res) => {
     const clv = (sig.signal_type === 'ML') ? calcCLV(bet_line, sig.closing_line) : null;
     db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
       .run(bet_line, clv, id);
+    try {
+      const ua = (req.headers && req.headers['user-agent']) || '';
+      q.insertBetSignalAudit({
+        signal_id: Number(id),
+        game_date: sig.game_date,
+        game_id: sig.game_id,
+        signal_type: sig.signal_type,
+        signal_side: sig.signal_side,
+        action: 'lock',
+        bet_line: bet_line,
+        closing_line: sig.closing_line,
+        clv: clv,
+        source: 'ui_lock_button',
+        detail: 'bet_line=' + bet_line + ' | UA=' + ua,
+      });
+    } catch(e) { /* audit failure must not block lock */ }
     res.json({success:true, id, bet_line, clv});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
+// Fetch a single signal — used by the UI lock flow to verify the write persisted.
+router.get('/signals/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
+    if (!sig) return res.status(404).json({error:'Signal not found'});
+    res.json(sig);
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
+// Audit trail: every lock/unlock/auto_delete/auto_deactivate/set_closing_line/manual_log
+// event written by the lifecycle paths in jobs.js + routes/api.js.
+router.get('/audit/bet-signals/:date', (req, res) => {
+  try {
+    const rows = db.prepare(
+      'SELECT * FROM bet_signal_audit WHERE game_date=? ORDER BY created_at ASC, id ASC'
+    ).all(req.params.date);
+    res.json({date: req.params.date, count: rows.length, rows});
+  } catch(err) { res.status(500).json({error:err.message}); }
+});
+
+router.get('/audit/by-game/:date/:game_id', (req, res) => {
+  try {
+    const rows = db.prepare(
+      'SELECT * FROM bet_signal_audit WHERE game_date=? AND game_id=? ORDER BY created_at ASC, id ASC'
+    ).all(req.params.date, req.params.game_id);
+    res.json({date: req.params.date, game_id: req.params.game_id, count: rows.length, rows});
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
