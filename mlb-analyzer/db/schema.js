@@ -314,6 +314,13 @@ try { db.exec("UPDATE bet_signals SET cohort='v2-tainted' WHERE cohort='v2'"); }
 // historical separation isn't worth the UI confusion. Idempotent: once all
 // v3-tainted rows have been merged, future runs update 0 rows.
 try { db.exec("UPDATE bet_signals SET cohort='v3' WHERE cohort='v3-tainted'"); } catch(e) {}
+// User was tuning model inputs through 2026-04-23. v3 cohort is reserved
+// for the stable post-tuning period starting 2026-04-24 — earlier v3 rows
+// are reclassified as v3-pretuning so the default 'v3 (current)' Backtest
+// filter shows only the clean evaluation set. Idempotent: once all v3 rows
+// dated before the cutoff have been retagged, future runs update 0 rows
+// (new signals get cohort='v3' with today's game_date, which is post-cutoff).
+try { db.exec("UPDATE bet_signals SET cohort='v3-pretuning' WHERE cohort='v3' AND game_date < '2026-04-24'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
