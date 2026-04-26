@@ -668,9 +668,32 @@ router.get('/settings', (req, res) => {
   res.json(s);
 });
 
+// Schema view for the settings UI. Drops invariant functions (not
+// JSON-serializable) but keeps min/max/default/help/invariantMsg/dependsOn
+// so the form can render inputs + show client-side warnings.
+router.get('/settings/schema', (req, res) => {
+  const { getSchemaForClient } = require('../services/settings-schema');
+  res.json(getSchemaForClient());
+});
+
 router.post('/settings', (req, res) => {
-  const updates = req.body;
-  for (const [key, value] of Object.entries(updates)) q.setSetting.run(key, String(value));
+  const { validateAll } = require('../services/settings-schema');
+  const updates = req.body || {};
+  // Strip undefined values so a missing form field doesn't trigger
+  // a "cannot be blank" error for a key the client didn't intend to update.
+  const cleanUpdates = {};
+  for (const [k, v] of Object.entries(updates)) {
+    if (v === undefined) continue;
+    cleanUpdates[k] = v;
+  }
+  const currentRows = q.getAllSettings.all();
+  const current = {};
+  currentRows.forEach(r => { current[r.key] = r.value; });
+  const result = validateAll(cleanUpdates, current);
+  if (!result.ok) return res.status(400).json({ errors: result.errors });
+  for (const [key, value] of Object.entries(cleanUpdates)) {
+    q.setSetting.run(key, String(value));
+  }
   res.json({ success: true });
 });
 
@@ -2092,103 +2115,31 @@ router.get('/health/:date', (req, res) => {
     }
 
     // ---- check 13: settings_sanity ----
+    // Single source of truth: services/settings-schema.js. The hardcoded
+    // ranges/sums that used to live here drifted from the API validator;
+    // both now read from the same SETTINGS_SCHEMA so a value that violates
+    // the API also fails this check (and vice versa).
     {
+      const { SETTINGS_SCHEMA, validateSetting } = require('../services/settings-schema');
       const settingsRows = db.prepare("SELECT key, value FROM app_settings").all();
       const s = {};
       for (const r of settingsRows) s[r.key] = r.value;
       const violations = [];
-
-      // Numeric range checker: handles blank/missing/non-numeric/out-of-range.
-      // Returns the parsed number on pass, null on fail (so sum checks can
-      // skip cleanly when an individual value already failed). Lo/hi are
-      // inclusive when prefixed by '=' in opts; default exclusive both sides.
-      const range = (key, lo, hi, opts) => {
-        opts = opts || {};
+      // Walk every schema key and run the same validateSetting the API uses.
+      // s acts as both the "current settings" and the value-to-validate so
+      // invariants resolve against actual stored values.
+      for (const key of Object.keys(SETTINGS_SCHEMA)) {
         const v = s[key];
-        if (v == null || v === '') {
-          violations.push({ key, value: v == null ? null : '', expected: opts.includeLo ? '['+lo : '('+lo + ', ' + hi + (opts.includeHi ? ']' : ')'), reason: 'blank' });
-          return null;
-        }
-        const n = Number(v);
-        if (!Number.isFinite(n)) {
-          violations.push({ key, value: v, expected: '(' + lo + ', ' + hi + ')', reason: 'not_numeric' });
-          return null;
-        }
-        const failLo = opts.includeLo ? n < lo : n <= lo;
-        const failHi = opts.includeHi ? n > hi : n >= hi;
-        if (failLo || failHi) {
-          violations.push({
-            key, value: n,
-            expected: (opts.includeLo ? '[' : '(') + lo + ', ' + hi + (opts.includeHi ? ']' : ')'),
-            reason: 'out_of_range',
-          });
-          return null;
-        }
-        return n;
-      };
-
-      // Pair-sum checker: validates two keys sum to target within tolerance.
-      // Skips silently if either key already failed range — caller catches
-      // those individually.
-      const sumTo = (k1, k2, target, tol) => {
-        target = target == null ? 1.0 : target;
-        tol = tol == null ? 0.02 : tol;
-        const v1 = Number(s[k1]), v2 = Number(s[k2]);
-        if (!Number.isFinite(v1) || !Number.isFinite(v2)) return;
-        if (Math.abs(v1 + v2 - target) >= tol) {
-          violations.push({
-            key: k1 + '+' + k2,
-            value: v1 + ' + ' + v2 + ' = ' + (v1 + v2).toFixed(4),
-            expected: '≈ ' + target + ' (±' + tol + ')',
-            reason: 'sum_off',
-          });
-        }
-      };
-
-      // Bound inclusivity choices reflect documented default values that
-      // sit exactly on a boundary — we want a configured value matching
-      // the default to pass, not flag as out_of_range. See PR description
-      // for the per-key reasoning.
-      range('w_pit',                 0.4,  0.7,  { includeLo: true });   // default 0.5; allow 0.4
-      range('w_bat',                 0.4,  0.7,  { includeLo: true });   // default 0.5; allow 0.4
-      sumTo('w_pit', 'w_bat');
-      range('sp_pit_weight',         0.5,  0.95);
-      range('relief_pit_weight',     0.05, 0.50, { includeHi: true });   // default 0.20-0.25; allow 0.50
-      sumTo('sp_pit_weight', 'relief_pit_weight');
-      range('sp_weight',             0.5,  0.95);
-      range('relief_weight',         0.05, 0.50, { includeHi: true });   // same logic as relief_pit_weight
-      sumTo('sp_weight', 'relief_weight');
-      range('run_mult',              30,   60);
-      range('tot_slope',             0.05, 0.15);
-      range('wp_clamp_lo',           0.20, 0.50, { includeLo: true });
-      range('wp_clamp_hi',           0.50, 0.80, { includeHi: true });
-      // Cross-key ordering check
-      {
-        const lo = Number(s['wp_clamp_lo']), hi = Number(s['wp_clamp_hi']);
-        if (Number.isFinite(lo) && Number.isFinite(hi) && !(lo < hi)) {
-          violations.push({ key: 'wp_clamp_lo<wp_clamp_hi', value: lo + ' vs ' + hi, expected: 'lo < hi', reason: 'ordering' });
-        }
+        // Missing key in app_settings: defaults are applied at read in
+        // jobs.js getSettings, so an absent row is fine here — skip.
+        if (v == null || v === '') continue;
+        const r = validateSetting(key, v, s);
+        if (!r.ok) violations.push({ key, value: v, reason: r.error });
       }
-      range('tot_prob_lo',           0.20, 0.50, { includeLo: true });
-      range('tot_prob_hi',           0.50, 0.80, { includeHi: true });
-      range('hfa_boost',             0.0,  0.10, { includeLo: true });   // default 0.025; allow 0.0 (no HFA)
-      range('bullpen_avg',           0.25, 0.40);
-      range('woba_baseline',         0.20, 0.30);
-      range('pyth_exp',              1.5,  2.5);
-      range('w_proj',                0.5,  1.0);
-      range('w_act',                 0.0,  0.5,  { includeLo: true });   // default 0.35; allow 0.0 (proj-only)
-      sumTo('w_proj', 'w_act');
-      range('bp_strong_weight_r',    0.3,  0.8);
-      range('bp_weak_weight_r',      0.2,  0.7);
-      sumTo('bp_strong_weight_r', 'bp_weak_weight_r');
-      range('bp_strong_weight_l',    0.2,  0.7);
-      range('bp_weak_weight_l',      0.3,  0.8);
-      sumTo('bp_strong_weight_l', 'bp_weak_weight_l');
-
       const status = violations.length ? 'fail' : 'pass';
       const message = violations.length === 0
         ? 'All settings invariants pass'
-        : violations.length + ' settings violation(s): ' + violations.slice(0, 5).map(v => v.key + '=' + v.value + ' (' + v.reason + ')').join('; ') + (violations.length > 5 ? '; +' + (violations.length - 5) + ' more' : '');
+        : violations.length + ' settings violation(s): ' + violations.slice(0, 5).map(v => v.reason).join('; ') + (violations.length > 5 ? '; +' + (violations.length - 5) + ' more' : '');
       checks.push({ id: 'settings_sanity', status, severity: 'error', message, detail: { violations } });
     }
 

@@ -554,7 +554,16 @@ async function api(path,opts={}){
     sessionStorage.setItem('mlb_pwd',pwd);
     return api(path,opts); // retry
   }
-  if(!r.ok)throw new Error('API '+path+' → '+r.status);
+  if(!r.ok){
+    // Try to attach the JSON error body so callers (e.g. saveSettings) can
+    // surface schema-validator messages instead of a bare HTTP status.
+    let body = null;
+    try { body = await r.json(); } catch(_) {}
+    const err = new Error('API '+path+' → '+r.status);
+    err.status = r.status;
+    err.body = body;
+    throw err;
+  }
   return r.json();
 }
 
@@ -1844,9 +1853,130 @@ function pairBpWeights(hand, which) {
   if (!isNaN(v) && v >= 0 && v <= 1) dst.value = parseFloat((1 - v).toFixed(4));
 }
 
+// Schema → existing input id mapping. Keeps the hand-built grid layout while
+// letting min/max/step/help/invariant come from services/settings-schema.js.
+const _SETTINGS_SCHEMA_ID_MAP = {
+  run_mult: 's-run-mult', hfa_boost: 's-hfa',
+  w_pit: 's-w-pit', w_bat: 's-w-bat',
+  w_proj: 's-w-proj', w_act: 's-w-act',
+  sp_weight: 's-sp-weight', relief_weight: 's-relief-weight',
+  sp_pit_weight: 's-sp-pit-weight', relief_pit_weight: 's-relief-pit-weight',
+  bp_strong_weight_r: 's-bp-strong-r', bp_weak_weight_r: 's-bp-weak-r',
+  bp_strong_weight_l: 's-bp-strong-l', bp_weak_weight_l: 's-bp-weak-l',
+  bullpen_avg: 's-bullpen-avg', woba_baseline: 's-woba-baseline',
+  pyth_exp: 's-pyth-exp', tot_slope: 's-tot-slope',
+  wp_clamp_lo: 's-wp-clamp-lo', wp_clamp_hi: 's-wp-clamp-hi',
+  tot_prob_lo: 's-tot-prob-lo', tot_prob_hi: 's-tot-prob-hi',
+  market_total_dflt: 's-market-total-dflt',
+  ml_lean_edge: 's-ml-lean', ml_value_edge: 's-ml-val', ml_3star_edge: 's-ml-3star',
+  tot_lean_edge: 's-tot-lean', tot_value_edge: 's-tot-val', tot_3star_edge: 's-tot-3star',
+};
+let _SETTINGS_SCHEMA_CACHE = null;
+
+async function _loadSettingsSchema(){
+  if (_SETTINGS_SCHEMA_CACHE) return _SETTINGS_SCHEMA_CACHE;
+  try {
+    _SETTINGS_SCHEMA_CACHE = await api('/settings/schema');
+  } catch(e) {
+    console.error('settings/schema fetch failed', e);
+    _SETTINGS_SCHEMA_CACHE = {};
+  }
+  return _SETTINGS_SCHEMA_CACHE;
+}
+
+// Apply schema-driven UX: min/max/step + help on title + invariant check on
+// input. Server-side validateAll is the source of truth — this is just UX
+// feedback so the user sees the violation before the POST round-trips.
+async function _applySettingsSchema(){
+  const schema = await _loadSettingsSchema();
+  for (const [key, def] of Object.entries(schema)) {
+    const id = _SETTINGS_SCHEMA_ID_MAP[key];
+    if (!id) continue;
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (def.type === 'number') {
+      el.min = def.min;
+      el.max = def.max;
+    }
+    const helpBits = [];
+    if (def.help) helpBits.push(def.help);
+    if (def.type === 'number') helpBits.push('Range: ' + def.min + ' to ' + def.max + '. Default: ' + def.default + '.');
+    if (def.invariantMsg) helpBits.push('Invariant: ' + def.invariantMsg);
+    el.title = helpBits.join(' ');
+    el.dataset.schemaKey = key;
+    if (!el._schemaHookAttached) {
+      el.addEventListener('input', _checkSettingsInvariants);
+      el._schemaHookAttached = true;
+    }
+  }
+  _checkSettingsInvariants();
+}
+
+function _checkSettingsInvariants(){
+  if (!_SETTINGS_SCHEMA_CACHE) return;
+  // Build a snapshot of current form values keyed by schema key.
+  const snapshot = {};
+  for (const [key, id] of Object.entries(_SETTINGS_SCHEMA_ID_MAP)) {
+    const el = document.getElementById(id);
+    if (el && el.value !== '') snapshot[key] = Number(el.value);
+  }
+  // Re-run invariants. Each invariant in the client schema lives as a textual
+  // form ('invariantMsg' + 'dependsOn') — we re-evaluate sum/order checks
+  // here for the keys we know how to recompute.
+  for (const [key, def] of Object.entries(_SETTINGS_SCHEMA_CACHE)) {
+    const id = _SETTINGS_SCHEMA_ID_MAP[key];
+    if (!id) continue;
+    const el = document.getElementById(id);
+    if (!el) continue;
+    let invalidMsg = null;
+    if (el.value === '') {
+      invalidMsg = def.invariantMsg ? null : (key + ' cannot be blank');
+    } else {
+      const n = Number(el.value);
+      if (!Number.isFinite(n)) invalidMsg = key + ' must be numeric';
+      else if (def.type === 'number' && (n < def.min || n > def.max)) {
+        invalidMsg = key + ' must be ' + def.min + '–' + def.max;
+      } else if (def.invariantMsg && def.dependsOn && def.dependsOn.length) {
+        // Sum-to-1 vs lt/gt invariants — both encoded in invariantMsg text.
+        // Replay the common shapes locally for UX feedback only.
+        const dep = def.dependsOn[0];
+        const depVal = snapshot[dep];
+        if (Number.isFinite(depVal)) {
+          const msg = def.invariantMsg;
+          if (/must equal 1\.0/.test(msg)) {
+            if (Math.abs(n + depVal - 1.0) >= 0.02) invalidMsg = def.invariantMsg;
+          } else if (/must be less than/.test(msg)) {
+            // The dep is the smaller side per our schema authoring convention
+            // (e.g. wp_clamp_lo < wp_clamp_hi: invariant lives on wp_clamp_hi
+            // and depends on wp_clamp_lo). So expect depVal < n.
+            if (!(depVal < n)) invalidMsg = def.invariantMsg;
+          }
+        }
+      }
+    }
+    if (invalidMsg) {
+      el.style.borderColor = '#cc3333';
+      el.dataset.invalidReason = invalidMsg;
+      el.title = invalidMsg + ' — ' + (def.help || '');
+    } else {
+      el.style.borderColor = '';
+      delete el.dataset.invalidReason;
+      const helpBits = [];
+      if (def.help) helpBits.push(def.help);
+      if (def.type === 'number') helpBits.push('Range: ' + def.min + ' to ' + def.max + '. Default: ' + def.default + '.');
+      if (def.invariantMsg) helpBits.push('Invariant: ' + def.invariantMsg);
+      el.title = helpBits.join(' ');
+    }
+  }
+}
+
 async function loadSettings(){
   try{
     const s = await api('/settings');
+    // Apply schema-driven min/max/help/invariant hooks each time the form
+    // loads. Cheap (cached) and survives DOM changes if the section is
+    // re-rendered.
+    _applySettingsSchema();
     const set = (id, val) => { const el=document.getElementById(id); if(el&&val!=null) el.value=val; };
     set('s-odds-api-key',  s.odds_api_key);
     set('s-fangraphs-cookie', s.fangraphs_session_cookie);
@@ -1956,9 +2086,19 @@ async function saveSettings(){
     tot_lean_edge:      get('s-tot-lean'),
   };
   try{
-    await api('/settings', {method:'POST', body:JSON.stringify(pairs)});
+    const resp = await api('/settings', {method:'POST', body:JSON.stringify(pairs)});
+    if (resp && resp.errors && resp.errors.length) {
+      alert('Save failed:\n\n' + resp.errors.join('\n'));
+      return;
+    }
     document.getElementById('games-status').textContent='✓ Settings saved';
-  } catch(e){ alert('Save failed: '+e.message); }
+  } catch(e){
+    // The api() helper may throw with the parsed error body — surface schema
+    // validator messages so the user sees exactly which key failed.
+    let msg = e && e.message || 'unknown error';
+    if (e && e.body && Array.isArray(e.body.errors)) msg = e.body.errors.join('\n');
+    alert('Save failed:\n\n' + msg);
+  }
 }
 
 function openManualBetForGame(gameId, date, game) {

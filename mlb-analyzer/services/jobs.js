@@ -26,6 +26,8 @@ function tomorrowStr() {
   return d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 }
 
+const { getDefaults: _settingsDefaults } = require('./settings-schema');
+
 function getSettings() {
   const rows = q.getAllSettings.all();
   const s = {};
@@ -40,34 +42,41 @@ function getSettings() {
     const v = Number(raw);
     return isNaN(v) ? def : v;
   };
+  // Defaults sourced from services/settings-schema.js for keys it covers; the
+  // schema is the single source of truth so a server boot against an empty
+  // app_settings table runs with the same numbers the validator enforces.
+  // Keys the schema doesn't enumerate (FAV_ADJ, DOG_ADJ, MIN_PA, etc.) keep
+  // their inline defaults below.
+  const _DFL = _settingsDefaults();
+  const _d = (key, fallback) => (_DFL[key] !== undefined ? _DFL[key] : fallback);
   return {
-    RUN_MULT:       num('run_mult', 48),
-    HFA_BOOST:      num('hfa_boost', 0.02),
+    RUN_MULT:       num('run_mult',          _d('run_mult', 48)),
+    HFA_BOOST:      num('hfa_boost',         _d('hfa_boost', 0.02)),
     FAV_ADJ:        num('fav_adj', 0),
     DOG_ADJ:        num('dog_adj', 0),
-    W_PIT:          num('w_pit', 0.5),
-    W_BAT:          num('w_bat', 0.5),
-    W_PROJ:         num('w_proj', 0.65),
-    W_ACT:          num('w_act', 0.35),
-    ML_VALUE_EDGE:  num('ml_value_edge', 40),
-    ML_LEAN_EDGE:   num('ml_lean_edge', 20),
-    TOT_VALUE_EDGE:  num('tot_value_edge',  0.08),
-    ML_3STAR_EDGE:   num('ml_3star_edge',    60),
-    TOT_3STAR_EDGE:  num('tot_3star_edge',   0.12),
-    TOT_LEAN_EDGE:  num('tot_lean_edge', 0.5),
-    SP_WEIGHT:      num('sp_weight', 0.77),
-    RELIEF_WEIGHT:     num('relief_weight',     0.23),
-    SP_PIT_WEIGHT:     num('sp_pit_weight',     0.80),
-    RELIEF_PIT_WEIGHT: num('relief_pit_weight', 0.20),
-    BP_STRONG_WEIGHT_R: num('bp_strong_weight_r', 0.55),
-    BP_WEAK_WEIGHT_R:   num('bp_weak_weight_r',   0.45),
-    BP_STRONG_WEIGHT_L: num('bp_strong_weight_l', 0.35),
-    BP_WEAK_WEIGHT_L:   num('bp_weak_weight_l',   0.65),
-    BULLPEN_AVG:    num('bullpen_avg',    0.318),
-    WOBA_BASELINE:  num('woba_baseline',  0.230),
-    PYTH_EXP:       num('pyth_exp',       1.83),
-    WIND_SCALE:     num('wind_scale',     2.0),
-    TOT_SLOPE:      num('tot_slope',      0.08),
+    W_PIT:          num('w_pit',             _d('w_pit', 0.5)),
+    W_BAT:          num('w_bat',             _d('w_bat', 0.5)),
+    W_PROJ:         num('w_proj',            _d('w_proj', 0.65)),
+    W_ACT:          num('w_act',             _d('w_act', 0.35)),
+    ML_VALUE_EDGE:  num('ml_value_edge',     _d('ml_value_edge', 40)),
+    ML_LEAN_EDGE:   num('ml_lean_edge',      _d('ml_lean_edge', 20)),
+    TOT_VALUE_EDGE: num('tot_value_edge',    _d('tot_value_edge', 0.08)),
+    ML_3STAR_EDGE:  num('ml_3star_edge',     _d('ml_3star_edge', 60)),
+    TOT_3STAR_EDGE: num('tot_3star_edge',    _d('tot_3star_edge', 0.12)),
+    TOT_LEAN_EDGE:  num('tot_lean_edge',     _d('tot_lean_edge', 0.05)),
+    SP_WEIGHT:      num('sp_weight',         _d('sp_weight', 0.77)),
+    RELIEF_WEIGHT:     num('relief_weight',     _d('relief_weight', 0.23)),
+    SP_PIT_WEIGHT:     num('sp_pit_weight',     _d('sp_pit_weight', 0.80)),
+    RELIEF_PIT_WEIGHT: num('relief_pit_weight', _d('relief_pit_weight', 0.20)),
+    BP_STRONG_WEIGHT_R: num('bp_strong_weight_r', _d('bp_strong_weight_r', 0.55)),
+    BP_WEAK_WEIGHT_R:   num('bp_weak_weight_r',   _d('bp_weak_weight_r',   0.45)),
+    BP_STRONG_WEIGHT_L: num('bp_strong_weight_l', _d('bp_strong_weight_l', 0.35)),
+    BP_WEAK_WEIGHT_L:   num('bp_weak_weight_l',   _d('bp_weak_weight_l',   0.65)),
+    BULLPEN_AVG:    num('bullpen_avg',       _d('bullpen_avg', 0.318)),
+    WOBA_BASELINE:  num('woba_baseline',     _d('woba_baseline', 0.230)),
+    PYTH_EXP:       num('pyth_exp',          _d('pyth_exp', 1.83)),
+    WIND_SCALE:     num('wind_scale',        2.0),
+    TOT_SLOPE:      num('tot_slope',         _d('tot_slope', 0.08)),
     MIN_PA:         num('min_pa',         60),
     MIN_BF:         num('min_bf',         100),
     BAT_DFLT_START: num('bat_dflt_start', 0.315),
@@ -81,11 +90,11 @@ function getSettings() {
       } catch(e) {}
       return [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
     })(),
-    WP_CLAMP_LO:       num('wp_clamp_lo',       0.25),
-    WP_CLAMP_HI:       num('wp_clamp_hi',       0.75),
-    TOT_PROB_LO:       num('tot_prob_lo',       0.20),
-    TOT_PROB_HI:       num('tot_prob_hi',       0.80),
-    MARKET_TOTAL_DFLT: num('market_total_dflt', 8.5),
+    WP_CLAMP_LO:       num('wp_clamp_lo',       _d('wp_clamp_lo', 0.25)),
+    WP_CLAMP_HI:       num('wp_clamp_hi',       _d('wp_clamp_hi', 0.75)),
+    TOT_PROB_LO:       num('tot_prob_lo',       _d('tot_prob_lo', 0.20)),
+    TOT_PROB_HI:       num('tot_prob_hi',       _d('tot_prob_hi', 0.80)),
+    MARKET_TOTAL_DFLT: num('market_total_dflt', _d('market_total_dflt', 8.5)),
     BAT_DFLT_R_VS_RHP: num('bat_dflt_r_vs_rhp', 0.305),
     BAT_DFLT_R_VS_LHP: num('bat_dflt_r_vs_lhp', 0.325),
     BAT_DFLT_L_VS_RHP: num('bat_dflt_l_vs_rhp', 0.330),
