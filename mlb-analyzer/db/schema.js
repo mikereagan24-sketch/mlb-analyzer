@@ -111,6 +111,24 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_signals_date ON bet_signals(game_date);
   CREATE INDEX IF NOT EXISTS idx_signals_category ON bet_signals(category);
+  CREATE TABLE IF NOT EXISTS bet_signal_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id INTEGER,
+    game_date TEXT,
+    game_id TEXT,
+    signal_type TEXT,
+    signal_side TEXT,
+    action TEXT,
+    bet_line REAL,
+    closing_line REAL,
+    clv REAL,
+    source TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_date ON bet_signal_audit(game_date);
+  CREATE INDEX IF NOT EXISTS idx_audit_game ON bet_signal_audit(game_date, game_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_signal ON bet_signal_audit(signal_id);
   CREATE TABLE IF NOT EXISTS cron_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_type TEXT NOT NULL,
@@ -731,4 +749,25 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
 // Add is_active and notes columns if not present
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1").run(); } catch(e) {}
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN notes TEXT").run(); } catch(e) {}
+
+const _insertAuditStmt = db.prepare(
+  "INSERT INTO bet_signal_audit (signal_id, game_date, game_id, signal_type, signal_side, action, bet_line, closing_line, clv, source, detail) " +
+  "VALUES (@signal_id, @game_date, @game_id, @signal_type, @signal_side, @action, @bet_line, @closing_line, @clv, @source, @detail)"
+);
+q.insertBetSignalAudit = (row) => {
+  _insertAuditStmt.run({
+    signal_id: row.signal_id != null ? row.signal_id : null,
+    game_date: row.game_date || null,
+    game_id: row.game_id || null,
+    signal_type: row.signal_type || null,
+    signal_side: row.signal_side || null,
+    action: row.action || null,
+    bet_line: row.bet_line != null ? row.bet_line : null,
+    closing_line: row.closing_line != null ? row.closing_line : null,
+    clv: row.clv != null ? row.clv : null,
+    source: row.source || null,
+    detail: row.detail || null,
+  });
+};
+
 module.exports = { db, q };
