@@ -3,8 +3,11 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
+const { parseUnabatedOdds } = require('../services/unabated');
+const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
+const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
 const { normName, stripSfx } = require('../utils/names');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -489,6 +492,116 @@ router.post('/jobs/odds', async (req, res) => {
   const { date } = req.body;
   const result = await runOddsJob(date || null);
   res.json(result);
+});
+
+// ----------------------------------------------------------------------
+// Snapshot listing + replay endpoints. See services/snapshot.js for the
+// capture pipeline. Snapshots persist only within a single Render uptime
+// window — see CAVEAT in snapshot.js.
+// ----------------------------------------------------------------------
+
+router.get('/snapshots/:date', (req, res) => {
+  try {
+    const list = listSnapshots(req.params.date);
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Resolve { date, snapshot? } from req.body to a parsed raw payload + chosen
+// filename. snapshot is optional — if omitted, picks the latest for jobtype.
+function loadSnapshotForReplay(req, jobtype) {
+  const { date, snapshot } = req.body || {};
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('valid date (YYYY-MM-DD) required');
+  let filename = snapshot;
+  if (!filename) {
+    const latest = findLatestSnapshot(date, jobtype);
+    if (!latest) throw new Error('no ' + jobtype + ' snapshot found for ' + date);
+    filename = latest.filename;
+  }
+  const raw = readSnapshot(date, filename);
+  return { date, filename, raw };
+}
+
+router.post('/replay/odds', async (req, res) => {
+  try {
+    const { date, filename, raw } = loadSnapshotForReplay(req, 'odds');
+    const settings = getSettings();
+    const parsed = parseUnabatedOdds(raw, date);
+    const result = processOddsArray(date, parsed, settings);
+    res.json({
+      success: true,
+      replayed_from: filename,
+      date,
+      updated: result.updated,
+      source: result.source,
+      games_in_snapshot: parsed.length,
+    });
+  } catch (err) {
+    const status = /required|not found|no .+ snapshot|invalid|missing/.test(err.message) ? 400 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+router.post('/replay/lineups', async (req, res) => {
+  try {
+    const { date, filename, raw } = loadSnapshotForReplay(req, 'lineups');
+    if (!raw || !raw.html) throw new Error('snapshot missing html field');
+    const parsed = parseLineupsHtml(raw.html, date);
+    if (parsed && parsed.skipped) {
+      return res.json({ success: false, replayed_from: filename, date, skipped: true, reason: parsed.reason, message: parsed.message });
+    }
+    // Replay only re-runs the RotoWire parse — the upsert + lock + signal
+    // logic in runLineupJob is intermixed with statsapi bootstrap and is
+    // out of scope for this PR. Returning the parsed game list lets the
+    // caller verify the parser is doing the right thing on the captured
+    // payload, which is the most common debugging case.
+    res.json({
+      success: true,
+      replayed_from: filename,
+      date,
+      games: parsed.length,
+      sample: parsed.slice(0, 3),
+      note: 'lineups replay returns parsed game list only; full upsert/signal pipeline replay is a follow-up',
+    });
+  } catch (err) {
+    const status = /required|not found|invalid|missing/.test(err.message) ? 400 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+router.post('/replay/scores', async (req, res) => {
+  try {
+    const { date, filename, raw } = loadSnapshotForReplay(req, 'scores');
+    const parsed = parseScoresJson(raw);
+    let updated = 0;
+    for (const s of parsed) {
+      const gameId = s.gameId || makeGameId(s.away || s.away_team, s.home || s.home_team);
+      try {
+        q.updateScores.run({
+          game_date: date,
+          game_id: gameId,
+          away_score: s.awayScore,
+          home_score: s.homeScore,
+          scores_source: 'replay',
+        });
+        updated++;
+      } catch (e) {
+        console.warn('[replay-scores] skip ' + gameId + ': ' + e.message);
+      }
+    }
+    res.json({
+      success: true,
+      replayed_from: filename,
+      date,
+      updated,
+      finals_in_snapshot: parsed.length,
+    });
+  } catch (err) {
+    const status = /required|not found|no .+ snapshot|invalid|missing/.test(err.message) ? 400 : 500;
+    res.status(status).json({ error: err.message });
+  }
 });
 
 router.get('/cron-log', (req, res) => {

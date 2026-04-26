@@ -205,11 +205,22 @@ function isSaneML(price) {
 
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
-async function fetchUnabatedOdds(dateStr) {
+// Split into a raw-fetch step and a pure-parse step so the snapshot/replay
+// system (services/snapshot.js, /api/replay/odds) can save the raw upstream
+// JSON and re-run the parse against it without re-hitting Unabated. Original
+// fetchUnabatedOdds(dateStr) preserved as a thin wrapper for back-compat.
+async function fetchUnabatedRaw() {
   const cacheBust = '?v='+Date.now();
   const resp = await fetch(UB_URL+cacheBust, {headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0','Cache-Control':'no-cache','Pragma':'no-cache'}});
   if (!resp.ok) throw new Error('Unabated HTTP '+resp.status);
-  const data = await resp.json();
+  return await resp.json();
+}
+
+async function fetchUnabatedOdds(dateStr) {
+  return parseUnabatedOdds(await fetchUnabatedRaw(), dateStr);
+}
+
+function parseUnabatedOdds(data, dateStr) {
   const teamMap = {};
   Object.entries(data.teams||{}).forEach(([id,t])=>{ if(t.abbreviation) teamMap[id]=t.abbreviation; });
   const allGames = data.gameOddsEvents?.[MLB_KEY] || [];
@@ -479,4 +490,4 @@ async function fetchUnabatedOdds(dateStr) {
   return results;
 }
 
-module.exports = { fetchUnabatedOdds };
+module.exports = { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds };

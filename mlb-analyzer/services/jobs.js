@@ -1,11 +1,12 @@
 // jobs.js v2026-04-12T19:57:39.540Z
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchScores, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSchedule } = require('./scraper');
-const { fetchUnabatedOdds } = require('./unabated');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSchedule } = require('./scraper');
+const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName } = require('../utils/names');
+const { writeSnapshot } = require('./snapshot');
 
 // Pacific-Time date helpers (app is Pacific-based now). Neutral names on
 // purpose — if the app's canonical TZ ever shifts again, only these three
@@ -411,7 +412,18 @@ async function runLineupJob(dateStr) {
     // / future), we still consider the job a success when bootstrap rows
     // landed — the user gets matchups + probable SPs even without
     // confirmed lineups.
-    const result = await fetchLineups(dateStr);
+    //
+    // Split fetch into raw + parse so the snapshot system can capture the
+    // upstream HTML before any Cheerio parsing; /api/replay/lineups re-runs
+    // parseLineupsHtml against the captured payload.
+    const rawResp = await fetchLineupsRaw(dateStr);
+    let result;
+    if (rawResp.skipped) {
+      result = rawResp;
+    } else {
+      writeSnapshot('lineups', dateStr, { html: rawResp.html, fetched_at: rawResp.fetched_at });
+      result = parseLineupsHtml(rawResp.html, dateStr);
+    }
 
     if (result && result.skipped) {
       console.log('[lineup-job] RotoWire skipped: ' + result.message);
@@ -610,7 +622,11 @@ async function runScoreJob(dateStr) {
   console.log('[score-job] Starting for ' + dateStr);
   let gamesUpdated = 0;
   try {
-    const scores = await fetchScores(dateStr);
+    // Snapshot raw statsapi JSON before parsing; /api/replay/scores re-runs
+    // parseScoresJson against the captured payload.
+    const rawScoresJson = await fetchScoresRaw(dateStr);
+    writeSnapshot('scores', dateStr, rawScoresJson);
+    const scores = parseScoresJson(rawScoresJson);
     for (const s of scores) {
       const gameId = s.gameId || makeGameId(s.away || s.away_team, s.home || s.home_team);
       q.updateScores.run({
@@ -838,6 +854,137 @@ function gameHasStarted(gameRow, gameDate) {
   return minsToGame < -5; // started more than 5 min ago
 }
 
+// Pure post-fetch processing: dedup -> per-game flag build + UPDATE +
+// processGameSignals. Extracted from runOddsJob so the snapshot-replay
+// endpoint (POST /api/replay/odds) can re-run the same logic against a
+// captured upstream payload without hitting Unabated.
+function processOddsArray(dateStr, oddsRaw, settings) {
+  if (!Array.isArray(oddsRaw)) oddsRaw = [];
+  // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
+  const seen = new Set();
+  const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
+  if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' -> '+odds.length+' results');
+  const wobaIdx = getWobaIndex();
+  let updated = 0;
+  // Label-only UPDATE for locked games (see comment block in original site).
+  const refreshLockedLabels = db.prepare(`UPDATE game_log SET
+    ml_source=?, xcheck_ml_source=?,
+    total_source=?, xcheck_total_source=?,
+    odds_flagged=?, odds_flag_reason=?,
+    updated_at=datetime('now')
+    WHERE game_date=? AND game_id=?`);
+
+  for (const o of odds) {
+    console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_ml_source + ')');
+    const existing = q.getGameById.get(dateStr, o.game_id);
+
+    const haveMarket = o.market_away_ml != null && o.market_home_ml != null;
+    const singleSource = haveMarket && (!o.xcheck_ml_source || o.xcheck_ml_source === o.ml_source);
+    const reasons = [];
+    if (!haveMarket) {
+      reasons.push('no sane odds');
+    } else if (singleSource) {
+      reasons.push('single-source, no cross-check available');
+    } else {
+      const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
+      const divergenceReason = checkBookDivergence(
+        o.market_away_ml, o.market_home_ml,
+        o.xcheck_away_ml, o.xcheck_home_ml,
+        o.xcheck_ml_source
+      );
+      if (sanityReason) reasons.push(sanityReason);
+      if (divergenceReason) reasons.push(divergenceReason);
+    }
+    const haveTot = o.market_total != null && o.over_price != null && o.under_price != null;
+    const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
+    if (!haveTot && !haveXcheckTot) {
+      reasons.push('no sane totals: no source provided matching-line O/U');
+    } else if (!haveTot && haveXcheckTot) {
+      reasons.push('no primary totals; edge calc using xcheck only');
+    } else if (haveTot && !haveXcheckTot) {
+      reasons.push('single-source total, no cross-check available');
+    } else if (haveTot && haveXcheckTot) {
+      // Project xcheck onto primary's line; flag when projected Δp > 0.08.
+      const RUNS_TO_PROB = 0.12;
+      const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
+      const lineDelta = o.market_total - o.xcheck_total;
+      const dOver  = Math.abs(impP(o.over_price)  - (impP(o.xcheck_over_price)  - lineDelta * RUNS_TO_PROB));
+      const dUnder = Math.abs(impP(o.under_price) - (impP(o.xcheck_under_price) + lineDelta * RUNS_TO_PROB));
+      const d = Math.max(dOver, dUnder);
+      if (d > 0.08) {
+        if (o.market_total !== o.xcheck_total) {
+          reasons.push('totals divergence: ' + (o.total_source||'primary') + '=' + o.market_total + '@' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_total + '@' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
+        } else {
+          reasons.push('totals juice divergence: ' + (o.total_source||'primary') + '=' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
+        }
+      }
+    }
+    const oddsReason = reasons.length ? reasons.join(' | ') : null;
+    const oddsFlagged = oddsReason ? 1 : 0;
+    if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
+
+    if (existing && existing.odds_locked_at) {
+      refreshLockedLabels.run(
+        o.ml_source || null, o.xcheck_ml_source || null,
+        o.total_source || null, o.xcheck_total_source || null,
+        oddsFlagged, oddsReason,
+        dateStr, o.game_id
+      );
+      console.log('[odds] Locked '+o.game_id+': refreshed source labels (prices frozen)');
+      continue;
+    }
+    if (existing && gameHasStarted(existing, dateStr)) {
+      db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
+      console.log('[odds] Skipping started game: '+o.game_id);
+      const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, o.game_id);
+      for (const sig of mlSigsO) {
+        const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
+        let clv = null;
+        if (sig.bet_line != null && closingLine != null) {
+          const isFav = sig.bet_line < 0;
+          clv = isFav ? (closingLine - sig.bet_line) : (sig.bet_line - closingLine);
+        }
+        db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+      }
+      refreshLockedLabels.run(
+        o.ml_source || null, o.xcheck_ml_source || null,
+        o.total_source || null, o.xcheck_total_source || null,
+        oddsFlagged, oddsReason,
+        dateStr, o.game_id
+      );
+      continue;
+    }
+    db.prepare(`UPDATE game_log SET
+      market_away_ml=?, market_home_ml=?,
+      market_total=?, over_price=?, under_price=?, total_source=?,
+      ml_source=COALESCE(?, ml_source),
+      xcheck_ml_source=COALESCE(?, xcheck_ml_source),
+      xcheck_away_ml=?, xcheck_home_ml=?,
+      xcheck_total=COALESCE(?, xcheck_total),
+      xcheck_over_price=COALESCE(?, xcheck_over_price),
+      xcheck_under_price=COALESCE(?, xcheck_under_price),
+      xcheck_total_source=COALESCE(?, xcheck_total_source),
+      odds_flagged=?, odds_flag_reason=?,
+      updated_at=datetime('now')
+      WHERE game_date=? AND game_id=?`)
+      .run(o.market_away_ml, o.market_home_ml,
+           o.market_total, o.over_price, o.under_price, o.total_source || null,
+           o.ml_source || null,
+           o.xcheck_ml_source || null,
+           o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
+           o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
+           o.xcheck_total != null ? o.xcheck_total : null,
+           o.xcheck_over_price != null ? o.xcheck_over_price : null,
+           o.xcheck_under_price != null ? o.xcheck_under_price : null,
+           o.xcheck_total_source || null,
+           oddsFlagged, oddsReason,
+           dateStr, o.game_id);
+    const gameRow = q.getGameById.get(dateStr, o.game_id);
+    if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
+  }
+  return { updated, source: odds.length ? (odds[0].source || 'odds') : 'no source' };
+}
+
 async function runOddsJob(dateStr) {
   dateStr = dateStr || todayStr();
   try {
@@ -845,7 +992,12 @@ async function runOddsJob(dateStr) {
     let oddsRaw = [];
     try {
       console.log('[odds] Fetching from Unabated...');
-      oddsRaw = await fetchUnabatedOdds(dateStr);
+      // Split fetch into raw + parse so the snapshot system captures the
+      // upstream JSON before any transformation; /api/replay/odds re-runs
+      // parseUnabatedOdds against the captured payload without re-fetching.
+      const unabatedRawJson = await fetchUnabatedRaw();
+      writeSnapshot('odds', dateStr, unabatedRawJson);
+      oddsRaw = parseUnabatedOdds(unabatedRawJson, dateStr);
       console.log('[odds] Unabated returned '+oddsRaw.length+' games');
       if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
@@ -857,213 +1009,10 @@ async function runOddsJob(dateStr) {
         oddsRaw = []; // ensure array, don't throw Ã¢ÂÂ just log and continue
       }
     }
-    if (!Array.isArray(oddsRaw)) oddsRaw = [];
-    // Deduplicate by game_id Ã¢ÂÂ keep first occurrence (Kalshi lines take priority)
-    const seen = new Set();
-    const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
-    if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' Ã¢ÂÂ '+odds.length+' results');
-    const wobaIdx = getWobaIndex();
-    let updated = 0;
-    // Label-only UPDATE for locked games. Writes the 6 source/flag columns
-    // (ml_source, xcheck_ml_source, total_source, xcheck_total_source,
-    // odds_flagged, odds_flag_reason) using the fresh waterfall result.
-    // Does NOT touch market_*_ml / market_total / over/under_price / xcheck
-    // prices — those remain frozen at lock time so CLV calculations and
-    // existing bet_signals reference a stable snapshot. processGameSignals
-    // is NOT called: bet_signals on locked rows stay pinned.
-    //
-    // Hard write (no COALESCE) per spec — stale labels (e.g. pre-PR-#21
-    // 'single-source' strings written before the xcheck-skip-primary fix)
-    // get correctly overwritten with the post-fix waterfall result.
-    //
-    // CAVEAT: ml_source on a locked row reflects "the source Unabated's
-    // current waterfall would pick", not "the source the frozen prices
-    // originally came from." For strict provenance correctness we'd need
-    // a frozen_ml_source column written at lock time — out of scope here.
-    const refreshLockedLabels = db.prepare(`UPDATE game_log SET
-      ml_source=?, xcheck_ml_source=?,
-      total_source=?, xcheck_total_source=?,
-      odds_flagged=?, odds_flag_reason=?,
-      updated_at=datetime('now')
-      WHERE game_date=? AND game_id=?`);
-
-    for (const o of odds) {
-      console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_ml_source + ')');
-      const existing = q.getGameById.get(dateStr, o.game_id);
-
-      // Build the list of flag reasons — hoisted above the lock checks so
-      // both locked-row label refresh and the regular unlocked UPDATE can
-      // share the same computed flag. Reasons are derived purely from o
-      // (the fresh fetch); no dependency on existing row state.
-      // Order of precedence:
-      //   - No sane odds at all: overrides everything; market_* will be null.
-      //   - Single-source: only one book returned a sane two-sided price, so
-      //     the book-vs-book divergence check has nothing to compare against
-      //     (detected as xcheck_ml_source missing OR equal to ml_source — the
-      //     latter happens when Kalshi is absent and the xcheck waterfall
-      //     falls through to the same book the market waterfall picked).
-      //   - Otherwise: run the per-side sanity check and the book-vs-book
-      //     divergence check; union their reasons.
-      const haveMarket = o.market_away_ml != null && o.market_home_ml != null;
-      const singleSource = haveMarket && (!o.xcheck_ml_source || o.xcheck_ml_source === o.ml_source);
-      const reasons = [];
-      if (!haveMarket) {
-        reasons.push('no sane odds');
-      } else if (singleSource) {
-        reasons.push('single-source, no cross-check available');
-      } else {
-        const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
-        const divergenceReason = checkBookDivergence(
-          o.market_away_ml, o.market_home_ml,
-          o.xcheck_away_ml, o.xcheck_home_ml,
-          o.xcheck_ml_source
-        );
-        if (sanityReason) reasons.push(sanityReason);
-        if (divergenceReason) reasons.push(divergenceReason);
-      }
-      // Totals flag reasons — independent of the ML checks above, concatenated
-      // into the same odds_flag_reason field with ' | ' separator. Order of
-      // precedence when primary is null: first 'no sane totals' (nothing
-      // passed the matching-line check in EITHER waterfall), then 'no primary
-      // totals; edge calc using xcheck only' (primary failed but xcheck
-      // found a coherent source — edge math still runs). 'single-source'
-      // applies only when primary is present but xcheck isn't.
-      const haveTot = o.market_total != null && o.over_price != null && o.under_price != null;
-      const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
-      if (!haveTot && !haveXcheckTot) {
-        reasons.push('no sane totals: no source provided matching-line O/U');
-      } else if (!haveTot && haveXcheckTot) {
-        reasons.push('no primary totals; edge calc using xcheck only');
-      } else if (haveTot && !haveXcheckTot) {
-        reasons.push('single-source total, no cross-check available');
-      } else if (haveTot && haveXcheckTot) {
-        // Project xcheck's P(over) / P(under) onto primary's line before
-        // comparing. PR #27 fixed the line-distance threshold by switching
-        // to probability space, but compared P(over X.5) directly to
-        // P(over Y.5) — those are probabilities of DIFFERENT events when
-        // the lines differ, so two books that genuinely agree about the
-        // distribution still showed a large raw Δp.
-        //
-        // Concrete failure pre-projection: BOS@BAL 2026-04-26 with
-        // polymarket 8.5 +133/-138 (P(over 8.5)=0.429) vs sporttrade
-        // 7.5 -122/-111 (P(over 7.5)=0.550). Raw Δp=0.121 → flagged, but
-        // the books actually agree: Polymarket's 0.429 over 8.5 maps to
-        // ~0.55 over 7.5 via the empirical curve, matching Sporttrade.
-        //
-        // Heuristic: dropping the line by 1.0 lifts P(over) by roughly
-        // 0.12 in the 7-9 run range (RUNS_TO_PROB). To compare books on a
-        // common line, project xcheck onto primary's line:
-        //   xchkP_over_at_primary = xchkP_over - lineDelta * 0.12
-        //   xchkP_under_at_primary = xchkP_under + lineDelta * 0.12
-        // where lineDelta = primary_line - xcheck_line. Same threshold
-        // (0.08) and same flag-reason strings as PR #27.
-        const RUNS_TO_PROB = 0.12;
-        const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
-        const lineDelta = o.market_total - o.xcheck_total;
-        const primP_over  = impP(o.over_price);
-        const xchkP_over  = impP(o.xcheck_over_price);
-        const xchkP_over_at_primary = xchkP_over - lineDelta * RUNS_TO_PROB;
-        const dOver  = Math.abs(primP_over - xchkP_over_at_primary);
-        const primP_under = impP(o.under_price);
-        const xchkP_under = impP(o.xcheck_under_price);
-        const xchkP_under_at_primary = xchkP_under + lineDelta * RUNS_TO_PROB;
-        const dUnder = Math.abs(primP_under - xchkP_under_at_primary);
-        const d = Math.max(dOver, dUnder);
-        if (d > 0.08) {
-          if (o.market_total !== o.xcheck_total) {
-            reasons.push('totals divergence: ' + (o.total_source||'primary') + '=' + o.market_total + '@' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_total + '@' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
-          } else {
-            reasons.push('totals juice divergence: ' + (o.total_source||'primary') + '=' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
-          }
-        }
-      }
-      const oddsReason = reasons.length ? reasons.join(' | ') : null;
-      const oddsFlagged = oddsReason ? 1 : 0;
-      if (oddsReason) console.warn('[odds-sanity] ' + dateStr + '/' + o.game_id + ': ' + oddsReason);
-
-      // Locked: refresh source labels + flag, leave prices + bet_signals
-      // pinned. See refreshLockedLabels comment block above.
-      if (existing && existing.odds_locked_at) {
-        refreshLockedLabels.run(
-          o.ml_source || null, o.xcheck_ml_source || null,
-          o.total_source || null, o.xcheck_total_source || null,
-          oddsFlagged, oddsReason,
-          dateStr, o.game_id
-        );
-        console.log('[odds] Locked '+o.game_id+': refreshed source labels (prices frozen)');
-        continue;
-      }
-      if (existing && gameHasStarted(existing, dateStr)) {
-        // Lock it now to prevent future updates
-        db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
-        console.log('[odds] Skipping started game: '+o.game_id);
-        // Auto-set closing lines on ML signals
-        const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, o.game_id);
-        for (const sig of mlSigsO) {
-          const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
-          let clv = null;
-          if (sig.bet_line != null && closingLine != null) {
-            const isFav = sig.bet_line < 0;
-            clv = isFav ? (closingLine - sig.bet_line) : (sig.bet_line - closingLine);
-          }
-          db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
-        }
-        // Same label refresh as the already-locked branch — first runOddsJob
-        // run after start time gets a chance to populate labels at the same
-        // moment the lock fires, so subsequent runs (which hit the locked
-        // branch) just keep refreshing the same values.
-        refreshLockedLabels.run(
-          o.ml_source || null, o.xcheck_ml_source || null,
-          o.total_source || null, o.xcheck_total_source || null,
-          oddsFlagged, oddsReason,
-          dateStr, o.game_id
-        );
-        continue;
-      }
-      // Preserve existing non-null totals when incoming total is null.
-      // Unabated's feed can serve partial responses (observed 2026-04-21:
-      // two fetches seconds apart returned full totals then empty totals
-      // for the same 3 games). Previously the second call's null overwrote
-      // the first call's good data. COALESCE(incoming, existing) prevents
-      // that. Apply to total + over_price + under_price since those pair.
-      // Do NOT apply to ML — moneylines are volatile and we want fresh.
-      // Primary totals fields (market_total/over_price/under_price/total_source)
-      // are written unconditionally — no COALESCE. With the new matching-line
-      // guard in services/unabated.js, "null" from the waterfall now means
-      // "no source provided a coherent O/U pair" (an observable state the UI
-      // falls back on by showing xcheck as the displayed price). COALESCE
-      // would preserve stale Kalshi data past the guard's rejection and
-      // mask this state. xcheck fields keep COALESCE so a transient refresh
-      // that finds no non-Kalshi book doesn't wipe prior xcheck values.
-      db.prepare(`UPDATE game_log SET
-        market_away_ml=?, market_home_ml=?,
-        market_total=?, over_price=?, under_price=?, total_source=?,
-        ml_source=COALESCE(?, ml_source),
-        xcheck_ml_source=COALESCE(?, xcheck_ml_source),
-        xcheck_away_ml=?, xcheck_home_ml=?,
-        xcheck_total=COALESCE(?, xcheck_total),
-        xcheck_over_price=COALESCE(?, xcheck_over_price),
-        xcheck_under_price=COALESCE(?, xcheck_under_price),
-        xcheck_total_source=COALESCE(?, xcheck_total_source),
-        odds_flagged=?, odds_flag_reason=?,
-        updated_at=datetime('now')
-        WHERE game_date=? AND game_id=?`)
-        .run(o.market_away_ml, o.market_home_ml,
-             o.market_total, o.over_price, o.under_price, o.total_source || null,
-             o.ml_source || null,
-             o.xcheck_ml_source || null,
-             o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
-             o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
-             o.xcheck_total != null ? o.xcheck_total : null,
-             o.xcheck_over_price != null ? o.xcheck_over_price : null,
-             o.xcheck_under_price != null ? o.xcheck_under_price : null,
-             o.xcheck_total_source || null,
-             oddsFlagged, oddsReason,
-             dateStr, o.game_id);
-      const gameRow = q.getGameById.get(dateStr, o.game_id);
-      if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
-    }
-    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + (odds.length ? odds[0].source || 'odds' : 'no source'), updated);
+    const result = processOddsArray(dateStr, oddsRaw, settings);
+    const updated = result.updated;
+    const sourceLabel = result.source;
+    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + sourceLabel, updated);
     return { success: true, updated, date: dateStr };
   } catch(err) {
     console.error('[odds-job]', err.message);
@@ -1095,4 +1044,4 @@ async function runRosterJob() {
   }
 }
 
-module.exports = { runRosterJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, getWobaIndex, getSettings, startCronJobs };
+module.exports = { runRosterJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };

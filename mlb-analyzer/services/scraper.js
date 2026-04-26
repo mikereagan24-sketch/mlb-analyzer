@@ -116,8 +116,12 @@ function extractRotoWireDate(text) {
   return null;
 }
 
-async function fetchLineups(dateStr) {
-  console.log('[scraper] fetchLineups requested for ' + dateStr);
+// Split into raw-fetch and pure-parse so the snapshot system (services/
+// snapshot.js) can capture the upstream HTML before any Cheerio parsing,
+// and /api/replay/lineups can re-run parseLineupsHtml on the captured
+// payload without re-fetching RotoWire.
+async function fetchLineupsRaw(dateStr) {
+  console.log('[scraper] fetchLineupsRaw requested for ' + dateStr);
   const dayType = classifyDate(dateStr);
   console.log('[scraper] Date classification: ' + dayType);
 
@@ -156,7 +160,17 @@ async function fetchLineups(dateStr) {
   if (!resp.ok) throw new Error('RotoWire fetch failed: ' + resp.status);
   const html = await resp.text();
   console.log('[scraper] RotoWire HTML length: ' + html.length);
+  return { html, fetched_at: new Date().toISOString(), dateStr };
+}
 
+// Wrapper: preserves original fetchLineups signature for in-process callers.
+async function fetchLineups(dateStr) {
+  const raw = await fetchLineupsRaw(dateStr);
+  if (raw.skipped) return raw;
+  return parseLineupsHtml(raw.html, dateStr);
+}
+
+function parseLineupsHtml(html, dateStr) {
   // Check we got actual lineup data
   if (!html.includes('lineup__player') && !html.includes('lineup is-mlb')) {
     throw new Error('Could not parse any games from response');
@@ -271,7 +285,20 @@ async function fetchLineups(dateStr) {
   return games;
 }
 
+async function fetchScoresRaw(dateStr) {
+  const [year, month, day] = dateStr.split('-');
+  const mmdd = month.padStart(2,'0')+'/'+day.padStart(2,'0')+'/'+year;
+  const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date='+mmdd+'&hydrate=linescore';
+  const resp = await fetch(url+'&_t='+Date.now(), {headers:{'Accept':'application/json','Cache-Control':'no-cache'}});
+  if (!resp.ok) throw new Error('MLB API error: '+resp.status);
+  return await resp.json();
+}
+
 async function fetchScores(dateStr) {
+  return parseScoresJson(await fetchScoresRaw(dateStr));
+}
+
+function parseScoresJson(data) {
   // Uses MLB Stats API â free, no auth, returns final scores as JSON
   const TEAM_MAP = {
     'San Diego Padres':'SD','Boston Red Sox':'BOS','Pittsburgh Pirates':'PIT',
@@ -285,12 +312,6 @@ async function fetchScores(dateStr) {
     'Chicago Cubs':'CHC','Tampa Bay Rays':'TB','Athletics':'ATH',
     'New York Yankees':'NYY','Detroit Tigers':'DET','Minnesota Twins':'MIN',
   };
-  const [year, month, day] = dateStr.split('-');
-  const mmdd = month.padStart(2,'0')+'/'+day.padStart(2,'0')+'/'+year;
-  const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date='+mmdd+'&hydrate=linescore';
-  const resp = await fetch(url+'&_t='+Date.now(), {headers:{'Accept':'application/json','Cache-Control':'no-cache'}});
-  if (!resp.ok) throw new Error('MLB API error: '+resp.status);
-  const data = await resp.json();
   const games = (data.dates||[])[0]?.games || [];
   const results = [];
   for (const g of games) {
@@ -735,4 +756,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchScores, fetchSchedule, makeGameId };
+module.exports = { fetchActiveRosters, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
