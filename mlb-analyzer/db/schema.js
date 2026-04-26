@@ -319,6 +319,35 @@ try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_line INTEGER"); } catc
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN clv REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN under_price INTEGER"); } catch(e) {}
 
+// One-shot CLV backfill: every CLV value written before
+// fix/clv-formula-correct used the buggy American-cents formula. Some are
+// double-wrong (cross-sign cases where lock and close had opposite signs),
+// some have right magnitude / wrong sign. Easiest correct migration is to
+// nullify all ML CLV values and recompute from existing bet_line/closing_line
+// pairs using the new implied-probability math (see services/clv.js).
+// Total signals stay clv=NULL — bet_line on a Total is a runs total, not a
+// price, and implied-prob doesn't apply.
+// Idempotent via the app_settings flag at the bottom; runs once on first
+// boot after this migration lands, then skipped on subsequent boots.
+try {
+  const flag = db.prepare("SELECT value FROM app_settings WHERE key='clv_backfill_2026_04_26'").get();
+  if (!flag) {
+    const nulled = db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='ML'").run();
+    const recompute = db.prepare(`UPDATE bet_signals SET clv = ROUND(
+      ((CASE WHEN closing_line < 0 THEN ABS(closing_line)*1.0/(ABS(closing_line)+100)
+                                   ELSE 100.0/(closing_line+100) END)
+       -
+       (CASE WHEN bet_line < 0     THEN ABS(bet_line)*1.0/(ABS(bet_line)+100)
+                                   ELSE 100.0/(bet_line+100)     END)
+      ) * 1000) / 10.0
+      WHERE signal_type='ML' AND bet_line IS NOT NULL AND closing_line IS NOT NULL`).run();
+    db.prepare("INSERT INTO app_settings (key, value) VALUES ('clv_backfill_2026_04_26', datetime('now'))").run();
+    console.log('[migration] CLV backfill: nulled ' + nulled.changes + ' ML signals, recomputed ' + recompute.changes + ' from bet_line/closing_line pairs');
+  }
+} catch (e) {
+  console.warn('[migration] CLV backfill failed (non-fatal): ' + e.message);
+}
+
 const q = {
   upsertWoba: db.prepare(`
     INSERT INTO woba_data (data_key, player_name, woba, sample_size, uploaded_at)
