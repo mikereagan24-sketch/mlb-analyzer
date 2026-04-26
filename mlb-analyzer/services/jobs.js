@@ -447,6 +447,9 @@ async function runLineupJob(dateStr) {
           lineup_source:  existingRow ? existingRow.lineup_source : 'auto',
           venue_id:       g.venue_id != null ? g.venue_id : (existingRow ? existingRow.venue_id : null),
           venue_name:     g.venue_name != null ? g.venue_name : (existingRow ? existingRow.venue_name : null),
+          // statsapi is the source of truth for doubleheader markers.
+          game_number:    g.game_number != null ? g.game_number : 1,
+          game_pk:        g.game_pk != null ? g.game_pk : null,
         });
       }
       console.log('[lineup-job] statsapi bootstrap upserted ' + bootstrapRows.length + ' rows for ' + dateStr);
@@ -598,6 +601,10 @@ async function runLineupJob(dateStr) {
         // bootstrapped venue. Statsapi-bootstrapped venue_id wins when set.
         venue_id:   g.venue_id != null ? g.venue_id : (existingRow ? existingRow.venue_id : null),
         venue_name: g.venue_name != null ? g.venue_name : (existingRow ? existingRow.venue_name : null),
+        // RotoWire payload doesn't carry doubleheader markers — pass null so
+        // the upsert's COALESCE preserves the statsapi-bootstrapped values.
+        game_number: g.game_number != null ? g.game_number : null,
+        game_pk:     g.game_pk     != null ? g.game_pk     : null,
           away_lineup_status: g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
       home_lineup_status: g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
       lineup_status: g.lineup_status || 'projected',

@@ -339,6 +339,10 @@ router.post('/games/upsert', async (req, res) => {
       market_total: g.market_total, park_factor: g.park_factor || 1.0,
       model_away_ml: null, model_home_ml: null, model_total: null,
       lineup_source: 'manual',
+      venue_id: g.venue_id != null ? g.venue_id : null,
+      venue_name: g.venue_name != null ? g.venue_name : null,
+      game_number: g.game_number != null ? g.game_number : 1,
+      game_pk: g.game_pk != null ? g.game_pk : null,
     });
     db.prepare(`UPDATE game_log SET away_lineup_json=?, home_lineup_json=? WHERE game_date=? AND game_id=?`)
       .run(JSON.stringify(g.away_lineup || []), JSON.stringify(g.home_lineup || []), g.game_date, gameId);

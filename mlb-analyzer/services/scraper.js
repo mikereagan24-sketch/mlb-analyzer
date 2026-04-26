@@ -261,6 +261,12 @@ function parseLineupsHtml(html, dateStr) {
     const NORM = { WSH:'WAS', OAK:'ATH' };
     const awayTeam = NORM[away] || away;
     const homeTeam = NORM[home] || home;
+    // TODO(doubleheader): RotoWire doesn't expose a leg marker. The bare
+    // team-pair game_id will only hit the G1 row in game_log on doubleheader
+    // dates; G2 keeps statsapi-bootstrapped matchup but doesn't pick up the
+    // RotoWire lineup confirmation. Fix requires cross-referencing
+    // fetchSchedule output by start time with a timezone-aware compare
+    // (RotoWire shows ET, fetchSchedule emits PT).
     const gameId = (awayTeam + '-' + homeTeam).toLowerCase();
 
     games.push({
@@ -326,7 +332,12 @@ function parseScoresJson(data) {
       console.log('[scores] Skipping unmapped: '+awayName+' @ '+homeName);
       continue;
     }
-    results.push({away, home, awayScore, homeScore, gameId: (away+'-'+home).toLowerCase()});
+    // Same -g{N} suffix convention as fetchSchedule so doubleheader legs
+    // grade against the right game_log row.
+    const gameNumber = g.gameNumber || 1;
+    const baseId = (away+'-'+home).toLowerCase();
+    const gameId = gameNumber > 1 ? baseId + '-g' + gameNumber : baseId;
+    results.push({away, home, awayScore, homeScore, gameId, game_number: gameNumber, game_pk: g.gamePk || null});
   }
   return results;
 }
@@ -738,8 +749,16 @@ async function fetchSchedule(dateStr) {
     if (g.status?.detailedState === 'Final') continue;
     const aPP = g.teams?.away?.probablePitcher;
     const hPP = g.teams?.home?.probablePitcher;
+    // Doubleheaders: statsapi gives gameNumber 1/2/3 per leg. Single games
+    // are gameNumber 1 implicitly. game_id appends '-g{N}' when N > 1 so the
+    // UNIQUE(game_date, game_id) constraint holds across legs.
+    const gameNumber = g.gameNumber || 1;
+    const baseGameId = (awayAbbr + '-' + homeAbbr).toLowerCase();
+    const finalGameId = gameNumber > 1 ? baseGameId + '-g' + gameNumber : baseGameId;
     results.push({
-      game_id: (awayAbbr + '-' + homeAbbr).toLowerCase(),
+      game_id: finalGameId,
+      game_number: gameNumber,
+      game_pk: g.gamePk || null,
       away_team: awayAbbr,
       home_team: homeAbbr,
       time: fmtPT(g.gameDate),
