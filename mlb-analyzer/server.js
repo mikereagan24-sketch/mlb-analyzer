@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { startCronJobs } = require('./services/jobs');
+const { startCronJobs, runRosterJob } = require('./services/jobs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -58,4 +58,9 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`MLB Analyzer running on port ${PORT}`);
   startCronJobs();
+  // One-shot roster refresh on startup. Bridges the gap when the server
+  // starts up after the 6AM PT cron window — without this, rosters would
+  // sit at last-cron-state until the following morning. Failure here must
+  // not block the listen() callback returning, so the call is fire-and-forget.
+  runRosterJob().catch(e => console.warn('[startup-roster] failed:', e && e.message));
 });
