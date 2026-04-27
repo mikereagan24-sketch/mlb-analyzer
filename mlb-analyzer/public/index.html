@@ -313,6 +313,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 </div>
 <div id="bt-results">
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
+<div class="card" id="bt-lineup-sens-card" style="margin-bottom:1rem;display:none">
+<div class="slabel">Lineup sensitivity — ROI by whether projected vs confirmed lineup shifted the model</div>
+<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Shifted = |Δtotal| ≥ 0.3 runs OR |ΔML| ≥ 10 cents. Hypothesis: signals on shifted games may underperform stable ones — lock-on-projection rule should weigh this.</div>
+<table class="cat-tbl"><thead><tr><th>Bucket</th><th>Plays</th><th>W-L-P</th><th>P&L</th><th>ROI</th></tr></thead><tbody id="bt-lineup-sens-body"></tbody></table>
+</div>
 <div class="card">
 <div class="slabel">P&L by category — $100/play</div>
 <table class="cat-tbl"><thead><tr><th>Category</th><th>Plays</th><th>W-L-P</th><th>P&L</th><th>ROI</th></tr></thead><tbody id="bt-cat-body"></tbody></table>
@@ -1095,10 +1100,31 @@ function renderModelOutput(g) {
       +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(g.model_total ? parseFloat(g.model_total).toFixed(1) : '—')+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtTotalsBlock(g)+'</span></div>'
       +'</div>'
     : '<div style="font-size:11px;color:var(--text3);font-style:italic">No confirmed lineup yet</div>';
+  // Sensitivity badge: only meaningful when at least one side's lineup has
+  // confirmed (otherwise proj == final by construction and 'matches' isn't
+  // actionable evidence). Server returns the deltas + status; the UI gates
+  // visibility on lineup_status here.
+  var sens = g.lineup_sensitivity;
+  var sensRow = '';
+  if (sens && (awayConf || homeConf)) {
+    var dt = sens.delta_total != null ? sens.delta_total.toFixed(2) + ' runs' : '—';
+    var dml = sens.delta_aml != null && sens.delta_hml != null
+      ? Math.max(sens.delta_aml, sens.delta_hml) + ' cents'
+      : '—';
+    var bgColor = sens.status === 'shifted' ? 'rgba(204,136,51,0.15)' : 'rgba(39,139,66,0.15)';
+    var textColor = sens.status === 'shifted' ? '#cc8833' : 'var(--green)';
+    var label = sens.status === 'shifted' ? 'Shifted' : 'Matches';
+    sensRow = '<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px;display:flex;align-items:center;gap:8px">'
+      +'<span style="font-size:10px;color:var(--text2);font-weight:500">Lineup sensitivity:</span>'
+      +'<span style="background:'+bgColor+';color:'+textColor+';padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500">'+label+'</span>'
+      +'<span style="font-size:10px;color:var(--text2)">Δtotal '+dt+'  ·  Δml '+dml+'</span>'
+      +'</div>';
+  }
   return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 12px;margin-bottom:14px">'
     +'<div style="font-size:10px;color:var(--text2);font-weight:600;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Model Output</div>'
     +'<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:500;color:var(--yellow);margin-bottom:4px">&#9888; Projected Lineup</div>'+projRow+'</div>'
     +'<div style="border-top:1px solid var(--border);padding-top:8px"><div style="font-size:10px;font-weight:500;color:var(--green);margin-bottom:4px">&#10003; Confirmed Lineup</div>'+confRow+'</div>'
+    +sensRow
     +'</div>';
 }
 async function renderMatchupGame(id){
@@ -1759,6 +1785,33 @@ async function loadBacktest(){
       if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
       var _r=(c.wins||0)+(c.losses||0)+(c.pushes||0);var _p=c.pending>0?_r+'<span style="font-size:10px;color:var(--text3)"> (+'+c.pending+' pending)</span>':String(_r);return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+_p+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+((c.total_pnl||0)>=0?'green':'red')+'">'+((c.total_pnl||0)>=0?'+':'')+'$'+(+(c.total_pnl||0)).toFixed(0)+'</td><td class="'+((c.roi||0)>=0?'green':'red')+'">'+((c.roi||0)>=0?'+':'')+(+(c.roi||0)).toFixed(1)+'%</td></tr>';
     }).join('');
+  // Lineup-sensitivity ROI: separate roundtrip so the existing /backtest
+  // payload stays unchanged and the join-on-game_log only happens when the
+  // user is actually looking at this view.
+  try {
+    const ls = await api('/backtest/lineup-sensitivity?from='+from+'&to='+to+'&cohort='+encodeURIComponent(cohort));
+    const card = document.getElementById('bt-lineup-sens-card');
+    const body = document.getElementById('bt-lineup-sens-body');
+    const totalSettled = (ls.stable.settled_count||0) + (ls.shifted.settled_count||0);
+    if (totalSettled === 0) {
+      card.style.display = 'none';
+    } else {
+      card.style.display = '';
+      const labelFor = { stable: 'Stable (proj ≈ final)', shifted: 'Shifted (proj diverged)', unknown: 'Unknown (no projection / no final)' };
+      body.innerHTML = ['stable','shifted','unknown'].map(function(k){
+        const b = ls[k] || {count:0, wins:0, losses:0, pushes:0, total_pnl:0, roi_pct:null};
+        if (!b.count) return '<tr><td>'+labelFor[k]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
+        const wlp = (b.wins||0)+'-'+(b.losses||0)+'-'+(b.pushes||0);
+        const pnlCls = (b.total_pnl||0)>=0 ? 'green' : 'red';
+        const pnlStr = ((b.total_pnl||0)>=0?'+':'')+'$'+(+(b.total_pnl||0)).toFixed(0);
+        const roiVal = b.roi_pct;
+        const roiCell = roiVal == null
+          ? '<td class="muted">—</td>'
+          : '<td class="'+(roiVal>=0?'green':'red')+'">'+(roiVal>=0?'+':'')+roiVal.toFixed(1)+'%</td>';
+        return '<tr><td>'+labelFor[k]+'</td><td>'+(b.count||0)+'</td><td>'+wlp+'</td><td class="'+pnlCls+'">'+pnlStr+'</td>'+roiCell+'</tr>';
+      }).join('');
+    }
+  } catch(e) { console.error('lineup-sensitivity load error', e); }
   }catch(e){console.error('Backtest error:',e.message,e.stack);}
 }
 function exportCSV(){window.open('/api/export/csv?from='+(btFrom||document.getElementById('bt-from').value)+'&to='+(btTo||document.getElementById('bt-to').value),'_blank');}
