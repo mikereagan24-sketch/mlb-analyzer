@@ -319,8 +319,31 @@ function _classifyAge(ms) {
 // the same projected rerun) the deltas are zero and status is 'matches' —
 // the UI is responsible for suppressing the badge in that case via
 // lineup_status, since 'matches' there isn't actionable evidence.
-const _SENSITIVITY_TOTAL_THRESHOLD = 0.3;
-const _SENSITIVITY_ML_THRESHOLD = 10;
+//
+// ML deltas are reported in implied-probability percentage points, NOT raw
+// American-odds cents. Subtracting -110 from +103 gives 213 (a wildly
+// alarming number) but the actual implied-probability shift is ~3pp; the
+// pp form mirrors the same fix from PR #31's calcCLV. Run-total delta
+// stays in raw runs since runs don't have a sign-flip pathology.
+const _SENSITIVITY_TOTAL_MATCH = 0.3;       // < this → matches (runs)
+const _SENSITIVITY_TOTAL_LARGE = 0.8;       // ≥ this → large_shift (runs)
+const _SENSITIVITY_ML_MATCH_PP = 2.5;       // < this → matches (pp)
+const _SENSITIVITY_ML_LARGE_PP = 6;         // ≥ this → large_shift (pp)
+
+function _americanToImplied(p) {
+  if (p == null) return null;
+  return p < 0 ? Math.abs(p) / (Math.abs(p) + 100) : 100 / (p + 100);
+}
+// Returns the implied-probability gap between two American moneylines, in
+// percentage points (0–100), rounded to 0.1pp.
+function _impliedDeltaPP(a, b) {
+  if (a == null || b == null) return null;
+  const ia = _americanToImplied(a);
+  const ib = _americanToImplied(b);
+  if (ia == null || ib == null) return null;
+  return Math.round(Math.abs(ia - ib) * 1000) / 10;
+}
+
 function _lineupSensitivity(g) {
   const haveProj = g.proj_model_total != null
     || g.proj_model_away_ml != null
@@ -333,16 +356,18 @@ function _lineupSensitivity(g) {
   const delta_total = (g.proj_model_total != null && g.model_total != null)
     ? Math.abs(g.proj_model_total - g.model_total)
     : null;
-  const delta_aml = (g.proj_model_away_ml != null && g.model_away_ml != null)
-    ? Math.abs(g.proj_model_away_ml - g.model_away_ml)
-    : null;
-  const delta_hml = (g.proj_model_home_ml != null && g.model_home_ml != null)
-    ? Math.abs(g.proj_model_home_ml - g.model_home_ml)
-    : null;
-  const totalShift = delta_total != null && delta_total >= _SENSITIVITY_TOTAL_THRESHOLD;
-  const amlShift = delta_aml != null && delta_aml >= _SENSITIVITY_ML_THRESHOLD;
-  const hmlShift = delta_hml != null && delta_hml >= _SENSITIVITY_ML_THRESHOLD;
-  const status = (totalShift || amlShift || hmlShift) ? 'shifted' : 'matches';
+  const delta_aml = _impliedDeltaPP(g.proj_model_away_ml, g.model_away_ml);
+  const delta_hml = _impliedDeltaPP(g.proj_model_home_ml, g.model_home_ml);
+  // Three-tier classification. Order matters: large_shift wins over shifted
+  // when both gates would trigger (the prior single-tier code missed
+  // BOS@BAL 4/25 with delta_total=1.55 well past the large threshold).
+  const isLarge = (delta_total != null && delta_total >= _SENSITIVITY_TOTAL_LARGE)
+    || (delta_aml != null && delta_aml >= _SENSITIVITY_ML_LARGE_PP)
+    || (delta_hml != null && delta_hml >= _SENSITIVITY_ML_LARGE_PP);
+  const isShifted = (delta_total != null && delta_total >= _SENSITIVITY_TOTAL_MATCH)
+    || (delta_aml != null && delta_aml >= _SENSITIVITY_ML_MATCH_PP)
+    || (delta_hml != null && delta_hml >= _SENSITIVITY_ML_MATCH_PP);
+  const status = isLarge ? 'large_shift' : (isShifted ? 'shifted' : 'matches');
   return { delta_total, delta_aml, delta_hml, status };
 }
 
@@ -611,7 +636,7 @@ router.get('/backtest/lineup-sensitivity', (req, res) => {
       "WHERE bs.game_date BETWEEN ? AND ? AND bs.outcome NOT IN ('pending','void')" +
       cohortPred
     ).all(...params);
-    const buckets = { stable: [], shifted: [], unknown: [] };
+    const buckets = { stable: [], shifted: [], large_shift: [], unknown: [] };
     for (const r of rows) {
       const sens = _lineupSensitivity({
         proj_model_total: r.proj_model_total,
@@ -622,7 +647,9 @@ router.get('/backtest/lineup-sensitivity', (req, res) => {
         model_home_ml: r.model_home_ml,
       });
       if (!sens) buckets.unknown.push(r);
-      else buckets[sens.status === 'shifted' ? 'shifted' : 'stable'].push(r);
+      else if (sens.status === 'large_shift') buckets.large_shift.push(r);
+      else if (sens.status === 'shifted') buckets.shifted.push(r);
+      else buckets.stable.push(r);
     }
     const summarize = arr => {
       const wins = arr.filter(x => x.outcome === 'win').length;
@@ -645,9 +672,15 @@ router.get('/backtest/lineup-sensitivity', (req, res) => {
     res.json({
       cohort: cohortArg,
       from: fromDate, to: toDate,
-      threshold: { delta_total: _SENSITIVITY_TOTAL_THRESHOLD, delta_ml: _SENSITIVITY_ML_THRESHOLD },
+      threshold: {
+        total_match: _SENSITIVITY_TOTAL_MATCH,
+        total_large: _SENSITIVITY_TOTAL_LARGE,
+        ml_match_pp: _SENSITIVITY_ML_MATCH_PP,
+        ml_large_pp: _SENSITIVITY_ML_LARGE_PP,
+      },
       stable: summarize(buckets.stable),
       shifted: summarize(buckets.shifted),
+      large_shift: summarize(buckets.large_shift),
       unknown: summarize(buckets.unknown),
     });
   } catch (err) {
