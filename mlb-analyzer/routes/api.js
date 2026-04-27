@@ -312,6 +312,40 @@ function _classifyAge(ms) {
   return 'expired';
 }
 
+// Lineup sensitivity: how much did the model output change when the projected
+// lineup was replaced with the confirmed one. Returns null when no projection
+// snapshot exists (game never ran the projected pass). When proj == final
+// (which includes the "lineup never confirmed" case where both columns track
+// the same projected rerun) the deltas are zero and status is 'matches' —
+// the UI is responsible for suppressing the badge in that case via
+// lineup_status, since 'matches' there isn't actionable evidence.
+const _SENSITIVITY_TOTAL_THRESHOLD = 0.3;
+const _SENSITIVITY_ML_THRESHOLD = 10;
+function _lineupSensitivity(g) {
+  const haveProj = g.proj_model_total != null
+    || g.proj_model_away_ml != null
+    || g.proj_model_home_ml != null;
+  if (!haveProj) return null;
+  const haveFinal = g.model_total != null
+    || g.model_away_ml != null
+    || g.model_home_ml != null;
+  if (!haveFinal) return null;
+  const delta_total = (g.proj_model_total != null && g.model_total != null)
+    ? Math.abs(g.proj_model_total - g.model_total)
+    : null;
+  const delta_aml = (g.proj_model_away_ml != null && g.model_away_ml != null)
+    ? Math.abs(g.proj_model_away_ml - g.model_away_ml)
+    : null;
+  const delta_hml = (g.proj_model_home_ml != null && g.model_home_ml != null)
+    ? Math.abs(g.proj_model_home_ml - g.model_home_ml)
+    : null;
+  const totalShift = delta_total != null && delta_total >= _SENSITIVITY_TOTAL_THRESHOLD;
+  const amlShift = delta_aml != null && delta_aml >= _SENSITIVITY_ML_THRESHOLD;
+  const hmlShift = delta_hml != null && delta_hml >= _SENSITIVITY_ML_THRESHOLD;
+  const status = (totalShift || amlShift || hmlShift) ? 'shifted' : 'matches';
+  return { delta_total, delta_aml, delta_hml, status };
+}
+
 router.get('/games/:date', (req, res) => {
   try {
     const { date } = req.params;
@@ -342,6 +376,7 @@ router.get('/games/:date', (req, res) => {
         lineups_quality: _classifyAge(_ageMs(g.lineups_quality_at, now)),
         weather_quality: _classifyAge(_ageMs(g.weather_quality_at, now)),
         scores_quality: _classifyAge(_ageMs(g.scores_quality_at, now)),
+        lineup_sensitivity: _lineupSensitivity(g),
       };
     });
     res.json(result);
@@ -544,6 +579,77 @@ router.get('/backtest', (req, res) => {
     ).all(fromDate, toDate, ...cohortParams);
 
     res.json({ overall, byCategory, signals, cohort: cohortArg });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lineup-sensitivity ROI breakdown: were locked bets worse on games whose
+// model output shifted noticeably between projected and confirmed lineups?
+// Joins bet_signals to game_log on (game_date, game_id) so the proj_model_*
+// vs model_* delta classifies each signal's parent game as 'stable' or
+// 'shifted' using the same thresholds /api/games/:date applies inline.
+// 'unknown' bucket: parent game has no projected snapshot OR no final
+// model output yet. These are excluded from the comparative ROI line.
+router.get('/backtest/lineup-sensitivity', (req, res) => {
+  try {
+    const { from, to, cohort } = req.query;
+    const fromDate = from || '2026-04-09';
+    const toDate = to || '2099-12-31';
+    const cohortArg = (cohort || 'v3').toString();
+    const filterByCohort = cohortArg !== 'all';
+    const cohortPred = filterByCohort ? ' AND bs.cohort=?' : '';
+    const params = filterByCohort
+      ? [fromDate, toDate, cohortArg]
+      : [fromDate, toDate];
+    const rows = db.prepare(
+      "SELECT bs.signal_type, bs.signal_side, bs.outcome, bs.pnl, bs.bet_line, bs.market_line, " +
+      "  gl.proj_model_total, gl.proj_model_away_ml, gl.proj_model_home_ml, " +
+      "  gl.model_total, gl.model_away_ml, gl.model_home_ml " +
+      "FROM bet_signals bs " +
+      "JOIN game_log gl ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id " +
+      "WHERE bs.game_date BETWEEN ? AND ? AND bs.outcome NOT IN ('pending','void')" +
+      cohortPred
+    ).all(...params);
+    const buckets = { stable: [], shifted: [], unknown: [] };
+    for (const r of rows) {
+      const sens = _lineupSensitivity({
+        proj_model_total: r.proj_model_total,
+        proj_model_away_ml: r.proj_model_away_ml,
+        proj_model_home_ml: r.proj_model_home_ml,
+        model_total: r.model_total,
+        model_away_ml: r.model_away_ml,
+        model_home_ml: r.model_home_ml,
+      });
+      if (!sens) buckets.unknown.push(r);
+      else buckets[sens.status === 'shifted' ? 'shifted' : 'stable'].push(r);
+    }
+    const summarize = arr => {
+      const wins = arr.filter(x => x.outcome === 'win').length;
+      const losses = arr.filter(x => x.outcome === 'loss').length;
+      const pushes = arr.filter(x => x.outcome === 'push').length;
+      const settled = arr.filter(x => x.outcome === 'win' || x.outcome === 'loss');
+      const totalPnl = settled.reduce((s, x) => s + (x.pnl || 0), 0);
+      // Assume to-win-100 stake: $100 risked per signal for ROI denominator.
+      // Matches the Backtest tab convention.
+      const stake = 100 * settled.length;
+      const roi_pct = stake > 0 ? +(totalPnl / stake * 100).toFixed(2) : null;
+      return {
+        count: arr.length,
+        settled_count: settled.length,
+        wins, losses, pushes,
+        total_pnl: +totalPnl.toFixed(2),
+        roi_pct,
+      };
+    };
+    res.json({
+      cohort: cohortArg,
+      from: fromDate, to: toDate,
+      threshold: { delta_total: _SENSITIVITY_TOTAL_THRESHOLD, delta_ml: _SENSITIVITY_ML_THRESHOLD },
+      stable: summarize(buckets.stable),
+      shifted: summarize(buckets.shifted),
+      unknown: summarize(buckets.unknown),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
