@@ -882,12 +882,36 @@ async function runWeatherJob(date) {
           +'&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability'
           +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
           +'&start_date='+date+'&end_date='+date;
-        const wd = await fetch(url).then(r => r.json());
-        const idx = Math.min(gameHour, (wd.hourly?.time || []).length - 1);
-        const speed = parseFloat((wd.hourly?.wind_speed_10m?.[idx] || 0).toFixed(1));
-        const dir   = Math.round(wd.hourly?.wind_direction_10m?.[idx] || 0);
-        const temp  = parseFloat((wd.hourly?.temperature_2m?.[idx] || 65).toFixed(1));
-        const precip = wd.hourly?.precipitation_probability?.[idx] || 0;
+        const wd = await fetch(url, {
+          headers: { 'User-Agent': 'mlb-analyzer/1.0 (https://github.com/mikereagan24-sketch/mlb-analyzer)' },
+        }).then(r => r.json());
+        // Validate before touching game_log. The previous "|| 0" / "|| 65"
+        // pattern silently wrote 65°F + 0mph when Open-Meteo returned an
+        // empty response, overwriting good data the UI's client-side fetch
+        // had already PATCHed in. On bad data: log + skip the UPDATE so
+        // last-good values survive and the freshness clock keeps ticking
+        // toward the existing expired/stale gates.
+        if (!wd || !wd.hourly || !Array.isArray(wd.hourly.time) || !wd.hourly.time.length) {
+          console.warn('[weather] '+game.game_id+': empty/invalid response, leaving last-good data: '+JSON.stringify(wd).slice(0,200));
+          continue;
+        }
+        const idx = Math.min(gameHour, wd.hourly.time.length - 1);
+        if (idx < 0) {
+          console.warn('[weather] '+game.game_id+': bad gameHour='+gameHour+', leaving last-good data');
+          continue;
+        }
+        const _speed  = wd.hourly.wind_speed_10m?.[idx];
+        const _dir    = wd.hourly.wind_direction_10m?.[idx];
+        const _temp   = wd.hourly.temperature_2m?.[idx];
+        const _precip = wd.hourly.precipitation_probability?.[idx];
+        if (![_speed, _dir, _temp, _precip].every(v => Number.isFinite(v))) {
+          console.warn('[weather] '+game.game_id+': missing fields (speed='+_speed+' dir='+_dir+' temp='+_temp+' precip='+_precip+'), leaving last-good data');
+          continue;
+        }
+        const speed = parseFloat(_speed.toFixed(1));
+        const dir   = Math.round(_dir);
+        const temp  = parseFloat(_temp.toFixed(1));
+        const precip = _precip;
         const windFactor = calcWindFactor(dir, speed, park);
         const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
         // Roof logic

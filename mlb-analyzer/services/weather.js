@@ -90,14 +90,38 @@ async function fetchParkWind(homeTeam, gameDate, gameTime) {
       `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
       `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
       `&start_date=${gameDate}&end_date=${gameDate}`;
-    const data = await fetch(url).then(r => r.json());
-    const idx = Math.min(gameHour, (data.hourly?.time || []).length - 1);
-    const windSpeed = data.hourly?.wind_speed_10m?.[idx] || 0;
-    const windDir   = data.hourly?.wind_direction_10m?.[idx] || 0;
-    const tempF     = data.hourly?.temperature_2m?.[idx] || 65;
-    const precipProb = data.hourly?.precipitation_probability?.[idx] || 0;
+    // User-Agent: some upstream APIs reject headerless server-side fetches.
+    // Open-Meteo's free tier rate-limit is per-IP, and Render shared IPs hit
+    // it; the UA helps the provider distinguish our traffic if we need to
+    // request a quota bump.
+    const data = await fetch(url, {
+      headers: { 'User-Agent': 'mlb-analyzer/1.0 (https://github.com/mikereagan24-sketch/mlb-analyzer)' },
+    }).then(r => r.json());
+
+    // Validate response shape — fail loud rather than silently returning the
+    // 65°F / 0mph default cluster, which the cron then writes over real data.
+    if (!data || !data.hourly || !Array.isArray(data.hourly.time) || !data.hourly.time.length) {
+      console.warn(`[weather] empty/invalid response for ${homeTeam}: ${JSON.stringify(data).slice(0, 200)}`);
+      return null;
+    }
+
+    const idx = Math.min(gameHour, data.hourly.time.length - 1);
+    if (idx < 0) return null;
+
+    const windSpeed = data.hourly.wind_speed_10m?.[idx];
+    const windDir   = data.hourly.wind_direction_10m?.[idx];
+    const tempF     = data.hourly.temperature_2m?.[idx];
+    const precipProb = data.hourly.precipitation_probability?.[idx];
+
+    // Require all four fields to be present and finite. A missing field is
+    // a data-quality problem, not a fact about the weather.
+    if (![windSpeed, windDir, tempF, precipProb].every(v => Number.isFinite(v))) {
+      console.warn(`[weather] missing fields for ${homeTeam}: speed=${windSpeed} dir=${windDir} temp=${tempF} precip=${precipProb}`);
+      return null;
+    }
+
     const factor = calcWindFactor(windDir, windSpeed, park);
-    // Temp adjustment: research shows ~1 run per 50F from 65F baseline
+    // Temp adjustment: research shows ~1 run per 50F from 65F baseline.
     const tempAdj = Math.max(-1.3, Math.min(1.3, (tempF - 65) * 0.052)); // continuous: -1.3 at 40°F, 0 at 65°F baseline, +1.3 at 90°F
     return { windSpeed, windDir, factor, tempF, tempAdj, precipProb, parkName: park.name, cfDir: park.cfDir };
   } catch (e) {
