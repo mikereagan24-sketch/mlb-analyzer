@@ -315,7 +315,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
 <div class="card" id="bt-lineup-sens-card" style="margin-bottom:1rem;display:none">
 <div class="slabel">Lineup sensitivity — ROI by whether projected vs confirmed lineup shifted the model</div>
-<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Shifted = |Δtotal| ≥ 0.3 runs OR |ΔML| ≥ 10 cents. Hypothesis: signals on shifted games may underperform stable ones — lock-on-projection rule should weigh this.</div>
+<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Stable = |Δtotal| &lt; 0.3 runs AND |ΔML| &lt; 2.5pp. Shifted = either gate ≥ 0.3 / 2.5pp. Large shift = ≥ 0.8 runs OR ≥ 6pp on either ML. ML deltas are implied-probability percentage points (cross-sign safe). Hypothesis: locked bets on shifted/large-shift games may underperform stable ones.</div>
 <table class="cat-tbl"><thead><tr><th>Bucket</th><th>Plays</th><th>W-L-P</th><th>P&L</th><th>ROI</th></tr></thead><tbody id="bt-lineup-sens-body"></tbody></table>
 </div>
 <div class="card">
@@ -1103,17 +1103,24 @@ function renderModelOutput(g) {
   // Sensitivity badge: only meaningful when at least one side's lineup has
   // confirmed (otherwise proj == final by construction and 'matches' isn't
   // actionable evidence). Server returns the deltas + status; the UI gates
-  // visibility on lineup_status here.
+  // visibility on lineup_status here. ML deltas are now in implied-prob
+  // percentage points, not raw cents — a -110/+103 cross-sign no longer
+  // shows up as a bogus 213.
   var sens = g.lineup_sensitivity;
   var sensRow = '';
   if (sens && (awayConf || homeConf)) {
     var dt = sens.delta_total != null ? sens.delta_total.toFixed(2) + ' runs' : '—';
     var dml = sens.delta_aml != null && sens.delta_hml != null
-      ? Math.max(sens.delta_aml, sens.delta_hml) + ' cents'
+      ? Math.max(sens.delta_aml, sens.delta_hml).toFixed(1) + 'pp'
       : '—';
-    var bgColor = sens.status === 'shifted' ? 'rgba(204,136,51,0.15)' : 'rgba(39,139,66,0.15)';
-    var textColor = sens.status === 'shifted' ? '#cc8833' : 'var(--green)';
-    var label = sens.status === 'shifted' ? 'Shifted' : 'Matches';
+    var bgColor, textColor, label;
+    if (sens.status === 'large_shift') {
+      bgColor = 'rgba(204,51,51,0.15)'; textColor = '#cc3333'; label = 'Large shift';
+    } else if (sens.status === 'shifted') {
+      bgColor = 'rgba(204,136,51,0.15)'; textColor = '#cc8833'; label = 'Shifted';
+    } else {
+      bgColor = 'rgba(39,139,66,0.15)'; textColor = 'var(--green)'; label = 'Matches';
+    }
     sensRow = '<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px;display:flex;align-items:center;gap:8px">'
       +'<span style="font-size:10px;color:var(--text2);font-weight:500">Lineup sensitivity:</span>'
       +'<span style="background:'+bgColor+';color:'+textColor+';padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500">'+label+'</span>'
@@ -1792,13 +1799,18 @@ async function loadBacktest(){
     const ls = await api('/backtest/lineup-sensitivity?from='+from+'&to='+to+'&cohort='+encodeURIComponent(cohort));
     const card = document.getElementById('bt-lineup-sens-card');
     const body = document.getElementById('bt-lineup-sens-body');
-    const totalSettled = (ls.stable.settled_count||0) + (ls.shifted.settled_count||0);
+    const totalSettled = (ls.stable.settled_count||0) + (ls.shifted.settled_count||0) + ((ls.large_shift && ls.large_shift.settled_count)||0);
     if (totalSettled === 0) {
       card.style.display = 'none';
     } else {
       card.style.display = '';
-      const labelFor = { stable: 'Stable (proj ≈ final)', shifted: 'Shifted (proj diverged)', unknown: 'Unknown (no projection / no final)' };
-      body.innerHTML = ['stable','shifted','unknown'].map(function(k){
+      const labelFor = {
+        stable: 'Stable (proj ≈ final)',
+        shifted: 'Shifted (proj diverged)',
+        large_shift: 'Large shift (proj diverged sharply)',
+        unknown: 'Unknown (no projection / no final)',
+      };
+      body.innerHTML = ['stable','shifted','large_shift','unknown'].map(function(k){
         const b = ls[k] || {count:0, wins:0, losses:0, pushes:0, total_pnl:0, roi_pct:null};
         if (!b.count) return '<tr><td>'+labelFor[k]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
         const wlp = (b.wins||0)+'-'+(b.losses||0)+'-'+(b.pushes||0);
