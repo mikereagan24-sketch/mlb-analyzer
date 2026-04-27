@@ -94,6 +94,15 @@ db.exec(`
   scores_quality_at TEXT,
   game_number INTEGER DEFAULT 1,
   game_pk INTEGER,
+  -- First-projection snapshot. Captured once on the first non-empty
+  -- projected lineup write, frozen across subsequent updates so
+  -- proj_* keeps the original projection while away_lineup_json /
+  -- home_lineup_json track the live (eventually confirmed) state.
+  proj_away_lineup_json TEXT,
+  proj_home_lineup_json TEXT,
+  proj_away_sp TEXT,
+  proj_home_sp TEXT,
+  proj_lineup_captured_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -307,6 +316,15 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN scores_quality_at TEXT"); } catch
 // give us a stable handle off statsapi for cross-source matching.
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_number INTEGER DEFAULT 1"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_pk INTEGER"); } catch(e) {}
+// Projected-lineup snapshot columns. Capture-once via COALESCE in the
+// updateLineup statement; preserved across subsequent (projected or
+// confirmed) updates so we can later diff the original projection
+// against the eventual confirmed state.
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_lineup_json TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_lineup_json TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_sp TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_sp TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN proj_lineup_captured_at TEXT"); } catch(e) {}
 // Historical backfill: rows created before this migration default to G1.
 try { db.exec("UPDATE game_log SET game_number = 1 WHERE game_number IS NULL"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book

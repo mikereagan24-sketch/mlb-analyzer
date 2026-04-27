@@ -590,8 +590,25 @@ async function runLineupJob(dateStr) {
 
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
+    // updateLineup also writes the proj_* snapshot columns wrapped in
+    // COALESCE so the FIRST non-empty projected write wins and subsequent
+    // updates (still projected, or transitioned to confirmed) preserve the
+    // original snapshot. Caller passes the values when capture conditions
+    // are met, null otherwise — when it passes null COALESCE is a no-op
+    // (preserves existing, including null-staying-null when projection
+    // never happened).
     const updateLineup = db.prepare(
-    `UPDATE game_log SET away_lineup_json=?, home_lineup_json=?, away_lineup_status=?, home_lineup_status=?, lineups_quality='fresh', lineups_quality_at=datetime('now'), updated_at=datetime('now') WHERE game_date=? AND game_id=?`
+    `UPDATE game_log SET
+      away_lineup_json=?, home_lineup_json=?,
+      away_lineup_status=?, home_lineup_status=?,
+      proj_away_lineup_json = COALESCE(proj_away_lineup_json, ?),
+      proj_home_lineup_json = COALESCE(proj_home_lineup_json, ?),
+      proj_away_sp = COALESCE(proj_away_sp, ?),
+      proj_home_sp = COALESCE(proj_home_sp, ?),
+      proj_lineup_captured_at = COALESCE(proj_lineup_captured_at, ?),
+      lineups_quality='fresh', lineups_quality_at=datetime('now'),
+      updated_at=datetime('now')
+     WHERE game_date=? AND game_id=?`
   );
 
     for (const g of games) {
@@ -672,7 +689,24 @@ async function runLineupJob(dateStr) {
       });
       const awayStatus = g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     const homeStatus = g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
-    updateLineup.run(JSON.stringify(awayLU), JSON.stringify(homeLU), awayStatus, homeStatus, dateStr, gameId);
+    // Capture-once snapshot of the first non-empty projected lineup. Skips
+    // bootstrap-empty and direct-to-confirmed states; once captured, the
+    // COALESCE in updateLineup keeps it frozen across later updates.
+    const _captureProj = (awayStatus === 'projected' || homeStatus === 'projected')
+      && awayStatus !== 'confirmed' && homeStatus !== 'confirmed'
+      && awayLU.length > 0 && homeLU.length > 0;
+    const _projAwayJson = _captureProj ? JSON.stringify(awayLU) : null;
+    const _projHomeJson = _captureProj ? JSON.stringify(homeLU) : null;
+    const _projAwaySP = _captureProj ? (g.away_sp ? g.away_sp.name : null) : null;
+    const _projHomeSP = _captureProj ? (g.home_sp ? g.home_sp.name : null) : null;
+    const _projAt = _captureProj ? new Date().toISOString() : null;
+    updateLineup.run(
+      JSON.stringify(awayLU), JSON.stringify(homeLU),
+      awayStatus, homeStatus,
+      _projAwayJson, _projHomeJson,
+      _projAwaySP, _projHomeSP, _projAt,
+      dateStr, gameId
+    );
       // Clear zeros Ã¢ÂÂ treat 0 same as null for market odds
       db.prepare("UPDATE game_log SET market_away_ml=CASE WHEN market_away_ml=0 THEN NULL ELSE market_away_ml END, market_home_ml=CASE WHEN market_home_ml=0 THEN NULL ELSE market_home_ml END, market_total=CASE WHEN market_total=0 THEN NULL ELSE market_total END WHERE game_date=? AND game_id=?").run(dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
