@@ -1,4 +1,5 @@
 // jobs.js v2026-04-12T19:57:39.540Z
+// File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSchedule } = require('./scraper');
@@ -312,19 +313,19 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const isProjected = !gameRow.away_lineup_status || gameRow.away_lineup_status === 'projected';
   const hasProjSnapshot = gameRow.proj_model_away_ml != null;
   if (!suppressed && isProjected) {
-    // Lineup still projected Ã¢ÂÂ keep proj snapshot current
+    // Lineup still projected — keep proj snapshot current
     db.prepare(`UPDATE game_log SET proj_model_away_ml=?, proj_model_home_ml=?, proj_model_total=?, model_away_ml=?, model_home_ml=?, model_total=?, proj_market_away_ml=COALESCE(proj_market_away_ml, ?), proj_market_home_ml=COALESCE(proj_market_home_ml, ?), proj_market_total=COALESCE(proj_market_total, ?), updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.market_away_ml||null, gameRow.market_home_ml||null, gameRow.market_total||null, gameRow.game_date, gameRow.game_id);
   } else if (!suppressed) {
-    // Confirmed lineup Ã¢ÂÂ proj snapshot is frozen, update current model only
+    // Confirmed lineup — proj snapshot is frozen, update current model only
     db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
-  // If game is already final (scored), freeze all signals Ã¢ÂÂ don't rewrite
+  // If game is already final (scored), freeze all signals — don't rewrite
   if (gl.away_score != null) {
-    // Just grade any ungraded signals and return Ã¢ÂÂ never wipe a completed game's signals
+    // Just grade any ungraded signals and return — never wipe a completed game's signals
     const existing = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(gameRow.game_date, gameRow.game_id);
     const updateSig = db.prepare('UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?');
     for (const ex of existing) {
@@ -368,7 +369,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     });
   }
 
-  // Remove any duplicate signals (same type+side) Ã¢ÂÂ keep highest ID
+  // Remove any duplicate signals (same type+side) — keep highest ID
   // Audit which rows are about to be deleted, for forensic "where did my lock go?" queries.
   const dupRows = db.prepare(
     "SELECT id, signal_type, signal_side, bet_line, closing_line, clv, " +
@@ -404,7 +405,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   if (lockedLines.length) {
     for (const locked of lockedLines) {
       if (!newSigKeys.has(locked.signal_type+'|'+locked.signal_side)) {
-        // Signal no longer qualifies Ã¢ÂÂ deactivate with a note
+        // Signal no longer qualifies — deactivate with a note
         // When suppressed (incomplete lineup), model_* values are null;
         // skip .toFixed and write a suppression note instead.
         const finalMdl = suppressed
@@ -419,7 +420,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
               : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
         const note = suppressed
           ? 'Lineup incomplete (' + (model._suppressed_detail || 'no batters') + ') — model output suppressed, signal deactivated.'
-          : 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' Ã¢ÂÂ edge no longer meets threshold.';
+          : 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
         db.prepare("UPDATE bet_signals SET is_active=0, notes=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
           .run(note, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
         try {
@@ -549,7 +550,7 @@ async function runLineupJob(dateStr) {
     }
 
     const games = Array.isArray(result) ? result : [];
-  // Normalize team codes Ã¢ÂÂ fix common scraper mistakes
+  // Normalize team codes — fix common scraper mistakes
   const TEAM_NORM = {'WSH':'WAS','OAK':'ATH','CWS':'CWS'};
   for (const g of games) {
     if (TEAM_NORM[g.away_team]) g.away_team = TEAM_NORM[g.away_team];
@@ -616,7 +617,7 @@ async function runLineupJob(dateStr) {
       const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
       const existingRow = q.getGameById.get(dateStr, gameId);
-        // Lock odds 10min before game start Ã¢ÂÂ only for TODAY's games, never future dates
+        // Lock odds 10min before game start — only for TODAY's games, never future dates
         const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});
         if (existingRow && !existingRow.odds_locked_at && existingRow.game_time && dateStr === todayForLock) {
           const tm = existingRow.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
@@ -666,7 +667,7 @@ async function runLineupJob(dateStr) {
         away_sp_hand: g.away_sp && g.away_sp.hand,
         home_sp: g.home_sp && g.home_sp.name,
         home_sp_hand: g.home_sp && g.home_sp.hand,
-        // Lineup job NEVER overwrites odds Ã¢ÂÂ only the odds job writes market lines
+        // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
       market_total:   existingRow ? existingRow.market_total   : g.market_total,
@@ -707,7 +708,7 @@ async function runLineupJob(dateStr) {
       _projAwaySP, _projHomeSP, _projAt,
       dateStr, gameId
     );
-      // Clear zeros Ã¢ÂÂ treat 0 same as null for market odds
+      // Clear zeros — treat 0 same as null for market odds
       db.prepare("UPDATE game_log SET market_away_ml=CASE WHEN market_away_ml=0 THEN NULL ELSE market_away_ml END, market_home_ml=CASE WHEN market_home_ml=0 THEN NULL ELSE market_home_ml END, market_total=CASE WHEN market_total=0 THEN NULL ELSE market_total END WHERE game_date=? AND game_id=?").run(dateStr, gameId);
       const gameRow = q.getGameById.get(dateStr, gameId);
       if (gameRow) {
@@ -721,7 +722,7 @@ async function runLineupJob(dateStr) {
     }
 
     q.logCron.run('lineups', dateStr, 'success', 'Pulled ' + games.length + ' games (date verified)', gamesUpdated);
-    console.log('[lineup-job] Done Ã¢ÂÂ ' + gamesUpdated + ' games processed');
+    console.log('[lineup-job] Done — ' + gamesUpdated + ' games processed');
     return { success: true, gamesUpdated, date: dateStr };
 
   } catch (err) {
@@ -839,7 +840,7 @@ async function runScoreJob(dateStr) {
       console.log('[score-job] pitcher-usage fetch failed: ' + e.message);
     }
     q.logCron.run('scores', dateStr, 'success', 'Updated ' + scores.length + ' scores, ' + pitcherRecords + ' pitcher apps', gamesUpdated);
-    console.log('[score-job] Done Ã¢ÂÂ ' + gamesUpdated + ' games updated');
+    console.log('[score-job] Done — ' + gamesUpdated + ' games updated');
     return { success: true, gamesUpdated, date: dateStr };
   } catch (err) {
     console.error('[score-job] Error:', err.message);
@@ -1179,7 +1180,7 @@ async function runOddsJob(dateStr) {
         oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
       } catch(e2) {
         console.log('[odds] Odds API also failed: '+e2.message);
-        oddsRaw = []; // ensure array, don't throw Ã¢ÂÂ just log and continue
+        oddsRaw = []; // ensure array, don't throw — just log and continue
       }
     }
     const result = processOddsArray(dateStr, oddsRaw, settings);
@@ -1209,7 +1210,7 @@ async function runRosterJob() {
       }
       totalPitchers += pitchers.length;
     }
-    console.log(`[roster] Done Ã¢ÂÂ ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
+    console.log(`[roster] Done — ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
     return { success: true, teams: Object.keys(rosters).length, pitchers: totalPitchers };
   } catch(e) {
     console.error('[roster] Error: '+e.message);

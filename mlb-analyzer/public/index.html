@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- File encoding: UTF-8 (do not save as Windows-1252) -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -207,10 +208,10 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <body>
 <div class="app">
 <div class="hdr">
-<div class="hdr-icon">→¾</div>
+<div class="hdr-icon">⚾</div>
 <div>
 <div class="ttl">MLB Betting Analyzer</div>
-<div class="sub" id="hdr-sub">Loading→¦</div>
+<div class="sub" id="hdr-sub">Loading…</div>
 </div>
 </div>
 <div class="tabs">
@@ -232,7 +233,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
   <span id="health-dot" style="width:10px;height:10px;border-radius:50%;background:#9ca3af;display:inline-block"></span>
   <span id="health-label">Health …</span>
 </span>
-<button class="btn btn-ghost btn-sm" onclick="refreshLineups()">→³ Refresh Lineups</button>
+<button class="btn btn-ghost btn-sm" onclick="refreshLineups()">⟳ Refresh Lineups</button>
 <button class="btn btn-ghost btn-sm" onclick="triggerScores()">Pull Scores</button>
         <button class="btn btn-ghost btn-sm" onclick="triggerRosters()">👥 Pull Rosters</button>
         <button class="btn btn-ghost btn-sm" onclick="pullWeather(this)">⛅ Pull Weather</button>
@@ -251,7 +252,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 
 <!-- ANALYSIS -->
 <div id="sec-analysis" style="display:none!important" class="sec">
-<div id="no-analysis" class="notice">Click →¡ Analyze on a game card to open the full analysis view.</div>
+<div id="no-analysis" class="notice">Click ▶ Analyze on a game card to open the full analysis view.</div>
 <div id="analysis-content" style="display:none">
 <div class="model-hero">
 <div class="slabel" style="margin-bottom:10px">Model projected line</div>
@@ -356,7 +357,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div class="slabel">Expected filenames</div>
 <div class="grid-2" style="font-size:11px;color:var(--text2);gap:4px">
 <span>ð <code>bat_proj_vs_lhp.csv</code></span><span>ð <code>bat_proj_vs_rhp.csv</code></span>
-<span>→¾ <code>pit_proj_vs_lhb.csv</code></span><span>→¾ <code>pit_proj_vs_rhb.csv</code></span>
+<span>• <code>pit_proj_vs_lhb.csv</code></span><span>• <code>pit_proj_vs_rhb.csv</code></span>
 <span>ð <code>bat_actual_vs_lhp.csv</code></span><span>ð <code>bat_actual_vs_rhp.csv</code></span>
 <span>ð <code>pit_actual_vs_lhb.csv</code></span><span>ð <code>pit_actual_vs_rhb.csv</code></span>
 </div>
@@ -408,7 +409,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     </div>
     <div class="slabel">Model weights</div>
 <div class="grid-2" style="gap:8px;margin-bottom:12px">
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Run multiplier (ÃN)</label><input type="number" id="s-run-mult" step="1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Run multiplier (×N)</label><input type="number" id="s-run-mult" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">HFA boost (pp)</label><input type="number" id="s-hfa" step="0.01"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Pitcher weight</label><input type="number" id="s-w-pit" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter weight</label><input type="number" id="s-w-bat" step="0.05"></div>
@@ -437,7 +438,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Lower bound for model's over-probability on totals. Default 0.20.">Total prob clamp lo</label><input type="number" id="s-tot-prob-lo" step="0.01" min="0.05" max="0.45"></div>
       <div class="setting-row"><label title="Upper bound for model's over-probability on totals. Default 0.80.">Total prob clamp hi</label><input type="number" id="s-tot-prob-hi" step="0.01" min="0.55" max="0.95"></div>
       <div class="setting-row"><label title="Fallback total (runs) used when a game has no market total yet. Default 8.5.">Market total default</label><input type="number" id="s-market-total-dflt" step="0.5" min="5" max="12"></div>
-    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (→N)</label><input type="number" id="s-fav-adj" step="1"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (±N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
 <div class="slabel">Signal thresholds</div>
@@ -598,7 +599,7 @@ async function processFiles(files){
   if(!csvs.length)return;
   document.getElementById('drop-zone').classList.add('has-files');
   const st=document.getElementById('upload-status');
-  st.className='notice info';st.textContent='Uploading '+csvs.length+' file(s)→¦';
+  st.className='notice info';st.textContent='Uploading '+csvs.length+' file(s)…';
   let ok=0,err=0;
   for(const file of csvs){
     const key=detectKey(file.name);
@@ -682,7 +683,7 @@ async function refreshHealth() {
 async function loadGamesFromDB(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Loading→¦';
+  st.innerHTML='<span class="spinner"></span>Loading…';
   try{
     const games=await api('/games/'+date);
     currentGames=games;
@@ -699,11 +700,11 @@ async function loadGamesFromDB(){
 async function refreshLineups(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Pulling lineups from RotoWire→¦';
+  st.innerHTML='<span class="spinner"></span>Pulling lineups from RotoWire…';
   try{
     const r=await api('/jobs/lineups',{method:'POST',body:JSON.stringify({date})});
     if(r.success){
-      st.textContent='✓ Pulled '+r.gamesUpdated+' games — reloading→¦';
+      st.textContent='✓ Pulled '+r.gamesUpdated+' games — reloading…';
       await loadGamesFromDB();
     } else {
       st.textContent='Error: '+r.error;
@@ -863,7 +864,7 @@ async function pullOdds(){
 async function triggerScores(){
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
-  st.innerHTML='<span class="spinner"></span>Fetching scores→¦';
+  st.innerHTML='<span class="spinner"></span>Fetching scores…';
   try{
         const r=await api('/jobs/scores',{method:'POST',body:JSON.stringify({date})});
     st.textContent='✓ '+r.gamesUpdated+' games updated';
@@ -978,7 +979,7 @@ function renderGameGrid(games,date){
       '<div class="godds"'+(oddsStyle?' style="'+oddsStyle+'"':'')+'>'+(_isNeverLoaded(oddsQ)?'<span class="gml" title="odds never loaded">—</span><span class="gtot">—</span><span class="gml">—</span>':'<span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">'+fmtTotalsBlock(g)+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span>')+oddsBadge+'</div>'+
       (g.odds_flagged?'<div style="background:rgba(220,40,40,0.15);border:1px solid #cc3333;color:#ff6666;font-size:10px;font-weight:600;padding:3px 6px;margin:3px 0;border-radius:3px;text-align:center">⚠ ODDS FLAG: '+(g.odds_flag_reason||'unknown')+'</div>':'')+
       '<div class="gactions">'+
-      '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">→¡ Analyze</button>'+
+      '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">▶ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
       '</div>'+
       '<div class="gresult '+(!g.is_postponed&&g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
@@ -1047,7 +1048,7 @@ async function runAI(){
   if(!currentGame)return;
   const g=currentGame;
   const btn=document.getElementById('ai-btn'),out=document.getElementById('ai-out');
-  btn.disabled=true;out.innerHTML='<span class="spinner"></span>Generating→¦';
+  btn.disabled=true;out.innerHTML='<span class="spinner"></span>Generating…';
   const sigs=(g.signals||[]).map(s=>s.signal_label+' '+s.signal_side+' '+s.signal_type).join(', ')||'no signals';
   try{
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,messages:[{role:'user',content:'Sharp MLB analyst. 3 paragraphs on: 1) handedness matchup dynamics, 2) model vs market, 3) best bet.\n'+g.away_team+'@'+g.home_team+' · '+g.away_sp+'('+g.away_sp_hand+'HP) vs '+g.home_sp+'('+g.home_sp_hand+'HP)\nModel: '+g.away_team+fmtML(g.model_away_ml)+'/'+g.home_team+fmtML(g.model_home_ml)+' Tot:'+parseFloat(g.model_total||0).toFixed(1)+'\nMarket: '+fmtML(g.market_away_ml)+'/'+fmtML(g.market_home_ml)+' O/U:'+g.market_total+'\nSignals: '+sigs+'\nNo disclaimers.'}]})});
