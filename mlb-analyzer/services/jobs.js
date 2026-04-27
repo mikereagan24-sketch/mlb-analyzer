@@ -966,6 +966,17 @@ function startCronJobs() {
     runScoreJob(yesterdayStr());
   }, { timezone: 'America/Los_Angeles' });
 
+  // --- 6AM PT roster refresh: pull active 26-man rosters from statsapi ---
+  // Catches IL transitions and activations from the previous day. Runs before
+  // the 7AM morning refresh so updated rosters are available when bullpen-
+  // aware signals compute. Order on this date: roster → odds → weather →
+  // lineups → rerun.
+  cron.schedule('0 6 * * *', async () => {
+    console.log('[cron] 6AM PT roster refresh');
+    try { await runRosterJob(); }
+    catch(e) { console.error('[cron-roster] failed:', e && e.message); }
+  }, { timezone: 'America/Los_Angeles' });
+
   // --- 7AM PT morning refresh: odds -> weather -> lineups -> rerun all games ---
   // Sequential so we don't thrash SQLite or hit rate limits. Catches each step
   // individually so a single failure doesn't abort the rest of the chain.
@@ -992,7 +1003,7 @@ function startCronJobs() {
     } catch(e) { console.error('[cron-refresh] rerun loop failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
-  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P + tomorrow 8P, scores 4A, morning refresh 7A');
+  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P + tomorrow 8P, scores 4A, roster 6A, morning refresh 7A');
 }
 
 function gameHasStarted(gameRow, gameDate) {
@@ -1218,4 +1229,31 @@ async function runRosterJob() {
   }
 }
 
-module.exports = { runRosterJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
+// Defensive trigger: refresh rosters only when the most recent team_rosters
+// row is older than maxAgeHrs (default 24). Belt-and-suspenders for the case
+// where the 6AM cron didn't fire (server started up after the cron window,
+// process restarted mid-day, etc.). Manual /api/jobs/rosters and the cron
+// itself still call runRosterJob() unconditionally.
+async function runRosterJobIfStale(maxAgeHrs = 24) {
+  try {
+    const row = db.prepare("SELECT MAX(updated_at) AS last FROM team_rosters").get();
+    const last = row && row.last;
+    if (last) {
+      // SQLite datetime('now') is "YYYY-MM-DD HH:MM:SS" UTC; normalize before parse.
+      const t = Date.parse(last.replace(' ', 'T') + 'Z');
+      if (!isNaN(t)) {
+        const ageHrs = (Date.now() - t) / 3600000;
+        if (ageHrs < maxAgeHrs) {
+          console.log('[roster] skip: last refresh ' + ageHrs.toFixed(1) + 'h ago (< ' + maxAgeHrs + 'h)');
+          return { success: true, skipped: true, ageHrs: +ageHrs.toFixed(2) };
+        }
+      }
+    }
+    return await runRosterJob();
+  } catch(e) {
+    console.error('[roster-if-stale] Error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+module.exports = { runRosterJob, runRosterJobIfStale, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };

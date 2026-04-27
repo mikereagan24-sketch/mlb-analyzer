@@ -628,13 +628,27 @@ async function fetchActiveRosters() {
   const results = {};
   const teams = Object.keys(MLB_TEAM_IDS);
 
+  // rosterType=active should already exclude 7/10/15/60-day IL, restricted,
+  // paternity, bereavement. Defense in depth: explicitly drop anything whose
+  // per-entry status code isn't 'A' (Active). One statsapi contract change
+  // shouldn't be enough to silently re-introduce injured pitchers into the
+  // model.
+  const ACTIVE_STATUS_CODE = 'A';
   for (const team of teams) {
     try {
       const teamId = MLB_TEAM_IDS[team];
-      // Get active 26-man roster with season stats hydrated
+      // Get active 26-man roster with season stats hydrated.
       const url = `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active&season=2026&hydrate=person(stats(type=season,sportId=1))`;
       const data = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } }).then(r => r.json());
-      const pitchers = (data.roster || []).filter(p => p.position?.type === 'Pitcher');
+      const pitchersAll = (data.roster || []).filter(p => p.position?.type === 'Pitcher');
+      // Diagnostic: surface any pitcher whose entry status isn't Active. With
+      // rosterType=active these should be zero; if any appear, the filter
+      // below catches them and the warning flags a contract drift.
+      const nonActive = pitchersAll.filter(p => p.status && p.status.code && p.status.code !== ACTIVE_STATUS_CODE);
+      for (const p of nonActive) {
+        console.warn(`[roster] ${team}: filtered non-active ${p.person?.fullName} (status=${p.status?.code}/${p.status?.description})`);
+      }
+      const pitchers = pitchersAll.filter(p => !p.status || !p.status.code || p.status.code === ACTIVE_STATUS_CODE);
 
       results[team] = pitchers.map(p => {
         const stats = p.person?.stats?.[0]?.splits?.[0]?.stat || {};

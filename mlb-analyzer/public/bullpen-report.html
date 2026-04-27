@@ -114,7 +114,9 @@ input[type=date], .btn{padding:7px 12px;font-size:12px;border:.5px solid var(--b
       <input type="date" id="date-input">
       <label class="toggle"><input type="checkbox" id="pool-only"> In-pool pitchers only</label>
       <button class="btn btn-ghost btn-sm" id="refresh-btn">Refresh</button>
+      <button class="btn btn-ghost btn-sm" id="refresh-rosters-btn" title="Pull active 26-man rosters from statsapi for all 30 teams">Refresh Rosters</button>
       <span class="meta" id="meta"></span>
+      <span class="meta" id="roster-status" style="margin-left:10px"></span>
     </div>
   </div>
 
@@ -129,9 +131,40 @@ input[type=date], .btn{padding:7px 12px;font-size:12px;border:.5px solid var(--b
 var dateInput = document.getElementById('date-input');
 var poolOnly = document.getElementById('pool-only');
 var refreshBtn = document.getElementById('refresh-btn');
+var refreshRostersBtn = document.getElementById('refresh-rosters-btn');
+var rosterStatusEl = document.getElementById('roster-status');
 var statusEl = document.getElementById('status');
 var gamesEl = document.getElementById('games');
 var metaEl = document.getElementById('meta');
+
+// Refresh active 26-man rosters via /api/jobs/rosters. Useful when an IL
+// transition or activation happened earlier in the day and we don't want
+// to wait for the 6AM PT cron tomorrow.
+function refreshRosters() {
+  rosterStatusEl.innerHTML = 'pulling rosters…';
+  refreshRostersBtn.disabled = true;
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/jobs/rosters', true);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState !== 4) return;
+    refreshRostersBtn.disabled = false;
+    try {
+      var d = JSON.parse(xhr.responseText || '{}');
+      if (xhr.status >= 200 && xhr.status < 300 && !d.error) {
+        rosterStatusEl.innerHTML = '✓ ' + (d.pitchers || 0) + ' pitchers / ' + (d.teams || 0) + ' teams';
+        // Reload bullpen data so the new roster takes effect immediately.
+        if (typeof load === 'function') load();
+      } else {
+        rosterStatusEl.innerHTML = '<span style="color:#cc3333">roster error: ' + escapeHtml(d.error || ('HTTP ' + xhr.status)) + '</span>';
+      }
+    } catch(e) {
+      rosterStatusEl.innerHTML = '<span style="color:#cc3333">roster error: parse failed</span>';
+    }
+  };
+  xhr.send('{}');
+}
+if (refreshRostersBtn) refreshRostersBtn.onclick = refreshRosters;
 
 var currentData = null;
 
