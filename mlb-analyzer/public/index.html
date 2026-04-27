@@ -1079,6 +1079,61 @@ function wobaHeat(w){
   return'background:rgba('+r+','+g+','+b+','+a+');color:rgb('+Math.round(r*.55)+','+Math.round(g*.55)+','+Math.round(b*.55)+');border-radius:3px;padding:3px 4px';
 }
 
+// Lineup-changes panel: diff the captured projected snapshot against the
+// current (eventually confirmed) lineup. Returns '' when no projection
+// snapshot exists or when the projection equals the current state.
+function renderLineupDiff(g) {
+  if (!g.proj_lineup_captured_at) return '';
+  let projAway = null, projHome = null;
+  try { projAway = g.proj_away_lineup_json ? JSON.parse(g.proj_away_lineup_json) : null; } catch(e) {}
+  try { projHome = g.proj_home_lineup_json ? JSON.parse(g.proj_home_lineup_json) : null; } catch(e) {}
+  const curAway = g.away_lineup || [];
+  const curHome = g.home_lineup || [];
+  function diffSide(proj, cur) {
+    if (!Array.isArray(proj) || !proj.length) return null;
+    const projByName = new Map(proj.map((p,i) => [p.name, i+1]));
+    const curByName = new Map(cur.map((p,i) => [p.name, i+1]));
+    const added = cur.filter(p => !projByName.has(p.name)).map((p,i) => ({name:p.name, pos:curByName.get(p.name)}));
+    const removed = proj.filter(p => !curByName.has(p.name)).map(p => ({name:p.name, pos:projByName.get(p.name)}));
+    const moved = [];
+    projByName.forEach((projPos, name) => {
+      const curPos = curByName.get(name);
+      if (curPos != null && curPos !== projPos) moved.push({name, from: projPos, to: curPos});
+    });
+    if (!added.length && !removed.length && !moved.length) return null;
+    return { added, removed, moved };
+  }
+  const awayDiff = diffSide(projAway, curAway);
+  const homeDiff = diffSide(projHome, curHome);
+  const awaySpChanged = g.proj_away_sp && g.away_sp && g.proj_away_sp !== g.away_sp;
+  const homeSpChanged = g.proj_home_sp && g.home_sp && g.proj_home_sp !== g.home_sp;
+  if (!awayDiff && !homeDiff && !awaySpChanged && !homeSpChanged) return '';
+  function renderSide(label, diff) {
+    if (!diff) return '';
+    const parts = [];
+    if (diff.removed.length) parts.push('<span style="color:#cc3333">−</span> ' + diff.removed.map(p => p.name + ' (was #' + p.pos + ')').join(', '));
+    if (diff.added.length) parts.push('<span style="color:var(--green)">+</span> ' + diff.added.map(p => p.name + ' (#' + p.pos + ')').join(', '));
+    if (diff.moved.length) parts.push('<span style="color:#cc8833">↔</span> ' + diff.moved.map(m => m.name + ' #' + m.from + '→#' + m.to).join(', '));
+    return '<div style="margin-bottom:4px"><span style="font-size:10px;color:var(--text2);font-weight:500;margin-right:6px">' + label + ':</span>' + parts.join(' · ') + '</div>';
+  }
+  const spRow = (awaySpChanged || homeSpChanged)
+    ? '<div style="margin-bottom:4px;font-size:11px"><span style="font-size:10px;color:var(--text2);font-weight:500;margin-right:6px">SP:</span>'
+      + (awaySpChanged ? (g.away_team || 'away') + ' ' + g.proj_away_sp + ' → ' + g.away_sp : '')
+      + (awaySpChanged && homeSpChanged ? ' · ' : '')
+      + (homeSpChanged ? (g.home_team || 'home') + ' ' + g.proj_home_sp + ' → ' + g.home_sp : '')
+      + '</div>'
+    : '';
+  return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 12px;margin-bottom:14px;font-size:11px">'
+    + '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">'
+    +   '<span style="font-size:10px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Lineup changes since projection</span>'
+    +   '<span style="font-size:10px;color:var(--text3)">captured ' + (g.proj_lineup_captured_at || '') + '</span>'
+    + '</div>'
+    + spRow
+    + renderSide(g.away_team || 'Away', awayDiff)
+    + renderSide(g.home_team || 'Home', homeDiff)
+    + '</div>';
+}
+
 function renderModelOutput(g) {
   var projML = g.proj_model_away_ml != null ? g.proj_model_away_ml : g.model_away_ml;
   var projRow = projML != null
@@ -1179,6 +1234,7 @@ async function renderMatchupGame(id){
     +'<div class="grid-2" style="margin-bottom:14px"><div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Away SP vs home batters</div><div style="font-size:13px;font-weight:500">'+(g.away_sp||'TBD')+' '+sb(g.away_sp_hand||'R')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wc(aL)+';padding:1px 5px">'+aL.toFixed(3)+'</span> vsRHB <span style="'+wc(aR)+';padding:1px 5px">'+aR.toFixed(3)+'</span></div></div><div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px"><div style="font-size:10px;color:var(--text2);margin-bottom:2px">Home SP vs away batters</div><div style="font-size:13px;font-weight:500">'+(g.home_sp||'TBD')+' '+sb(g.home_sp_hand||'R')+'</div><div style="font-size:11px;color:var(--text2);margin-top:2px">vsLHB <span style="'+wc(hL)+';padding:1px 5px">'+hL.toFixed(3)+'</span> vsRHB <span style="'+wc(hR)+';padding:1px 5px">'+hR.toFixed(3)+'</span></div></div></div>'
     
     +renderModelOutput(g)
+    +renderLineupDiff(g)
     +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
     +'<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(\'' +gid+ '\')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(\'' +gid+ '\')">Rerun Model</button></div>';
 }
