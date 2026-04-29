@@ -411,6 +411,26 @@ router.get('/games/:date', (req, res) => {
   }
 });
 
+// Forensic recovery view: rows fetchSchedule's auto-prune soft-deleted
+// (or flagged because locked bets blocked the delete). Not surfaced in
+// the main UI on purpose — these are removed schedule entries the user
+// shouldn't be betting against; this endpoint exists for investigation.
+router.get('/games/:date/removed', (req, res) => {
+  try {
+    const { date } = req.params;
+    const rows = db.prepare(
+      "SELECT id, game_id, game_pk, away_team, home_team, game_time, " +
+      "       is_removed, removed_at, removed_reason, updated_at " +
+      "FROM game_log " +
+      "WHERE game_date = ? AND (is_removed = 1 OR removed_reason IS NOT NULL) " +
+      "ORDER BY removed_at DESC, game_id"
+    ).all(date);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/games/:date/rerun', (req, res) => {
   try {
     const { date } = req.params;
@@ -1990,6 +2010,8 @@ router.get('/health/:date', (req, res) => {
     };
 
     // ---- summary counters (computed once, referenced by checks) ----
+    // Soft-deleted rows are excluded — they're surfaced separately by the
+    // 'removed_with_locked_bets' check below when applicable.
     const games = db.prepare(
       "SELECT game_id, away_team, home_team, away_sp, home_sp, " +
       "  away_lineup_status, home_lineup_status, " +
@@ -1997,7 +2019,7 @@ router.get('/health/:date', (req, res) => {
       "  xcheck_total, total_source, xcheck_total_source, " +
       "  odds_flagged, odds_flag_reason, updated_at, odds_locked_at, " +
       "  odds_quality_at, lineups_quality_at, weather_quality_at, scores_quality_at " +
-      "FROM game_log WHERE game_date=? ORDER BY game_id"
+      "FROM game_log WHERE game_date=? AND COALESCE(is_removed, 0) = 0 ORDER BY game_id"
     ).all(date);
 
     const summary = {
@@ -2168,6 +2190,33 @@ router.get('/health/:date', (req, res) => {
         const affected = cap(Array.from(new Set(issues.map(i => i.game_id))));
         checks.push({ id: 'data_quality_summary', status, severity: 'warn',
           message: parts.join(' | '), affected_games: affected });
+      }
+    }
+
+    // ---- check 7b: removed_with_locked_bets ----
+    // High-severity: a game on this date was removed from statsapi's
+    // schedule (cancelled, postponed, consolidated into a doubleheader)
+    // but the user has at least one locked bet on it. The book will
+    // typically void such bets, but we don't auto-grade — the user needs
+    // to manually unlock or investigate. fetchSchedule's prune step
+    // tagged the row with removed_reason = 'removed_from_schedule_but_has_locked_bets'.
+    {
+      const flagged = db.prepare(
+        "SELECT game_id, removed_reason FROM game_log " +
+        "WHERE game_date = ? AND removed_reason = 'removed_from_schedule_but_has_locked_bets'"
+      ).all(date);
+      if (flagged.length === 0) {
+        checks.push({ id: 'removed_with_locked_bets', status: 'pass', severity: 'error',
+          message: 'No removed games with locked bets' });
+      } else {
+        checks.push({
+          id: 'removed_with_locked_bets',
+          status: 'fail',
+          severity: 'error',
+          message: flagged.length + ' game(s) removed from statsapi but have locked bets — manual investigation required: '
+            + flagged.map(f => f.game_id).join(', '),
+          affected_games: cap(flagged.map(f => f.game_id)),
+        });
       }
     }
 

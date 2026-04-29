@@ -325,6 +325,20 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_lineup_json TEXT"); } c
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_lineup_captured_at TEXT"); } catch(e) {}
+// Soft-delete columns for the auto-prune path. fetchSchedule sets these
+// when a previously-bootstrapped row's game_pk disappears from statsapi
+// (cancellation, postponement to a different date, doubleheader
+// consolidation, etc.). Hard delete is unsafe — the user may have a
+// locked bet on the row whose audit trail we want to preserve.
+//   is_removed       — 0 = active, 1 = soft-deleted (hidden from UI)
+//   removed_at       — datetime('now') stamp when the prune fired
+//   removed_reason   — string tag explaining why (see fetchSchedule for
+//                      the values written today). Also written without
+//                      flipping is_removed when locked bets block the
+//                      delete: 'removed_from_schedule_but_has_locked_bets'.
+try { db.exec("ALTER TABLE game_log ADD COLUMN is_removed INTEGER DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN removed_at TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN removed_reason TEXT"); } catch(e) {}
 // Historical backfill: rows created before this migration default to G1.
 try { db.exec("UPDATE game_log SET game_number = 1 WHERE game_number IS NULL"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
@@ -515,7 +529,12 @@ const q = {
       updated_at = datetime('now')
     WHERE game_date = @game_date AND game_id = @game_id
   `),
-  getGamesByDate: db.prepare(`SELECT * FROM game_log WHERE game_date = ?
+  // is_removed = 0 hides soft-deleted rows from every caller of this query
+  // (the UI route, rerun, weather job, cron rerun). Forensic access goes
+  // through GET /api/games/:date/removed instead. COALESCE guards against
+  // pre-migration rows where the column may be NULL.
+  getGamesByDate: db.prepare(`SELECT * FROM game_log
+      WHERE game_date = ? AND COALESCE(is_removed, 0) = 0
       ORDER BY
         CASE
           WHEN game_time IS NULL THEN 9999

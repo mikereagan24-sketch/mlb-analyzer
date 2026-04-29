@@ -1,5 +1,6 @@
 // v2 2026-04-09T20:19:46.283Z
 const fetch = require('node-fetch');
+const { db } = require('../db/schema');
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-4-20250514';
@@ -861,6 +862,74 @@ async function fetchSchedule(dateStr) {
     });
   }
   console.log('[scraper] statsapi: ' + results.length + ' games for ' + dateStr);
+
+  // Auto-prune: any game_log row for dateStr whose game_pk is no longer in
+  // the current statsapi response is a candidate for soft-deletion. This
+  // catches schedule changes (cancellations, postponements to other dates,
+  // doubleheader consolidations) that previously left phantom rows in the
+  // DB receiving odds/weather/lineup updates from secondary sources.
+  //
+  // Guards:
+  //   - games.length === 0 → don't prune. statsapi may be having a bad
+  //     moment; we'd rather leave stale rows than wipe the whole slate.
+  //   - row.game_pk IS NULL → don't prune. Rows ingested from RotoWire/
+  //     Unabated without a statsapi backfill have no pk to match against;
+  //     pruning by name alone risks false positives across timezones.
+  //   - bet_signals with non-NULL bet_line → don't soft-delete. The user
+  //     has money exposure on the row; we instead set removed_reason to
+  //     a distinct flag so the health check can surface it.
+  if (games.length > 0) {
+    try {
+      const validPks = new Set();
+      for (const g of games) if (g.gamePk) validPks.add(g.gamePk);
+      const existing = db.prepare(
+        "SELECT id, game_id, game_pk, away_team, home_team " +
+        "FROM game_log " +
+        "WHERE game_date = ? AND game_pk IS NOT NULL AND COALESCE(is_removed, 0) = 0"
+      ).all(dateStr);
+      const lockedBetCount = db.prepare(
+        "SELECT COUNT(*) AS c FROM bet_signals WHERE game_date = ? AND game_id = ? AND bet_line IS NOT NULL"
+      );
+      const flagOnly = db.prepare(
+        "UPDATE game_log SET removed_reason = ? WHERE id = ?"
+      );
+      const softDelete = db.prepare(
+        "UPDATE game_log SET is_removed = 1, removed_at = datetime('now'), removed_reason = ? WHERE id = ?"
+      );
+      const deactivateSignals = db.prepare(
+        "UPDATE bet_signals SET is_active = 0, notes = ? " +
+        "WHERE game_date = ? AND game_id = ? AND bet_line IS NULL"
+      );
+      const insertAudit = db.prepare(
+        "INSERT INTO bet_signal_audit (signal_id, game_date, game_id, action, source, detail, created_at) " +
+        "VALUES (NULL, ?, ?, ?, ?, ?, datetime('now'))"
+      );
+      let pruned = 0, flagged = 0;
+      for (const row of existing) {
+        if (validPks.has(row.game_pk)) continue;
+        console.warn('[schedule] game removed from statsapi: ' + row.game_id + ' (gamePk=' + row.game_pk + ')');
+        const locked = lockedBetCount.get(dateStr, row.game_id).c;
+        if (locked > 0) {
+          console.warn('[schedule] WOULD remove ' + row.game_id + ' but ' + locked + ' locked bet(s) exist — preserving row, marking flag');
+          flagOnly.run('removed_from_schedule_but_has_locked_bets', row.id);
+          flagged++;
+          continue;
+        }
+        softDelete.run('not_in_statsapi_schedule', row.id);
+        deactivateSignals.run('game_removed_from_schedule', dateStr, row.game_id);
+        insertAudit.run(dateStr, row.game_id, 'game_removed', 'fetchSchedule', 'Game no longer in statsapi schedule (gamePk=' + row.game_pk + ')');
+        pruned++;
+      }
+      if (pruned > 0 || flagged > 0) {
+        console.log('[schedule] prune: soft-deleted ' + pruned + ' row(s), flagged ' + flagged + ' locked-bet row(s) for ' + dateStr);
+      }
+    } catch (e) {
+      console.warn('[schedule] prune step failed (non-fatal): ' + e.message);
+    }
+  } else {
+    console.log('[schedule] prune skipped: statsapi returned 0 games (avoid wiping slate on transient outage)');
+  }
+
   return results;
 }
 
