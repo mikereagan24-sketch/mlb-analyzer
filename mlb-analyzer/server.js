@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { startCronJobs, runRosterJob } = require('./services/jobs');
+const { startCronJobs, runRosterJob, runOddsJob, runWeatherJob, runLineupJob } = require('./services/jobs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -63,4 +63,27 @@ app.listen(PORT, () => {
   // sit at last-cron-state until the following morning. Failure here must
   // not block the listen() callback returning, so the call is fire-and-forget.
   runRosterJob().catch(e => console.warn('[startup-roster] failed:', e && e.message));
+
+  // One-shot tomorrow-slate prefetch on startup. Bridges the gap when the
+  // server starts up after the 8PM/11PM PT prefetch crons — without this,
+  // tomorrow's odds/weather/lineups would be missing until the next cron
+  // window. Delayed 30s so the startup roster pull and other boot work
+  // can settle before three sequential network calls fire.
+  setTimeout(async () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    console.log('[startup-prefetch] tomorrow-slate ' + dateStr);
+    try {
+      const oddsR    = await runOddsJob(dateStr);
+      const weatherR = await runWeatherJob(dateStr);
+      const lineupR  = await runLineupJob(dateStr);
+      console.log('[startup-prefetch] ' + dateStr
+        + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
+        + ', weather updated ' + ((weatherR && weatherR.updated) || 0)
+        + ', lineups ' + ((lineupR && lineupR.gamesUpdated) || 0));
+    } catch (e) {
+      console.warn('[startup-prefetch] failed:', e && e.message);
+    }
+  }, 30000);
 });

@@ -964,25 +964,14 @@ function startCronJobs() {
     runLineupJob(todayStr());
   }, { timezone: 'America/Los_Angeles' });
 
-  // --- Odds: 4 pulls today (8AM, 11AM, 3PM, 5PM PT) + 1 pull tomorrow (8PM PT) ---
+  // --- Odds: 4 pulls today (8AM, 11AM, 3PM, 5PM PT) ---
+  // Tomorrow's odds pull is handled by the tomorrow-slate prefetch block below.
   [[8,'8AM'],[11,'11AM'],[15,'3PM'],[17,'5PM']].forEach(([h,label]) => {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT odds pull');
       runOddsJob(todayStr());
     }, { timezone: 'America/Los_Angeles' });
   });
-  cron.schedule('0 20 * * *', async () => {
-    const d = tomorrowStr();
-    console.log('[cron] 8PM PT tomorrow prep for ' + d);
-    // Bootstrap tomorrow's game_log from statsapi schedule first so the
-    // 8PM odds pull has rows to attach to. RotoWire usually doesn't have
-    // tomorrow's lineups yet at this hour, so runLineupJob will skip
-    // RotoWire and return success purely from the statsapi bootstrap.
-    try { await runLineupJob(d); }
-    catch(e) { console.error('[cron-8pm] lineups failed:', e && e.message); }
-    try { await runOddsJob(d); }
-    catch(e) { console.error('[cron-8pm] odds failed:', e && e.message); }
-  }, { timezone: 'America/Los_Angeles' });
 
   // --- Scores: 4AM PT ---
   cron.schedule('0 4 * * *', () => {
@@ -1027,7 +1016,50 @@ function startCronJobs() {
     } catch(e) { console.error('[cron-refresh] rerun loop failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
-  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P + tomorrow 8P, scores 4A, roster 6A, morning refresh 7A');
+  // --- 8PM PT tomorrow-slate prefetch ---
+  // Pulls odds, weather, and lineups (if available) for tomorrow's date so the
+  // UI has fresh data the moment the user switches to tomorrow. Tomorrow's
+  // confirmed lineups usually aren't published yet at this hour, but the
+  // statsapi schedule bootstrap inside runLineupJob captures schedule + SPs.
+  // Open-Meteo serves forecasts 7+ days out. Most books post next-day odds
+  // around 6-8PM ET (3-5PM PT), so 8PM PT typically sees full coverage.
+  cron.schedule('0 20 * * *', async () => {
+    const d = tomorrowStr();
+    console.log('[cron] 8PM PT tomorrow-slate prefetch for ' + d);
+    // Run sequentially, not in parallel — keeps logs readable and avoids
+    // rate-limit collisions across odds/weather/lineup providers.
+    try {
+      const oddsR    = await runOddsJob(d);
+      const weatherR = await runWeatherJob(d);
+      const lineupR  = await runLineupJob(d);
+      console.log('[cron-prefetch] ' + d
+        + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
+        + ', weather updated ' + ((weatherR && weatherR.updated) || 0)
+        + ', lineups ' + ((lineupR && lineupR.gamesUpdated) || 0));
+    } catch (e) {
+      console.error('[cron-prefetch] failed:', e && e.message);
+    }
+  }, { timezone: 'America/Los_Angeles' });
+
+  // --- 11PM PT tomorrow-slate refresh ---
+  // Second pass to catch books that posted lines after the 8PM run. Skips
+  // the lineup pull — RotoWire rarely has new info between 8PM and 11PM PT
+  // and the statsapi schedule was already bootstrapped at 8PM.
+  cron.schedule('0 23 * * *', async () => {
+    const d = tomorrowStr();
+    console.log('[cron] 11PM PT tomorrow-slate refresh for ' + d);
+    try {
+      const oddsR    = await runOddsJob(d);
+      const weatherR = await runWeatherJob(d);
+      console.log('[cron-prefetch-refresh] ' + d
+        + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
+        + ', weather updated ' + ((weatherR && weatherR.updated) || 0));
+    } catch (e) {
+      console.error('[cron-prefetch-refresh] failed:', e && e.message);
+    }
+  }, { timezone: 'America/Los_Angeles' });
+
+  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P, scores 4A, roster 6A, morning refresh 7A, tomorrow-slate prefetch 8P + refresh 11P');
 }
 
 function gameHasStarted(gameRow, gameDate) {
