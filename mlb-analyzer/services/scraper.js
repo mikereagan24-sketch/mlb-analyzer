@@ -711,17 +711,25 @@ async function fetchSchedule(dateStr) {
   const ABBR_NORM = { 'WSH': 'WAS', 'OAK': 'ATH', 'AZ': 'ARI' };
   const norm = a => (ABBR_NORM[a] || a || '').toUpperCase();
 
-  // Format gameDate ISO → "h:MM AM/PM" in Pacific time, matching the
-  // existing game_time column convention RotoWire writes. The lock-time
-  // parser at services/jobs.js ~382 expects /(\d+):(\d+)\s*(AM|PM)/ so we
-  // hold to that exact format.
-  const fmtPT = iso => {
+  // Format gameDate ISO → "h:MM AM/PM ET", matching RotoWire's convention
+  // (the "ET" suffix is what RotoWire's .lineup__time element emits, so
+  // both bootstrap sources write the same shape now).
+  //
+  // Why ET and not PT: the UI's etToPT() in public/index.html assumes the
+  // stored value is ET and subtracts 3 hours before rendering. The old
+  // fmtPT path stored PT, so etToPT was producing "PT minus 3" — that's
+  // the "6:40 AM PT first pitch" the user originally reported (a 9:40 AM
+  // PT value rendered as 6:40 AM PT after the conversion). Storing ET
+  // makes etToPT correct without touching the UI. Lock-time and
+  // gameHasStarted in services/jobs.js subtract 3 hours when comparing
+  // against PT wall-clock to match this convention.
+  const fmtET = iso => {
     if (!iso) return null;
     const d = new Date(iso);
     if (isNaN(d.getTime())) return null;
     return d.toLocaleTimeString('en-US', {
-      timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true,
-    });
+      timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true,
+    }) + ' ET';
   };
 
   // Per-park timezone, used to evaluate whether a statsapi-emitted
@@ -745,23 +753,6 @@ async function fetchSchedule(dateStr) {
     PHI:'America/New_York', PIT:'America/New_York', TB:'America/New_York',
     TOR:'America/New_York',  WAS:'America/New_York',
   };
-
-  // First pass: collect each team-pair's Game 1 gameDate. Used below to
-  // catch the placeholder-time pattern statsapi emits when a doubleheader
-  // makeup hasn't been finalized — e.g. 2026-04-30 HOU@BAL Game 2 carried
-  // a gameDate just 5 minutes after Game 1's. That isn't a real start
-  // time; bootstrapping a row from it lands a meaningless first-pitch
-  // value on the slate. Statsapi gives Game 2 a real gameDate once the
-  // makeup time is finalized; until then we simply omit the leg.
-  const g1IsoByPair = {};
-  for (const g of games) {
-    if ((g.gameNumber || 1) !== 1) continue;
-    const aA = norm(g.teams?.away?.team?.abbreviation);
-    const hA = norm(g.teams?.home?.team?.abbreviation);
-    if (!aA || !hA || !g.gameDate) continue;
-    g1IsoByPair[aA + '-' + hA] = g.gameDate;
-  }
-  const PLACEHOLDER_GAP_MS = 90 * 60 * 1000;
 
   // Bulk-fetch pitcher hand info. /api/v1/people?personIds=A,B,C in one call
   // beats N round-trips against the schedule's per-pitcher endpoints.
@@ -810,27 +801,14 @@ async function fetchSchedule(dateStr) {
     const baseGameId = (awayAbbr + '-' + homeAbbr).toLowerCase();
     const finalGameId = gameNumber > 1 ? baseGameId + '-g' + gameNumber : baseGameId;
 
-    // Reject doubleheader Game 2+ whose gameDate is too close to Game 1's
-    // — that's statsapi's placeholder pattern for an unfinalized makeup.
-    // Bootstrapping the leg on a placeholder time lands a wrong first-pitch
-    // value on the slate; we'd rather skip and re-bootstrap when statsapi
-    // publishes the real gameDate.
-    if (gameNumber > 1) {
-      const g1Iso = g1IsoByPair[awayAbbr + '-' + homeAbbr];
-      const g1Ms = g1Iso ? Date.parse(g1Iso) : NaN;
-      const gMs  = g.gameDate ? Date.parse(g.gameDate) : NaN;
-      if (!isNaN(g1Ms) && !isNaN(gMs) && Math.abs(gMs - g1Ms) < PLACEHOLDER_GAP_MS) {
-        console.warn('[scraper] schedule: rejecting placeholder-time leg ' + finalGameId
-          + ' (gameDate ' + g.gameDate + ' is ' + Math.round(Math.abs(gMs - g1Ms)/60000)
-          + 'min from G1 ' + g1Iso + ')');
-        continue;
-      }
-    }
-
-    // Reject games whose park-local first-pitch hour falls in [4, 9). MLB
-    // never schedules a game in that window — if statsapi gives us one, the
-    // gameDate is feed-glitched and we'd rather skip than bootstrap a row
-    // whose time is wrong.
+    // Sanity-warn (do NOT reject) when park-local first-pitch falls before
+    // 8 AM. Real makeup-doubleheader Game 2 legs sometimes carry a
+    // placeholder gameDate near Game 1's (e.g. 2026-04-30 HOU@BAL G2 ran
+    // 5 min after G1), and the previous reject filter blocked those rows
+    // entirely — losing the leg until statsapi finalized the makeup time.
+    // Better to bootstrap with whatever statsapi gives us; the upsert's
+    // COALESCE on game_time means the next refresh overwrites a placeholder
+    // time with the real one.
     const parkTz = PARK_TZ[homeAbbr];
     if (parkTz && g.gameDate) {
       const parts = new Intl.DateTimeFormat('en-US', {
@@ -838,10 +816,10 @@ async function fetchSchedule(dateStr) {
       }).formatToParts(new Date(g.gameDate));
       const hp = parts.find(p => p.type === 'hour');
       const hr = hp ? parseInt(hp.value, 10) : null;
-      if (hr != null && hr >= 4 && hr < 9) {
-        console.warn('[scraper] schedule: rejecting suspicious early start ' + finalGameId
-          + ' (gameDate ' + g.gameDate + ' = hour ' + hr + ' ' + parkTz + ')');
-        continue;
+      if (hr != null && hr < 8) {
+        console.warn('[scraper] schedule: suspicious early start ' + finalGameId
+          + ' (gameDate ' + g.gameDate + ' = hour ' + hr + ' ' + parkTz
+          + ', below 8 AM local park time — likely a placeholder gameDate)');
       }
     }
 
@@ -851,7 +829,7 @@ async function fetchSchedule(dateStr) {
       game_pk: g.gamePk || null,
       away_team: awayAbbr,
       home_team: homeAbbr,
-      time: fmtPT(g.gameDate),
+      time: fmtET(g.gameDate),
       away_sp: aPP ? { name: aPP.fullName || null, hand: handById[aPP.id] || null } : null,
       home_sp: hPP ? { name: hPP.fullName || null, hand: handById[hPP.id] || null } : null,
       away_lineup: [],
