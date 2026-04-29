@@ -1250,6 +1250,36 @@ async function runOddsJob(dateStr) {
         oddsRaw = []; // ensure array, don't throw — just log and continue
       }
     }
+
+    // Statsapi-authoritative gate: drop any odds row whose game_id doesn't
+    // map to a game in statsapi's schedule for dateStr. statsapi is the
+    // single source of truth for *which games exist*; Unabated / Odds API
+    // only enrich. processOddsArray today uses UPDATE (so a phantom can't
+    // create a row), but if that ever loosens this filter prevents a
+    // misidentified Unabated contract from poisoning a slate. Schedule
+    // fetch failure is non-fatal — degrade open and let the existing
+    // ingest path run.
+    if (oddsRaw.length) {
+      let validIds = null;
+      try {
+        const sched = await fetchSchedule(dateStr);
+        validIds = new Set(sched.map(g => g.game_id));
+      } catch (e) {
+        console.warn('[odds] schedule fetch for valid-game gate failed: '+e.message+' (proceeding without gate)');
+      }
+      if (validIds) {
+        const before = oddsRaw.length;
+        oddsRaw = oddsRaw.filter(o => {
+          if (validIds.has(o.game_id)) return true;
+          console.warn('[unabated] rejecting phantom matchup not in statsapi: ' + o.game_id);
+          return false;
+        });
+        if (oddsRaw.length < before) {
+          console.log('[odds] gated out '+(before - oddsRaw.length)+' game(s) not in statsapi schedule');
+        }
+      }
+    }
+
     const result = processOddsArray(dateStr, oddsRaw, settings);
     const updated = result.updated;
     const sourceLabel = result.source;

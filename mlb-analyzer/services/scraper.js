@@ -723,6 +723,45 @@ async function fetchSchedule(dateStr) {
     });
   };
 
+  // Per-park timezone, used to evaluate whether a statsapi-emitted
+  // gameDate sits inside an obviously-implausible first-pitch window
+  // (no MLB game starts at park-local 4–9 AM). Keys are the same
+  // post-norm abbreviations fetchSchedule emits. ATH plays at Sutter
+  // Health Park (Sacramento) — Pacific Time, NOT Coliseum-era Pacific.
+  const PARK_TZ = {
+    LAD:'America/Los_Angeles', LAA:'America/Los_Angeles',
+    SD:'America/Los_Angeles',  SF:'America/Los_Angeles',
+    SEA:'America/Los_Angeles', ATH:'America/Los_Angeles',
+    ARI:'America/Phoenix',
+    COL:'America/Denver',
+    TEX:'America/Chicago', HOU:'America/Chicago',
+    MIN:'America/Chicago', MIL:'America/Chicago',
+    KC:'America/Chicago',  STL:'America/Chicago',
+    CHC:'America/Chicago', CWS:'America/Chicago',
+    ATL:'America/New_York', CIN:'America/New_York', CLE:'America/New_York',
+    DET:'America/New_York', MIA:'America/New_York', BAL:'America/New_York',
+    BOS:'America/New_York', NYY:'America/New_York', NYM:'America/New_York',
+    PHI:'America/New_York', PIT:'America/New_York', TB:'America/New_York',
+    TOR:'America/New_York',  WAS:'America/New_York',
+  };
+
+  // First pass: collect each team-pair's Game 1 gameDate. Used below to
+  // catch the placeholder-time pattern statsapi emits when a doubleheader
+  // makeup hasn't been finalized — e.g. 2026-04-30 HOU@BAL Game 2 carried
+  // a gameDate just 5 minutes after Game 1's. That isn't a real start
+  // time; bootstrapping a row from it lands a meaningless first-pitch
+  // value on the slate. Statsapi gives Game 2 a real gameDate once the
+  // makeup time is finalized; until then we simply omit the leg.
+  const g1IsoByPair = {};
+  for (const g of games) {
+    if ((g.gameNumber || 1) !== 1) continue;
+    const aA = norm(g.teams?.away?.team?.abbreviation);
+    const hA = norm(g.teams?.home?.team?.abbreviation);
+    if (!aA || !hA || !g.gameDate) continue;
+    g1IsoByPair[aA + '-' + hA] = g.gameDate;
+  }
+  const PLACEHOLDER_GAP_MS = 90 * 60 * 1000;
+
   // Bulk-fetch pitcher hand info. /api/v1/people?personIds=A,B,C in one call
   // beats N round-trips against the schedule's per-pitcher endpoints.
   const pitcherIds = new Set();
@@ -769,6 +808,42 @@ async function fetchSchedule(dateStr) {
     const gameNumber = g.gameNumber || 1;
     const baseGameId = (awayAbbr + '-' + homeAbbr).toLowerCase();
     const finalGameId = gameNumber > 1 ? baseGameId + '-g' + gameNumber : baseGameId;
+
+    // Reject doubleheader Game 2+ whose gameDate is too close to Game 1's
+    // — that's statsapi's placeholder pattern for an unfinalized makeup.
+    // Bootstrapping the leg on a placeholder time lands a wrong first-pitch
+    // value on the slate; we'd rather skip and re-bootstrap when statsapi
+    // publishes the real gameDate.
+    if (gameNumber > 1) {
+      const g1Iso = g1IsoByPair[awayAbbr + '-' + homeAbbr];
+      const g1Ms = g1Iso ? Date.parse(g1Iso) : NaN;
+      const gMs  = g.gameDate ? Date.parse(g.gameDate) : NaN;
+      if (!isNaN(g1Ms) && !isNaN(gMs) && Math.abs(gMs - g1Ms) < PLACEHOLDER_GAP_MS) {
+        console.warn('[scraper] schedule: rejecting placeholder-time leg ' + finalGameId
+          + ' (gameDate ' + g.gameDate + ' is ' + Math.round(Math.abs(gMs - g1Ms)/60000)
+          + 'min from G1 ' + g1Iso + ')');
+        continue;
+      }
+    }
+
+    // Reject games whose park-local first-pitch hour falls in [4, 9). MLB
+    // never schedules a game in that window — if statsapi gives us one, the
+    // gameDate is feed-glitched and we'd rather skip than bootstrap a row
+    // whose time is wrong.
+    const parkTz = PARK_TZ[homeAbbr];
+    if (parkTz && g.gameDate) {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: parkTz, hour: 'numeric', hour12: false,
+      }).formatToParts(new Date(g.gameDate));
+      const hp = parts.find(p => p.type === 'hour');
+      const hr = hp ? parseInt(hp.value, 10) : null;
+      if (hr != null && hr >= 4 && hr < 9) {
+        console.warn('[scraper] schedule: rejecting suspicious early start ' + finalGameId
+          + ' (gameDate ' + g.gameDate + ' = hour ' + hr + ' ' + parkTz + ')');
+        continue;
+      }
+    }
+
     results.push({
       game_id: finalGameId,
       game_number: gameNumber,

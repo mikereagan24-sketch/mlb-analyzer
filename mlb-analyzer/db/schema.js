@@ -426,6 +426,36 @@ try {
   console.warn('[migration] CLV backfill failed (non-fatal): ' + e.message);
 }
 
+// One-shot phantom HOU@BAL Game 2 cleanup (2026-04-30). statsapi reported a
+// real doubleheader Game 2 (gamePk 824850, makeup of postponed 4/29) but
+// emitted a placeholder gameDate within 5 minutes of Game 1 (16:35Z vs
+// 16:40Z) — bootstrap then materialized a row whose first-pitch column
+// landed at 9:40 AM PT, well before any plausible MLB start time.
+// Removes the phantom row + non-locked bet_signals + audit entries; the
+// fetchSchedule sanity filters added in this branch keep it from
+// re-bootstrapping. Idempotent via the app_settings flag. Skipped if the
+// user has manually locked a bet on the row so manual state isn't lost.
+try {
+  const flag = db.prepare("SELECT value FROM app_settings WHERE key='phantom_hou_bal_g2_cleanup_2026_04_30'").get();
+  if (!flag) {
+    const PD = '2026-04-30', GID = 'hou-bal-g2';
+    const locked = db.prepare(
+      "SELECT 1 FROM bet_signals WHERE game_date=? AND game_id=? AND bet_line IS NOT NULL LIMIT 1"
+    ).get(PD, GID);
+    if (locked) {
+      console.warn('[migration] phantom hou-bal-g2 cleanup SKIPPED: locked bet_line found — investigate manually');
+    } else {
+      const sigs   = db.prepare("DELETE FROM bet_signals      WHERE game_date=? AND game_id=? AND bet_line IS NULL").run(PD, GID);
+      const audits = db.prepare("DELETE FROM bet_signal_audit WHERE game_date=? AND game_id=?").run(PD, GID);
+      const games  = db.prepare("DELETE FROM game_log         WHERE game_date=? AND game_id=?").run(PD, GID);
+      console.log('[migration] phantom hou-bal-g2 cleanup: removed ' + games.changes + ' game_log row, ' + sigs.changes + ' signal(s), ' + audits.changes + ' audit row(s)');
+    }
+    db.prepare("INSERT INTO app_settings (key, value) VALUES (?, datetime('now'))").run('phantom_hou_bal_g2_cleanup_2026_04_30');
+  }
+} catch (e) {
+  console.warn('[migration] phantom hou-bal-g2 cleanup failed (non-fatal): ' + e.message);
+}
+
 const q = {
   upsertWoba: db.prepare(`
     INSERT INTO woba_data (data_key, player_name, woba, sample_size, uploaded_at)
