@@ -453,6 +453,58 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   return { model, signals };
 }
 
+// Fetch statsapi's schedule for dateStr and upsert every game it returns.
+// Idempotent — upsertGame ON CONFLICT(game_date, game_id) preserves all
+// downstream-written fields (odds, model, lineup confirmations) and only
+// touches the matchup + SP columns the bootstrap is responsible for.
+//
+// Used by every job that needs "schedule is current" before its real
+// work — runOddsJob and runWeatherJob both call it at the top, so an
+// overnight schedule change (e.g. a postponement makeup added after
+// last night's prefetch) gets a game_log row before odds/weather try
+// to enrich it. runLineupJob keeps its own inline bootstrap loop because
+// it has additional pre-bootstrap cleanup (dropping stale unplayed rows).
+//
+// Returns the array of rows from fetchSchedule (empty on fetch failure
+// — failure is non-fatal, callers degrade open).
+async function ensureScheduleBootstrap(dateStr) {
+  let rows = [];
+  try {
+    rows = await fetchSchedule(dateStr);
+  } catch (e) {
+    console.warn('[bootstrap] statsapi fetch failed for ' + dateStr + ': ' + e.message);
+    return [];
+  }
+  for (const g of rows) {
+    const existingRow = q.getGameById.get(dateStr, g.game_id);
+    q.upsertGame.run({
+      game_date: dateStr,
+      game_id: g.game_id,
+      away_team: g.away_team,
+      home_team: g.home_team,
+      game_time: g.time || null,
+      away_sp: g.away_sp ? g.away_sp.name : null,
+      away_sp_hand: g.away_sp ? g.away_sp.hand : null,
+      home_sp: g.home_sp ? g.home_sp.name : null,
+      home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+      market_away_ml: existingRow ? (existingRow.market_away_ml || null) : null,
+      market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
+      market_total:   existingRow ? existingRow.market_total : null,
+      park_factor:    existingRow ? existingRow.park_factor : 1.0,
+      model_away_ml:  existingRow ? existingRow.model_away_ml : null,
+      model_home_ml:  existingRow ? existingRow.model_home_ml : null,
+      model_total:    existingRow ? existingRow.model_total : null,
+      lineup_source:  existingRow ? existingRow.lineup_source : 'auto',
+      venue_id:       g.venue_id != null ? g.venue_id : (existingRow ? existingRow.venue_id : null),
+      venue_name:     g.venue_name != null ? g.venue_name : (existingRow ? existingRow.venue_name : null),
+      game_number:    g.game_number != null ? g.game_number : 1,
+      game_pk:        g.game_pk != null ? g.game_pk : null,
+    });
+  }
+  if (rows.length > 0) console.log('[bootstrap] statsapi upserted ' + rows.length + ' row(s) for ' + dateStr);
+  return rows;
+}
+
 async function runLineupJob(dateStr) {
   dateStr = dateStr || todayStr();
   console.log('[lineup-job] Starting for ' + dateStr);
@@ -624,8 +676,14 @@ async function runLineupJob(dateStr) {
           if (tm) {
             let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
             if(ap==='PM'&&h!==12)h+=12; if(ap==='AM'&&h===12)h=0;
+            // game_time is stored in ET (scraper.fmtET, RotoWire's
+            // .lineup__time). Subtract 3 hours to compare against PT
+            // wall-clock. Cross-midnight wrap-around isn't a real case for
+            // MLB so the simple modulo is safe.
+            let gameMinsPT = h*60+mn - 3*60;
+            if (gameMinsPT < 0) gameMinsPT += 24*60;
             const nowPT=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));
-            const minsToGame=(h*60+mn)-(nowPT.getHours()*60+nowPT.getMinutes());
+            const minsToGame=gameMinsPT-(nowPT.getHours()*60+nowPT.getMinutes());
             if(minsToGame<=10&&minsToGame>=-240){
               db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
               console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)');
@@ -855,6 +913,12 @@ async function runWeatherJob(date) {
   console.log('[weather] running for '+date);
   let updated = 0;
   try {
+    // Bootstrap statsapi schedule first so any newly-discovered games
+    // (e.g. an overnight postponement makeup) get a game_log row before
+    // we start fetching weather. Otherwise a brand-new leg would be
+    // weatherless until runLineupJob's next cycle.
+    await ensureScheduleBootstrap(date);
+
     const games = q.getGamesByDate.all(date);
     if (!games.length) { console.log('[weather] no games for '+date); return { success: true, updated: 0, date: date, note: 'no games' }; }
     const { calcWindFactor, PARKS } = require('./weather');
@@ -1064,9 +1128,9 @@ function startCronJobs() {
 
 function gameHasStarted(gameRow, gameDate) {
   // Returns true if game start time has passed (game is live or finished).
-  // Only games on TODAY's date (Pacific) can have started. NOTE: assumes
-  // gameRow.game_time text is PT-local ("7:05 PM" = 7:05 PM PT). If game_time
-  // is stored in a different TZ this comparison needs adjusting.
+  // Only games on TODAY's date (Pacific) can have started. game_time is
+  // stored in ET (scraper.fmtET, RotoWire's .lineup__time text); subtract
+  // 3 hours before comparing against PT wall-clock.
   const today = new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});
   if (!gameRow || !gameRow.game_time) return false;
   if (gameDate && gameDate !== today) return false; // future/past dates never "in progress"
@@ -1074,8 +1138,10 @@ function gameHasStarted(gameRow, gameDate) {
   if (!tm) return false;
   let h=parseInt(tm[1]),mn=parseInt(tm[2]),ap=tm[3].toUpperCase();
   if(ap==='PM'&&h!==12)h+=12; if(ap==='AM'&&h===12)h=0;
+  let gameMinsPT = h*60+mn - 3*60;
+  if (gameMinsPT < 0) gameMinsPT += 24*60;
   const nowPT=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));
-  const minsToGame=(h*60+mn)-(nowPT.getHours()*60+nowPT.getMinutes());
+  const minsToGame=gameMinsPT-(nowPT.getHours()*60+nowPT.getMinutes());
   return minsToGame < -5; // started more than 5 min ago
 }
 
@@ -1230,6 +1296,14 @@ async function runOddsJob(dateStr) {
   dateStr = dateStr || todayStr();
   try {
     const settings = getSettings();
+
+    // Bootstrap statsapi schedule first. Adds any newly-discovered games
+    // (e.g. an overnight postponement makeup added after last night's
+    // 8/11PM prefetch) to game_log before odds processing tries to enrich
+    // them. The same fetched rows feed the validIds gate below — saves a
+    // duplicate fetch.
+    const scheduleRows = await ensureScheduleBootstrap(dateStr);
+
     let oddsRaw = [];
     try {
       console.log('[odds] Fetching from Unabated...');
@@ -1256,27 +1330,18 @@ async function runOddsJob(dateStr) {
     // single source of truth for *which games exist*; Unabated / Odds API
     // only enrich. processOddsArray today uses UPDATE (so a phantom can't
     // create a row), but if that ever loosens this filter prevents a
-    // misidentified Unabated contract from poisoning a slate. Schedule
-    // fetch failure is non-fatal — degrade open and let the existing
-    // ingest path run.
-    if (oddsRaw.length) {
-      let validIds = null;
-      try {
-        const sched = await fetchSchedule(dateStr);
-        validIds = new Set(sched.map(g => g.game_id));
-      } catch (e) {
-        console.warn('[odds] schedule fetch for valid-game gate failed: '+e.message+' (proceeding without gate)');
-      }
-      if (validIds) {
-        const before = oddsRaw.length;
-        oddsRaw = oddsRaw.filter(o => {
-          if (validIds.has(o.game_id)) return true;
-          console.warn('[unabated] rejecting phantom matchup not in statsapi: ' + o.game_id);
-          return false;
-        });
-        if (oddsRaw.length < before) {
-          console.log('[odds] gated out '+(before - oddsRaw.length)+' game(s) not in statsapi schedule');
-        }
+    // misidentified Unabated contract from poisoning a slate. Reuses the
+    // bootstrap fetch above; degrades open if that returned 0 rows.
+    if (oddsRaw.length && scheduleRows.length) {
+      const validIds = new Set(scheduleRows.map(g => g.game_id));
+      const before = oddsRaw.length;
+      oddsRaw = oddsRaw.filter(o => {
+        if (validIds.has(o.game_id)) return true;
+        console.warn('[unabated] rejecting phantom matchup not in statsapi: ' + o.game_id);
+        return false;
+      });
+      if (oddsRaw.length < before) {
+        console.log('[odds] gated out '+(before - oddsRaw.length)+' game(s) not in statsapi schedule');
       }
     }
 
