@@ -607,10 +607,15 @@ async function runLineupJob(dateStr) {
   for (const g of games) {
     if (TEAM_NORM[g.away_team]) g.away_team = TEAM_NORM[g.away_team];
     if (TEAM_NORM[g.home_team]) g.home_team = TEAM_NORM[g.home_team];
-    // Recompute game_id after normalization
-    g.game_id = (g.away_team + '-' + g.home_team).toLowerCase();
+    // Recompute game_id after normalization, preserving any '-g{N}'
+    // doubleheader suffix that parseLineupsHtml assigned. Stripping it
+    // here was the silent collapse that re-collided RotoWire's two DH
+    // sections back into one game_id.
+    const dhMatch = (g.game_id || '').match(/-g\d+$/);
+    g.game_id = (g.away_team + '-' + g.home_team).toLowerCase() + (dhMatch ? dhMatch[0] : '');
   }
-  // Deduplicate by game_id (keep last)
+  // Deduplicate by game_id (keep last). With the DH suffix preserved
+  // above, doubleheader legs now have distinct game_ids and survive dedup.
   const seen = {}; for (const g of games) seen[g.game_id] = g;
   games.length = 0; Object.values(seen).forEach(g => games.push(g));
     if (!games.length) {

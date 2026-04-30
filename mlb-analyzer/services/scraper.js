@@ -219,6 +219,13 @@ function parseLineupsHtml(html, dateStr) {
   };
 
   const games = [];
+  // Track how many sections we've already seen for each team-pair on this
+  // page. RotoWire's lineup HTML shows each leg of a doubleheader as a
+  // separate .lineup.is-mlb block but with no DOM marker tying it to a
+  // statsapi gameNumber. Standard ordering on the page is G1 first, G2
+  // second; we ride that convention to assign the same -g{N} suffix the
+  // statsapi bootstrap uses, so per-leg upserts target the right row.
+  const pairOccurrences = {};
 
   $('.lineup.is-mlb').each((i, el) => {
     const away = $(el).find('.lineup__team.is-visit .lineup__abbr').text().trim();
@@ -262,13 +269,18 @@ function parseLineupsHtml(html, dateStr) {
     const NORM = { WSH:'WAS', OAK:'ATH' };
     const awayTeam = NORM[away] || away;
     const homeTeam = NORM[home] || home;
-    // TODO(doubleheader): RotoWire doesn't expose a leg marker. The bare
-    // team-pair game_id will only hit the G1 row in game_log on doubleheader
-    // dates; G2 keeps statsapi-bootstrapped matchup but doesn't pick up the
-    // RotoWire lineup confirmation. Fix requires cross-referencing
-    // fetchSchedule output by start time with a timezone-aware compare
-    // (RotoWire shows ET, fetchSchedule emits PT).
-    const gameId = (awayTeam + '-' + homeTeam).toLowerCase();
+    const baseGameId = (awayTeam + '-' + homeTeam).toLowerCase();
+    // Doubleheader handling: every additional section for the same
+    // team-pair gets a '-g{N}' suffix matching the convention statsapi's
+    // fetchSchedule uses. Without this, two sections share the same
+    // game_id and the runLineupJob dedup keeps only the last (G2's
+    // pitchers leak into G1's row — the original bug, see commit log).
+    const occ = (pairOccurrences[baseGameId] || 0) + 1;
+    pairOccurrences[baseGameId] = occ;
+    const gameId = occ > 1 ? baseGameId + '-g' + occ : baseGameId;
+    if (occ > 1) {
+      console.log('[scraper] RotoWire doubleheader leg ' + occ + ' for ' + baseGameId + ' → ' + gameId);
+    }
 
     games.push({
       game_id: gameId,
@@ -840,6 +852,38 @@ async function fetchSchedule(dateStr) {
     });
   }
   console.log('[scraper] statsapi: ' + results.length + ' games for ' + dateStr);
+
+  // Upstream-duplicate-SP warning. MLB always uses different starters
+  // per leg in a real doubleheader; if statsapi emits the same
+  // probablePitcher.fullName for the same side across legs of a
+  // team-pair, that's almost certainly a placeholder that hasn't been
+  // updated to the actual G2 starter yet. We still emit both rows
+  // (suppressing them would mask a transient feed state); the warning
+  // lets a human spot the mismatch when triaging.
+  const spByPair = {};
+  for (const r of results) {
+    const baseKey = (r.away_team + '-' + r.home_team).toLowerCase();
+    if (!spByPair[baseKey]) spByPair[baseKey] = [];
+    spByPair[baseKey].push({
+      leg: r.game_number,
+      gameId: r.game_id,
+      awaySp: r.away_sp ? r.away_sp.name : null,
+      homeSp: r.home_sp ? r.home_sp.name : null,
+    });
+  }
+  for (const [pair, legs] of Object.entries(spByPair)) {
+    if (legs.length < 2) continue;
+    for (const side of ['awaySp', 'homeSp']) {
+      const named = legs.filter(l => l[side]);
+      if (named.length < 2) continue;
+      const unique = new Set(named.map(l => l[side]));
+      if (unique.size === 1) {
+        console.warn('[scraper] schedule: same ' + (side === 'awaySp' ? 'away' : 'home')
+          + ' SP "' + named[0][side] + '" listed across DH legs for ' + pair
+          + ' (' + named.map(l => 'G' + l.leg).join(', ') + ') — likely a statsapi placeholder');
+      }
+    }
+  }
 
   // Auto-prune: any game_log row for dateStr whose game_pk is no longer in
   // the current statsapi response is a candidate for soft-deletion. This
