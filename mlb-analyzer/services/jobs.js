@@ -477,6 +477,13 @@ async function ensureScheduleBootstrap(dateStr) {
   }
   for (const g of rows) {
     const existingRow = q.getGameById.get(dateStr, g.game_id);
+    // statsapi is the authoritative source; values flow through unchanged.
+    // Log source attribution so the per-game write trail is greppable —
+    // pairs with the [lineups] write log in runLineupJob's RotoWire path.
+    console.log('[bootstrap] ' + g.game_id + ' write from statsapi: '
+      + 'away_sp=' + (g.away_sp ? g.away_sp.name : 'null') + ', '
+      + 'home_sp=' + (g.home_sp ? g.home_sp.name : 'null') + ', '
+      + 'game_time=' + (g.time || 'null'));
     q.upsertGame.run({
       game_date: dateStr,
       game_id: g.game_id,
@@ -538,6 +545,10 @@ async function runLineupJob(dateStr) {
       }
       for (const g of bootstrapRows) {
         const existingRow = q.getGameById.get(dateStr, g.game_id);
+        console.log('[bootstrap] ' + g.game_id + ' write from statsapi: '
+          + 'away_sp=' + (g.away_sp ? g.away_sp.name : 'null') + ', '
+          + 'home_sp=' + (g.home_sp ? g.home_sp.name : 'null') + ', '
+          + 'game_time=' + (g.time || 'null'));
         q.upsertGame.run({
           game_date: dateStr,
           game_id: g.game_id,
@@ -720,16 +731,66 @@ async function runLineupJob(dateStr) {
             }
           }
         }
+        // Option B precedence: statsapi is the authoritative source for
+        // away_sp / home_sp / game_time. RotoWire is allowed to *fill in*
+        // those fields when statsapi hasn't published yet (existing is
+        // null), but never to *override* a non-null statsapi value. The
+        // upsert's COALESCE(excluded, existing) treats null as "preserve",
+        // so passing null here when we want to preserve statsapi's value
+        // is the trigger.
+        //
+        // Disagreements are warned, not silenced, so a bad RotoWire parse
+        // doesn't quietly diverge from statsapi truth in production logs.
+        const rwAwaySp   = g.away_sp && g.away_sp.name || null;
+        const rwHomeSp   = g.home_sp && g.home_sp.name || null;
+        const rwAwayHand = g.away_sp && g.away_sp.hand || null;
+        const rwHomeHand = g.home_sp && g.home_sp.hand || null;
+        const rwTime     = g.time || null;
+        let writeAwaySp = rwAwaySp, writeAwayHand = rwAwayHand;
+        let writeHomeSp = rwHomeSp, writeHomeHand = rwHomeHand;
+        let writeTime   = rwTime;
+        if (existingRow) {
+          if (existingRow.away_sp && rwAwaySp && existingRow.away_sp !== rwAwaySp) {
+            console.warn('[lineups] not overwriting away_sp for ' + gameId
+              + ': statsapi=\'' + existingRow.away_sp + '\', rotowire=\'' + rwAwaySp + '\'');
+            writeAwaySp = null; writeAwayHand = null;
+          }
+          if (existingRow.home_sp && rwHomeSp && existingRow.home_sp !== rwHomeSp) {
+            console.warn('[lineups] not overwriting home_sp for ' + gameId
+              + ': statsapi=\'' + existingRow.home_sp + '\', rotowire=\'' + rwHomeSp + '\'');
+            writeHomeSp = null; writeHomeHand = null;
+          }
+          if (existingRow.game_time && rwTime && existingRow.game_time !== rwTime) {
+            console.warn('[lineups] not overwriting game_time for ' + gameId
+              + ': statsapi=\'' + existingRow.game_time + '\', rotowire=\'' + rwTime + '\'');
+            writeTime = null;
+          }
+        }
+        // Source attribution. "rotowire" when we accept RotoWire's value,
+        // "preserved-statsapi" when we declined to overwrite, "rotowire-fill"
+        // when we wrote because existing was null. Easy to grep when
+        // debugging which source landed which value.
+        const fmtSrc = (rw, write, existing) => {
+          if (rw == null) return 'rotowire-null';
+          if (write == null && existing) return 'preserved-statsapi';
+          if (existing == null) return 'rotowire-fill';
+          return 'rotowire-overwrite-same'; // existing == new, no harm
+        };
+        console.log('[lineups] ' + gameId + ' write: '
+          + 'away_sp=' + (writeAwaySp ?? existingRow?.away_sp ?? 'null') + '(' + fmtSrc(rwAwaySp, writeAwaySp, existingRow?.away_sp) + '), '
+          + 'home_sp=' + (writeHomeSp ?? existingRow?.home_sp ?? 'null') + '(' + fmtSrc(rwHomeSp, writeHomeSp, existingRow?.home_sp) + '), '
+          + 'game_time=' + (writeTime ?? existingRow?.game_time ?? 'null') + '(' + fmtSrc(rwTime, writeTime, existingRow?.game_time) + ')');
+
         q.upsertGame.run({
         game_date: dateStr,
         game_id: gameId,
         away_team: g.away_team,
         home_team: g.home_team,
-        game_time: g.time || null,
-        away_sp: g.away_sp && g.away_sp.name,
-        away_sp_hand: g.away_sp && g.away_sp.hand,
-        home_sp: g.home_sp && g.home_sp.name,
-        home_sp_hand: g.home_sp && g.home_sp.hand,
+        game_time: writeTime,
+        away_sp: writeAwaySp,
+        away_sp_hand: writeAwayHand,
+        home_sp: writeHomeSp,
+        home_sp_hand: writeHomeHand,
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
