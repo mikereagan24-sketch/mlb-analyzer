@@ -3,6 +3,8 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSchedule } = require('./scraper');
+const { fetchAllTeamRoles } = require('./fangraphs-roles');
+const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl } = require('./model');
 const { fetchParkWind } = require('./weather');
@@ -1438,12 +1440,127 @@ async function runRosterJob() {
       }
       totalPitchers += pitchers.length;
     }
-    console.log(`[roster] Done — ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
-    return { success: true, teams: Object.keys(rosters).length, pitchers: totalPitchers };
+    console.log(`[roster] statsapi pull done — ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
+
+    // Phase 2: FanGraphs RosterResource overlay. Fetches editorially-curated
+    // SP/RP tags and overrides the GS/G heuristic where we have a match.
+    // Failure here is non-fatal — we keep the GS/G role.
+    let fgResult = { success: false, skipped: true };
+    try {
+      fgResult = await runFangraphsRolesJob();
+    } catch (e) {
+      console.error('[fg-roles] runFangraphsRolesJob failed (non-fatal): ' + e.message);
+    }
+
+    // Phase 3: manual overrides — always win. Applied last so they sit
+    // on top of both fg_role and the GS/G heuristic in team_rosters.role.
+    let overridesApplied = 0;
+    try {
+      const overrides = q.listRoleOverrides.all();
+      for (const o of overrides) {
+        const info = db.prepare("UPDATE team_rosters SET role=? WHERE mlb_id=?")
+          .run(o.role, o.mlb_id);
+        if (info.changes > 0) overridesApplied++;
+      }
+      if (overridesApplied > 0) {
+        console.log('[roster] applied ' + overridesApplied + ' manual role override(s)');
+      }
+    } catch (e) {
+      console.warn('[roster] override application failed (non-fatal): ' + e.message);
+    }
+
+    return {
+      success: true,
+      teams: Object.keys(rosters).length,
+      pitchers: totalPitchers,
+      fg: fgResult,
+      overrides_applied: overridesApplied,
+    };
   } catch(e) {
     console.error('[roster] Error: '+e.message);
     return { success: false, error: e.message };
   }
+}
+
+// Pulls FanGraphs RosterResource depth charts for all 30 teams, matches
+// FG names against the freshly-pulled team_rosters (so we can join name →
+// mlb_id), writes pitcher_fg_role keyed by mlb_id, and updates the
+// team_rosters.role column for matched pitchers UNLESS a manual override
+// exists for that mlb_id (override is reapplied in runRosterJob phase 3).
+//
+// Idempotent — safe to re-run. Standalone callable via /api/jobs/fg-roles
+// for manual triggers, but normally chained inside runRosterJob.
+async function runFangraphsRolesJob() {
+  console.log('[fg-roles] Starting RosterResource fetch for all 30 teams...');
+  let fgData;
+  try {
+    fgData = await fetchAllTeamRoles();
+  } catch (e) {
+    console.error('[fg-roles] fetchAllTeamRoles threw: ' + e.message);
+    return { success: false, error: e.message };
+  }
+
+  let teamsSucceeded = 0, teamsFailed = 0, totalApplied = 0, totalKnown = 0;
+  for (const [team, data] of fgData) {
+    if (!data) { teamsFailed++; continue; }
+    teamsSucceeded++;
+
+    // Build a normalized lookup table from FG names → role for this team.
+    // Keyed on normName(player) so accents / case differences match. The
+    // fuzzyLookup helper from utils/names already handles suffix variants
+    // (Jr / Sr / III) and abbreviated first names ("L. McCullers").
+    const fgKeyMap = {};
+    const fgFull = [];
+    for (const s of data.starters) {
+      fgKeyMap[s.name_norm] = { role: s.role, role_detail: s.role_detail, name: s.name };
+      fgFull.push(s);
+    }
+    for (const r of data.relievers) {
+      fgKeyMap[r.name_norm] = { role: r.role, role_detail: r.role_detail, name: r.name };
+      fgFull.push(r);
+    }
+
+    const ourPitchers = db.prepare(
+      "SELECT player_name, mlb_id FROM team_rosters WHERE team=?"
+    ).all(team);
+    totalKnown += ourPitchers.length;
+
+    let appliedThis = 0;
+    for (const p of ourPitchers) {
+      if (p.mlb_id == null) continue;
+      const match = fuzzyLookup(fgKeyMap, p.player_name, team);
+      if (!match) continue;
+      // CL collapses to RP for the binary team_rosters.role column;
+      // pitcher_fg_role keeps the full tag for debugging.
+      const collapsedRole = match.role === 'SP' ? 'SP' : 'RP';
+      q.upsertPitcherFgRole.run(
+        p.mlb_id, p.player_name, team, match.role, match.role_detail || null
+      );
+      // Update team_rosters.role unless an override exists for this mlb_id
+      // (overrides win and are also re-applied in runRosterJob phase 3 — the
+      // skip here is just to avoid log noise from a no-op overwrite).
+      const ovr = q.getRoleOverride.get(p.mlb_id);
+      if (!ovr) {
+        db.prepare("UPDATE team_rosters SET role=? WHERE mlb_id=?").run(collapsedRole, p.mlb_id);
+      }
+      appliedThis++;
+    }
+    totalApplied += appliedThis;
+    console.log('[fg-roles] ' + team + ': '
+      + data.starters.length + ' SP, ' + data.relievers.length + ' RP fetched, '
+      + 'role applied to ' + appliedThis + '/' + ourPitchers.length + ' known pitchers');
+  }
+
+  console.log('[fg-roles] Done — '
+    + teamsSucceeded + '/' + (teamsSucceeded + teamsFailed) + ' teams succeeded, '
+    + 'role applied to ' + totalApplied + '/' + totalKnown + ' known pitchers');
+  return {
+    success: teamsSucceeded > 0,
+    teams_succeeded: teamsSucceeded,
+    teams_failed: teamsFailed,
+    pitchers_applied: totalApplied,
+    pitchers_known: totalKnown,
+  };
 }
 
 // Defensive trigger: refresh rosters only when the most recent team_rosters
@@ -1473,4 +1590,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
