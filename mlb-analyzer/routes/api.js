@@ -44,7 +44,7 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, processOddsArray } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -717,6 +717,61 @@ router.post('/jobs/rosters', async (req, res) => {
     const result = await runRosterJob();
     res.json(result);
   } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// Standalone FanGraphs RosterResource pull. The same job runs as phase 2
+// of /jobs/rosters; this endpoint exists so an operator can refresh the
+// FG overlay without redoing the full statsapi roster pull.
+router.post('/jobs/fg-roles', async (req, res) => {
+  console.log('[api] fg-roles job fired');
+  try {
+    const result = await runFangraphsRolesJob();
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual SP/RP override. Wins over both fg_role and the GS/G heuristic in
+// the runRosterJob resolution chain. Body: { mlb_id, role, reason }.
+// role must be 'SP' or 'RP'. The override is also re-applied to
+// team_rosters.role on next runRosterJob so it survives a roster refresh.
+router.post('/pitcher-role-override', (req, res) => {
+  try {
+    const { mlb_id, role, reason } = req.body || {};
+    if (!mlb_id || !Number.isInteger(mlb_id)) {
+      return res.status(400).json({ error: 'mlb_id (integer) required' });
+    }
+    if (role !== 'SP' && role !== 'RP') {
+      return res.status(400).json({ error: 'role must be "SP" or "RP"' });
+    }
+    q.setRoleOverride.run(mlb_id, role, reason || null);
+    db.prepare("UPDATE team_rosters SET role=? WHERE mlb_id=?").run(role, mlb_id);
+    res.json({ success: true, mlb_id, role, reason: reason || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/pitcher-role-override/:mlb_id', (req, res) => {
+  try {
+    const mlb_id = parseInt(req.params.mlb_id, 10);
+    if (!Number.isInteger(mlb_id)) {
+      return res.status(400).json({ error: 'mlb_id must be an integer' });
+    }
+    const info = q.deleteRoleOverride.run(mlb_id);
+    // Reapply fg_role (if any) so the row reverts to the next-priority
+    // value instead of being left at the override's last value.
+    const fg = q.getFgRoleByMlbId.get(mlb_id);
+    if (fg) {
+      const collapsed = fg.role === 'SP' ? 'SP' : 'RP';
+      db.prepare("UPDATE team_rosters SET role=? WHERE mlb_id=?").run(collapsed, mlb_id);
+    }
+    // If no fg_role, the GS/G role from the most recent statsapi pull
+    // remains in team_rosters — no action needed here.
+    res.json({ success: true, mlb_id, removed: info.changes, reverted_to_fg_role: !!fg });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/pitcher-role-override', (req, res) => {
+  try { res.json(q.listRoleOverrides.all()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/rosters/:team', (req, res) => {
@@ -2244,6 +2299,42 @@ router.get('/health/:date', (req, res) => {
         ? failures.concat(warnings).join('; ')
         : 'odds, lineups, scores all ran successfully in last 24h';
       checks.push({ id: 'cron_health', status, severity: 'warn', message: msg });
+    }
+
+    // ---- check 9: fg_roles_fresh ----
+    // FanGraphs RosterResource overlay drives SP/RP classification (PR
+    // adding services/fangraphs-roles.js). pass = all 30 teams have a
+    // pitcher_fg_role row updated within 48h; warn = some are stale or
+    // missing; fail = nothing fresh anywhere (cron / fetch is broken).
+    {
+      const rows = q.fgRoleFreshnessByTeam.all();
+      const cutoffMs = Date.now() - 48 * 60 * 60 * 1000;
+      const teamFreshness = {};
+      for (const r of rows) {
+        const norm = (r.last_at || '').indexOf('T') === -1
+          ? (r.last_at || '').replace(' ', 'T') + 'Z'
+          : r.last_at;
+        const t = Date.parse(norm);
+        teamFreshness[r.team] = !isNaN(t) && t >= cutoffMs;
+      }
+      const known = Object.keys(teamFreshness);
+      const fresh = known.filter(t => teamFreshness[t]).length;
+      const expected = 30; // all MLB teams
+      let status, message;
+      if (known.length === 0) {
+        status = 'fail';
+        message = 'fg_roles never populated — runFangraphsRolesJob has not produced any data';
+      } else if (fresh === 0) {
+        status = 'fail';
+        message = 'fg_roles all stale (oldest team last fetched > 48h ago across ' + known.length + ' team(s))';
+      } else if (fresh < expected) {
+        status = 'warn';
+        message = 'fg_roles partial: ' + fresh + '/' + expected + ' teams fresh within 48h';
+      } else {
+        status = 'pass';
+        message = 'fg_roles fresh: all ' + expected + ' teams updated within 48h';
+      }
+      checks.push({ id: 'fg_roles_fresh', status, severity: 'warn', message });
     }
 
     // ---- check 10: sources_active ----

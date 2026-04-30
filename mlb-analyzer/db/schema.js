@@ -254,6 +254,34 @@ db.exec(`
     UNIQUE(player_name_norm)
   );
   CREATE INDEX IF NOT EXISTS idx_pit_proj_ip_team ON pit_proj_ip(team);
+
+  -- FanGraphs RosterResource role classifier. Keyed by mlb_id so the
+  -- signal survives team_rosters churn (clearRoster wipes per-team rows
+  -- on every roster refresh; this side table preserves the last good FG
+  -- pull per pitcher). role is 'SP' / 'RP' / 'CL'; the team_rosters role
+  -- column is the resolved 'SP' or 'RP' (CL → RP) used by downstream
+  -- bullpen/SP weight code. role_detail keeps FG's specific tag (SP1,
+  -- CL, SU8, MID, LR, …) for debugging.
+  CREATE TABLE IF NOT EXISTS pitcher_fg_role (
+    mlb_id INTEGER PRIMARY KEY,
+    player_name TEXT NOT NULL,
+    team TEXT,
+    role TEXT NOT NULL,
+    role_detail TEXT,
+    role_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'fangraphs'
+  );
+  CREATE INDEX IF NOT EXISTS idx_pitcher_fg_role_team ON pitcher_fg_role(team);
+
+  -- Manual override — wins over both fg_role and the GS/G heuristic.
+  -- Useful for fresh transactions FG hasn't indexed yet, or for the
+  -- rare case where FG is flat-out wrong.
+  CREATE TABLE IF NOT EXISTS pitcher_role_override (
+    mlb_id INTEGER PRIMARY KEY,
+    role TEXT NOT NULL,
+    set_at TEXT NOT NULL DEFAULT (datetime('now')),
+    reason TEXT
+  );
 `);
 
 
@@ -614,6 +642,30 @@ q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,r
     mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, updated_at=excluded.updated_at`);
 q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
 q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
+
+// pitcher_fg_role + pitcher_role_override prepared statements.
+q.upsertPitcherFgRole = db.prepare(
+  "INSERT INTO pitcher_fg_role (mlb_id, player_name, team, role, role_detail, role_at, source) " +
+  "VALUES (?, ?, ?, ?, ?, datetime('now'), 'fangraphs') " +
+  "ON CONFLICT(mlb_id) DO UPDATE SET " +
+  "  player_name=excluded.player_name, team=excluded.team, role=excluded.role, " +
+  "  role_detail=excluded.role_detail, role_at=excluded.role_at, source=excluded.source"
+);
+q.getFgRoleByMlbId = db.prepare("SELECT * FROM pitcher_fg_role WHERE mlb_id=?");
+q.getFgRolesByTeam = db.prepare("SELECT * FROM pitcher_fg_role WHERE team=?");
+q.fgRoleFreshnessByTeam = db.prepare(
+  "SELECT team, MAX(role_at) AS last_at, COUNT(*) AS n FROM pitcher_fg_role GROUP BY team"
+);
+
+q.setRoleOverride = db.prepare(
+  "INSERT INTO pitcher_role_override (mlb_id, role, set_at, reason) " +
+  "VALUES (?, ?, datetime('now'), ?) " +
+  "ON CONFLICT(mlb_id) DO UPDATE SET " +
+  "  role=excluded.role, set_at=excluded.set_at, reason=excluded.reason"
+);
+q.deleteRoleOverride = db.prepare("DELETE FROM pitcher_role_override WHERE mlb_id=?");
+q.getRoleOverride    = db.prepare("SELECT * FROM pitcher_role_override WHERE mlb_id=?");
+q.listRoleOverrides  = db.prepare("SELECT * FROM pitcher_role_override ORDER BY set_at DESC");
 
 q.upsertPitcherGameLog = db.prepare(
   `INSERT OR REPLACE INTO pitcher_game_log
