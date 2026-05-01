@@ -367,6 +367,20 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN proj_lineup_captured_at TEXT"); }
 try { db.exec("ALTER TABLE game_log ADD COLUMN is_removed INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN removed_at TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN removed_reason TEXT"); } catch(e) {}
+
+// cron_log observability columns. Added so runWeatherJob (and any future
+// job that wants the same structured trail) can record per-game skip
+// counts + reasons + duration in addition to the legacy
+// games_updated/message fields. Other jobs continue writing the legacy
+// 5-arg form via q.logCron; weather uses q.logCronStructured below.
+//   games_skipped     — count of games the job declined to update this run
+//   games_skipped_ids — comma-joined game_ids for the skipped set
+//   skip_reasons      — JSON object: { reason_tag: count, ... }
+//   duration_ms       — wall-clock duration of the job in milliseconds
+try { db.exec("ALTER TABLE cron_log ADD COLUMN games_skipped INTEGER DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE cron_log ADD COLUMN games_skipped_ids TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE cron_log ADD COLUMN skip_reasons TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE cron_log ADD COLUMN duration_ms INTEGER"); } catch(e) {}
 // Historical backfill: rows created before this migration default to G1.
 try { db.exec("UPDATE game_log SET game_number = 1 WHERE game_number IS NULL"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
@@ -630,6 +644,15 @@ const q = {
     FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome NOT IN ('pending','push')
   `),
   logCron: db.prepare(`INSERT INTO cron_log (job_type, run_date, status, message, games_updated) VALUES (?, ?, ?, ?, ?)`),
+  // Structured variant — populates the columns added in the cron_log
+  // observability migration above. Use this when the job has more to say
+  // than "n games updated, here's a string". runWeatherJob is the first
+  // caller; future jobs can adopt the same form without forcing every
+  // existing logCron call site to change.
+  logCronStructured: db.prepare(
+    "INSERT INTO cron_log (job_type, run_date, status, message, games_updated, games_skipped, games_skipped_ids, skip_reasons, duration_ms) " +
+    "VALUES (@job_type, @run_date, @status, @message, @games_updated, @games_skipped, @games_skipped_ids, @skip_reasons, @duration_ms)"
+  ),
   getRecentCronLogs: db.prepare(`SELECT * FROM cron_log ORDER BY ran_at DESC LIMIT 20`),
   getSetting: db.prepare(`SELECT value FROM app_settings WHERE key = ?`),
   setSetting: db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`),

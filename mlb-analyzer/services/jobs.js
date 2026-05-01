@@ -978,8 +978,47 @@ async function runScoreJob(dateStr) {
 
 // Run weather for all games on a given date. Returns { success, updated, date }.
 async function runWeatherJob(date) {
+  const startTs = Date.now();
   console.log('[weather] running for '+date);
   let updated = 0;
+  const skippedIds = [];
+  // Per-reason tally so the cron_log row can answer "how many games hit
+  // which failure mode" at a glance — exactly the question we couldn't
+  // answer when 3 games went stale on 2026-05-01 with no log signal.
+  // dome / no_park are deterministic and counted but NOT added to
+  // skippedIds (they're not "unexpected misses"); the transient reasons
+  // are both counted and listed.
+  const skipReasonCounts = {
+    dome: 0,
+    no_park: 0,
+    empty_response: 0,
+    bad_index: 0,
+    non_finite_value: 0,
+    exception: 0,
+    retry_succeeded: 0,
+  };
+
+  // Helper: write the cron_log row in its own try/catch so a logging
+  // failure (e.g. SQLite lock) can never break the actual job. Same
+  // guarantee runOddsJob / runLineupJob have via their q.logCron calls.
+  const writeCronLog = (status, message) => {
+    try {
+      q.logCronStructured.run({
+        job_type: 'weather',
+        run_date: date,
+        status,
+        message,
+        games_updated: updated,
+        games_skipped: skippedIds.length,
+        games_skipped_ids: skippedIds.join(','),
+        skip_reasons: JSON.stringify(skipReasonCounts),
+        duration_ms: Date.now() - startTs,
+      });
+    } catch (e) {
+      console.warn('[weather] cron_log write failed (non-fatal): ' + e.message);
+    }
+  };
+
   try {
     // Bootstrap statsapi schedule first so any newly-discovered games
     // (e.g. an overnight postponement makeup) get a game_log row before
@@ -988,57 +1027,52 @@ async function runWeatherJob(date) {
     await ensureScheduleBootstrap(date);
 
     const games = q.getGamesByDate.all(date);
-    if (!games.length) { console.log('[weather] no games for '+date); return { success: true, updated: 0, date: date, note: 'no games' }; }
+    if (!games.length) {
+      console.log('[weather] no games for '+date);
+      writeCronLog('no_games', 'no games on slate');
+      return { success: true, updated: 0, date: date, note: 'no games' };
+    }
     const { calcWindFactor, PARKS } = require('./weather');
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
     const month = new Date(date).getMonth() + 1;
-    for (const game of games) {
-      const parts = game.game_id.split('-');
-      const homeKey = parts[1];
-      const park = PARKS[homeKey];
-      if (!park || park.dome) continue;
-      // Parse game hour from game_time (stored as "7:05 PM ET" etc)
-      let gameHour = 19;
-      if (game.game_time) {
-        const m = game.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
-        if (m) {
-          let h = parseInt(m[1]), ap = m[3].toUpperCase();
-          if (ap === 'PM' && h !== 12) h += 12;
-          if (ap === 'AM' && h === 12) h = 0;
-          gameHour = h;
-        }
-      }
+
+    // One-shot fetch + write for a single game. Returns:
+    //   { ok: true }                       — weather written, signals will rerun
+    //   { ok: false, reason, transient }   — skip. transient=true means a
+    //                                         retry might help (Open-Meteo
+    //                                         returned bad/empty data this
+    //                                         attempt). reason ∈
+    //                                         { empty_response, bad_index,
+    //                                           non_finite_value, exception }.
+    // dome / no_park are deterministic and handled by the outer loop.
+    const fetchAndApply = async (game, park, gameHour) => {
       try {
+        // Cache-bust query param so retries hit the upstream rather than
+        // any intermediary cache that returned the bad payload first time.
         const url = 'https://api.open-meteo.com/v1/forecast?latitude='+park.lat+'&longitude='+park.lng
           +'&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability'
           +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
-          +'&start_date='+date+'&end_date='+date;
+          +'&start_date='+date+'&end_date='+date+'&_t='+Date.now();
         const wd = await fetch(url, {
           headers: { 'User-Agent': 'mlb-analyzer/1.0 (https://github.com/mikereagan24-sketch/mlb-analyzer)' },
         }).then(r => r.json());
-        // Validate before touching game_log. The previous "|| 0" / "|| 65"
-        // pattern silently wrote 65°F + 0mph when Open-Meteo returned an
-        // empty response, overwriting good data the UI's client-side fetch
-        // had already PATCHed in. On bad data: log + skip the UPDATE so
-        // last-good values survive and the freshness clock keeps ticking
-        // toward the existing expired/stale gates.
         if (!wd || !wd.hourly || !Array.isArray(wd.hourly.time) || !wd.hourly.time.length) {
-          console.warn('[weather] '+game.game_id+': empty/invalid response, leaving last-good data: '+JSON.stringify(wd).slice(0,200));
-          continue;
+          return { ok: false, reason: 'empty_response', transient: true,
+                   detail: JSON.stringify(wd).slice(0, 200) };
         }
         const idx = Math.min(gameHour, wd.hourly.time.length - 1);
         if (idx < 0) {
-          console.warn('[weather] '+game.game_id+': bad gameHour='+gameHour+', leaving last-good data');
-          continue;
+          return { ok: false, reason: 'bad_index', transient: true,
+                   detail: 'gameHour=' + gameHour };
         }
         const _speed  = wd.hourly.wind_speed_10m?.[idx];
         const _dir    = wd.hourly.wind_direction_10m?.[idx];
         const _temp   = wd.hourly.temperature_2m?.[idx];
         const _precip = wd.hourly.precipitation_probability?.[idx];
         if (![_speed, _dir, _temp, _precip].every(v => Number.isFinite(v))) {
-          console.warn('[weather] '+game.game_id+': missing fields (speed='+_speed+' dir='+_dir+' temp='+_temp+' precip='+_precip+'), leaving last-good data');
-          continue;
+          return { ok: false, reason: 'non_finite_value', transient: true,
+                   detail: 'speed='+_speed+' dir='+_dir+' temp='+_temp+' precip='+_precip };
         }
         const speed = parseFloat(_speed.toFixed(1));
         const dir   = Math.round(_dir);
@@ -1046,7 +1080,6 @@ async function runWeatherJob(date) {
         const precip = _precip;
         const windFactor = calcWindFactor(dir, speed, park);
         const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
-        // Roof logic
         let roofStatus = 'open', roofMult = 1;
         if (park.roofType === 'retractable') {
           let closed = false;
@@ -1069,13 +1102,81 @@ async function runWeatherJob(date) {
         }
         const latestRow = q.getGameById.get(date, game.game_id);
         if (latestRow) processGameSignals(latestRow, wobaIdx, settings);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, reason: 'exception', transient: true, detail: e.message };
+      }
+    };
+
+    for (const game of games) {
+      const parts = game.game_id.split('-');
+      const homeKey = parts[1];
+      const park = PARKS[homeKey];
+      if (!park) {
+        skipReasonCounts.no_park++;
+        skippedIds.push(game.game_id);
+        console.warn('[weather] '+game.game_id+': no_park (homeKey='+homeKey+')');
+        continue;
+      }
+      if (park.dome) {
+        // Domes are deterministically weather-irrelevant; tallied but not
+        // listed in skippedIds (which is for unexpected misses we'd want
+        // to investigate).
+        skipReasonCounts.dome++;
+        continue;
+      }
+      let gameHour = 19;
+      if (game.game_time) {
+        const m = game.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+        if (m) {
+          let h = parseInt(m[1]), ap = m[3].toUpperCase();
+          if (ap === 'PM' && h !== 12) h += 12;
+          if (ap === 'AM' && h === 12) h = 0;
+          gameHour = h;
+        }
+      }
+
+      let res = await fetchAndApply(game, park, gameHour);
+      if (!res.ok && res.transient) {
+        // Retry once after 1s. The 2026-05-01 incident (3 games stale at
+        // the 7AM PT cron) looked like transient Open-Meteo failures —
+        // a single retry would have caught all three. Logging the
+        // first-attempt reason so we can tell from cron_log how often
+        // retries are actually saving us.
+        console.warn('[weather] '+game.game_id+': '+res.reason+' on first attempt, retrying in 1s ('+res.detail+')');
+        await new Promise(r => setTimeout(r, 1000));
+        res = await fetchAndApply(game, park, gameHour);
+        if (res.ok) {
+          skipReasonCounts.retry_succeeded++;
+        }
+      }
+
+      if (res.ok) {
         updated++;
-      } catch(e) { console.error('[weather] '+game.game_id+':', e.message); }
+      } else {
+        skipReasonCounts[res.reason] = (skipReasonCounts[res.reason] || 0) + 1;
+        skippedIds.push(game.game_id);
+        console.warn('[weather] '+game.game_id+' final skip: '+res.reason+' ('+(res.detail||'')+')');
+      }
     }
-    console.log('[weather] updated '+updated+' games for '+date);
-    return { success: true, updated: updated, date: date };
+
+    const status = skippedIds.length === 0 ? 'success' : (updated > 0 ? 'partial' : 'error');
+    const message = 'updated '+updated+', skipped '+skippedIds.length
+      + (skipReasonCounts.retry_succeeded ? ', retries succeeded '+skipReasonCounts.retry_succeeded : '');
+    console.log('[weather] ' + message + ' for ' + date);
+    writeCronLog(status, message);
+
+    return {
+      success: status !== 'error',
+      updated,
+      skipped: skippedIds.length,
+      skipped_ids: skippedIds,
+      skip_reasons: skipReasonCounts,
+      date,
+    };
   } catch(e) {
     console.error('[weather] job error:', e.message);
+    writeCronLog('error', 'job threw: ' + e.message);
     return { success: false, error: e.message, updated: updated, date: date };
   }
 }
