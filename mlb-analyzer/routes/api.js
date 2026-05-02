@@ -48,6 +48,7 @@ const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, proces
 const { runModel, getSignals } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
+const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
 const { normName, stripSfx } = require('../utils/names');
 const { calcCLV } = require('../services/clv');
@@ -2459,18 +2460,47 @@ router.get('/health/:date', (req, res) => {
     // missing; fail = nothing fresh anywhere (cron / fetch is broken).
     {
       const rows = q.fgRoleFreshnessByTeam.all();
-      const cutoffMs = Date.now() - 48 * 60 * 60 * 1000;
+      const nowMs = Date.now();
+      const cutoffMs = nowMs - 48 * 60 * 60 * 1000;
       const teamFreshness = {};
+      const teamLastMs = {}; // per-team parsed last_at timestamp; used to sort stale teams oldest-first
       for (const r of rows) {
         const norm = (r.last_at || '').indexOf('T') === -1
           ? (r.last_at || '').replace(' ', 'T') + 'Z'
           : r.last_at;
         const t = Date.parse(norm);
         teamFreshness[r.team] = !isNaN(t) && t >= cutoffMs;
+        teamLastMs[r.team] = isNaN(t) ? null : t;
       }
       const known = Object.keys(teamFreshness);
       const fresh = known.filter(t => teamFreshness[t]).length;
-      const expected = 30; // all MLB teams
+      // FG_TEAM_SLUGS keys are the uppercase MLB abbreviations the
+      // fangraphs-roles module writes into pitcher_fg_role.team. Reused
+      // here so the "missing team" calculation stays consistent with
+      // what the cron actually attempts to fetch — when the slug map
+      // grows or shrinks, this check follows automatically.
+      const expectedTeams = Object.keys(FG_TEAM_SLUGS);
+      const expected = expectedTeams.length; // 30 for current MLB
+      // Stale: team has rows but the latest is older than the 48h cutoff.
+      // Missing entirely: team is in expectedTeams but never appeared in
+      // pitcher_fg_role at all. These are different failure modes — one
+      // is "fetch ran but the result is old", the other is "this team
+      // has never been ingested" (e.g. persistent CF block on its slug).
+      const staleTeams = known
+        .filter(t => teamFreshness[t] === false)
+        .sort((a, b) => (teamLastMs[a] || 0) - (teamLastMs[b] || 0)); // oldest first
+      const knownSet = new Set(known);
+      const missingTeams = expectedTeams.filter(t => !knownSet.has(t));
+      // Format an age-since timestamp the same way other checks do —
+      // "Nh" under 48h, "Nd" otherwise. Returns '?' when unparseable.
+      const fmtAge = (ms) => {
+        if (ms == null) return '?';
+        const ageMs = nowMs - ms;
+        if (ageMs < 0) return '0h';
+        const h = Math.round(ageMs / 3600000);
+        if (h < 48) return h + 'h';
+        return Math.round(ageMs / 86400000) + 'd';
+      };
       let status, message;
       if (known.length === 0) {
         status = 'fail';
@@ -2480,7 +2510,15 @@ router.get('/health/:date', (req, res) => {
         message = 'fg_roles all stale (oldest team last fetched > 48h ago across ' + known.length + ' team(s))';
       } else if (fresh < expected) {
         status = 'warn';
-        message = 'fg_roles partial: ' + fresh + '/' + expected + ' teams fresh within 48h';
+        const staleHead = staleTeams.slice(0, 5)
+          .map(t => t + '(' + fmtAge(teamLastMs[t]) + ')')
+          .join(', ');
+        const staleOverflow = staleTeams.length > 5 ? ' +' + (staleTeams.length - 5) + ' more' : '';
+        const parts = [];
+        parts.push('fg_roles partial: ' + fresh + '/' + expected + ' teams fresh within 48h');
+        if (staleTeams.length) parts.push('Stale: ' + staleHead + staleOverflow);
+        if (missingTeams.length) parts.push('Missing entirely: ' + missingTeams.join(', '));
+        message = parts.join('. ');
       } else {
         status = 'pass';
         message = 'fg_roles fresh: all ' + expected + ' teams updated within 48h';
