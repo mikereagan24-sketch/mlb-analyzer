@@ -1673,25 +1673,38 @@ async function runOddsJob(dateStr) {
 
 
 // Identify the most likely bulk-guy on `team` for an opener-led game on
-// `date`. Strategy:
-//   1. Among the team's pitchers FG classifies as SP, exclude the opener
-//      themselves and anyone scheduled to start in the next 2 days
-//      (we don't want to pencil in a Saturday's planned starter as the
-//      Friday bulk-guy).
-//   2. Prefer candidates with ≥4 days rested; among those, pick the one
-//      whose most recent appearance is freshest (sharpest workload).
-//   3. If nobody is in the rested bucket, fall back to the freshest
-//      remaining candidate.
-// Returns null when no plausible candidate exists — the spec's
-// "do not guess; surface as UNKNOWN for manual override" behavior.
+// `date`. Replaced the freshest-last-appearance heuristic (which picked
+// Martinez over Scholtens for TB on 2026-05-02 because Martinez happened
+// to start more recently — exactly backwards) with the scored ranking
+// approved alongside PR A's data capture.
+//
+// Per-candidate score:
+//   +5  ≥1 outing in last 30d with was_starter=0 AND innings_pitched ≥ 3
+//       (long-relief pattern — the bulk-guy signature)
+//   +3  most recent appearance was was_starter=0 (last role was relief)
+//   +2  avg innings_pitched over last 5 outings ∈ [3.5, 5.5] (bulk-guy IP range)
+//   +1  days-rested ∈ [4, 6] (rotation-style rest)
+//   -2  most recent was was_starter=1 AND avg IP last-5 > 5.5
+//       (regular-starter signature — actively penalize so true SPs don't
+//       sneak in via a single misclassified relief outing)
+//
+// Threshold: top score must reach 5 to be picked; below that, return
+// null (spec's "do not guess; UI shows BULK GUY UNKNOWN with manual
+// override"). Tiebreak on most recent long-relief outing date —
+// freshest swingman wins.
+//
+// Note on date windows: long_relief detection uses last 30d (recent
+// pattern matters); last_was_relief / sp_signature / days_rested use
+// the absolute most recent appearance regardless of date; avg IP uses
+// the last 5 outings regardless of date. This way a candidate with
+// only old data still gets meaningful signals where applicable.
 function identifyBulkGuy(team, date, openerName) {
   const fgSPs = db.prepare(
     "SELECT mlb_id, player_name FROM pitcher_fg_role WHERE team=? AND role='SP'"
   ).all(team);
   if (!fgSPs.length) return null;
 
-  // game_log SPs scheduled for the next two calendar days from `date`.
-  // Operating on YYYY-MM-DD string addition is fine here (UTC math).
+  // Filter: not the opener, not scheduled to start in the next 2 days.
   const nextDate = (d, plus) => {
     const t = new Date(d + 'T00:00:00Z');
     t.setUTCDate(t.getUTCDate() + plus);
@@ -1706,27 +1719,89 @@ function identifyBulkGuy(team, date, openerName) {
     if (r.away_sp) scheduled.add(r.away_sp);
     if (r.home_sp) scheduled.add(r.home_sp);
   }
-
   const candidates = fgSPs.filter(p =>
     p.player_name !== openerName && !scheduled.has(p.player_name)
   );
   if (!candidates.length) return null;
 
-  // Days-rested via the most recent pitcher_game_log appearance.
+  const dateMs = Date.parse(date + 'T00:00:00Z');
+  const thirtyDaysAgo = new Date(dateMs - 30 * 86400000).toISOString().slice(0, 10);
+  const recent30Stmt = db.prepare(
+    "SELECT game_date, was_starter, innings_pitched FROM pitcher_game_log " +
+    "WHERE pitcher_mlb_id = ? AND game_date >= ? AND game_date < ? " +
+    "ORDER BY game_date DESC"
+  );
+  const mostRecentStmt = db.prepare(
+    "SELECT game_date, was_starter, innings_pitched FROM pitcher_game_log " +
+    "WHERE pitcher_mlb_id = ? AND game_date < ? " +
+    "ORDER BY game_date DESC LIMIT 1"
+  );
+  const last5Stmt = db.prepare(
+    "SELECT game_date, was_starter, innings_pitched FROM pitcher_game_log " +
+    "WHERE pitcher_mlb_id = ? AND game_date < ? " +
+    "ORDER BY game_date DESC LIMIT 5"
+  );
+
   for (const c of candidates) {
-    const row = db.prepare(
-      "SELECT MAX(game_date) AS last FROM pitcher_game_log WHERE pitcher_mlb_id=?"
-    ).get(c.mlb_id);
-    c.last_app = row && row.last ? row.last : null;
-    c.days_rested = c.last_app
-      ? Math.floor((Date.parse(date + 'T00:00:00Z') - Date.parse(c.last_app + 'T00:00:00Z')) / 86400000)
-      : null;
+    if (c.mlb_id == null) {
+      c.score = 0; c.signals = ['no_mlb_id']; c._tieKey = ''; continue;
+    }
+    const recent30   = recent30Stmt.all(c.mlb_id, thirtyDaysAgo, date);
+    const mostRecent = mostRecentStmt.get(c.mlb_id);
+    const last5      = last5Stmt.all(c.mlb_id, date);
+
+    let score = 0;
+    const signals = [];
+
+    if (recent30.some(o => o.was_starter === 0 && (o.innings_pitched || 0) >= 3)) {
+      score += 5; signals.push('+5 long_relief_pattern');
+    }
+    if (mostRecent && mostRecent.was_starter === 0) {
+      score += 3; signals.push('+3 last_was_relief');
+    }
+    let avgIp = null;
+    if (last5.length > 0) {
+      avgIp = last5.reduce((s, o) => s + (o.innings_pitched || 0), 0) / last5.length;
+      if (avgIp >= 3.5 && avgIp <= 5.5) {
+        score += 2; signals.push('+2 avg_ip_' + avgIp.toFixed(2));
+      }
+      if (mostRecent && mostRecent.was_starter === 1 && avgIp > 5.5) {
+        score -= 2; signals.push('-2 sp_signature_avgip_' + avgIp.toFixed(2));
+      }
+    }
+    let daysRested = null;
+    if (mostRecent && mostRecent.game_date) {
+      daysRested = Math.floor((dateMs - Date.parse(mostRecent.game_date + 'T00:00:00Z')) / 86400000);
+      if (daysRested >= 4 && daysRested <= 6) {
+        score += 1; signals.push('+1 days_rest_' + daysRested);
+      }
+    }
+    // Tiebreak key: most recent long-relief outing date in the 30d window
+    // (empty string sorts last so candidates with no long-relief lose ties).
+    const lastLongRelief = recent30.find(o => o.was_starter === 0 && (o.innings_pitched || 0) >= 3);
+    c._tieKey = lastLongRelief ? lastLongRelief.game_date : '';
+    c.score = score;
+    c.signals = signals;
+    console.log('[bulk-guy-score] ' + team + ' ' + c.player_name
+      + ': score=' + score + ' [' + signals.join(', ') + ']'
+      + ' avg_ip_last5=' + (avgIp != null ? avgIp.toFixed(2) : 'n/a')
+      + ' last_app=' + (mostRecent ? mostRecent.game_date : 'n/a')
+      + ' rest=' + (daysRested != null ? daysRested + 'd' : 'n/a'));
   }
 
-  const rested = candidates.filter(c => c.days_rested != null && c.days_rested >= 4);
-  const pool = rested.length ? rested : candidates;
-  pool.sort((a, b) => (b.last_app || '').localeCompare(a.last_app || ''));
-  return pool[0] && pool[0].player_name ? pool[0].player_name : null;
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (b._tieKey || '').localeCompare(a._tieKey || '');
+  });
+  const top = candidates[0];
+  if (!top || top.score < 5) {
+    console.log('[bulk-guy-score] ' + team + ': top='
+      + (top ? top.player_name + ' (' + top.score + ')' : 'none')
+      + ' below threshold 5 → leaving bulk_guy NULL');
+    return null;
+  }
+  console.log('[bulk-guy-score] ' + team + ': picked ' + top.player_name + ' (score=' + top.score + ')');
+  return top.player_name;
 }
 
 // Per-game opener detection. Writes is_opener_game_{side},
