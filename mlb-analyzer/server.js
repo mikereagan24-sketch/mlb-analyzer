@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { startCronJobs, runRosterJob, runOddsJob, runWeatherJob, runLineupJob } = require('./services/jobs');
+const { startCronJobs, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -63,6 +63,15 @@ app.listen(PORT, () => {
   // sit at last-cron-state until the following morning. Failure here must
   // not block the listen() callback returning, so the call is fire-and-forget.
   runRosterJob().catch(e => console.warn('[startup-roster] failed:', e && e.message));
+
+  // One-shot pitcher_game_log backfill (PR A). Self-gating via the
+  // 'pitcher_usage_backfill_done' app_settings flag — runs at most once
+  // per database. Fires after the roster pull so it doesn't compete for
+  // statsapi attention during the boot critical path. Fire-and-forget;
+  // a partial run will simply resume on the next start (the flag only
+  // flips when every date in the 60-day window completed cleanly).
+  runPitcherUsageBackfill().catch(e =>
+    console.warn('[startup-pitcher-usage-backfill] failed:', e && e.message));
 
   // One-shot tomorrow-slate prefetch on startup. Bridges the gap when the
   // server starts up after the 8PM/11PM PT prefetch crons — without this,

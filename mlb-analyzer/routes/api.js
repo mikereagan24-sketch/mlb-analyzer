@@ -44,7 +44,7 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, detectOpeners, processOddsArray } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -838,6 +838,20 @@ router.post('/jobs/detect-openers', async (req, res) => {
       return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
     }
     const result = await detectOpeners(date);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual trigger for the pitcher_game_log backfill. The startup hook
+// in server.js already fires this fire-and-forget on every boot, but
+// the flag short-circuits subsequent runs. Manual invocation here is
+// for the rare cases where you want to re-attempt after a partial run
+// (the flag stays false until every date in the 60-day window clears).
+// To force a full re-run after the flag has flipped, DELETE the
+// 'pitcher_usage_backfill_done' row from app_settings first.
+router.post('/jobs/pitcher-usage-backfill', async (req, res) => {
+  try {
+    const result = await runPitcherUsageBackfill();
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
