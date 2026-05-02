@@ -44,7 +44,7 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const { q, db } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, processOddsArray } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, detectOpeners, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -772,6 +772,74 @@ router.delete('/pitcher-role-override/:mlb_id', (req, res) => {
 router.get('/pitcher-role-override', (req, res) => {
   try { res.json(q.listRoleOverrides.all()); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual opener override for a specific game-side. Wins over the
+// auto-detection in detectOpeners. Body:
+//   { game_date, game_id, side, is_opener, bulk_guy?, planned_batters?, set_by?, reason? }
+// side ∈ ('away','home'). is_opener is required so the user can both
+// flag a missed opener (1) and explicitly mark a false-positive (0).
+router.post('/opener-override', (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.game_date || !/^\d{4}-\d{2}-\d{2}$/.test(b.game_date)) {
+      return res.status(400).json({ error: 'game_date (YYYY-MM-DD) required' });
+    }
+    if (!b.game_id || typeof b.game_id !== 'string') {
+      return res.status(400).json({ error: 'game_id (string) required' });
+    }
+    if (b.side !== 'away' && b.side !== 'home') {
+      return res.status(400).json({ error: 'side must be "away" or "home"' });
+    }
+    if (b.is_opener !== 0 && b.is_opener !== 1) {
+      return res.status(400).json({ error: 'is_opener must be 0 or 1' });
+    }
+    q.setOpenerOverride.run(
+      b.game_date, b.game_id, b.side,
+      b.is_opener,
+      b.bulk_guy || null,
+      Number.isInteger(b.planned_batters) ? b.planned_batters : null,
+      b.set_by || null,
+      b.reason || null
+    );
+    // Re-run detection for the date so the override propagates into
+    // game_log immediately (instead of waiting for the next lineup job).
+    detectOpeners(b.game_date).catch(e =>
+      console.warn('[api] post-override detectOpeners failed: ' + e.message));
+    res.json({ success: true, ...b });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/opener-override/:game_date/:game_id/:side', (req, res) => {
+  try {
+    const { game_date, game_id, side } = req.params;
+    if (side !== 'away' && side !== 'home') {
+      return res.status(400).json({ error: 'side must be "away" or "home"' });
+    }
+    const info = q.deleteOpenerOverride.run(game_date, game_id, side);
+    detectOpeners(game_date).catch(e =>
+      console.warn('[api] post-delete detectOpeners failed: ' + e.message));
+    res.json({ success: true, removed: info.changes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/opener-override/:game_date', (req, res) => {
+  try { res.json(q.listOpenerOverridesByDate.all(req.params.game_date)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual detection trigger — runs detectOpeners standalone for a date.
+// Useful after editing an opener_override row, or for backfilling
+// detection on past dates.
+router.post('/jobs/detect-openers', async (req, res) => {
+  try {
+    const { date } = req.body || {};
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    }
+    const result = await detectOpeners(date);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/rosters/:team', (req, res) => {

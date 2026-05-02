@@ -849,6 +849,18 @@ async function runLineupJob(dateStr) {
 
     q.logCron.run('lineups', dateStr, 'success', 'Pulled ' + games.length + ' games (date verified)', gamesUpdated);
     console.log('[lineup-job] Done — ' + gamesUpdated + ' games processed');
+
+    // Phase 1 of opener support: data layer only. Detection runs after
+    // SPs are upserted but doesn't gate signal generation in this PR
+    // (processGameSignals already ran inside the per-game loop above).
+    // Failure is non-fatal — the lineup job's own success counts as
+    // success regardless of whether opener detection ran cleanly.
+    try {
+      await detectOpeners(dateStr);
+    } catch (e) {
+      console.warn('[opener-detect] failed (non-fatal): ' + e.message);
+    }
+
     return { success: true, gamesUpdated, date: dateStr };
 
   } catch (err) {
@@ -1527,6 +1539,174 @@ async function runOddsJob(dateStr) {
 }
 
 
+// Identify the most likely bulk-guy on `team` for an opener-led game on
+// `date`. Strategy:
+//   1. Among the team's pitchers FG classifies as SP, exclude the opener
+//      themselves and anyone scheduled to start in the next 2 days
+//      (we don't want to pencil in a Saturday's planned starter as the
+//      Friday bulk-guy).
+//   2. Prefer candidates with ≥4 days rested; among those, pick the one
+//      whose most recent appearance is freshest (sharpest workload).
+//   3. If nobody is in the rested bucket, fall back to the freshest
+//      remaining candidate.
+// Returns null when no plausible candidate exists — the spec's
+// "do not guess; surface as UNKNOWN for manual override" behavior.
+function identifyBulkGuy(team, date, openerName) {
+  const fgSPs = db.prepare(
+    "SELECT mlb_id, player_name FROM pitcher_fg_role WHERE team=? AND role='SP'"
+  ).all(team);
+  if (!fgSPs.length) return null;
+
+  // game_log SPs scheduled for the next two calendar days from `date`.
+  // Operating on YYYY-MM-DD string addition is fine here (UTC math).
+  const nextDate = (d, plus) => {
+    const t = new Date(d + 'T00:00:00Z');
+    t.setUTCDate(t.getUTCDate() + plus);
+    return t.toISOString().slice(0, 10);
+  };
+  const tomorrow = nextDate(date, 1);
+  const dayAfter = nextDate(date, 2);
+  const scheduled = new Set();
+  for (const r of db.prepare(
+    "SELECT away_sp, home_sp FROM game_log WHERE game_date IN (?, ?) AND COALESCE(is_removed, 0) = 0"
+  ).all(tomorrow, dayAfter)) {
+    if (r.away_sp) scheduled.add(r.away_sp);
+    if (r.home_sp) scheduled.add(r.home_sp);
+  }
+
+  const candidates = fgSPs.filter(p =>
+    p.player_name !== openerName && !scheduled.has(p.player_name)
+  );
+  if (!candidates.length) return null;
+
+  // Days-rested via the most recent pitcher_game_log appearance.
+  for (const c of candidates) {
+    const row = db.prepare(
+      "SELECT MAX(game_date) AS last FROM pitcher_game_log WHERE pitcher_mlb_id=?"
+    ).get(c.mlb_id);
+    c.last_app = row && row.last ? row.last : null;
+    c.days_rested = c.last_app
+      ? Math.floor((Date.parse(date + 'T00:00:00Z') - Date.parse(c.last_app + 'T00:00:00Z')) / 86400000)
+      : null;
+  }
+
+  const rested = candidates.filter(c => c.days_rested != null && c.days_rested >= 4);
+  const pool = rested.length ? rested : candidates;
+  pool.sort((a, b) => (b.last_app || '').localeCompare(a.last_app || ''));
+  return pool[0] && pool[0].player_name ? pool[0].player_name : null;
+}
+
+// Per-game opener detection. Writes is_opener_game_{side},
+// bulk_guy_{side}, opener_planned_batters_{side}, opener_detected_at on
+// each game_log row for `date`. Detection per side:
+//
+//   Primary signal — the probable SP is classified RP or CL by FG.
+//   Confirming   — recent pitcher_game_log shows avg pitches < 30
+//                  over the last 10 outings (proxy for "<2 IP",
+//                  since pitches is what we record).
+//
+// When both signals fire, mark is_opener_game_{side}=1 and try to
+// identify the bulk-guy. If we can't pick one confidently, leave
+// bulk_guy_{side} NULL so the UI can show "BULK GUY UNKNOWN" with a
+// manual-override button rather than guessing.
+//
+// opener_override rows always win — when one exists for (date, game_id,
+// side), its values are written verbatim and detection skips.
+//
+// This function is purely additive in Phase 1: no signal-generation
+// path reads is_opener_game_* yet, so the v3 cohort is not tainted.
+async function detectOpeners(dateStr) {
+  const games = q.getGamesByDate.all(dateStr);
+  if (!games.length) {
+    console.log('[opener-detect] no games for ' + dateStr);
+    return { date: dateStr, detected: 0, unknown_bulk: 0 };
+  }
+  const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters) => {
+    // side comes from a closed { 'away', 'home' } enum below — safe to
+    // splice into the column name. NEVER widen this to user input.
+    const sql = "UPDATE game_log SET "
+      + "is_opener_game_" + side + " = ?, "
+      + "bulk_guy_" + side + " = ?, "
+      + "opener_planned_batters_" + side + " = ?, "
+      + "opener_detected_at = datetime('now') "
+      + "WHERE game_date = ? AND game_id = ?";
+    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, date, gameId);
+  };
+
+  let detectedCount = 0, unknownBulkCount = 0;
+  for (const g of games) {
+    for (const side of ['away', 'home']) {
+      const team = side === 'away' ? g.away_team : g.home_team;
+      const sp   = side === 'away' ? g.away_sp   : g.home_sp;
+
+      // Manual override always wins. Detection logic skips entirely.
+      const ov = q.getOpenerOverride.get(dateStr, g.game_id, side);
+      if (ov) {
+        writeDetection(
+          dateStr, g.game_id, side,
+          !!ov.is_opener,
+          ov.bulk_guy || null,
+          ov.planned_batters != null ? ov.planned_batters : null
+        );
+        if (ov.is_opener) {
+          detectedCount++;
+          if (!ov.bulk_guy) unknownBulkCount++;
+          console.log('[opener-detect] ' + g.game_id + '/' + side + ': override applied — opener='
+            + (sp || 'unknown') + ' → bulk-guy ' + (ov.bulk_guy || 'UNKNOWN'));
+        }
+        continue;
+      }
+
+      if (!team || !sp) {
+        // Nothing to detect off; clear flags so a previous run's value
+        // doesn't linger if the SP was removed.
+        writeDetection(dateStr, g.game_id, side, false, null, null);
+        continue;
+      }
+
+      // Map SP name → mlb_id via team_rosters (the same lookup the
+      // FG-roles overlay uses). If we can't resolve mlb_id we can't
+      // check FG role and bail to "not opener".
+      const spRow = db.prepare(
+        "SELECT mlb_id FROM team_rosters WHERE team=? AND player_name=?"
+      ).get(team, sp);
+      let isOpener = false, bulkGuy = null, plannedBatters = null;
+
+      if (spRow && spRow.mlb_id) {
+        const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
+        const fgSaysReliever = fg && (fg.role === 'RP' || fg.role === 'CL');
+        if (fgSaysReliever) {
+          // Confirming signal: pitches per appearance over last ~10 outings.
+          // < 30 pitches/app is the proxy for "<2 IP". When we have no
+          // data (recent callup), trust the FG signal alone.
+          const outings = db.prepare(
+            "SELECT pitches_thrown FROM pitcher_game_log WHERE pitcher_mlb_id=? ORDER BY game_date DESC LIMIT 10"
+          ).all(spRow.mlb_id);
+          const avgPitches = outings.length
+            ? outings.reduce((s, o) => s + (o.pitches_thrown || 0), 0) / outings.length
+            : null;
+          if (avgPitches == null || avgPitches < 30) {
+            isOpener = true;
+            plannedBatters = 4; // spec default until per-pitcher tuning lands
+            bulkGuy = identifyBulkGuy(team, dateStr, sp);
+          }
+        }
+      }
+
+      writeDetection(dateStr, g.game_id, side, isOpener, bulkGuy, plannedBatters);
+      if (isOpener) {
+        detectedCount++;
+        if (!bulkGuy) unknownBulkCount++;
+        console.log('[opener-detect] ' + g.game_id + '/' + side + ': ' + team
+          + ' using opener ' + sp + ' → bulk-guy ' + (bulkGuy || 'UNKNOWN'));
+      }
+    }
+  }
+  console.log('[opener-detect] ' + dateStr + ': ' + detectedCount
+    + ' opener-led side(s), ' + unknownBulkCount + ' with unknown bulk-guy');
+  return { date: dateStr, detected: detectedCount, unknown_bulk: unknownBulkCount };
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -1691,4 +1871,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
