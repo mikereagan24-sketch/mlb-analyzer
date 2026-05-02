@@ -476,6 +476,16 @@ function getSignals(game, modelResult, settings) {
   return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
 }
 
+// "To win $100" P&L. Hoisted to module scope (was inner-defined inside
+// calcPnl) so calcRunlinePnl below can share it without copy-paste.
+// Returns null when ml is malformed/zero — caller decides how to render.
+function toWin100(ml, won) {
+  ml = parseFloat(ml);
+  if (isNaN(ml) || ml === 0) return null;
+  const stake = ml > 0 ? parseFloat((10000 / ml).toFixed(2)) : Math.abs(ml);
+  return parseFloat((won ? 100 : -stake).toFixed(2));
+}
+
 function calcPnl(signal, awayScore, homeScore, marketTotal) {
   if (awayScore == null || homeScore == null) return { outcome: 'pending', pnl: 0 };
   const actualTotal = awayScore + homeScore;
@@ -485,16 +495,6 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     const bl = parseFloat(sigBetLine);
     const ml = parseFloat(sigLine);
     return (!isNaN(bl) && bl !== 0) ? bl : ml;
-  }
-
-  // "To win $100" P&L:
-  //   +odds (dog):  stake = 10000/odds  â win +100, loss -stake
-  //   -odds (fav):  stake = abs(odds)   â win +100, loss -stake
-  function toWin100(ml, won) {
-    ml = parseFloat(ml);
-    if (isNaN(ml) || ml === 0) return null;
-    const stake = ml > 0 ? parseFloat((10000 / ml).toFixed(2)) : Math.abs(ml);
-    return parseFloat((won ? 100 : -stake).toFixed(2));
   }
 
   if (signal.type === 'ML') {
@@ -524,4 +524,46 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
   }
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,impliedP };
+// Runline (-1.5 / +1.5) PnL — graded against the side's score margin.
+// Step 2 of the runline workstream. ML-only companion: invoked from the
+// signal-grading paths in services/jobs.js whenever an ML bet_signals
+// row has captured a spread snapshot. Total signals never call this.
+//
+// Inputs:
+//   side         — 'away' | 'home' (which side the underlying ML signal was on)
+//   spreadLine   — REAL, expected ±1.5 from that side's perspective
+//   spreadPrice  — INTEGER American odds at fire time (signed)
+//   awayScore, homeScore — final scores; null until game finishes
+//
+// Returns { outcome, pnl }:
+//   - 'pending' (pnl 0)   when scores are missing OR spreadLine is null
+//                          (latter is expected for pre-Step-2 ML rows
+//                           with no captured snapshot)
+//   - 'pending' (pnl null) when spreadPrice is missing or spreadLine
+//                          is anomalous (warned/errored — spread should
+//                          always be ±1.5 in MLB; if it's not, Step 1's
+//                          MLB_RUNLINE_POINTS filter has a bug)
+//   - 'win'/'loss' (pnl)  graded via toWin100 at the captured price.
+// Pushes are not possible on ±1.5 in MLB (margin can't be 1.5 runs),
+// so no push branch.
+function calcRunlinePnl(side, spreadLine, spreadPrice, awayScore, homeScore) {
+  if (awayScore == null || homeScore == null) return { outcome: 'pending', pnl: 0 };
+  // Pre-Step-2 ML signals have no captured snapshot — leave pending,
+  // no log (this is the expected steady-state for historical rows).
+  if (spreadLine == null) return { outcome: 'pending', pnl: 0 };
+  if (spreadPrice == null) {
+    console.warn('[runline-grade] spread captured but price missing — side=' + side + ', line=' + spreadLine);
+    return { outcome: 'pending', pnl: null };
+  }
+  if (spreadLine !== -1.5 && spreadLine !== 1.5) {
+    console.error('[runline-grade] unexpected spread line ' + spreadLine + ' (Step 1 filter should have rejected) — side=' + side);
+    return { outcome: 'pending', pnl: null };
+  }
+  const sideMargin = side === 'away' ? awayScore - homeScore : homeScore - awayScore;
+  // -1.5: must win by ≥2;  +1.5: must lose by ≤1 (or win)
+  const won = spreadLine === -1.5 ? sideMargin >= 2 : sideMargin >= -1;
+  const pnl = toWin100(spreadPrice, won);
+  return { outcome: won ? 'win' : 'loss', pnl };
+}
+
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP };

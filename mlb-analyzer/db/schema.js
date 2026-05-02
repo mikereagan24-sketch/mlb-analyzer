@@ -549,6 +549,27 @@ try { db.exec("UPDATE bet_signals SET cohort='v3' WHERE cohort='v3-tainted'"); }
 // dated before the cutoff have been retagged, future runs update 0 rows
 // (new signals get cohort='v3' with today's game_date, which is post-cutoff).
 try { db.exec("UPDATE bet_signals SET cohort='v3-pretuning' WHERE cohort='v3' AND game_date < '2026-04-24'"); } catch(e) {}
+
+// Runline companion capture (Step 2 of 3 in runline workstream).
+// ML signals snapshot the spread (-1.5 / +1.5) line + price + source
+// at fire time, then get graded against the eventual game result so
+// we can compare ML signal ROI against the corresponding runline bet.
+// Total signals leave these null (Step 1 ingest is intentionally
+// ML-companion only). Forward-only — historical ML signals fired
+// before this PR have no captured spread data and stay null.
+//   companion_spread_line     — REAL, ±1.5 from the side's perspective
+//   companion_spread_price    — INTEGER American odds, e.g. -140
+//   companion_spread_outcome  — 'win' / 'loss' / 'pending'  (no push
+//                                possible on ±1.5 in MLB)
+//   companion_spread_pnl      — REAL, $100-to-win basis (matches the
+//                                existing pnl column convention)
+//   companion_spread_src      — TEXT, source string copied from
+//                                game_log.market_spread_src at fire
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN companion_spread_line REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN companion_spread_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN companion_spread_outcome TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN companion_spread_pnl REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN companion_spread_src TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_speed REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
@@ -716,10 +737,14 @@ const q = {
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
-      category, market_line, model_line, edge_pct, outcome, pnl, cohort
+      category, market_line, model_line, edge_pct, outcome, pnl, cohort,
+      companion_spread_line, companion_spread_price, companion_spread_outcome,
+      companion_spread_pnl, companion_spread_src
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
-      @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort
+      @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
+      @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
+      @companion_spread_pnl, @companion_spread_src
     )
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
