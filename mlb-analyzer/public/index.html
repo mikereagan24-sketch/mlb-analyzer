@@ -470,6 +470,18 @@ const KEY_LABELS={'bat-proj-lhp':'Batters vs LHP (Steamer)','bat-proj-rhp':'Batt
 const FILE_KEY_TESTS=[{key:'bat-proj-lhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-proj-rhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-proj-lhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-proj-rhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/rhb|_rh/i.test(n)},{key:'bat-act-lhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-act-rhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-act-lhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-act-rhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/rhb|_rh/i.test(n)}];
 function detectKey(fn){const n=fn.toLowerCase();for(const{key,t}of FILE_KEY_TESTS)if(t(n))return key;return null;}
 function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
+// Phase 2 opener-aware reads. PR #58 wired parallel opener_model_*
+// columns; PR #59 flipped use_opener_logic on so signals now fire on
+// opener_model_* for opener-led games. The UI surface line was still
+// reading the standard model_* columns, so the displayed line
+// disagreed with the signal the user was supposed to act on. These
+// helpers prefer opener_model_* when the side is opener-led AND the
+// column is populated; otherwise fall back to model_*. Visibility
+// gates and proj_model_* (frozen pre-lineup snapshot, intentional)
+// still read model_* directly.
+function effAwayML(g){return g.is_opener_game_away&&g.opener_model_away_ml!=null?g.opener_model_away_ml:g.model_away_ml;}
+function effHomeML(g){return g.is_opener_game_home&&g.opener_model_home_ml!=null?g.opener_model_home_ml:g.model_home_ml;}
+function effTotal(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_total!=null?g.opener_model_total:g.model_total;}
 // Render the bettable totals pair (O/U line + over/under juice). User
 // bets at the primary venue, so the UI shows ONLY the primary by
 // default. xcheck data is still in the API response and still drives
@@ -1001,9 +1013,9 @@ function renderGameResult(g){
   const vc=sig=>sig?({'3★':'s3','2★':'s2','1★':'s1'}[sig.signal_label]||''):'';
   const vd=sig=>{if(!sig)return'<span style="color:var(--text2);font-size:9px">—</span>';const col={'3★':'#4477cc','2★':'var(--green)','1★':'var(--yellow)'}[sig.signal_label]||'var(--yellow)';return'<span style="color:'+col+';font-size:9px;font-weight:500">'+sig.signal_label.toUpperCase()+'</span>';};
   return'<div class="result-grid">'+
-    '<div class="rbox '+vc(aEdge)+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(g.model_away_ml)+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
-    '<div class="rbox '+vc(totEdge)+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(g.model_total?parseFloat(g.model_total).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
-    '<div class="rbox '+vc(hEdge)+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(g.model_home_ml)+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
+    '<div class="rbox '+vc(aEdge)+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
+    '<div class="rbox '+vc(totEdge)+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
+    '<div class="rbox '+vc(hEdge)+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
     '</div>'+
     (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
 }
@@ -1016,9 +1028,9 @@ function analyzeGame(gameId,date){
   document.getElementById('analysis-content').style.display='block';
   document.getElementById('a-lbl').textContent=g.away_team;
   document.getElementById('h-lbl').textContent=g.home_team;
-  document.getElementById('a-ml').textContent=g.model_away_ml?fmtML(g.model_away_ml):'—';
-  document.getElementById('h-ml').textContent=g.model_home_ml?fmtML(g.model_home_ml):'—';
-  document.getElementById('a-tot').textContent=g.model_total?parseFloat(g.model_total).toFixed(1):'—';
+  document.getElementById('a-ml').textContent=effAwayML(g)!=null?fmtML(effAwayML(g)):'—';
+  document.getElementById('h-ml').textContent=effHomeML(g)!=null?fmtML(effHomeML(g)):'—';
+  document.getElementById('a-tot').textContent=effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—';
   document.getElementById('a-runs').textContent='Market: '+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' · O/U '+g.market_total;
   const sigs=g.signals||[];
   function setComp(boxId,lId,mId,mktId,edgId,label,modelVal,mktVal,sig){
@@ -1029,9 +1041,9 @@ function analyzeGame(gameId,date){
     if(sig){const col=sig.signal_label==='Value'?'var(--green)':'var(--blue)';document.getElementById(edgId).innerHTML='<span style="color:'+col+';font-weight:500">'+sig.signal_label+'</span>';box.className='rbox value';}
     else{document.getElementById(edgId).textContent='—';box.className='rbox';}
   }
-  setComp('comp-a','ca-lbl','ca-model','ca-mkt','ca-edge',g.away_team+' Moneyline',g.model_away_ml?fmtML(g.model_away_ml):'—',g.market_away_ml?fmtML(g.market_away_ml):'—',sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML'));
-  setComp('comp-h','ch-lbl','ch-model','ch-mkt','ch-edge',g.home_team+' Moneyline',g.model_home_ml?fmtML(g.model_home_ml):'—',g.market_home_ml?fmtML(g.market_home_ml):'—',sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML'));
-  setComp('comp-t','ct-lbl','ct-model','ct-mkt','ct-edge','Over/Under',g.model_total?parseFloat(g.model_total).toFixed(1):'—',g.market_total||'—',sigs.find(s=>s.signal_type==='Total'));
+  setComp('comp-a','ca-lbl','ca-model','ca-mkt','ca-edge',g.away_team+' Moneyline',effAwayML(g)!=null?fmtML(effAwayML(g)):'—',g.market_away_ml?fmtML(g.market_away_ml):'—',sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML'));
+  setComp('comp-h','ch-lbl','ch-model','ch-mkt','ch-edge',g.home_team+' Moneyline',effHomeML(g)!=null?fmtML(effHomeML(g)):'—',g.market_home_ml?fmtML(g.market_home_ml):'—',sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML'));
+  setComp('comp-t','ct-lbl','ct-model','ct-mkt','ct-edge','Over/Under',effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—',g.market_total||'—',sigs.find(s=>s.signal_type==='Total'));
   const mkBD=(lu,oppHand,el)=>{
     el.innerHTML=lu.map((b,i)=>{
       const eff=b.hand==='S'?(oppHand==='R'?'L':'R'):b.hand;
@@ -1056,7 +1068,7 @@ async function runAI(){
   btn.disabled=true;out.innerHTML='<span class="spinner"></span>Generating…';
   const sigs=(g.signals||[]).map(s=>s.signal_label+' '+s.signal_side+' '+s.signal_type).join(', ')||'no signals';
   try{
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,messages:[{role:'user',content:'Sharp MLB analyst. 3 paragraphs on: 1) handedness matchup dynamics, 2) model vs market, 3) best bet.\n'+g.away_team+'@'+g.home_team+' · '+g.away_sp+'('+g.away_sp_hand+'HP) vs '+g.home_sp+'('+g.home_sp_hand+'HP)\nModel: '+g.away_team+fmtML(g.model_away_ml)+'/'+g.home_team+fmtML(g.model_home_ml)+' Tot:'+parseFloat(g.model_total||0).toFixed(1)+'\nMarket: '+fmtML(g.market_away_ml)+'/'+fmtML(g.market_home_ml)+' O/U:'+g.market_total+'\nSignals: '+sigs+'\nNo disclaimers.'}]})});
+    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,messages:[{role:'user',content:'Sharp MLB analyst. 3 paragraphs on: 1) handedness matchup dynamics, 2) model vs market, 3) best bet.\n'+g.away_team+'@'+g.home_team+' · '+g.away_sp+'('+g.away_sp_hand+'HP) vs '+g.home_sp+'('+g.home_sp_hand+'HP)\nModel: '+g.away_team+fmtML(effAwayML(g))+'/'+g.home_team+fmtML(effHomeML(g))+' Tot:'+parseFloat(effTotal(g)||0).toFixed(1)+'\nMarket: '+fmtML(g.market_away_ml)+'/'+fmtML(g.market_home_ml)+' O/U:'+g.market_total+'\nSignals: '+sigs+'\nNo disclaimers.'}]})});
     const d=await r.json();
     out.innerHTML=(d.content||[]).map(c=>c.text||'').join('').replace(/\n\n/g,'<br><br>');
   }catch(e){out.textContent='AI error.';}
@@ -1156,9 +1168,9 @@ function renderModelOutput(g) {
   var awayConf=(g.away_lineup_status==='confirmed'); var homeConf=(g.home_lineup_status==='confirmed'); var confirmed=(awayConf||homeConf||g.lineup_status==='confirmed')&&g.model_away_ml!=null; var fullyConf=awayConf&&homeConf;
   var confRow = confirmed
     ? '<div style="display:flex;gap:20px;flex-wrap:wrap">'
-      +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'+fmtML(g.model_away_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_away_ml)+'</span></div>'
-      +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'+fmtML(g.model_home_ml)+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_home_ml)+'</span></div>'
-      +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(g.model_total ? parseFloat(g.model_total).toFixed(1) : '—')+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtTotalsBlock(g)+'</span></div>'
+      +'<div><span style="font-size:10px;color:var(--text2)">'+g.away_team+' ML</span><br><b>'+fmtML(effAwayML(g))+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_away_ml)+'</span></div>'
+      +'<div><span style="font-size:10px;color:var(--text2)">'+g.home_team+' ML</span><br><b>'+fmtML(effHomeML(g))+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtML(g.market_home_ml)+'</span></div>'
+      +'<div><span style="font-size:10px;color:var(--text2)">Total</span><br><b>'+(effTotal(g) != null ? parseFloat(effTotal(g)).toFixed(1) : '—')+'</b><span style="font-size:10px;color:var(--text2);margin-left:4px">mkt '+fmtTotalsBlock(g)+'</span></div>'
       +'</div>'
     : '<div style="font-size:11px;color:var(--text3);font-style:italic">No confirmed lineup yet</div>';
   // Sensitivity badge: only meaningful when at least one side's lineup has
