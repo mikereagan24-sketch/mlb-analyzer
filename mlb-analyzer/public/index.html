@@ -314,6 +314,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 </div>
 <div id="bt-results">
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
+<!-- Runline Companion Analysis (Step 3 of 3 in runline workstream).
+     Populated by renderRunlineCompanion() inside loadBacktest. Hidden
+     when there are fewer than 5 graded ML plays with captured runline
+     data — the empty-state notice falls through to the same div. -->
+<div id="bt-runline-panel" style="margin-bottom:1rem"></div>
 <div class="card" id="bt-lineup-sens-card" style="margin-bottom:1rem;display:none">
 <div class="slabel">Lineup sensitivity — ROI by whether projected vs confirmed lineup shifted the model</div>
 <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Stable = |Δtotal| &lt; 0.3 runs AND |ΔML| &lt; 2.5pp. Shifted = either gate ≥ 0.3 / 2.5pp. Large shift = ≥ 0.8 runs OR ≥ 6pp on either ML. ML deltas are implied-probability percentage points (cross-sign safe). Hypothesis: locked bets on shifted/large-shift games may underperform stable ones.</div>
@@ -1807,6 +1812,110 @@ function renderPoissonTracking(signals) {
 }
 
 
+// Runline Companion Analysis (Step 3 of 3 in runline workstream).
+// Builds a 3-column comparison panel from graded ML signals that have
+// a captured runline snapshot, treating the runline as a parallel bet
+// alongside the underlying ML. The panel only renders when ≥5 such
+// rows exist; below that, an empty-state notice falls through. ML
+// rows without companion data and Total rows are excluded.
+function renderRunlineCompanion(signals) {
+  var panel = document.getElementById('bt-runline-panel');
+  if (!panel) return;
+  var eligible = (signals || []).filter(function(s){
+    return s.signal_type === 'ML'
+      && s.companion_spread_line != null
+      && (s.companion_spread_outcome === 'win' || s.companion_spread_outcome === 'loss');
+  });
+  // Empty-state: not enough rows for a meaningful aggregate. Surface
+  // the start-date so it's clear this is a forward-only metric tied to
+  // when Step 2 deployed (earliest companion-captured row's created_at
+  // is the deploy boundary; falls back to 2026-05-02 when no rows yet).
+  if (eligible.length < 5) {
+    var earliest = (signals || []).reduce(function(acc, s){
+      if (s.companion_spread_line == null) return acc;
+      var d = (s.created_at || s.game_date || '').slice(0, 10);
+      if (!d) return acc;
+      return (acc == null || d < acc) ? d : acc;
+    }, null) || '2026-05-02';
+    panel.innerHTML = '<div class="card" style="font-size:11px;color:var(--text2)">'
+      + '<b>Runline companion data</b>: ' + eligible.length + ' graded ML play(s) with captured runline so far '
+      + '(need ≥5 for meaningful comparison). Step 2 of runline workstream shipped ' + earliest
+      + '; companion data is only available for ML signals fired after that.'
+      + '</div>';
+    return;
+  }
+  // $100-to-win stake. Mirrors model.toWin100 but inverted to recover
+  // the stake amount: -odds favorite stakes |price|; +odds dog stakes
+  // 10000/price. Returns 0 on malformed prices so a bad row doesn't
+  // skew the wagered total.
+  function stake(price) {
+    var p = parseFloat(price);
+    if (isNaN(p) || p === 0) return 0;
+    return p < 0 ? Math.abs(p) : parseFloat((10000 / p).toFixed(2));
+  }
+  var ml = { plays:0, wins:0, losses:0, pushes:0, pnl:0, wagered:0 };
+  var rl = { plays:0, wins:0, losses:0, pushes:0, pnl:0, wagered:0 };
+  // Combined column counts each play as TWO bets (ML + runline). plays
+  // stays the eligible-game count for header symmetry; the W-L-P sums
+  // bet-level outcomes across both sides so the magnitudes line up
+  // with ROI = total_pnl / total_wagered (also summed across both).
+  var cb = { plays:0, wins:0, losses:0, pushes:0, pnl:0, wagered:0 };
+  eligible.forEach(function(s){
+    var mlLine    = (s.bet_line != null && s.bet_line !== 0) ? s.bet_line : s.market_line;
+    var mlStake   = stake(mlLine);
+    var rlStake   = stake(s.companion_spread_price);
+    var mlPnl     = (typeof s.pnl === 'number') ? s.pnl : 0;
+    var rlPnl     = (typeof s.companion_spread_pnl === 'number') ? s.companion_spread_pnl : 0;
+    ml.plays++;
+    if (s.outcome === 'win')    ml.wins++;
+    else if (s.outcome === 'loss')  ml.losses++;
+    else if (s.outcome === 'push')  ml.pushes++;
+    ml.pnl     += mlPnl;
+    ml.wagered += (s.outcome === 'push') ? 0 : mlStake;
+    rl.plays++;
+    if (s.companion_spread_outcome === 'win')  rl.wins++;
+    else if (s.companion_spread_outcome === 'loss') rl.losses++;
+    rl.pnl     += rlPnl;
+    rl.wagered += rlStake;
+    cb.plays++;
+    cb.wins    += (s.outcome === 'win' ? 1 : 0) + (s.companion_spread_outcome === 'win' ? 1 : 0);
+    cb.losses  += (s.outcome === 'loss' ? 1 : 0) + (s.companion_spread_outcome === 'loss' ? 1 : 0);
+    cb.pushes  += (s.outcome === 'push' ? 1 : 0);
+    cb.pnl     += mlPnl + rlPnl;
+    cb.wagered += ((s.outcome === 'push') ? 0 : mlStake) + rlStake;
+  });
+  function roiOf(b) { return b.wagered > 0 ? (b.pnl / b.wagered) * 100 : null; }
+  function fmtPnl(v) { return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(0); }
+  function pnlCls(v) { return v >= 0 ? 'green' : 'red'; }
+  function fmtRoi(v) {
+    if (v == null) return '<span class="muted">—</span>';
+    return '<span class="' + (v >= 0 ? 'green' : 'red') + '">' + (v >= 0 ? '+' : '') + v.toFixed(1) + '%</span>';
+  }
+  function col(label, b, sub) {
+    var roi = roiOf(b);
+    var wlp = b.pushes > 0
+      ? (b.wins + '-' + b.losses + '-' + b.pushes)
+      : (b.wins + '-' + b.losses);
+    return '<div class="metric-card">'
+      + '<div class="metric-label">' + label + '</div>'
+      + '<div class="metric-val ' + pnlCls(b.pnl) + '">' + fmtPnl(b.pnl) + '</div>'
+      + '<div class="metric-sub">' + b.plays + ' plays · ' + wlp + ' · ROI ' + (roi == null ? '—' : fmtRoi(roi)) + (sub ? ' · ' + sub : '') + '</div>'
+      + '</div>';
+  }
+  panel.innerHTML = ''
+    + '<div class="slabel" style="margin-bottom:6px">Runline Companion Analysis (ML signals with captured runline data)</div>'
+    + '<div class="grid-4">'
+    +   col('ML-only', ml)
+    +   col('Runline-only', rl)
+    +   col('ML + Runline (parallel)', cb, '2 bets/play')
+    +   '<div class="metric-card" style="opacity:0.7">'
+    +     '<div class="metric-label">Eligible plays</div>'
+    +     '<div class="metric-val">' + eligible.length + '</div>'
+    +     '<div class="metric-sub">graded ML signals with captured runline</div>'
+    +   '</div>'
+    + '</div>';
+}
+
 function renderSignalTracking(signals) {
   var mlSigs  = signals.filter(function(s){ return s.signal_type==='ML'; });
   var totSigs = signals.filter(function(s){ return s.signal_type==='Total'; });
@@ -1821,6 +1930,30 @@ function renderSignalTracking(signals) {
   function pill(s){
     var l=s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1';
     return '<span class="sig-pill '+l+'">'+s.signal_label+'</span>';
+  }
+  // Per-row runline companion trailer. Renders only on ML rows that
+  // actually carry a captured spread snapshot (most pre-Step-2 rows
+  // and rows where Unabated had no clean ±1.5 source will get nothing
+  // — width budget stays clean for those). Outcome icon: ✓ win, ✗
+  // loss, ⏳ still-pending (graded later by runScoreJob).
+  function rlTrail(s) {
+    if (s.companion_spread_line == null) return '';
+    var pts = s.companion_spread_line;
+    var ptsTxt = (pts > 0 ? '+' : '') + pts.toFixed(1);
+    var priceTxt = s.companion_spread_price != null ? fmtML(s.companion_spread_price) : '—';
+    var ico, color;
+    if (s.companion_spread_outcome === 'win')      { ico = '✓'; color = 'var(--green)'; }
+    else if (s.companion_spread_outcome === 'loss'){ ico = '✗'; color = '#e05'; }
+    else                                            { ico = '⏳'; color = 'var(--text3)'; }
+    var pnlTxt2 = '';
+    if (s.companion_spread_outcome === 'win' || s.companion_spread_outcome === 'loss') {
+      var pnl = (typeof s.companion_spread_pnl === 'number') ? s.companion_spread_pnl : 0;
+      pnlTxt2 = ' ' + (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(0);
+    }
+    return '<span style="width:130px;font-size:10px;color:var(--text3);text-align:right;white-space:nowrap" title="Runline companion ('+(s.companion_spread_src||'unknown src')+')">'
+      + 'RL: ' + ptsTxt + ' (' + priceTxt + ') '
+      + '<span style="color:' + color + '">' + ico + pnlTxt2 + '</span>'
+      + '</span>';
   }
 
   // ── ML rows ──────────────────────────────────────────────────────────
@@ -1848,6 +1981,7 @@ function renderSignalTracking(signals) {
       +'<span style="width:55px;text-align:right">CLV: <span class="'+clvCls+'">'+clvTxt+'</span></span>'
       +'<span style="width:65px;text-align:right">cls: '+closingML+'</span>'
       +'<span style="width:50px;color:'+pnlClr(s)+';text-align:right">'+(s.is_active===0?'<span style="width:50px;text-align:right;opacity:0.6;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>':'<span style="width:50px;text-align:right;color:'+pnlClr(s)+'">'+pnlTxt(s)+'</span>')
+      +rlTrail(s)
 
       +'</div>'
       +(s.is_active===0&&s.notes?'<div style="padding:2px 0 4px 8px;font-size:10px;font-style:italic;color:var(--text3);border-bottom:.5px solid var(--border)">⚠️ '+s.notes+'</div>':'');
@@ -1919,6 +2053,7 @@ async function loadBacktest(){
       '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'—')+'</div></div>'+
       '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+(+(ov.wagered||0)).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     const cats=d.byCategory||[];
+    renderRunlineCompanion(d.signals||[]);
     renderSignalTracking(d.signals||[]);
 
   document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
