@@ -6,7 +6,7 @@ const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScore
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
-const { runModel, getSignals, calcPnl } = require('./model');
+const { runModel, getSignals, calcPnl, calcRunlinePnl } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName } = require('../utils/names');
 const { calcCLV } = require('./clv');
@@ -375,6 +375,12 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // Just grade any ungraded signals and return — never wipe a completed game's signals
     const existing = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(gameRow.game_date, gameRow.game_id);
     const updateSig = db.prepare('UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?');
+    // Step 2 runline companion: ML signals get a parallel grading
+    // pass on the captured spread snapshot. Total signals leave
+    // companion_spread_* null. Only fires when companion_spread_outcome
+    // is currently NULL (un-graded) — same "don't rewrite a graded
+    // signal" guard as the ML grading above.
+    const updateRunline = db.prepare('UPDATE bet_signals SET companion_spread_outcome=?, companion_spread_pnl=? WHERE id=?');
     for (const ex of existing) {
       if (ex.outcome !== 'pending') continue;
       const { outcome, pnl } = calcPnl(
@@ -382,6 +388,16 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         gl.away_score, gl.home_score, gl.market_total, gl.over_price, gl.under_price
       );
       if (outcome !== 'pending') updateSig.run(outcome, pnl, ex.id);
+    }
+    // Independent loop for runline grading — only ML signals participate,
+    // and we re-check companion_spread_outcome separately so a row whose
+    // ML grading already landed in a prior pass can still pick up its
+    // runline grade now that this PR's columns exist.
+    for (const ex of existing) {
+      if (ex.signal_type !== 'ML') continue;
+      if (ex.companion_spread_outcome != null && ex.companion_spread_outcome !== 'pending') continue;
+      const r = calcRunlinePnl(ex.signal_side, ex.companion_spread_line, ex.companion_spread_price, gl.away_score, gl.home_score);
+      if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, ex.id);
     }
     return;
   }
@@ -395,6 +411,22 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     const { outcome, pnl } = (gl.away_score != null)
       ? calcPnl({type:sig.type, side:sig.side, marketLine:sig.type==='ML'?(sig.side==='away'?gl.market_away_ml:gl.market_home_ml):gl.market_total, over_price:gl.over_price, under_price:gl.under_price}, gl.away_score, gl.home_score, gl.market_total)
       : { outcome: 'pending', pnl: 0 };
+    // Step 2 runline companion: snapshot the spread for ML signals,
+    // null for Total. Side-of-signal picks the matching half of the
+    // game_log spread pair (the spread is signed REAL, so 'away' gets
+    // market_away_spread and 'home' gets market_home_spread). Grade at
+    // fire time too if scores are already in (rare late re-run path).
+    const _spreadLine  = sig.type === 'ML'
+      ? (sig.side === 'away' ? gl.market_away_spread       : gl.market_home_spread)       : null;
+    const _spreadPrice = sig.type === 'ML'
+      ? (sig.side === 'away' ? gl.market_away_spread_price : gl.market_home_spread_price) : null;
+    const _spreadSrc   = sig.type === 'ML' ? (gl.market_spread_src || null) : null;
+    let _spreadOutcome = null, _spreadPnl = null;
+    if (sig.type === 'ML' && gl.away_score != null) {
+      const r = calcRunlinePnl(sig.side, _spreadLine, _spreadPrice, gl.away_score, gl.home_score);
+      _spreadOutcome = r.outcome === 'pending' ? null : r.outcome;
+      _spreadPnl     = r.outcome === 'pending' ? null : r.pnl;
+    }
     q.insertSignal.run({
       game_log_id: gl.id,
       game_date: gameRow.game_date,
@@ -413,6 +445,11 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       outcome,
       pnl,
       cohort: gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',
+      companion_spread_line:    _spreadLine,
+      companion_spread_price:   _spreadPrice,
+      companion_spread_outcome: _spreadOutcome,
+      companion_spread_pnl:     _spreadPnl,
+      companion_spread_src:     _spreadSrc,
     });
   }
 
@@ -1111,10 +1148,15 @@ async function runScoreJob(dateStr) {
         // Grade ALL locked signals (active + inactive) so P&L is complete
         const signals = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(dateStr, gameId);
         const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
+        // Step 2 runline companion: parallel grading on captured
+        // spread snapshot. ML-only; Total signals never enter this loop.
+        const updateRunline = db.prepare(`UPDATE bet_signals SET companion_spread_outcome=?, companion_spread_pnl=? WHERE id=?`);
+        const _ay = s.awayScore ?? s.away_score;
+        const _hy = s.homeScore ?? s.home_score;
         for (const sig of signals) {
           const { outcome } = calcPnl(
             { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line, bet_line: sig.bet_line },
-            s.awayScore ?? s.away_score, s.homeScore ?? s.home_score, gameRow.market_total
+            _ay, _hy, gameRow.market_total
           );
           // To-win-100 P&L
           let _pnl = 0;
@@ -1135,6 +1177,16 @@ async function runScoreJob(dateStr) {
             }
           }
           updateSignal.run(outcome, parseFloat(_pnl.toFixed(2)), sig.id);
+          // Runline grading runs independently — only for ML signals,
+          // only when the companion outcome is currently un-graded
+          // (NULL or 'pending'), and only when a spread snapshot was
+          // captured at fire time. Pre-Step-2 ML rows have null
+          // companion_spread_line, so calcRunlinePnl returns 'pending'
+          // and the row stays untouched.
+          if (sig.signal_type !== 'ML') continue;
+          if (sig.companion_spread_outcome != null && sig.companion_spread_outcome !== 'pending') continue;
+          const r = calcRunlinePnl(sig.signal_side, sig.companion_spread_line, sig.companion_spread_price, _ay, _hy);
+          if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, sig.id);
         }
         gamesUpdated++;
       }
