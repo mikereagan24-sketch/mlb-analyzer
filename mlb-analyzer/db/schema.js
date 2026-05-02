@@ -434,6 +434,35 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_home_ml INTEGER"); }
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_total REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_computed_at TEXT"); } catch(e) {}
 
+// One-shot Phase 2 flag flip. Sets use_opener_logic='true' (string;
+// getSettings coerces to boolean) and stamps opener_logic_enabled_at
+// with the wall-clock when the flip happened — that timestamp doubles
+// as the idempotency marker. Subsequent deploys see a non-null
+// timestamp and skip; user toggles via /api/settings persist across
+// deploys (this won't override 'false' once a user has set it).
+//
+// Marks the v3 cohort taint boundary: opener-led games before the
+// timestamp ran on the standard model; after, they run on the
+// opener-aware path. Useful for future "ROI on opener-led games
+// before vs after this deploy" analysis.
+try {
+  const enabledAt = db.prepare(
+    "SELECT value FROM app_settings WHERE key='opener_logic_enabled_at'"
+  ).get();
+  if (!enabledAt) {
+    db.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('use_opener_logic', 'true') " +
+      "ON CONFLICT(key) DO UPDATE SET value='true'"
+    ).run();
+    db.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('opener_logic_enabled_at', datetime('now'))"
+    ).run();
+    console.log('[settings] use_opener_logic flipped to true on deploy at ' + new Date().toISOString());
+  }
+} catch (e) {
+  console.warn('[migration] opener-logic flip failed (non-fatal): ' + e.message);
+}
+
 // pitcher_game_log richer capture (PR A of bulk-guy heuristic refinement).
 // Statsapi's boxscore exposes innings, batters faced, and a gameStarted
 // flag — we previously stored only pitches_thrown. The new columns let

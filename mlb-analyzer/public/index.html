@@ -421,6 +421,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Share of pitcher-side wOBA attributed to the bullpen. SP + Bullpen auto-pair to 1.0 on edit.">Bullpen wOBA</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1" oninput="pairSpBullpen('relief')"></div>
       <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains RHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs RHB</label><div style="display:flex;gap:6px;flex:1"><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Strong</span><input type="number" id="s-bp-strong-r" step="0.01" min="0" max="1" oninput="pairBpWeights('r','strong')"></div><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Weak</span><input type="number" id="s-bp-weak-r" step="0.01" min="0" max="1" oninput="pairBpWeights('r','weak')"></div></div></div>
       <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains LHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs LHB</label><div style="display:flex;gap:6px;flex:1"><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Strong</span><input type="number" id="s-bp-strong-l" step="0.01" min="0" max="1" oninput="pairBpWeights('l','strong')"></div><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Weak</span><input type="number" id="s-bp-weak-l" step="0.01" min="0" max="1" oninput="pairBpWeights('l','weak')"></div></div></div>
+      <!-- Opener-led games (Phase 2). Used only when is_opener_game_X=1 with bulk-guy identified. Sum must = 1.00. Standard SP/bullpen weights above apply to non-opener games. -->
+      <div class="setting-section-header" style="margin:12px 0 4px;font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;" title="Used only for opener-led games (is_opener_game_X=1 with bulk-guy identified). Sum must = 1.00. Standard SP/bullpen weights above apply to non-opener games.">Opener-led games</div>
+      <div class="setting-row"><label title="Opener weight in pitching component for opener-led games. Default 0.15 ≈ 1 inning of 9 plus high-leverage premium. Sum of opener+bulk+leftover must equal 1.00.">Opener wOBA</label><input type="number" id="s-opener-pit-weight" step="0.01" min="0.05" max="0.30" style="flex:1"></div>
+      <div class="setting-row"><label title="Bulk-guy weight in opener-led games. Default 0.60 ≈ 5 innings of 9 plus workhorse share. Sum of opener+bulk+leftover must equal 1.00.">Bulk-guy wOBA</label><input type="number" id="s-bulk-pit-weight" step="0.01" min="0.40" max="0.80" style="flex:1"></div>
+      <div class="setting-row"><label title="Leftover bullpen weight in opener-led games. Default 0.25 ≈ 3 innings of 9 (later, lower-leverage). Sum of opener+bulk+leftover must equal 1.00.">Leftover bullpen wOBA</label><input type="number" id="s-opener-relief-pit-weight" step="0.01" min="0.10" max="0.40" style="flex:1"></div>
       <div class="setting-section-header" style="margin:12px 0 4px;font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;">Formula parameters</div>
       <div class="setting-row"><label title="League-average bullpen wOBA used when no roster data is available. Applied at RELIEF_PIT_WEIGHT% of pitcher side exposure.">Bullpen avg wOBA</label><input type="number" id="s-bullpen-avg" step="0.001" min="0.200" max="0.450"></div>
       <div class="setting-row"><label title="The wOBA value subtracted before scaling to run expectancy. Lower = more runs generated from same wOBA. Default: 0.230 (league floor).">wOBA baseline</label><input type="number" id="s-woba-baseline" step="0.001" min="0.150" max="0.300"></div>
@@ -2030,6 +2035,9 @@ const _SETTINGS_SCHEMA_ID_MAP = {
   sp_pit_weight: 's-sp-pit-weight', relief_pit_weight: 's-relief-pit-weight',
   bp_strong_weight_r: 's-bp-strong-r', bp_weak_weight_r: 's-bp-weak-r',
   bp_strong_weight_l: 's-bp-strong-l', bp_weak_weight_l: 's-bp-weak-l',
+  opener_pit_weight: 's-opener-pit-weight',
+  bulk_pit_weight: 's-bulk-pit-weight',
+  opener_relief_pit_weight: 's-opener-relief-pit-weight',
   bullpen_avg: 's-bullpen-avg', woba_baseline: 's-woba-baseline',
   pyth_exp: 's-pyth-exp', tot_slope: 's-tot-slope',
   wp_clamp_lo: 's-wp-clamp-lo', wp_clamp_hi: 's-wp-clamp-hi',
@@ -2106,18 +2114,27 @@ function _checkSettingsInvariants(){
       } else if (def.invariantMsg && def.dependsOn && def.dependsOn.length) {
         // Sum-to-1 vs lt/gt invariants — both encoded in invariantMsg text.
         // Replay the common shapes locally for UX feedback only.
-        const dep = def.dependsOn[0];
-        const depVal = snapshot[dep];
-        if (Number.isFinite(depVal)) {
-          const msg = def.invariantMsg;
-          if (/must equal 1\.0/.test(msg)) {
-            if (Math.abs(n + depVal - 1.0) >= 0.02) invalidMsg = def.invariantMsg;
-          } else if (/must be less than/.test(msg)) {
-            // The dep is the smaller side per our schema authoring convention
-            // (e.g. wp_clamp_lo < wp_clamp_hi: invariant lives on wp_clamp_hi
-            // and depends on wp_clamp_lo). So expect depVal < n.
-            if (!(depVal < n)) invalidMsg = def.invariantMsg;
+        const msg = def.invariantMsg;
+        if (/must equal 1\.0/.test(msg)) {
+          // Generalized N-way sum-to-1: sum the current value plus EVERY
+          // declared dependency. Covers the 2-way pair (sp + relief) and
+          // the 3-way opener split (opener + bulk + leftover) with the
+          // same code. If any dep is missing/blank, defer the check —
+          // the user is mid-edit and we don't want to flash red.
+          let sum = n;
+          let anyMissing = false;
+          for (const d of def.dependsOn) {
+            const dv = snapshot[d];
+            if (!Number.isFinite(dv)) { anyMissing = true; break; }
+            sum += dv;
           }
+          if (!anyMissing && Math.abs(sum - 1.0) >= 0.02) invalidMsg = def.invariantMsg;
+        } else if (/must be less than/.test(msg)) {
+          // The dep is the smaller side per our schema authoring convention
+          // (e.g. wp_clamp_lo < wp_clamp_hi: invariant lives on wp_clamp_hi
+          // and depends on wp_clamp_lo). So expect depVal < n.
+          const depVal = snapshot[def.dependsOn[0]];
+          if (Number.isFinite(depVal) && !(depVal < n)) invalidMsg = def.invariantMsg;
         }
       }
     }
@@ -2161,6 +2178,9 @@ async function loadSettings(){
     set('s-bp-weak-r',       s.bp_weak_weight_r);
     set('s-bp-strong-l',     s.bp_strong_weight_l);
     set('s-bp-weak-l',       s.bp_weak_weight_l);
+    set('s-opener-pit-weight',         s.opener_pit_weight);
+    set('s-bulk-pit-weight',           s.bulk_pit_weight);
+    set('s-opener-relief-pit-weight',  s.opener_relief_pit_weight);
     set('s-bullpen-avg',     s.bullpen_avg);
     set('s-woba-baseline',   s.woba_baseline);
     set('s-pyth-exp',        s.pyth_exp);
@@ -2227,6 +2247,9 @@ async function saveSettings(){
         bp_weak_weight_r:   get('s-bp-weak-r'),
         bp_strong_weight_l: get('s-bp-strong-l'),
         bp_weak_weight_l:   get('s-bp-weak-l'),
+        opener_pit_weight:        get('s-opener-pit-weight'),
+        bulk_pit_weight:          get('s-bulk-pit-weight'),
+        opener_relief_pit_weight: get('s-opener-relief-pit-weight'),
         bullpen_avg:        get('s-bullpen-avg'),
         woba_baseline:      get('s-woba-baseline'),
         pyth_exp:           get('s-pyth-exp'),
