@@ -35,6 +35,29 @@ const ML_SOURCES = [
   '4',   // BetMGM
 ];
 
+// Spread (runline) priority — same Kalshi-first ordering as ML. The user
+// bets exclusively via Robinhood/Kalshi for prediction-market lines, so
+// Kalshi is the primary spread source when available. Prediction markets
+// generally post fewer alt spreads than retail books, so the standard
+// runline (-1.5/+1.5) is more likely to appear cleanly here than on
+// retail; retail still serves as fallback. Mirror of ML_SOURCES — keep
+// these two arrays in sync if either expands.
+const SPREAD_SOURCES = [
+  '105', // Kalshi  ← primary
+  '107', // Polymarket
+  '89',  // Novig
+  '66',  // Prophet Exchange
+  '67',  // Sporttrade
+  '104', // SxBet
+  '52',  // Matchbook
+  // --- below this line is retail fallback only; user does NOT bet these ---
+  '2',   // FanDuel
+  '1',   // DraftKings
+  '86',  // Fanatics
+  '78',  // Bet365
+  '4',   // BetMGM
+];
+
 // Total priority: same logic. Prediction markets / exchanges are thinner on
 // totals than on ML, so retail fallback is more likely to be used here.
 const TOTAL_SOURCES = [
@@ -203,6 +226,27 @@ function isSaneML(price) {
   return Math.abs(n) <= ML_MAX_ABS_PRICE;
 }
 
+// MLB runline is fixed at ±1.5 — this PR only ingests the standard line.
+// Alt spreads (±2.5, ±3.5, etc.) are non-standard handicaps and would
+// poison the snapshot if mixed in; reject anything outside the set.
+// A future PR may add alt-spread support if Mike starts capturing them.
+const MLB_RUNLINE_POINTS = new Set([-1.5, 1.5]);
+
+// Sanity bound for runline prices. Real MLB runline juice rarely exceeds
+// ±300 (e.g. heavy favorite -1.5 at -180 / underdog +1.5 at +150 is the
+// outer band). Reject |price| > 400 to drop the 99900-class sentinel
+// without policing legitimate prices. Same null/non-numeric/zero
+// handling as isSaneML. Tighter than isSaneML since the ML bound (1000)
+// has to accommodate pre-game heavy favorites at -350+.
+const SPREAD_MAX_ABS_PRICE = 400;
+function isSaneSpreadPrice(price) {
+  if (price == null) return false;
+  const n = Number(price);
+  if (!Number.isFinite(n)) return false;
+  if (n === 0) return false;
+  return Math.abs(n) <= SPREAD_MAX_ABS_PRICE;
+}
+
 const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CIN:'cin',CLE:'cle',COL:'col',DET:'det',HOU:'hou',KC:'kc',LAA:'laa',LAD:'lad',MIA:'mia',MIL:'mil',MIN:'min',NYM:'nym',NYY:'nyy',OAK:'ath',ATH:'ath',PHI:'phi',PIT:'pit',SD:'sd',SF:'sf',SEA:'sea',STL:'stl',TB:'tb',TEX:'tex',TOR:'tor',WSH:'was',WAS:'was'};
 
 // Split into a raw-fetch step and a pure-parse step so the snapshot/replay
@@ -297,9 +341,16 @@ function parseUnabatedOdds(data, dateStr) {
   for (const {g, away, home, gameNumber, finalKey} of Object.values(byMatchup)) {
     const lines = g.gameOddsMarketSourcesLines||{};
 
-    // Build bySource for ML (an0 only) and totals (all an values)
+    // Build bySource for ML (an0 only), totals (all an values), and
+    // spread (bt2 — runline). ML only honors an0 because alt MLs aren't
+    // a thing on MLB; totals/spreads scan all an values and pick the
+    // entry that carries real `points`. Spread prefers the entry whose
+    // points value is in MLB_RUNLINE_POINSet so alt spreads (±2.5+)
+    // don't displace the standard ±1.5 — defer the final sanity check
+    // to isSaneSpreadPrice / runline-set membership in the waterfall.
     const bySource = {};      // for ML — an0 only
     const bySourceTot = {};   // for totals — keep entry with real points
+    const bySourceSpread = {}; // for spread — keep entry whose bt2.points is ±1.5
     Object.entries(lines).forEach(([key,val])=>{
       const [si,ms,an]=key.split(':');
       const msId=ms.replace('ms','');
@@ -314,6 +365,19 @@ function parseUnabatedOdds(data, dateStr) {
         if(!bySourceTot[msId]) bySourceTot[msId]={};
         if(!bySourceTot[msId][side] || bySourceTot[msId][side].bt3?.points==null){
           bySourceTot[msId][side]=val;
+        }
+      }
+      // Spread (bt2): keep the entry whose points value is the standard
+      // ±1.5 runline. Books often emit multiple bt2 entries per side
+      // (the standard line plus one or two alts); selecting on the set
+      // means we never accidentally store a -2.5 contract as the runline.
+      if(val.bt2?.points!=null && MLB_RUNLINE_POINTS.has(val.bt2.points)){
+        if(!bySourceSpread[msId]) bySourceSpread[msId]={};
+        // Only overwrite a previous entry when the new one is on the
+        // standard runline — already gated above, but the explicit
+        // guard makes intent obvious if MLB_RUNLINE_POINTS ever expands.
+        if(!bySourceSpread[msId][side] || !MLB_RUNLINE_POINTS.has(bySourceSpread[msId][side].bt2?.points)){
+          bySourceSpread[msId][side]=val;
         }
       }
     });
@@ -504,11 +568,83 @@ function parseUnabatedOdds(data, dateStr) {
       break;
     }
 
+    // SPREAD (runline ±1.5): walk SPREAD_SOURCES priority list. Rules
+    // for accepting a source (all must pass, else fall through):
+    //   - Both sides have bt2 entries (skip one-sided)
+    //   - Both bt2 entries pass isLiveContract (overrideType / peg flags)
+    //   - Both points values are in MLB_RUNLINE_POINTS (±1.5 only —
+    //     reject alts here even though bySourceSpread already filtered;
+    //     defensive)
+    //   - Sides mirror: away.points === -home.points (catches feed bugs
+    //     where two sources of one side somehow wrote both as +1.5)
+    //   - Both prices pass isSaneSpreadPrice (|price| ≤ 400, no zero,
+    //     no 99900-class sentinel)
+    let awaySpread=null, homeSpread=null,
+        awaySpreadPrice=null, homeSpreadPrice=null,
+        spreadSrc=null, spreadMsId=null;
+    for (const msId of SPREAD_SOURCES) {
+      const s = bySourceSpread[msId];
+      if (!s) continue;
+      const aBt2 = s?.away?.bt2, hBt2 = s?.home?.bt2;
+      if (!aBt2 || !hBt2) continue;
+      if (!isLiveContract(aBt2) || !isLiveContract(hBt2)) {
+        if (aBt2.overrideType === 'disabled' || hBt2.overrideType === 'disabled' ||
+            aBt2.includePeg === false || hBt2.includePeg === false) {
+          console.log('[unabated] '+away+'-'+home+': rejected disabled spread from src '+(SOURCE_NAMES[msId]||msId)+' (away.overrideType='+aBt2?.overrideType+'/peg='+aBt2?.includePeg+', home.overrideType='+hBt2?.overrideType+'/peg='+hBt2?.includePeg+')');
+        }
+        continue;
+      }
+      if (!MLB_RUNLINE_POINTS.has(aBt2.points) || !MLB_RUNLINE_POINTS.has(hBt2.points)) continue;
+      if (aBt2.points !== -hBt2.points) {
+        console.log('[unabated] '+away+'-'+home+': rejected non-mirror spread from src '+(SOURCE_NAMES[msId]||msId)+' (away-pts='+aBt2.points+', home-pts='+hBt2.points+')');
+        continue;
+      }
+      const aP = aBt2.americanPrice ?? null;
+      const hP = hBt2.americanPrice ?? null;
+      if (!isSaneSpreadPrice(aP) || !isSaneSpreadPrice(hP)) {
+        if (aP != null || hP != null) {
+          console.log('[unabated] '+away+'-'+home+': rejected insane spread juice from src '+(SOURCE_NAMES[msId]||msId)+' (away='+aP+', home='+hP+')');
+        }
+        continue;
+      }
+      awaySpread = aBt2.points;
+      homeSpread = hBt2.points;
+      awaySpreadPrice = aP;
+      homeSpreadPrice = hP;
+      spreadSrc = SOURCE_NAMES[msId] || msId;
+      spreadMsId = msId;
+      break;
+    }
+    // Fallback sweep — any source in bySourceSpread (not just the
+    // priority list) with a coherent mirror pair on the standard
+    // runline. Same strict guard.
+    if (awaySpread == null) {
+      for (const [msId, s] of Object.entries(bySourceSpread)) {
+        if (!s) continue;
+        const aBt2 = s?.away?.bt2, hBt2 = s?.home?.bt2;
+        if (!aBt2 || !hBt2) continue;
+        if (!isLiveContract(aBt2) || !isLiveContract(hBt2)) continue;
+        if (!MLB_RUNLINE_POINTS.has(aBt2.points) || !MLB_RUNLINE_POINTS.has(hBt2.points)) continue;
+        if (aBt2.points !== -hBt2.points) continue;
+        const aP = aBt2.americanPrice ?? null;
+        const hP = hBt2.americanPrice ?? null;
+        if (!isSaneSpreadPrice(aP) || !isSaneSpreadPrice(hP)) continue;
+        awaySpread = aBt2.points;
+        homeSpread = hBt2.points;
+        awaySpreadPrice = aP;
+        homeSpreadPrice = hP;
+        spreadSrc = 'src'+msId+'(fb)';
+        spreadMsId = msId;
+        break;
+      }
+    }
+
     console.log('[unabated] '+away+'-'+home
       +': ml='+awayML+'/'+homeML+'('+mlSrc+')'
       +' ml-xcheck='+xcheckAwayML+'/'+xcheckHomeML+'('+xcheckSrc+')'
       +' tot='+total+'@'+overPrice+'/'+underPrice+'('+totalSrc+')'
-      +' tot-xcheck='+xcheckTotal+'@'+xcheckOverPrice+'/'+xcheckUnderPrice+'('+xcheckTotalSrc+')');
+      +' tot-xcheck='+xcheckTotal+'@'+xcheckOverPrice+'/'+xcheckUnderPrice+'('+xcheckTotalSrc+')'
+      +' spread='+awaySpread+'@'+awaySpreadPrice+'/'+homeSpread+'@'+homeSpreadPrice+'('+spreadSrc+')');
     results.push({
       game_id: finalKey,
       game_number: gameNumber,
@@ -519,6 +655,13 @@ function parseUnabatedOdds(data, dateStr) {
       xcheck_total:xcheckTotal, xcheck_over_price:xcheckOverPrice, xcheck_under_price:xcheckUnderPrice,
       ml_source:mlSrc||null, xcheck_ml_source:xcheckSrc||null,
       total_source:totalSrc||null, xcheck_total_source:xcheckTotalSrc||null,
+      // Step 1 of runline ingest (PR #spread-ingest). Step 2 will copy
+      // these onto bet_signals at fire time; Step 3 surfaces ROI.
+      market_away_spread: awaySpread,
+      market_home_spread: homeSpread,
+      market_away_spread_price: awaySpreadPrice,
+      market_home_spread_price: homeSpreadPrice,
+      market_spread_src: spreadSrc || null,
       source:'unabated',
     });
   }
