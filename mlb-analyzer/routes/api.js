@@ -2387,6 +2387,45 @@ router.get('/health/:date', (req, res) => {
       }
     }
 
+    // ---- check 7c: opener_model_populated ----
+    // Phase 2 always computes the opener-aware shadow alongside the
+    // standard model when a side is opener-led. Warn when a game has
+    // is_opener_game_X=1 but opener_model_X is NULL — that means
+    // processGameSignals didn't reach the shadow write, which can happen
+    // if the lineup was incomplete at the last run, or if the opener-
+    // aware run was suppressed for a reason the standard run wasn't.
+    // Severity 'warn' only — the standard model still feeds signals, so
+    // this is a data-coverage issue, not a betting-correctness issue.
+    {
+      const stale = db.prepare(
+        "SELECT game_id, " +
+        "  is_opener_game_away, is_opener_game_home, " +
+        "  opener_model_away_ml, opener_model_home_ml, opener_model_computed_at " +
+        "FROM game_log " +
+        "WHERE game_date = ? AND COALESCE(is_removed, 0) = 0 " +
+        "  AND ((is_opener_game_away = 1 AND opener_model_away_ml IS NULL) " +
+        "    OR (is_opener_game_home = 1 AND opener_model_home_ml IS NULL))"
+      ).all(date);
+      if (stale.length === 0) {
+        checks.push({ id: 'opener_model_populated', status: 'pass', severity: 'warn',
+          message: 'All opener-led sides have opener_model_* populated' });
+      } else {
+        const detail = stale.map(s => {
+          const sides = [];
+          if (s.is_opener_game_away === 1 && s.opener_model_away_ml == null) sides.push('away');
+          if (s.is_opener_game_home === 1 && s.opener_model_home_ml == null) sides.push('home');
+          return s.game_id + '(' + sides.join(',') + ')';
+        }).join(', ');
+        checks.push({
+          id: 'opener_model_populated',
+          status: 'warn',
+          severity: 'warn',
+          message: stale.length + ' opener-led side(s) missing opener_model_*: ' + detail,
+          affected_games: cap(stale.map(s => s.game_id)),
+        });
+      }
+    }
+
     // ---- check 8: cron_health (any job that hasn't successfully run in 25h) ----
     {
       const window25h = "datetime('now','-25 hours')";

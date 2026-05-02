@@ -102,12 +102,27 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings)
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 
-function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP) {
+// `openerOpts` (Phase 2) is null for the standard 2-way pitching split.
+// When non-null, it carries { bulkVsL, bulkVsR, openerPitW, bulkPitW,
+// openerReliefPitW } and the function uses a 3-way split instead:
+//   pitW = openerWoba × openerPitW + bulkWoba × bulkPitW + bullpenWoba × openerReliefPitW
+// Per-side opt-in — runModel passes openerOpts only for sides where
+// is_opener_game_<side>=1 AND bulk_guy_<side> is set, so the other side
+// of the same game continues running the standard split.
+function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP, openerOpts) {
   const eff = effHand(batter.hand, pitcherHand);
-  const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
-  const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
   const pitWvsBatter = eff === 'L' ? pitWvsL : pitWvsR;
-  const pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW;
+  let pitW;
+  if (openerOpts) {
+    const bulkVsBatter = eff === 'L' ? openerOpts.bulkVsL : openerOpts.bulkVsR;
+    pitW = pitWvsBatter * openerOpts.openerPitW
+         + bulkVsBatter * openerOpts.bulkPitW
+         + bullpenWoba  * openerOpts.openerReliefPitW;
+  } else {
+    const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
+    const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
+    pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW;
+  }
   const spW  = (SP_WEIGHT  != null) ? SP_WEIGHT  : 0.77;
   const relW = (RELIEF_WEIGHT != null) ? RELIEF_WEIGHT : 0.23;
   const vsStart = pitcherHand === 'R' ? (batter.vsRHP ?? BAT_DFLT_START) : (batter.vsLHP ?? BAT_DFLT_START);
@@ -170,7 +185,15 @@ function impliedP(ml) {
  * @property {number|null} hML — model home American ML
  * @property {string} [_suppressed] — present iff model invalid; values: 'incomplete_lineup'
  */
-function runModel(game, wobaIdx, settings) {
+function runModel(game, wobaIdx, settings, mode) {
+  // mode === 'opener_aware' enables the 3-way pitching split for any side
+  // with is_opener_game_<side>=1 AND bulk_guy_<side> set. Sides without
+  // opener data keep the standard 2-way split inside the same call. Any
+  // other value (incl. undefined) runs the standard model end-to-end.
+  // Caller (processGameSignals) computes BOTH and persists each pair so
+  // the use_opener_logic flag can swap which one feeds getSignals
+  // without re-running the model.
+  if (mode == null) mode = 'standard';
   // Empty/incomplete lineups → suppress. Model run estimates require a
   // full 9-batter lineup to integrate over PA_WEIGHTS; with 0 or partial
   // lineups, the per-batter EW loop produces 0 contributions, aWp/hWp
@@ -230,6 +253,47 @@ function runModel(game, wobaIdx, settings) {
   const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT, MIN_BF, settings);
   const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT, MIN_BF, settings);
 
+  // Phase 2: per-side opener opts. is_opener_game_<side>=1 means that
+  // team is using an opener — the listed SP is the opener and bulk_guy_*
+  // names the bulk-guy. The opts object is only built when mode is
+  // 'opener_aware' AND both flags are present; perBatterEW falls back to
+  // the standard 2-way split when opts is null. Side-asymmetry: in the
+  // awayLU loop, away batters face HOME pitching, so awayLU consumes
+  // opts built from the home side's opener data (and vice versa).
+  const OPENER_PIT_W   = num(settings.OPENER_PIT_WEIGHT,         0.15);
+  const BULK_PIT_W     = num(settings.BULK_PIT_WEIGHT,           0.60);
+  const OPENER_REL_W   = num(settings.OPENER_RELIEF_PIT_WEIGHT,  0.25);
+  const UNK_PIT_WOBA   = num(settings.UNKNOWN_PITCHER_WOBA,      0.335);
+
+  // Build opener opts for a given side. Returns null when the side isn't
+  // opener-led, or when mode != 'opener_aware'. Logs a warn when the
+  // bulk-guy isn't in the wOBA index (newly-promoted swingman, etc.) so
+  // we can detect data-coverage gaps in production.
+  const buildOpenerOpts = (side) => {
+    if (mode !== 'opener_aware') return null;
+    const flag    = side === 'away' ? game.is_opener_game_away : game.is_opener_game_home;
+    const bulkSp  = side === 'away' ? game.bulk_guy_away       : game.bulk_guy_home;
+    if (flag !== 1 || !bulkSp) return null;
+    const team    = side === 'away' ? game.away_team : game.home_team;
+    // Bulk-guy hand isn't carried on game_log; fallback default 'R' is
+    // only used when the wOBA index misses entirely (in which case we
+    // overwrite both vsLHB/vsRHB with UNKNOWN_PITCHER_WOBA below).
+    const bulkW = getPitcherWoba(wobaIdx, bulkSp, 'R', team, W_PROJ, W_ACT, MIN_BF, settings);
+    let bulkVsL = bulkW.vsLHB;
+    let bulkVsR = bulkW.vsRHB;
+    if (bulkW.source === 'fallback') {
+      console.warn('[opener-model] ' + (game.game_id || '?') + '/' + side
+        + ': bulk-guy ' + bulkSp + ' not in wOBA index — using UNKNOWN_PITCHER_WOBA=' + UNK_PIT_WOBA);
+      bulkVsL = UNK_PIT_WOBA;
+      bulkVsR = UNK_PIT_WOBA;
+    }
+    return { bulkVsL, bulkVsR, openerPitW: OPENER_PIT_W, bulkPitW: BULK_PIT_W, openerReliefPitW: OPENER_REL_W };
+  };
+  // Away batters face home pitching → away-side perBatterEW uses HOME's
+  // opener opts. Mirror for home.
+  const homeOpenerOpts = buildOpenerOpts('home');
+  const awayOpenerOpts = buildOpenerOpts('away');
+
   const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA,settings)}));
   const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA,settings)}));
 
@@ -252,9 +316,9 @@ function runModel(game, wobaIdx, settings) {
   const relPitW = RELIEF_PIT_WEIGHT;
 
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
