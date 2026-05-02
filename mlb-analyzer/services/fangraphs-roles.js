@@ -16,13 +16,18 @@ const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { normName } = require('../utils/names');
 
+// FanGraphs RosterResource uses hyphenated slugs for multi-word team
+// nicknames — TOR=blue-jays, BOS=red-sox, CWS=white-sox. Single-word
+// nicknames stay un-hyphenated. Any future expansion team or rebrand
+// (e.g. CLE Guardians ←→ Indians historical lookups) needs to follow
+// the same convention; verify by hitting the live URL before adding.
 const TEAM_SLUGS = {
-  LAA: 'angels',  HOU: 'astros',     ATH: 'athletics', TOR: 'bluejays',  ATL: 'braves',
+  LAA: 'angels',  HOU: 'astros',     ATH: 'athletics', TOR: 'blue-jays', ATL: 'braves',
   MIL: 'brewers', STL: 'cardinals',  CHC: 'cubs',      ARI: 'diamondbacks', LAD: 'dodgers',
   SF:  'giants',  CLE: 'guardians',  SEA: 'mariners',  MIA: 'marlins',   NYM: 'mets',
   WAS: 'nationals', BAL: 'orioles',  SD:  'padres',    PHI: 'phillies',  PIT: 'pirates',
-  TEX: 'rangers', TB:  'rays',       BOS: 'redsox',    CIN: 'reds',      COL: 'rockies',
-  KC:  'royals',  DET: 'tigers',     MIN: 'twins',     CWS: 'whitesox',  NYY: 'yankees',
+  TEX: 'rangers', TB:  'rays',       BOS: 'red-sox',   CIN: 'reds',      COL: 'rockies',
+  KC:  'royals',  DET: 'tigers',     MIN: 'twins',     CWS: 'white-sox', NYY: 'yankees',
 };
 
 const BROWSER_HEADERS = {
