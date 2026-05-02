@@ -33,6 +33,29 @@ const SETTINGS_SCHEMA = {
     invariantMsg: 'bp_strong_weight_l + bp_weak_weight_l must equal 1.0',
     help: 'L-bullpen weak-arm weight vs LHB.' },
 
+  // --- Opener-aware pitching split (Phase 2) -------------------------------
+  // Activated only when use_opener_logic=true AND a side has
+  // is_opener_game_<side>=1 + bulk_guy_<side>. The three weights replace
+  // sp_pit_weight / relief_pit_weight on that side; non-opener sides keep
+  // the standard split. Defaults: 0.15 / 0.60 / 0.25 = opener / bulk /
+  // leftover bullpen, calibrated as ~1 IP / ~5 IP / ~3 IP of a 9-inning
+  // team day. Sum-to-1 invariant lives on bulk_pit_weight.
+  opener_pit_weight: { type: 'number', min: 0.05, max: 0.30, default: 0.15,
+    help: 'Opener weight in pitching component for opener-led games. Default 0.15 ≈ 1 inning of 9 plus high-leverage premium.' },
+  bulk_pit_weight: { type: 'number', min: 0.40, max: 0.80, default: 0.60,
+    invariant: (v, all) => Math.abs(Number(all.opener_pit_weight) + v + Number(all.opener_relief_pit_weight) - 1.0) < 0.02,
+    invariantMsg: 'opener_pit_weight + bulk_pit_weight + opener_relief_pit_weight must equal 1.0',
+    help: 'Bulk-guy weight in opener-led games. Default 0.60 ≈ 5 innings of 9 plus workhorse share.' },
+  opener_relief_pit_weight: { type: 'number', min: 0.10, max: 0.40, default: 0.25,
+    help: 'Leftover bullpen weight in opener-led games. Default 0.25 ≈ 3 innings of 9 (later, lower-leverage).' },
+  // Phase 2 feature flag — DEFAULT FALSE. When false, opener-led games
+  // run the standard SP path (opener as the SP) and the opener-aware
+  // values are computed in shadow only. Flipping to true is the moment
+  // v3 cohort taints; do not enable until shadow comparison has run for
+  // ≥1 week and the diffs look right.
+  use_opener_logic: { type: 'boolean', default: false,
+    help: 'Phase 2: enable opener-aware pitching split for opener-led games. Default false; opener_model_* is shadowed when off, swapped with model_* when on.' },
+
   // --- SP/RP split (model side) --------------------------------------------
   sp_weight: { type: 'number', min: 0.5, max: 0.95, default: 0.80,
     help: 'SP weight in run estimation.' },
@@ -148,6 +171,15 @@ function validateSetting(key, value, allSettings) {
       if (!def.invariant(n, merged)) return { ok: false, error: def.invariantMsg };
     }
     return { ok: true, value: n };
+  }
+  if (def.type === 'boolean') {
+    // app_settings stores TEXT, so accept the common encodings — true/false,
+    // 1/0, and the strings 'true'/'false'/'1'/'0'. Coerce to a real boolean
+    // for the validator's return value; storage downstream stringifies.
+    if (typeof value === 'boolean') return { ok: true, value };
+    if (value === 'true' || value === '1' || value === 1) return { ok: true, value: true };
+    if (value === 'false' || value === '0' || value === 0) return { ok: true, value: false };
+    return { ok: false, error: key + ' must be boolean (true/false/1/0), got: ' + value };
   }
   return { ok: true, value };
 }

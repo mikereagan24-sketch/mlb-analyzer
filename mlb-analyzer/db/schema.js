@@ -423,6 +423,17 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEG
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
 
+// Phase 2 shadow-mode columns. Phase 2's opener-aware run estimation is
+// always computed when a side is opener-led (regardless of the
+// use_opener_logic flag) and persisted here. The flag selects which
+// pair (model_* vs opener_model_*) feeds getSignals — the other
+// stays as the comparison shadow. Lets us watch divergence for ≥1 week
+// before flipping the flag and tainting v3.
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_away_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_home_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_total REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_computed_at TEXT"); } catch(e) {}
+
 // pitcher_game_log richer capture (PR A of bulk-guy heuristic refinement).
 // Statsapi's boxscore exposes innings, batters faced, and a gameStarted
 // flag — we previously stored only pitches_thrown. The new columns let

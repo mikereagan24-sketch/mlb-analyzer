@@ -108,6 +108,18 @@ function getSettings() {
     PIT_DFLT_R_VS_RHB: num('pit_dflt_r_vs_rhb', 0.295),
     PIT_DFLT_L_VS_LHB: num('pit_dflt_l_vs_lhb', 0.285),
     PIT_DFLT_L_VS_RHB: num('pit_dflt_l_vs_rhb', 0.330),
+    // Phase 2 opener-aware weights + flag. The flag is stored as TEXT
+    // in app_settings (the table is TEXT-only) so we coerce to a real
+    // boolean here; processGameSignals then routes signals to whichever
+    // model output the flag selects.
+    OPENER_PIT_WEIGHT:        num('opener_pit_weight',         _d('opener_pit_weight', 0.15)),
+    BULK_PIT_WEIGHT:          num('bulk_pit_weight',           _d('bulk_pit_weight', 0.60)),
+    OPENER_RELIEF_PIT_WEIGHT: num('opener_relief_pit_weight',  _d('opener_relief_pit_weight', 0.25)),
+    USE_OPENER_LOGIC: (function() {
+      const raw = s['use_opener_logic'];
+      if (raw == null) return _d('use_opener_logic', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -291,7 +303,23 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // Starter projected IP (null when no projection uploaded)
     awaySpProjIP: awaySpProjIP, homeSpProjIP: homeSpProjIP,
   };
-  const model = runModel(game, wobaIdx, settings);
+  const stdModel = runModel(game, wobaIdx, settings, 'standard');
+  // Phase 2 shadow: compute the opener-aware model whenever a side is
+  // opener-led, regardless of the use_opener_logic flag. Persisted into
+  // opener_model_* alongside the standard model_* so we can compare
+  // outputs side-by-side for ≥1 week before flipping the flag.
+  const hasOpenerSide = (game.is_opener_game_away === 1 && !!game.bulk_guy_away)
+                     || (game.is_opener_game_home === 1 && !!game.bulk_guy_home);
+  const openerModel = hasOpenerSide
+    ? runModel(game, wobaIdx, settings, 'opener_aware')
+    : null;
+  const useOpenerLogic = settings && settings.USE_OPENER_LOGIC === true;
+  // Pick which model output feeds getSignals. Standard is the default;
+  // when the flag is on AND a non-suppressed opener-aware result exists,
+  // signals fire off opener-aware instead.
+  const model = (useOpenerLogic && openerModel && !openerModel._suppressed)
+    ? openerModel
+    : stdModel;
   // Empty/partial lineups → runModel returned a sentinel. Skip ALL DB
   // writes downstream: model_* would be null (and .toFixed would throw),
   // and signals would crash on null marketLine math. Locked bet_lines
@@ -301,6 +329,12 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const suppressed = !!(model && model._suppressed);
   if (suppressed) {
     console.log('[model] Suppressed signals for ' + gameRow.game_id + ': ' + model._suppressed_detail);
+  }
+  if (hasOpenerSide && openerModel && !openerModel._suppressed && stdModel && !stdModel._suppressed) {
+    console.log('[opener-model] ' + gameRow.game_id
+      + ' std=' + stdModel.aML + '/' + stdModel.hML + '@' + stdModel.estTot.toFixed(2)
+      + ' opener=' + openerModel.aML + '/' + openerModel.hML + '@' + openerModel.estTot.toFixed(2)
+      + ' active=' + (useOpenerLogic ? 'opener' : 'std'));
   }
   // When suppressed, emit empty signals — the bet_signals lifecycle below
   // still runs (DELETE unlocked, deactivate locked-but-no-longer-qualifying)
@@ -314,14 +348,25 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   // already communicate the suppression state to the UI).
   const isProjected = !gameRow.away_lineup_status || gameRow.away_lineup_status === 'projected';
   const hasProjSnapshot = gameRow.proj_model_away_ml != null;
+  // model_* always stores the STANDARD model output regardless of which
+  // model fed signals. Phase 2 stores opener-aware separately into
+  // opener_model_* below. The flag only swaps which one drives signals,
+  // not which writes to which column.
   if (!suppressed && isProjected) {
     // Lineup still projected — keep proj snapshot current
     db.prepare(`UPDATE game_log SET proj_model_away_ml=?, proj_model_home_ml=?, proj_model_total=?, model_away_ml=?, model_home_ml=?, model_total=?, proj_market_away_ml=COALESCE(proj_market_away_ml, ?), proj_market_home_ml=COALESCE(proj_market_home_ml, ?), proj_market_total=COALESCE(proj_market_total, ?), updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
-      .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.market_away_ml||null, gameRow.market_home_ml||null, gameRow.market_total||null, gameRow.game_date, gameRow.game_id);
+      .run(stdModel.aML, stdModel.hML, parseFloat(stdModel.estTot.toFixed(2)), stdModel.aML, stdModel.hML, parseFloat(stdModel.estTot.toFixed(2)), gameRow.market_away_ml||null, gameRow.market_home_ml||null, gameRow.market_total||null, gameRow.game_date, gameRow.game_id);
   } else if (!suppressed) {
     // Confirmed lineup — proj snapshot is frozen, update current model only
     db.prepare(`UPDATE game_log SET model_away_ml=?, model_home_ml=?, model_total=?, updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
-      .run(model.aML, model.hML, parseFloat(model.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
+      .run(stdModel.aML, stdModel.hML, parseFloat(stdModel.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
+  }
+  // Phase 2 shadow persistence. Independent of model_* — fires whenever
+  // the opener-aware run produced a non-suppressed output. Doesn't touch
+  // any column other than opener_model_* + opener_model_computed_at.
+  if (!suppressed && openerModel && !openerModel._suppressed) {
+    db.prepare(`UPDATE game_log SET opener_model_away_ml=?, opener_model_home_ml=?, opener_model_total=?, opener_model_computed_at=datetime('now'), updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
+      .run(openerModel.aML, openerModel.hML, parseFloat(openerModel.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
