@@ -297,8 +297,19 @@ router.get('/pit-proj-ip', (req, res) => {
 // Display state is recomputed lazily here so the UI reflects time-of-read,
 // not time-of-write — a game whose cron didn't run for 4h shows 'expired'
 // even though the stored row still says 'fresh' from the last successful run.
-const _QUALITY_GRACE_MS = 60 * 60 * 1000;       // 1h
-const _QUALITY_EXPIRED_MS = 3 * 60 * 60 * 1000; // 3h
+//
+// Thresholds are tied to the odds cron cadence (8/11/15/17 PT — gaps of
+// 2-4h between pulls). Earlier values (1h fresh / 3h expired) were
+// structurally guaranteed to fire warn between every pull, regardless
+// of cron health, which made data_quality_summary uninformative. Now:
+//   < 2.5h ago → fresh             (one cron cycle has run)
+//   < 5h ago   → stale_within_grace (one missed pull — investigate but
+//                                    not yet failing)
+//   ≥ 5h ago   → expired           (two consecutive missed pulls — real
+//                                    signal that cron is broken)
+// Adjust both halves together if the odds cron schedule changes.
+const _QUALITY_GRACE_MS = 2.5 * 60 * 60 * 1000; // 2.5h — > longest 2h gap, absorbs the 11→15 PT 4h gap as stale
+const _QUALITY_EXPIRED_MS = 5 * 60 * 60 * 1000; // 5h — anything older means a cron pull was actually missed
 function _ageMs(isoLike, now) {
   if (!isoLike) return null;
   // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no Z.
@@ -2314,10 +2325,14 @@ router.get('/health/:date', (req, res) => {
         const t = Date.parse(norm);
         return isNaN(t) ? null : now - t;
       };
+      // Reuses the module-level _QUALITY_GRACE_MS / _QUALITY_EXPIRED_MS
+      // constants so the per-game UI pill (driven by _classifyAge above)
+      // and this aggregated health-check warn stay aligned. Threshold
+      // tuning happens in one place at the top of the file.
       const _classify = ms => {
         if (ms == null) return 'never_loaded';
-        if (ms < 60*60*1000) return 'fresh';
-        if (ms < 3*60*60*1000) return 'stale_within_grace';
+        if (ms < _QUALITY_GRACE_MS) return 'fresh';
+        if (ms < _QUALITY_EXPIRED_MS) return 'stale_within_grace';
         return 'expired';
       };
       const _fmtAge = ms => {
