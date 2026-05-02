@@ -1470,6 +1470,51 @@ function injectEditButtons(games, date) {
     if (spans.length >= 1) spans[0].after(ba); else gsp.prepend(ba);
     if (spans.length >= 2) spans[1].after(bh); else gsp.appendChild(bh);
 
+    // Opener badge — Phase 1 data layer surface. Renders one badge per
+    // side when detectOpeners flagged is_opener_game_{side}=1. Badge text
+    // is "Opener: {sp_name} → {bulk_guy or BULK GUY UNKNOWN}". When bulk
+    // is unknown, a small "Set" button prompts for the name and POSTs to
+    // /api/opener-override, then refreshes the slate.
+    var openerBadge = function(side) {
+      var isOpener = side === 'away' ? g.is_opener_game_away : g.is_opener_game_home;
+      if (!isOpener) return null;
+      var openerName = side === 'away' ? g.away_sp : g.home_sp;
+      var bulk       = side === 'away' ? g.bulk_guy_away : g.bulk_guy_home;
+      var b = document.createElement('span');
+      b.className = 'opener-badge';
+      b.style.cssText = 'display:inline-block;margin-left:6px;padding:2px 6px;background:#ffe082;color:#5d4037;border-radius:8px;font-size:11px;font-weight:600;line-height:1.4;';
+      b.textContent = 'Opener: ' + (openerName || '?') + ' → ' + (bulk || 'BULK GUY UNKNOWN');
+      if (!bulk) {
+        var setBtn = document.createElement('button');
+        setBtn.textContent = 'Set';
+        setBtn.title = 'Identify the bulk-guy for this opener';
+        setBtn.style.cssText = 'margin-left:4px;font-size:10px;padding:1px 6px;cursor:pointer;border:1px solid #5d4037;background:#fff8e1;border-radius:4px;';
+        setBtn.onclick = function() {
+          var name = prompt('Bulk-guy name for ' + g.game_id + ' (' + side + ' side):');
+          if (!name) return;
+          fetch('/api/opener-override', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              game_date: date, game_id: g.game_id, side: side,
+              is_opener: 1, bulk_guy: name.trim(), planned_batters: 4,
+              set_by: 'ui', reason: 'manual bulk-guy ID',
+            })
+          }).then(function(r){ return r.json(); }).then(function(){
+            if (typeof loadGamesFromDB === 'function') loadGamesFromDB();
+            else location.reload();
+          });
+        };
+        b.appendChild(document.createTextNode(' '));
+        b.appendChild(setBtn);
+      }
+      return b;
+    };
+    var aBadge = openerBadge('away');
+    var hBadge = openerBadge('home');
+    if (aBadge && spans.length >= 1) spans[0].after(aBadge);
+    if (hBadge && spans.length >= 2) spans[1].after(hBadge);
+
     // Roof status badge for retractable roof parks
     const RETRACTABLE_PARKS={
     'mil':{'name':'American Family','openAbove':60},

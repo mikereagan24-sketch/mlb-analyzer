@@ -282,6 +282,23 @@ db.exec(`
     set_at TEXT NOT NULL DEFAULT (datetime('now')),
     reason TEXT
   );
+
+  -- Per-game opener override. Wins over the auto-detection in
+  -- detectOpeners. side ∈ ('away','home'). is_opener and planned_batters
+  -- are stored as integers; bulk_guy is the pitcher name to write into
+  -- bulk_guy_{side}. set_by + reason are free-form for debugging.
+  CREATE TABLE IF NOT EXISTS opener_override (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('away','home')),
+    is_opener INTEGER NOT NULL,
+    bulk_guy TEXT,
+    planned_batters INTEGER,
+    set_at TEXT NOT NULL DEFAULT (datetime('now')),
+    set_by TEXT,
+    reason TEXT,
+    PRIMARY KEY (game_date, game_id, side)
+  );
 `);
 
 
@@ -381,6 +398,30 @@ try { db.exec("ALTER TABLE cron_log ADD COLUMN games_skipped INTEGER DEFAULT 0")
 try { db.exec("ALTER TABLE cron_log ADD COLUMN games_skipped_ids TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE cron_log ADD COLUMN skip_reasons TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE cron_log ADD COLUMN duration_ms INTEGER"); } catch(e) {}
+
+// Opener-detection columns. Phase 1 is purely additive: detectOpeners
+// writes these per side after lineups are known, the API returns them,
+// and the UI shows a badge — but no run-estimation code reads them yet.
+// Phase 2 (behind a settings flag, separate PR) is what will actually
+// change model behavior. Splitting here so a v3 cohort flip can be
+// scheduled cleanly.
+//   is_opener_game_{side}        — 1 when the listed SP is functioning
+//                                  as an opener (FG says RP, recent
+//                                  outings are short)
+//   bulk_guy_{side}              — pitcher name expected to take the
+//                                  bulk after the opener; null when
+//                                  detection couldn't pick one
+//   opener_planned_batters_{side} — typically 3-6, default 4 when no
+//                                  better signal is available
+//   opener_detected_at           — ISO timestamp of the most recent
+//                                  detection pass for the row
+try { db.exec("ALTER TABLE game_log ADD COLUMN is_opener_game_away INTEGER DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN is_opener_game_home INTEGER DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
 // Historical backfill: rows created before this migration default to G1.
 try { db.exec("UPDATE game_log SET game_number = 1 WHERE game_number IS NULL"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
@@ -689,6 +730,24 @@ q.setRoleOverride = db.prepare(
 q.deleteRoleOverride = db.prepare("DELETE FROM pitcher_role_override WHERE mlb_id=?");
 q.getRoleOverride    = db.prepare("SELECT * FROM pitcher_role_override WHERE mlb_id=?");
 q.listRoleOverrides  = db.prepare("SELECT * FROM pitcher_role_override ORDER BY set_at DESC");
+
+q.setOpenerOverride = db.prepare(
+  "INSERT INTO opener_override (game_date, game_id, side, is_opener, bulk_guy, planned_batters, set_at, set_by, reason) " +
+  "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?) " +
+  "ON CONFLICT(game_date, game_id, side) DO UPDATE SET " +
+  "  is_opener=excluded.is_opener, bulk_guy=excluded.bulk_guy, " +
+  "  planned_batters=excluded.planned_batters, set_at=excluded.set_at, " +
+  "  set_by=excluded.set_by, reason=excluded.reason"
+);
+q.deleteOpenerOverride = db.prepare(
+  "DELETE FROM opener_override WHERE game_date=? AND game_id=? AND side=?"
+);
+q.getOpenerOverride = db.prepare(
+  "SELECT * FROM opener_override WHERE game_date=? AND game_id=? AND side=?"
+);
+q.listOpenerOverridesByDate = db.prepare(
+  "SELECT * FROM opener_override WHERE game_date=? ORDER BY game_id, side"
+);
 
 q.upsertPitcherGameLog = db.prepare(
   `INSERT OR REPLACE INTO pitcher_game_log
