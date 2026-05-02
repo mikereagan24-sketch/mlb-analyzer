@@ -1277,6 +1277,36 @@ router.delete('/backtest/reset', (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// Diagnostic: last ~10 pitcher_game_log outings for each requested
+// mlb_id, with the PR A columns surfaced. Use to spot-check that the
+// backfill landed innings_pitched / batters_faced / was_starter /
+// outing_type cleanly.
+//   GET /api/debug/pitcher-usage?ids=669947,607259&limit=10
+// Returns { <mlb_id>: { count, rows: [...] }, … }.
+router.get('/debug/pitcher-usage', (req, res) => {
+  try {
+    const idsRaw = (req.query.ids || '').toString();
+    const ids = idsRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n));
+    if (!ids.length) {
+      return res.status(400).json({ error: 'ids query param required (comma-separated mlb_ids)' });
+    }
+    const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+    const stmt = db.prepare(
+      "SELECT game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown, " +
+      "       innings_pitched, batters_faced, was_starter, outing_type " +
+      "FROM pitcher_game_log " +
+      "WHERE pitcher_mlb_id = ? " +
+      "ORDER BY game_date DESC LIMIT ?"
+    );
+    const out = {};
+    for (const id of ids) {
+      const rows = stmt.all(id, limit);
+      out[id] = { count: rows.length, rows };
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/debug/woba-keys', (req, res) => {
   const q2 = req.query.q || '';
   const idx = getWobaIndex();
