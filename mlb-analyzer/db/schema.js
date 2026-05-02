@@ -422,6 +422,25 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) 
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
+
+// pitcher_game_log richer capture (PR A of bulk-guy heuristic refinement).
+// Statsapi's boxscore exposes innings, batters faced, and a gameStarted
+// flag — we previously stored only pitches_thrown. The new columns let
+// PR B's scored ranking distinguish "long relief 4+ IP" (bulk-guy
+// signature) from "5-day rotation 6+ IP" (regular SP signature).
+//   innings_pitched — REAL (parsed from "6.1" → 6.333... etc)
+//   batters_faced   — INTEGER
+//   was_starter     — 0/1 (statsapi's pitching.gamesStarted)
+//   outing_type     — derived: 'start' (was_starter=1),
+//                     'long_relief' (was_starter=0 AND IP >= 3),
+//                     'short_relief' (otherwise). Stored so callers can
+//                     filter without re-deriving on every read.
+// No model behavior change in this PR — purely capture. PR B will
+// consume these columns.
+try { db.exec("ALTER TABLE pitcher_game_log ADD COLUMN innings_pitched REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE pitcher_game_log ADD COLUMN batters_faced INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE pitcher_game_log ADD COLUMN was_starter INTEGER DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE pitcher_game_log ADD COLUMN outing_type TEXT"); } catch(e) {}
 // Historical backfill: rows created before this migration default to G1.
 try { db.exec("UPDATE game_log SET game_number = 1 WHERE game_number IS NULL"); } catch(e) {}
 // Rename legacy consensus_* columns on pre-upgrade DBs. The book-vs-book
@@ -749,10 +768,17 @@ q.listOpenerOverridesByDate = db.prepare(
   "SELECT * FROM opener_override WHERE game_date=? ORDER BY game_id, side"
 );
 
+// 10 positional args: game_date, team, pitcher_name, pitcher_mlb_id,
+// pitches_thrown, innings_pitched, batters_faced, was_starter,
+// outing_type, appeared. INSERT OR REPLACE on the (game_date, team,
+// pitcher_name) unique index — re-running fetchPitcherUsage for a date
+// overwrites any partial row cleanly.
 q.upsertPitcherGameLog = db.prepare(
   `INSERT OR REPLACE INTO pitcher_game_log
-   (game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown, appeared, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+   (game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown,
+    innings_pitched, batters_faced, was_starter, outing_type,
+    appeared, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
 );
 
 // Projected starter IP (from Steamer or manual override).

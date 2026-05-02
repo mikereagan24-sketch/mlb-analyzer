@@ -870,8 +870,27 @@ async function runLineupJob(dateStr) {
   }
 }
 
-// Fetch pitcher usage (pitch counts) from MLB Stats API for a given date.
-// Returns array of { team, pitcher_name, pitcher_mlb_id, pitches_thrown }.
+// Convert MLB Stats API's innings-pitched string ("6.1" = 6⅓ IP, "6.2"
+// = 6⅔ IP) to a real number. Handles edge cases:
+//   "0.0", "" / null / undefined → 0
+//   "6.0" → 6, "6.1" → 6.333…, "6.2" → 6.667
+//   anything not matching the X.D pattern falls back to parseFloat
+function parseInningsString(s) {
+  if (s == null) return 0;
+  const str = String(s).trim();
+  if (!str) return 0;
+  const m = str.match(/^(\d+)(?:\.(\d))?$/);
+  if (!m) {
+    const f = parseFloat(str);
+    return isNaN(f) ? 0 : f;
+  }
+  const whole = parseInt(m[1], 10);
+  const partial = m[2] ? parseInt(m[2], 10) : 0;
+  return whole + (partial === 1 ? 1/3 : partial === 2 ? 2/3 : 0);
+}
+
+// Returns array of { team, pitcher_name, pitcher_mlb_id, pitches_thrown,
+// innings_pitched, batters_faced, was_starter, outing_type }.
 async function fetchPitcherUsage(dateStr) {
   const fetch = require('node-fetch');
   const [y,m,d] = dateStr.split('-');
@@ -903,7 +922,28 @@ async function fetchPitcherUsage(dateStr) {
           const pitching = (player.stats && player.stats.pitching) || {};
           const pitches = pitching.numberOfPitches != null ? pitching.numberOfPitches
                         : (pitching.pitchesThrown != null ? pitching.pitchesThrown : 0);
-          out.push({ team: teamAbbr, pitcher_name: name, pitcher_mlb_id: pid, pitches_thrown: Number(pitches)||0 });
+          // PR A additions: capture IP, BF, GS-flag and derive an outing_type
+          // tag so PR B can score candidates without re-deriving on read.
+          // outing_type: 'start' when statsapi credited the gameStarted flag
+          // (covers regular SPs *and* openers — the bulk-guy detection
+          // discriminates via separate signals), 'long_relief' when the
+          // pitcher came on in relief but worked 3+ IP (the bulk-guy
+          // signature), 'short_relief' otherwise.
+          const ip = parseInningsString(pitching.inningsPitched);
+          const bf = Number(pitching.battersFaced) || 0;
+          const wasStarter = pitching.gamesStarted ? 1 : 0;
+          const outingType = wasStarter ? 'start'
+                           : (ip >= 3 ? 'long_relief' : 'short_relief');
+          out.push({
+            team: teamAbbr,
+            pitcher_name: name,
+            pitcher_mlb_id: pid,
+            pitches_thrown: Number(pitches) || 0,
+            innings_pitched: ip,
+            batters_faced: bf,
+            was_starter: wasStarter,
+            outing_type: outingType,
+          });
         }
       }
     } catch(e) {
@@ -911,6 +951,95 @@ async function fetchPitcherUsage(dateStr) {
     }
   }
   return out;
+}
+
+// One-shot: backfill innings_pitched / batters_faced / was_starter /
+// outing_type on pitcher_game_log rows from the last 60 days. Statsapi
+// has had these fields all along; we just weren't reading them. PR B's
+// scored bulk-guy heuristic needs ~30+ days of long-relief / start
+// patterns to discriminate, so 60 days covers v3 + the pre-tuning era
+// that PR B will lean on.
+//
+// Idempotency:
+//   - app_settings flag 'pitcher_usage_backfill_done' (string 'true')
+//     short-circuits the entire function — set on successful completion.
+//   - row-level: a date is skipped when ANY pitcher_game_log row for
+//     that date already has innings_pitched IS NOT NULL. So a deploy
+//     interrupted mid-backfill resumes cleanly on the next start, and
+//     ongoing runScoreJob captures (which write the new columns
+//     directly) keep the backfill from re-fetching boxscores it
+//     doesn't need.
+//
+// Throttle: 200ms between dates so we're not hammering statsapi for
+// 60 boxscore fans-out in a single tight loop. Per-game errors are
+// already swallowed inside fetchPitcherUsage.
+async function runPitcherUsageBackfill() {
+  const flagRow = db.prepare(
+    "SELECT value FROM app_settings WHERE key='pitcher_usage_backfill_done'"
+  ).get();
+  if (flagRow && flagRow.value === 'true') {
+    console.log('[pitcher-usage-backfill] flag set — skipping');
+    return { success: true, skipped: true, reason: 'flag_set' };
+  }
+
+  const dates = [];
+  const today = new Date();
+  for (let i = 1; i <= 60; i++) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+
+  console.log('[pitcher-usage-backfill] starting — 60-day window, ' + dates.length + ' dates');
+  let datesProcessed = 0, datesAlreadyDone = 0, datesFailed = 0, rowsWritten = 0;
+  for (const date of dates) {
+    const exists = db.prepare(
+      "SELECT 1 FROM pitcher_game_log WHERE game_date = ? AND innings_pitched IS NOT NULL LIMIT 1"
+    ).get(date);
+    if (exists) { datesAlreadyDone++; continue; }
+
+    try {
+      const usage = await fetchPitcherUsage(date);
+      for (const u of usage) {
+        q.upsertPitcherGameLog.run(
+          date, u.team, u.pitcher_name, u.pitcher_mlb_id,
+          u.pitches_thrown, u.innings_pitched, u.batters_faced,
+          u.was_starter, u.outing_type, 1
+        );
+        rowsWritten++;
+      }
+      datesProcessed++;
+      if (usage.length > 0) {
+        console.log('[pitcher-usage-backfill] ' + date + ': ' + usage.length + ' pitcher rows');
+      }
+    } catch (e) {
+      datesFailed++;
+      console.warn('[pitcher-usage-backfill] ' + date + ' failed: ' + e.message);
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // Set the done flag only if we didn't have any date-level failures.
+  // Partial backfills shouldn't flip the flag — the next deploy will
+  // resume on the still-empty dates via the row-level guard above.
+  if (datesFailed === 0) {
+    db.prepare(
+      "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('pitcher_usage_backfill_done', 'true')"
+    ).run();
+    console.log('[pitcher-usage-backfill] done — flag set');
+  } else {
+    console.warn('[pitcher-usage-backfill] '+datesFailed+' date(s) failed — flag NOT set, will retry on next start');
+  }
+  console.log('[pitcher-usage-backfill] processed='+datesProcessed
+    +', already_done='+datesAlreadyDone+', failed='+datesFailed
+    +', rows_written='+rowsWritten);
+  return {
+    success: datesFailed === 0,
+    dates_processed: datesProcessed,
+    dates_already_done: datesAlreadyDone,
+    dates_failed: datesFailed,
+    rows_written: rowsWritten,
+  };
 }
 
 async function runScoreJob(dateStr) {
@@ -970,7 +1099,11 @@ async function runScoreJob(dateStr) {
     try {
       const usage = await fetchPitcherUsage(dateStr);
       for (const u of usage) {
-        q.upsertPitcherGameLog.run(dateStr, u.team, u.pitcher_name, u.pitcher_mlb_id, u.pitches_thrown, 1);
+        q.upsertPitcherGameLog.run(
+          dateStr, u.team, u.pitcher_name, u.pitcher_mlb_id,
+          u.pitches_thrown, u.innings_pitched, u.batters_faced,
+          u.was_starter, u.outing_type, 1
+        );
         pitcherRecords++;
       }
       console.log('[score-job] Recorded ' + pitcherRecords + ' pitcher appearances for ' + dateStr);
@@ -1871,4 +2004,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getSettings, startCronJobs };
