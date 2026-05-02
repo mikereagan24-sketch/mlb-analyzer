@@ -1747,7 +1747,7 @@ function identifyBulkGuy(team, date, openerName) {
       c.score = 0; c.signals = ['no_mlb_id']; c._tieKey = ''; continue;
     }
     const recent30   = recent30Stmt.all(c.mlb_id, thirtyDaysAgo, date);
-    const mostRecent = mostRecentStmt.get(c.mlb_id);
+    const mostRecent = mostRecentStmt.get(c.mlb_id, date);
     const last5      = last5Stmt.all(c.mlb_id, date);
 
     let score = 0;
