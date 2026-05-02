@@ -434,6 +434,29 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_home_ml INTEGER"); }
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_total REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_computed_at TEXT"); } catch(e) {}
 
+// Runline spread ingest (Step 1 of 3). Pure data layer — Step 2 will
+// snapshot these onto bet_signals at fire time, Step 3 will surface
+// runline ROI in the backtest tab. No model logic touches these
+// columns yet.
+//   market_{away,home}_spread        — signed REAL, almost always
+//                                      ±1.5 for MLB runline (away
+//                                      negative when favorite, etc.)
+//   market_{away,home}_spread_price  — INTEGER American odds (e.g.
+//                                      -140, +120). Treats 0 as null
+//                                      via the cleanup at write site.
+//   market_{away,home}_spread_quality — 'fresh' / 'stale' / null,
+//                                      matches the per-field freshness
+//                                      pattern used elsewhere.
+//   market_spread_src                — source string (e.g. 'kalshi'),
+//                                      mirrors ml_source / total_source.
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_away_spread REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_home_spread REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_away_spread_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_home_spread_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_away_spread_quality TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_home_spread_quality TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_spread_src TEXT"); } catch(e) {}
+
 // One-shot Phase 2 flag flip. Sets use_opener_logic='true' (string;
 // getSettings coerces to boolean) and stamps opener_logic_enabled_at
 // with the wall-clock when the flip happened — that timestamp doubles

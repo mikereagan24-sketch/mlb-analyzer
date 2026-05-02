@@ -1619,6 +1619,18 @@ function processOddsArray(dateStr, oddsRaw, settings) {
     // a transient null isn't masked. Pre-lock provenance labels (ml_source,
     // xcheck_ml_source, xcheck_total_source) keep COALESCE so a single null
     // fetch on a near-locked game doesn't lose the correct source label.
+    // Step 1 runline ingest (PR #spread-ingest): write market_*_spread,
+    // *_spread_price, *_spread_quality, market_spread_src in the same
+    // odds-write transaction. Quality flips to 'fresh' on a non-null
+    // write and falls back to null otherwise so a transient miss doesn't
+    // mask staleness. The 0→null cleanup mirrors the lineup-job pattern
+    // for ML — an American-odds value of 0 doesn't exist; treat as null.
+    const _awaySpread       = o.market_away_spread != null ? o.market_away_spread : null;
+    const _homeSpread       = o.market_home_spread != null ? o.market_home_spread : null;
+    const _awaySpreadPrice  = (o.market_away_spread_price != null && o.market_away_spread_price !== 0) ? o.market_away_spread_price : null;
+    const _homeSpreadPrice  = (o.market_home_spread_price != null && o.market_home_spread_price !== 0) ? o.market_home_spread_price : null;
+    const _awaySpreadQual   = (_awaySpread != null && _awaySpreadPrice != null) ? 'fresh' : null;
+    const _homeSpreadQual   = (_homeSpread != null && _homeSpreadPrice != null) ? 'fresh' : null;
     db.prepare(`UPDATE game_log SET
       market_away_ml=?, market_home_ml=?,
       market_total=?, over_price=?, under_price=?, total_source=?,
@@ -1629,6 +1641,10 @@ function processOddsArray(dateStr, oddsRaw, settings) {
       xcheck_over_price=?,
       xcheck_under_price=?,
       xcheck_total_source=COALESCE(?, xcheck_total_source),
+      market_away_spread=?, market_home_spread=?,
+      market_away_spread_price=?, market_home_spread_price=?,
+      market_away_spread_quality=?, market_home_spread_quality=?,
+      market_spread_src=COALESCE(?, market_spread_src),
       odds_flagged=?, odds_flag_reason=?,
       odds_quality='fresh', odds_quality_at=datetime('now'),
       updated_at=datetime('now')
@@ -1643,6 +1659,10 @@ function processOddsArray(dateStr, oddsRaw, settings) {
            o.xcheck_over_price != null ? o.xcheck_over_price : null,
            o.xcheck_under_price != null ? o.xcheck_under_price : null,
            o.xcheck_total_source || null,
+           _awaySpread, _homeSpread,
+           _awaySpreadPrice, _homeSpreadPrice,
+           _awaySpreadQual, _homeSpreadQual,
+           o.market_spread_src || null,
            oddsFlagged, oddsReason,
            dateStr, o.game_id);
     const gameRow = q.getGameById.get(dateStr, o.game_id);

@@ -1012,11 +1012,26 @@ function renderGameResult(g){
   const totEdge=sigs.find(s=>s.signal_type==='Total');
   const vc=sig=>sig?({'3★':'s3','2★':'s2','1★':'s1'}[sig.signal_label]||''):'';
   const vd=sig=>{if(!sig)return'<span style="color:var(--text2);font-size:9px">—</span>';const col={'3★':'#4477cc','2★':'var(--green)','1★':'var(--yellow)'}[sig.signal_label]||'var(--yellow)';return'<span style="color:'+col+';font-size:9px;font-weight:500">'+sig.signal_label.toUpperCase()+'</span>';};
+  // Spread (runline) row — Step 1 ingest from Unabated. Display only;
+  // Mike isn't betting these yet. Shows "—" for missing sides rather
+  // than hiding the row, so a glance reveals which games carry spread
+  // data. Format: "Spread: AWAY -1.5 (-140) / HOME +1.5 (+120) · src"
+  const fmtPts = pts => pts == null ? '—' : (pts > 0 ? '+' : '') + pts.toFixed(1);
+  const aSpread = fmtPts(g.market_away_spread);
+  const hSpread = fmtPts(g.market_home_spread);
+  const aSpreadPrice = g.market_away_spread_price != null ? fmtML(g.market_away_spread_price) : '—';
+  const hSpreadPrice = g.market_home_spread_price != null ? fmtML(g.market_home_spread_price) : '—';
+  const spreadSrc = g.market_spread_src ? ' · ' + g.market_spread_src : '';
+  const spreadRow = '<div style="font-size:10px;color:var(--text2);text-align:center;margin-top:4px">'
+    + 'Spread: ' + g.away_team + ' ' + aSpread + ' (' + aSpreadPrice + ') / '
+    + g.home_team + ' ' + hSpread + ' (' + hSpreadPrice + ')' + spreadSrc
+    + '</div>';
   return'<div class="result-grid">'+
     '<div class="rbox '+vc(aEdge)+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
     '<div class="rbox '+vc(totEdge)+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
     '<div class="rbox '+vc(hEdge)+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
     '</div>'+
+    spreadRow +
     (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
 }
 
