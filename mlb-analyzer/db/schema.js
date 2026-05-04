@@ -1021,7 +1021,7 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
   ).all(dataKey, '%'+teamAbbr);
 };
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF) => {
   if (unknownWoba == null) unknownWoba = 0.335;
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
@@ -1055,10 +1055,17 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
 
   const W_PROJ = (wProj != null) ? wProj : 0.65;
   const W_ACT = (wAct != null) ? wAct : 0.35;
+  // Gate actuals at minBF — matches the gate in services/model.js blendWoba
+  // (used for SPs and bulk pitchers). Below threshold, actuals don't have
+  // enough signal to override projection. Defaults to 100 inline so
+  // standalone callers (scripts/) that don't thread minBF still get the
+  // same behavior as getPitcherWoba's default.
+  const minSample = (minBF != null) ? minBF : 100;
   const pitchers = bullpenProj.map(proj => {
     const pName = normName(proj.player_name.replace(/ [A-Z]+$/, ''));
     const actMatch = fuzzyLookup(actIdx, pName, teamAbbr);
-    const woba = (actMatch && actMatch.woba)
+    const useAct = actMatch && actMatch.woba && actMatch.sample_size >= minSample;
+    const woba = useAct
       ? W_PROJ * proj.woba + W_ACT * actMatch.woba
       : proj.woba;
     return { name: pName, woba, sample: proj.sample_size, fallback: false };
@@ -1097,7 +1104,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF) => {
   // Blend the team's bullpen-allowed wOBA using per-handedness strong/weak
   // manager-assumption weights. For each batter in the opposing lineup the
   // manager is assumed to deploy `strongWt` share of the better-matched
@@ -1105,8 +1112,8 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
   // the R/L split tuned separately because righty vs lefty matchup leverage
   // differs in practice. Fallback (no lineup) averages R and L weights.
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   if (!vsRHB && !vsLHB) return null;
