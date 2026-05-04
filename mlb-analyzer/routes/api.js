@@ -1991,6 +1991,9 @@ router.get('/debug/bullpen-report', (req, res) => {
     const BP_SL = settings.BP_STRONG_WEIGHT_L != null ? Number(settings.BP_STRONG_WEIGHT_L) : 0.35;
     const BP_WL = settings.BP_WEAK_WEIGHT_L   != null ? Number(settings.BP_WEAK_WEIGHT_L)   : 0.65;
     const UNKNOWN_PITCHER_WOBA = settings.UNKNOWN_PITCHER_WOBA != null ? Number(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
+    // MIN_BF gate mirrors q.getBullpenWoba so the displayed report number
+    // matches what the model actually feeds into perBatterEW for the game.
+    const MIN_BF = settings.MIN_BF != null ? Number(settings.MIN_BF) : 100;
 
     const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
     const idx = {};
@@ -2012,10 +2015,14 @@ router.get('/debug/bullpen-report', (req, res) => {
       }
       return null;
     };
-    const blend = (proj, act) => {
-      if (proj != null && act != null) return parseFloat((W_PROJ*proj + W_ACT*act).toFixed(4));
+    // actObj is the full {woba, sample} lookup result (or null) so the gate
+    // can compare actuals sample size against MIN_BF. Below threshold the
+    // actuals are dropped — same behavior as q.getBullpenWoba.
+    const blend = (proj, actObj) => {
+      const useAct = actObj && actObj.woba != null && actObj.sample >= MIN_BF;
+      if (proj != null && useAct) return parseFloat((W_PROJ*proj + W_ACT*actObj.woba).toFixed(4));
       if (proj != null) return parseFloat(proj.toFixed(4));
-      if (act != null) return parseFloat(act.toFixed(4));
+      if (useAct) return parseFloat(actObj.woba.toFixed(4));
       return null;
     };
     const mean = (arr) => arr.length ? parseFloat((arr.reduce((s,x)=>s+x,0)/arr.length).toFixed(4)) : null;
@@ -2057,8 +2064,8 @@ router.get('/debug/bullpen-report', (req, res) => {
         const projR = lookup('pit-proj-rhb', p.player_name, teamU);
         const actL  = lookup('pit-act-lhb',  p.player_name, teamU);
         const actR  = lookup('pit-act-rhb',  p.player_name, teamU);
-        let blended_vs_lhb = blend(projL?.woba, actL?.woba);
-        let blended_vs_rhb = blend(projR?.woba, actR?.woba);
+        let blended_vs_lhb = blend(projL?.woba, actL);
+        let blended_vs_rhb = blend(projR?.woba, actR);
         const isSP = !!spLast && (pNorm === spNorm || pLast === spLast);
         const fatigue_reasons = fatigueByExact[pNorm] || null;
         const fatigued_flag = !!fatigue_reasons;
