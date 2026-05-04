@@ -42,8 +42,12 @@
 
 const express = require('express');
 const multer = require('multer');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
-const { q, db } = require('../db/schema');
+const { q, db, DB_PATH } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
@@ -2699,6 +2703,93 @@ router.get('/health/:date', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message, stack: err.stack });
   }
+});
+
+// ─── Admin: download production DB snapshot ─────────────────────────────
+// Pulls a consistent SQLite snapshot of the live DB and streams it to the
+// caller as a binary attachment. Read-only. Authenticated by a shared
+// secret in the X-Admin-Token header that must equal process.env
+// .DB_DOWNLOAD_TOKEN exactly. No fallback / default — if the env var is
+// unset, the endpoint returns 503 so a forgotten config can never expose
+// the DB. No write counterpart, no UI button, no wildcard mount —
+// explicit single path so the surface area stays auditable.
+//
+// Why the SQLite backup API (db.backup) instead of streaming the live
+// file directly: SQLite uses WAL, and a naive read mid-write produces
+// a corrupted snapshot at the destination. db.backup() cooperates with
+// the writer to produce a consistent snapshot in a side file, which we
+// then stream and unlink.
+router.get('/admin/download-db', async (req, res) => {
+  const stamp = new Date().toISOString();
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const expected = process.env.DB_DOWNLOAD_TOKEN;
+  if (!expected) {
+    console.log('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=missing-token-config');
+    return res.status(503).json({ error: 'DB download not configured (set DB_DOWNLOAD_TOKEN env var)' });
+  }
+  const provided = req.get('X-Admin-Token') || '';
+  // Constant-time comparison so a length-mismatch or first-byte diff
+  // doesn't leak via response timing. timingSafeEqual requires equal
+  // lengths, so we length-check first; the length-check itself is
+  // observable but only leaks the *length* of the expected token, which
+  // is randomly generated and not sensitive.
+  let ok = false;
+  if (provided.length === expected.length) {
+    try {
+      ok = crypto.timingSafeEqual(Buffer.from(provided, 'utf8'), Buffer.from(expected, 'utf8'));
+    } catch (e) { ok = false; }
+  }
+  if (!ok) {
+    console.log('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=auth-fail');
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  // Snapshot to a per-request temp file, then stream + unlink.
+  const tempPath = path.join(os.tmpdir(), 'mlb-backup-' + Date.now() + '-' + process.pid + '.db');
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    fs.unlink(tempPath, (err) => {
+      if (err && err.code !== 'ENOENT') {
+        console.warn('[admin-download-db] temp cleanup failed: ' + err.message);
+      }
+    });
+  };
+
+  try {
+    await db.backup(tempPath);
+  } catch (e) {
+    console.error('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=backup-error msg=' + e.message);
+    cleanup();
+    if (!res.headersSent) return res.status(500).json({ error: 'backup failed: ' + e.message });
+    return;
+  }
+
+  const fnameDate = stamp.slice(0, 10); // YYYY-MM-DD
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="mlb-' + fnameDate + '.db"');
+  // Content-Length helps the client show progress; stat() can't fail
+  // here since db.backup() just produced the file.
+  try {
+    const stat = fs.statSync(tempPath);
+    res.setHeader('Content-Length', String(stat.size));
+  } catch (e) { /* non-fatal — stream still works without Content-Length */ }
+
+  const stream = fs.createReadStream(tempPath);
+  stream.on('end', () => {
+    console.log('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=success path=' + DB_PATH);
+    cleanup();
+  });
+  stream.on('error', (e) => {
+    console.error('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=stream-error msg=' + e.message);
+    if (!res.headersSent) res.status(500).json({ error: 'stream failed' });
+    else res.destroy(e);
+    cleanup();
+  });
+  // If the client aborts mid-download, still cleanup the temp file.
+  res.on('close', () => { if (!res.writableEnded) cleanup(); });
+  stream.pipe(res);
 });
 
 module.exports = router;
