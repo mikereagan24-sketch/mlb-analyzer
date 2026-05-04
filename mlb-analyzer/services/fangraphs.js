@@ -226,4 +226,4 @@ async function refreshAllFanGraphs(cookieValue) {
   return results;
 }
 
-module.exports = { refreshAllFanGraphs };
+module.exports = { refreshAllFanGraphs, fetchActualSplit };
