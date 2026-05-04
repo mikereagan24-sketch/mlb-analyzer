@@ -2087,6 +2087,11 @@ router.get('/debug/bullpen-report', (req, res) => {
           proj_vs_rhb: projR?.woba ?? null,
           act_vs_lhb:  actL?.woba  ?? null,
           act_vs_rhb:  actR?.woba  ?? null,
+          // Sample sizes are surfaced so the report consumer can see whether
+          // the MIN_BF gate fired: when sample < MIN_BF, blended_vs_* equals
+          // proj_vs_* and the actuals contribution is dropped.
+          act_sample_lhb: actL?.sample ?? null,
+          act_sample_rhb: actR?.sample ?? null,
           blended_vs_lhb,
           blended_vs_rhb,
           fatigued: fatigued_flag,
