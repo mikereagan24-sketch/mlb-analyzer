@@ -2912,6 +2912,56 @@ router.get('/admin/diagnose-fg-actuals-threshold', async (req, res) => {
   }
 });
 
+// ─── Admin: dump raw FG pit-act-rhb response as CSV ─────────────────────
+// Calls the production fetchActualSplit(6, 'P', cookie) — the exact same
+// call refreshAllFanGraphs makes for pit-act-rhb — and streams the CSV
+// response straight back. No parsing, no filtering, no toggling. The
+// purpose is to see what FG actually returns so a downstream grep can
+// determine whether a missing pitcher (e.g., Bennett Sousa) is absent
+// at the FG layer or being filtered later by parseCSV / name matching.
+//
+// Auth reuses DB_DOWNLOAD_TOKEN via X-Admin-Token (same pattern as
+// /admin/download-db and /admin/diagnose-fg-actuals-threshold).
+router.get('/admin/dump-fg-actuals-raw', async (req, res) => {
+  const stamp = new Date().toISOString();
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const expected = process.env.DB_DOWNLOAD_TOKEN;
+  if (!expected) {
+    console.log('[dump-fg-raw] ' + stamp + ' ip=' + ip + ' result=missing-token-config');
+    return res.status(503).json({ error: 'Diagnostic not configured (set DB_DOWNLOAD_TOKEN env var)' });
+  }
+  const provided = req.get('X-Admin-Token') || '';
+  let ok = false;
+  if (provided.length === expected.length) {
+    try {
+      ok = crypto.timingSafeEqual(Buffer.from(provided, 'utf8'), Buffer.from(expected, 'utf8'));
+    } catch (e) { ok = false; }
+  }
+  if (!ok) {
+    console.log('[dump-fg-raw] ' + stamp + ' ip=' + ip + ' result=auth-fail');
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const cookieRow = q.getSetting.get('fangraphs_session_cookie');
+  const cookieValue = cookieRow && cookieRow.value ? String(cookieRow.value).trim() : '';
+  if (!cookieValue) {
+    return res.status(400).json({ error: 'fangraphs_session_cookie not configured. Paste from Model tab.' });
+  }
+
+  try {
+    const { fetchActualSplit } = require('../services/fangraphs');
+    const csv = await fetchActualSplit(6, 'P', cookieValue);
+    const rowCount = Math.max(0, csv.split('\n').length - 1);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="pit-act-rhb-raw.csv"');
+    console.log('[dump-fg-raw] ' + stamp + ' ip=' + ip + ' result=success rows=' + rowCount);
+    return res.send(csv);
+  } catch (err) {
+    console.error('[dump-fg-raw] ' + stamp + ' ip=' + ip + ' result=error msg=' + err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
 
 
