@@ -171,14 +171,16 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     strSplitTeams: false,
     dctFilters: [],
     strStatType: 'player',
-    // strAutoPt='false' disables FG's automatic PA-qualifying threshold so the
-    // response includes low-usage relievers. The model has its own MIN_BF gate
-    // (services/model.js, default 100) that handles small-sample filtering at
-    // consumption time. Investigation 2026-05-04 found 30-80% of MLB bullpen
-    // tail pitchers were silently absent from pit-act-* rows due to two filters
-    // compounding (FG-side + model-side). Removing the FG-side filter lets the
-    // model gate as designed.
-    strAutoPt: 'false',
+    // strAutoPt is FG's body parameter for the API endpoint at line 11
+    // (ACTUAL_URL). However, that endpoint is not called during normal
+    // operation — actuals ingest happens via a browser bookmarklet that
+    // hits FG's web URL with the analogous `autoPt` query parameter.
+    // fetchActualSplit (and this strAutoPt setting) is reached only by
+    // admin diagnostic endpoints. Kept at 'true' to match what FG would
+    // return to non-authenticated browser sessions; the bookmarklet
+    // independently sets autoPt=false for the actual ingest. See
+    // docs/bookmarklet-actuals.txt for the canonical bookmarklet source.
+    strAutoPt: 'true',
     arrPlayerId: [],
     strPlayerId: 'all',
     strSplitArrPitch: [],
