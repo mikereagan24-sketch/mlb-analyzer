@@ -171,7 +171,14 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     strSplitTeams: false,
     dctFilters: [],
     strStatType: 'player',
-    strAutoPt: 'true',
+    // strAutoPt='false' disables FG's automatic PA-qualifying threshold so the
+    // response includes low-usage relievers. The model has its own MIN_BF gate
+    // (services/model.js, default 100) that handles small-sample filtering at
+    // consumption time. Investigation 2026-05-04 found 30-80% of MLB bullpen
+    // tail pitchers were silently absent from pit-act-* rows due to two filters
+    // compounding (FG-side + model-side). Removing the FG-side filter lets the
+    // model gate as designed.
+    strAutoPt: 'false',
     arrPlayerId: [],
     strPlayerId: 'all',
     strSplitArrPitch: [],
