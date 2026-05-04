@@ -1,0 +1,19 @@
+MLB Analyzer — Actuals Upload Bookmarklet (canonical source)
+=============================================================
+
+This is the bookmarklet Mike uses to refresh actuals from FanGraphs.
+Active in his browser as a saved bookmark; this file is the canonical
+reference so future debugging knows the exact URL parameters being
+sent.
+
+Key parameter: autoPt=false (disables FG's automatic PA-qualifying
+threshold). Required to surface low-usage relievers like Bennett Sousa
+who would otherwise be filtered out, leaving 30-80% of MLB bullpen
+tail pitchers absent from pit-act-* rows.
+
+Usage: paste the entire `javascript:...` line below into the URL
+field of a browser bookmark. To run: navigate to any fangraphs.com
+page, then click the bookmark.
+
+Bookmarklet:
+[BOOKMARKLET HERE — paste the full single-line javascript:... URL from your saved browser bookmark before merging this PR]
