@@ -2,6 +2,23 @@
 // Fallback used when settings doesn't carry a valid PA_WEIGHTS array
 // (should never happen in the Render deploy — getSettings seeds it).
 const PA_WEIGHTS_DEFAULT = [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
+
+// Per-lineup-position batters-faced distributions for opener_aware mode.
+// Index [0] = leadoff, [8] = 9-hole. Sum of OPENER_FACED ≈ 4.5 BF
+// (~1 IP + a couple extra batters); sum of BULK_FACED ≈ 13.5 BF
+// (~4.5 IP). At runtime we convert to per-PA fractions by dividing by
+// PA_WEIGHTS[i]: openerFrac[i] = OPENER_FACED[i]/PA_WEIGHTS[i], same
+// for bulk, with bullpen taking the residual (1 - opener - bulk).
+// In bullpen_game mode (no bulk identified) bulkFrac collapses to 0
+// and bullpen absorbs the bulk slot.
+//
+// Replaces the uniform 0.15/0.60/0.25 split from PR #68. Top-of-order
+// PAs concentrate on the opener; middle innings on the bulk; bottom
+// of order on the bullpen pool. Settable via settings (see
+// OPENER_FACED_DISTRIBUTION / BULK_FACED_DISTRIBUTION reads in
+// runModel) — same shape contract as PA_WEIGHTS.
+const OPENER_FACED_DEFAULT = [1.00, 1.00, 1.00, 0.95, 0.45, 0.20, 0.13, 0.06, 0.00];
+const BULK_FACED_DEFAULT   = [1.30, 1.25, 1.10, 1.55, 1.85, 1.85, 1.65, 1.55, 1.40];
 const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
 const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
 
@@ -102,23 +119,42 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings)
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 
-// `openerOpts` (Phase 2) is null for the standard 2-way pitching split.
-// When non-null, it carries { bulkVsL, bulkVsR, openerPitW, bulkPitW,
-// openerReliefPitW } and the function uses a 3-way split instead:
-//   pitW = openerWoba × openerPitW + bulkWoba × bulkPitW + bullpenWoba × openerReliefPitW
-// Per-side opt-in — runModel passes openerOpts only for sides where
-// is_opener_game_<side>=1 AND bulk_guy_<side> is set, so the other side
-// of the same game continues running the standard split.
-function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP, openerOpts) {
+// `openerOpts` (Phase 2 / per-batter weighting) is null for the standard
+// non-opener path; perBatterEW then runs the existing 2-way SP/RP split
+// against pitWvsL / pitWvsR — bit-identical to pre-opener behavior.
+//
+// When openerOpts is non-null (post-this-PR shape):
+//   { mode: 'opener' | 'bullpen_game',
+//     openerVsL, openerVsR,                  // opener wOBA splits
+//     bulkVsL, bulkVsR,                      // bulk wOBA splits (null in bullpen_game)
+//     bullpenWobaVsL, bullpenWobaVsR,        // pitching team's bullpen splits
+//     perPositionWeights: [{opener,bulk,bullpen}, ...]  // 9 entries
+//   }
+// `lineupPosition` (0-indexed) selects the batter's row in the matrix.
+// The opener / bulk weight at the top of the order reaches ~0.21 / 0.28;
+// at the bottom of the order opener collapses to 0 and bullpen absorbs
+// the rest. Replaces the uniform 0.15/0.60/0.25 split from PR #68.
+//
+// The pitWvsL/pitWvsR positional args are NO LONGER USED on the
+// opener path — opener wOBA reads come from openerOpts.openerVsL/R
+// instead. They still feed the standard non-opener path; non-opener
+// games are untouched by this PR.
+function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP, openerOpts, lineupPosition) {
   const eff = effHand(batter.hand, pitcherHand);
   const pitWvsBatter = eff === 'L' ? pitWvsL : pitWvsR;
   let pitW;
   if (openerOpts) {
-    const bulkVsBatter = eff === 'L' ? openerOpts.bulkVsL : openerOpts.bulkVsR;
-    pitW = pitWvsBatter * openerOpts.openerPitW
-         + bulkVsBatter * openerOpts.bulkPitW
-         + bullpenWoba  * openerOpts.openerReliefPitW;
+    const w = openerOpts.perPositionWeights[lineupPosition] || { opener: 0, bulk: 0, bullpen: 1 };
+    const openerVsBatter  = eff === 'L' ? openerOpts.openerVsL : openerOpts.openerVsR;
+    const bullpenVsBatter = eff === 'L' ? openerOpts.bullpenWobaVsL : openerOpts.bullpenWobaVsR;
+    if (openerOpts.mode === 'bullpen_game') {
+      pitW = openerVsBatter * w.opener + bullpenVsBatter * w.bullpen;
+    } else {
+      const bulkVsBatter = eff === 'L' ? openerOpts.bulkVsL : openerOpts.bulkVsR;
+      pitW = openerVsBatter * w.opener + bulkVsBatter * w.bulk + bullpenVsBatter * w.bullpen;
+    }
   } else {
+    // Standard non-opener path — bit-identical to pre-PR. Do not modify.
     const spPitW  = (SP_PIT_WEIGHT     != null) ? SP_PIT_WEIGHT     : 0.80;
     const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
     pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW;
@@ -260,15 +296,65 @@ function runModel(game, wobaIdx, settings, mode) {
   // the standard 2-way split when opts is null. Side-asymmetry: in the
   // awayLU loop, away batters face HOME pitching, so awayLU consumes
   // opts built from the home side's opener data (and vice versa).
+  // OPENER_PIT_WEIGHT / BULK_PIT_WEIGHT / OPENER_RELIEF_PIT_WEIGHT are
+  // ORPHANED post-PR (per-batter weighting). They were the uniform
+  // 0.15/0.60/0.25 split from PR #68 — replaced by the per-position
+  // matrix derived from OPENER_FACED / BULK_FACED below. Kept around
+  // for back-compat in case a future revisit wants to fall back to
+  // uniform weighting; nothing else in the model reads them now.
   const OPENER_PIT_W   = num(settings.OPENER_PIT_WEIGHT,         0.15);
   const BULK_PIT_W     = num(settings.BULK_PIT_WEIGHT,           0.60);
   const OPENER_REL_W   = num(settings.OPENER_RELIEF_PIT_WEIGHT,  0.25);
   const UNK_PIT_WOBA   = num(settings.UNKNOWN_PITCHER_WOBA,      0.335);
 
+  // Per-position batters-faced distributions. Falls back to
+  // module-level defaults when settings are missing or malformed —
+  // same guard pattern PA_WEIGHTS uses below. Read here so the
+  // matrix is in scope for buildOpenerOpts.
+  const OPENER_FACED = (Array.isArray(settings.OPENER_FACED_DISTRIBUTION) && settings.OPENER_FACED_DISTRIBUTION.length === 9)
+    ? settings.OPENER_FACED_DISTRIBUTION
+    : OPENER_FACED_DEFAULT;
+  const BULK_FACED = (Array.isArray(settings.BULK_FACED_DISTRIBUTION) && settings.BULK_FACED_DISTRIBUTION.length === 9)
+    ? settings.BULK_FACED_DISTRIBUTION
+    : BULK_FACED_DEFAULT;
+  // PA_WEIGHTS read moved up from the per-batter loop section so
+  // buildOpenerOpts can divide the FACED distributions by it. The
+  // forEach loops below reuse the same constant.
+  const PA_WEIGHTS = (Array.isArray(settings.PA_WEIGHTS) && settings.PA_WEIGHTS.length === 9)
+    ? settings.PA_WEIGHTS
+    : PA_WEIGHTS_DEFAULT;
+
   // Build opener opts for a given side. Returns null when the side isn't
   // opener-led, or when mode != 'opener_aware'. Logs a warn when the
   // bulk-guy isn't in the wOBA index (newly-promoted swingman, etc.) so
   // we can detect data-coverage gaps in production.
+  // Per-position weight matrix builder. For each lineup slot:
+  //   openerFrac[i] = OPENER_FACED[i] / PA_WEIGHTS[i]   (clamped [0,1])
+  //   bulkFrac[i]   = BULK_FACED[i]   / PA_WEIGHTS[i]   (0 in bullpen_game)
+  //   bullpenFrac[i] = 1 - openerFrac[i] - bulkFrac[i]
+  // Sanity guard: if a custom distribution overshoots (opener+bulk > 1),
+  // scale opener and bulk down proportionally so they sum to 1 and
+  // bullpenFrac is exactly 0 — never negative. With the default
+  // distributions this overshoot branch never fires.
+  const buildPerPositionWeights = (mode_) => {
+    const out = new Array(9);
+    for (let i = 0; i < 9; i++) {
+      const pa = PA_WEIGHTS[i] || 1; // PA_WEIGHTS[i] should never be 0/null but guard for safety
+      let openerFrac = Math.max(0, Math.min(1, (OPENER_FACED[i] || 0) / pa));
+      let bulkFrac   = mode_ === 'bullpen_game'
+        ? 0
+        : Math.max(0, Math.min(1, (BULK_FACED[i] || 0) / pa));
+      const sum = openerFrac + bulkFrac;
+      if (sum > 1) {
+        openerFrac = openerFrac / sum;
+        bulkFrac   = bulkFrac   / sum;
+      }
+      const bullpenFrac = 1 - openerFrac - bulkFrac;
+      out[i] = { opener: openerFrac, bulk: bulkFrac, bullpen: bullpenFrac };
+    }
+    return out;
+  };
+
   const buildOpenerOpts = (side) => {
     if (mode !== 'opener_aware') return null;
     const flag    = side === 'away' ? game.is_opener_game_away : game.is_opener_game_home;
@@ -276,34 +362,45 @@ function runModel(game, wobaIdx, settings, mode) {
     const bulkSp  = side === 'away' ? game.bulk_guy_away       : game.bulk_guy_home;
     const team    = side === 'away' ? game.away_team : game.home_team;
 
+    // Opener wOBA splits: the listed SP IS the opener, so we already
+    // have the splits in pwA/pwH from earlier. Re-key onto the opts so
+    // perBatterEW reads opener splits via openerOpts directly (the
+    // existing pitWvsL/pitWvsR positional args still flow through but
+    // are unused on the opener_aware path post-PR; standard path
+    // continues to consume them as before).
+    const openerVsL = side === 'away' ? pwA.vsLHB : pwH.vsLHB;
+    const openerVsR = side === 'away' ? pwA.vsRHB : pwH.vsRHB;
+
+    // Per-hand bullpen wOBA splits for the pitching team. processGame-
+    // Signals populates game.{home,away}BullpenVs{L,R} from
+    // q.getBullpenWobaBlended; falls back to the combined bullpen
+    // wOBA, then BULLPEN_AVG. 'home' opts feed the awayLU loop where
+    // away batters face home pitching, so use home's bullpen splits;
+    // mirror for 'away'.
+    const bullpenVsL = side === 'away'
+      ? (game.awayBullpenVsL ?? game.awayBullpenWoba ?? BULLPEN_AVG)
+      : (game.homeBullpenVsL ?? game.homeBullpenWoba ?? BULLPEN_AVG);
+    const bullpenVsR = side === 'away'
+      ? (game.awayBullpenVsR ?? game.awayBullpenWoba ?? BULLPEN_AVG)
+      : (game.homeBullpenVsR ?? game.homeBullpenWoba ?? BULLPEN_AVG);
+
     // Bullpen-game branch: opener flagged, no bulk man identified
-    // (game_type_{side} = 'bullpen_game'). The "bulk" slot collapses
-    // into the bullpen pool — set bulkVsL = bulkVsR = the pitching
-    // side's bullpen wOBA so the per-batter formula naturally reduces
-    // to: opener × OPENER_PIT_W + bullpen × (BULK_PIT_W + OPENER_REL_W)
-    // = opener × 0.15 + bullpen × 0.85 with the default settings.
-    // No perBatterEW signature change — same opts shape, the math
-    // collapses on equal-value bulk and leftover slots.
-    //
-    // Pitching-side bullpen mapping: this opts object is consumed by
-    // perBatterEW for the OPPOSING lineup (home opts → awayLU loop;
-    // away opts → homeLU loop). The bullpen wOBA we want is the
-    // pitching team's bullpen — i.e., for 'home' opts we want home's
-    // bullpen wOBA (game.homeBullpenWoba), and vice versa.
+    // (game_type_{side} = 'bullpen_game'). bulkFrac is 0 at every
+    // position; bullpenFrac absorbs the slot. bulk wOBA fields stay
+    // null so perBatterEW skips reading them.
     if (!bulkSp) {
-      const pitchingBp = side === 'away'
-        ? (game.awayBullpenWoba ?? BULLPEN_AVG)
-        : (game.homeBullpenWoba ?? BULLPEN_AVG);
+      const perPositionWeights = buildPerPositionWeights('bullpen_game');
+      const sample = perPositionWeights[0];
       console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
-        + ': bullpen_game mode (no bulk man identified, '
-        + OPENER_PIT_W.toFixed(2) + ' opener + ' + (BULK_PIT_W + OPENER_REL_W).toFixed(2) + ' bullpen)');
+        + ': bullpen_game mode (no bulk man identified, per-batter weighting; pos1='
+        + 'opener=' + sample.opener.toFixed(3) + '/bullpen=' + sample.bullpen.toFixed(3) + ')');
       return {
         mode: 'bullpen_game',
-        bulkVsL: pitchingBp,
-        bulkVsR: pitchingBp,
-        openerPitW: OPENER_PIT_W,
-        bulkPitW: BULK_PIT_W,
-        openerReliefPitW: OPENER_REL_W,
+        openerVsL, openerVsR,
+        bulkVsL: null, bulkVsR: null,
+        bullpenWobaVsL: bullpenVsL,
+        bullpenWobaVsR: bullpenVsR,
+        perPositionWeights,
       };
     }
 
@@ -320,7 +417,20 @@ function runModel(game, wobaIdx, settings, mode) {
       bulkVsL = UNK_PIT_WOBA;
       bulkVsR = UNK_PIT_WOBA;
     }
-    return { mode: 'opener', bulkVsL, bulkVsR, openerPitW: OPENER_PIT_W, bulkPitW: BULK_PIT_W, openerReliefPitW: OPENER_REL_W };
+    const perPositionWeights = buildPerPositionWeights('opener');
+    const s0 = perPositionWeights[0], s4 = perPositionWeights[4], s8 = perPositionWeights[8];
+    console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+      + ': opener+bulk per-batter (pos1 op=' + s0.opener.toFixed(3) + '/bk=' + s0.bulk.toFixed(3) + '/bp=' + s0.bullpen.toFixed(3)
+      + '; pos5 op=' + s4.opener.toFixed(3) + '/bk=' + s4.bulk.toFixed(3) + '/bp=' + s4.bullpen.toFixed(3)
+      + '; pos9 op=' + s8.opener.toFixed(3) + '/bk=' + s8.bulk.toFixed(3) + '/bp=' + s8.bullpen.toFixed(3) + ')');
+    return {
+      mode: 'opener',
+      openerVsL, openerVsR,
+      bulkVsL, bulkVsR,
+      bullpenWobaVsL: bullpenVsL,
+      bullpenWobaVsR: bullpenVsR,
+      perPositionWeights,
+    };
   };
   // Away batters face home pitching → away-side perBatterEW uses HOME's
   // opener opts. Mirror for home.
@@ -335,23 +445,25 @@ function runModel(game, wobaIdx, settings, mode) {
   const awayVsBullpen = game.homeBullpenWoba ?? BULLPEN_AVG;
   const homeVsBullpen = game.awayBullpenWoba ?? BULLPEN_AVG;
 
-  // Lineup-order PA weights — pulled from settings so they're tunable.
-  // Falls back to defaults if the setting is missing/malformed.
-  const PA_WEIGHTS = (Array.isArray(settings.PA_WEIGHTS) && settings.PA_WEIGHTS.length === 9)
-    ? settings.PA_WEIGHTS
-    : PA_WEIGHTS_DEFAULT;
+  // PA_WEIGHTS read moved up alongside OPENER_FACED / BULK_FACED so
+  // buildPerPositionWeights can divide by it (see top of runModel).
+  // The same constant feeds the per-batter loops below.
 
   // Fixed SP/RP pitcher-side split from settings. The UI contract is that
   // spPitW + relPitW = 1.0 (auto-paired in the form), so they're applied
   // uniformly to both teams — no per-game adjustment based on starter
-  // projected IP anymore.
+  // projected IP anymore. Standard non-opener path only — opener_aware
+  // routes through perPositionWeights inside perBatterEW.
   const spPitW  = SP_PIT_WEIGHT;
   const relPitW = RELIEF_PIT_WEIGHT;
 
+  // Per-batter loop. The trailing `i` is the lineup position (0-indexed)
+  // — perBatterEW uses it to index openerOpts.perPositionWeights when
+  // opener_aware mode is active. Standard non-opener mode ignores it.
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts,i)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts,i)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
