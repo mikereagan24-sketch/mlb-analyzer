@@ -308,8 +308,17 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   // opener-led, regardless of the use_opener_logic flag. Persisted into
   // opener_model_* alongside the standard model_* so we can compare
   // outputs side-by-side for ≥1 week before flipping the flag.
-  const hasOpenerSide = (game.is_opener_game_away === 1 && !!game.bulk_guy_away)
-                     || (game.is_opener_game_home === 1 && !!game.bulk_guy_home);
+  //
+  // The bulk_guy_* requirement was dropped here so the bullpen_game
+  // branch in model.buildOpenerOpts also runs through opener_aware
+  // mode — a side flagged is_opener_game with NO bulk man (true
+  // bullpen day) was previously falling through to the standard 75/25
+  // SP/RP path because hasOpenerSide gated on bulk_guy. Now any
+  // opener-flagged side gets opener_model_* written; the model picks
+  // the right branch (3-way 'opener' or collapsed 'bullpen_game') via
+  // game_type.
+  const hasOpenerSide = (game.is_opener_game_away === 1)
+                     || (game.is_opener_game_home === 1);
   const openerModel = hasOpenerSide
     ? runModel(game, wobaIdx, settings, 'opener_aware')
     : null;
@@ -1949,13 +1958,25 @@ async function detectOpeners(dateStr) {
   const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters) => {
     // side comes from a closed { 'away', 'home' } enum below — safe to
     // splice into the column name. NEVER widen this to user input.
+    //
+    // game_type derives from (isOpener, bulkGuy) — single source of
+    // truth so the auto-detection path and the manual-override path
+    // (which both flow through here) keep the column current with no
+    // separate code branch:
+    //   isOpener && bulkGuy   → 'opener'        (3-way model split)
+    //   isOpener && !bulkGuy  → 'bullpen_game'  (0.15 opener + 0.85 BP)
+    //   !isOpener             → 'standard'      (existing path)
+    const gameType = isOpener
+      ? (bulkGuy ? 'opener' : 'bullpen_game')
+      : 'standard';
     const sql = "UPDATE game_log SET "
       + "is_opener_game_" + side + " = ?, "
       + "bulk_guy_" + side + " = ?, "
       + "opener_planned_batters_" + side + " = ?, "
+      + "game_type_" + side + " = ?, "
       + "opener_detected_at = datetime('now') "
       + "WHERE game_date = ? AND game_id = ?";
-    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, date, gameId);
+    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, gameType, date, gameId);
   };
 
   let detectedCount = 0, unknownBulkCount = 0;

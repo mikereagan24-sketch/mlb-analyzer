@@ -272,9 +272,42 @@ function runModel(game, wobaIdx, settings, mode) {
   const buildOpenerOpts = (side) => {
     if (mode !== 'opener_aware') return null;
     const flag    = side === 'away' ? game.is_opener_game_away : game.is_opener_game_home;
+    if (flag !== 1) return null;
     const bulkSp  = side === 'away' ? game.bulk_guy_away       : game.bulk_guy_home;
-    if (flag !== 1 || !bulkSp) return null;
     const team    = side === 'away' ? game.away_team : game.home_team;
+
+    // Bullpen-game branch: opener flagged, no bulk man identified
+    // (game_type_{side} = 'bullpen_game'). The "bulk" slot collapses
+    // into the bullpen pool — set bulkVsL = bulkVsR = the pitching
+    // side's bullpen wOBA so the per-batter formula naturally reduces
+    // to: opener × OPENER_PIT_W + bullpen × (BULK_PIT_W + OPENER_REL_W)
+    // = opener × 0.15 + bullpen × 0.85 with the default settings.
+    // No perBatterEW signature change — same opts shape, the math
+    // collapses on equal-value bulk and leftover slots.
+    //
+    // Pitching-side bullpen mapping: this opts object is consumed by
+    // perBatterEW for the OPPOSING lineup (home opts → awayLU loop;
+    // away opts → homeLU loop). The bullpen wOBA we want is the
+    // pitching team's bullpen — i.e., for 'home' opts we want home's
+    // bullpen wOBA (game.homeBullpenWoba), and vice versa.
+    if (!bulkSp) {
+      const pitchingBp = side === 'away'
+        ? (game.awayBullpenWoba ?? BULLPEN_AVG)
+        : (game.homeBullpenWoba ?? BULLPEN_AVG);
+      console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+        + ': bullpen_game mode (no bulk man identified, '
+        + OPENER_PIT_W.toFixed(2) + ' opener + ' + (BULK_PIT_W + OPENER_REL_W).toFixed(2) + ' bullpen)');
+      return {
+        mode: 'bullpen_game',
+        bulkVsL: pitchingBp,
+        bulkVsR: pitchingBp,
+        openerPitW: OPENER_PIT_W,
+        bulkPitW: BULK_PIT_W,
+        openerReliefPitW: OPENER_REL_W,
+      };
+    }
+
+    // Standard opener-with-bulk path.
     // Bulk-guy hand isn't carried on game_log; fallback default 'R' is
     // only used when the wOBA index misses entirely (in which case we
     // overwrite both vsLHB/vsRHB with UNKNOWN_PITCHER_WOBA below).
@@ -287,7 +320,7 @@ function runModel(game, wobaIdx, settings, mode) {
       bulkVsL = UNK_PIT_WOBA;
       bulkVsR = UNK_PIT_WOBA;
     }
-    return { bulkVsL, bulkVsR, openerPitW: OPENER_PIT_W, bulkPitW: BULK_PIT_W, openerReliefPitW: OPENER_REL_W };
+    return { mode: 'opener', bulkVsL, bulkVsR, openerPitW: OPENER_PIT_W, bulkPitW: BULK_PIT_W, openerReliefPitW: OPENER_REL_W };
   };
   // Away batters face home pitching → away-side perBatterEW uses HOME's
   // opener opts. Mirror for home.
