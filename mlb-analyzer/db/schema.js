@@ -434,6 +434,42 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_home_ml INTEGER"); }
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_total REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_model_computed_at TEXT"); } catch(e) {}
 
+// Phase 2 follow-on: derived game_type label per side. Authoritative
+// inputs are still is_opener_game_{side} + bulk_guy_{side} — this column
+// is the rolled-up label that downstream model + UI read:
+//   'standard'      — non-opener side (existing 75/25 SP/RP path)
+//   'opener'        — opener-flagged AND a credible bulk man identified
+//                     (3-way model split: 0.15/0.60/0.25)
+//   'bullpen_game'  — opener-flagged but NO bulk man (true bullpen day —
+//                     0.15 opener / 0.85 bullpen pool)
+// Default 'standard' applies to existing rows automatically; the
+// one-shot backfill below seeds the 'opener' / 'bullpen_game' labels
+// for rows already detected before this PR.
+try { db.exec("ALTER TABLE game_log ADD COLUMN game_type_away TEXT DEFAULT 'standard'"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN game_type_home TEXT DEFAULT 'standard'"); } catch(e) {}
+try {
+  const flag = db.prepare("SELECT value FROM app_settings WHERE key='game_type_backfill_done'").get();
+  if (!flag) {
+    const r = db.prepare(
+      "UPDATE game_log SET " +
+      "  game_type_away = CASE " +
+      "    WHEN is_opener_game_away = 1 AND bulk_guy_away IS NOT NULL THEN 'opener' " +
+      "    WHEN is_opener_game_away = 1 AND bulk_guy_away IS NULL     THEN 'bullpen_game' " +
+      "    ELSE 'standard' END, " +
+      "  game_type_home = CASE " +
+      "    WHEN is_opener_game_home = 1 AND bulk_guy_home IS NOT NULL THEN 'opener' " +
+      "    WHEN is_opener_game_home = 1 AND bulk_guy_home IS NULL     THEN 'bullpen_game' " +
+      "    ELSE 'standard' END"
+    ).run();
+    db.prepare(
+      "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('game_type_backfill_done', datetime('now'))"
+    ).run();
+    console.log('[migration] game_type backfill: updated ' + r.changes + ' rows');
+  }
+} catch (e) {
+  console.warn('[migration] game_type backfill failed (non-fatal): ' + e.message);
+}
+
 // Runline spread ingest (Step 1 of 3). Pure data layer — Step 2 will
 // snapshot these onto bet_signals at fire time, Step 3 will surface
 // runline ROI in the backtest tab. No model logic touches these

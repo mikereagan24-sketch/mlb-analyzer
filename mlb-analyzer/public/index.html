@@ -1517,10 +1517,19 @@ function injectEditButtons(games, date) {
       if (!isOpener) return null;
       var openerName = side === 'away' ? g.away_sp : g.home_sp;
       var bulk       = side === 'away' ? g.bulk_guy_away : g.bulk_guy_home;
+      // game_type_{side} disambiguates "intentional bullpen day" from
+      // "couldn't identify a bulk-guy". After feat/opener-bullpen-game-
+      // handling both render the same model treatment (0.15/0.85), but
+      // the badge text reflects intent: 'BULLPEN GAME' when the column
+      // says so, 'BULK GUY UNKNOWN' for any pre-game-type rows.
+      var gameType = side === 'away' ? g.game_type_away : g.game_type_home;
+      var trailer  = bulk
+        ? bulk
+        : (gameType === 'bullpen_game' ? 'BULLPEN GAME' : 'BULK GUY UNKNOWN');
       var b = document.createElement('span');
       b.className = 'opener-badge';
       b.style.cssText = 'display:inline-block;margin-left:6px;padding:2px 6px;background:#ffe082;color:#5d4037;border-radius:8px;font-size:11px;font-weight:600;line-height:1.4;';
-      b.textContent = 'Opener: ' + (openerName || '?') + ' → ' + (bulk || 'BULK GUY UNKNOWN');
+      b.textContent = 'Opener: ' + (openerName || '?') + ' → ' + trailer;
       if (!bulk) {
         var setBtn = document.createElement('button');
         setBtn.textContent = 'Set';
