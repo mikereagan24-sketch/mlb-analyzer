@@ -1130,4 +1130,4 @@ q.insertBetSignalAudit = (row) => {
   });
 };
 
-module.exports = { db, q };
+module.exports = { db, q, DB_PATH };
