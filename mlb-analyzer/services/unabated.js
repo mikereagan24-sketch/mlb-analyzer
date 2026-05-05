@@ -269,16 +269,28 @@ function parseUnabatedOdds(data, dateStr) {
   Object.entries(data.teams||{}).forEach(([id,t])=>{ if(t.abbreviation) teamMap[id]=t.abbreviation; });
   const allGames = data.gameOddsEvents?.[MLB_KEY] || [];
 
-  const nextDayStr = new Date(dateStr+'T00:00:00');
-  nextDayStr.setDate(nextDayStr.getDate()+1);
-  const nextDayS = nextDayStr.toISOString().slice(0,10);
-  const windowEnd = nextDayS + 'T04:00:00';
-
-  const dateGames = allGames.filter(g=>{
+  // Convert eventStart UTC to PT date for the comparison. MLB schedules
+  // and our internal dateStr are PT-anchored — a 6:40 PM PT game on May 5
+  // has eventStart 2026-05-06T01:40:00 UTC. Naive prefix-match on UTC
+  // caused this to be captured by BOTH 5/5's filter (via the late-night
+  // extension) and 5/6's filter (via direct prefix match), double-mapping
+  // a single market's odds to two date rows. Diagnosed 2026-05-05 when
+  // 5/6 PIT-ARI showed -127/+122 from polymarket — same as 5/5's row,
+  // because both rows pulled from eventId 108860 (Polymarket's MarketSlug
+  // "mlb-pit-ari-2026-05-05" — the 5/5 PT game).
+  const ptFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+  const dateGames = allGames.filter(g => {
     if (!g.eventStart) return false;
-    if (g.eventStart.startsWith(dateStr)) return true;
-    if (g.eventStart.startsWith(nextDayS) && g.eventStart < windowEnd) return true;
-    return false;
+    // eventStart is ISO-8601 UTC without timezone suffix; append 'Z' to
+    // ensure Date parses as UTC, not local.
+    const utc = new Date(g.eventStart + 'Z');
+    if (isNaN(utc.getTime())) return false;
+    // en-CA locale formats as YYYY-MM-DD — directly comparable to dateStr.
+    const ptDateStr = ptFormatter.format(utc);
+    return ptDateStr === dateStr;
   });
 
   // Step 1: gather every event by team-pair (don't dedup yet — doubleheader
