@@ -2085,11 +2085,12 @@ router.get('/debug/bullpen-report', (req, res) => {
           hand: p.hand,
           proj_vs_lhb: projL?.woba ?? null,
           proj_vs_rhb: projR?.woba ?? null,
-          act_vs_lhb:  actL?.woba  ?? null,
-          act_vs_rhb:  actR?.woba  ?? null,
-          // Sample sizes are surfaced so the report consumer can see whether
-          // the MIN_BF gate fired: when sample < MIN_BF, blended_vs_* equals
-          // proj_vs_* and the actuals contribution is dropped.
+          // Gate displayed actuals at MIN_BF — matches the blend logic so
+          // the report doesn't show contributing-looking values that the
+          // model ignored. The act_sample_* fields stay populated either
+          // way, letting a reader see why a value was gated.
+          act_vs_lhb: (actL && actL.sample >= MIN_BF) ? actL.woba : null,
+          act_vs_rhb: (actR && actR.sample >= MIN_BF) ? actR.woba : null,
           act_sample_lhb: actL?.sample ?? null,
           act_sample_rhb: actR?.sample ?? null,
           blended_vs_lhb,
