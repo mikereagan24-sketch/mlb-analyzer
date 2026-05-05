@@ -934,9 +934,29 @@ router.post('/replay/odds', async (req, res) => {
     const { date, filename, raw } = loadSnapshotForReplay(req, 'odds');
     const settings = getSettings();
     const parsed = parseUnabatedOdds(raw, date);
+    const dryRun = req.body && req.body.dry_run === true;
+
+    if (dryRun) {
+      // Return parsed games without persisting. Used for diagnosing parser
+      // behavior against captured snapshots without mutating live DB —
+      // added during the 2026-05-05 timezone-bug investigation when calling
+      // this endpoint to inspect parser output was itself contaminating
+      // the diagnostic ("looking changed it").
+      res.json({
+        success: true,
+        dry_run: true,
+        replayed_from: filename,
+        date,
+        games_in_snapshot: parsed.length,
+        games: parsed,
+      });
+      return;
+    }
+
     const result = processOddsArray(date, parsed, settings);
     res.json({
       success: true,
+      dry_run: false,
       replayed_from: filename,
       date,
       updated: result.updated,
