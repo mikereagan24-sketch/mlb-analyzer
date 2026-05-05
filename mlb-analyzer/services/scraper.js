@@ -241,8 +241,37 @@ function parseLineupsHtml(html, dateStr) {
       return { name: name.trim(), hand };
     };
 
-    const awayPit = parseP($(el).find('.lineup__list.is-visit .lineup__player-highlight-name').text());
-    const homePit = parseP($(el).find('.lineup__list.is-home .lineup__player-highlight-name').text());
+    // RotoWire's lineup card shows ONE highlighted pitcher per side, but
+    // a PRIM badge in the sibling stats div changes that name's role:
+    //   - no PRIM: the highlighted name is the announced starter (current
+    //     behavior — populates away_sp / home_sp).
+    //   - PRIM present: the highlighted name is the announced *bulk*
+    //     pitcher behind an opener; RotoWire isn't publishing the opener
+    //     identity here. Treat the name as bulk, leave SP null so the
+    //     lineup-job's reconciliation preserves whatever statsapi already
+    //     bootstrapped (the actual opener / probable pitcher).
+    //
+    // Empirically verified 2026-05-05: the PRIM tag is rendered as
+    // `<div class="tag">PRIM</div>` inside `.lineup__player-highlight-stats`.
+    // Legend at page bottom: "PRIM = Primary Pitcher. This Pitcher is not
+    // starting but will pitch multiple innings after the starter."
+    const parseHighlight = (sideListClass) => {
+      const list = $(el).find('.lineup__list.' + sideListClass);
+      const nameEl = list.find('.lineup__player-highlight-name');
+      if (!nameEl.length) return { sp: null, bulk: null };
+      const parsed = parseP(nameEl.text());
+      if (!parsed.name) return { sp: null, bulk: null };
+      const hasPrim = list.find('.lineup__player-highlight-stats .tag').filter((_, t) =>
+        $(t).text().trim().toUpperCase() === 'PRIM'
+      ).length > 0;
+      return hasPrim
+        ? { sp: null, bulk: { name: parsed.name, hand: parsed.hand } }
+        : { sp: { name: parsed.name, hand: parsed.hand }, bulk: null };
+    };
+    const awaySide = parseHighlight('is-visit');
+    const homeSide = parseHighlight('is-home');
+    const awayPit = awaySide.sp || { name: '', hand: 'R' };
+    const homePit = homeSide.sp || { name: '', hand: 'R' };
     const time = $(el).find('.lineup__time').first().text().trim();
     // Use RotoWire's DOM class rather than free-text substring — projected
     // blurbs like "not yet confirmed" / "confirmed closer to game time" were
@@ -292,6 +321,8 @@ function parseLineupsHtml(html, dateStr) {
       home_lineup_status: lineup_status,
       away_sp: awayPit.name ? { name: awayPit.name, hand: awayPit.hand } : null,
       home_sp: homePit.name ? { name: homePit.name, hand: homePit.hand } : null,
+      away_bulk_announced: awaySide.bulk,
+      home_bulk_announced: homeSide.bulk,
       market_total: null,
       park_factor: PARK_FACTORS[homeTeam] || 1.0,
       away_lineup: parsePlayers('is-visit'),

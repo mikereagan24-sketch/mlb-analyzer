@@ -588,6 +588,11 @@ async function ensureScheduleBootstrap(dateStr) {
       away_sp_hand: g.away_sp ? g.away_sp.hand : null,
       home_sp: g.home_sp ? g.home_sp.name : null,
       home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+      // statsapi never carries the announced bulk; only RotoWire's PRIM
+      // tag does. Null here lets the upsert COALESCE preserve any value
+      // a prior RotoWire pass already wrote.
+      bulk_guy_away_announced: null,
+      bulk_guy_home_announced: null,
       market_away_ml: existingRow ? (existingRow.market_away_ml || null) : null,
       market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
       market_total:   existingRow ? existingRow.market_total : null,
@@ -653,6 +658,10 @@ async function runLineupJob(dateStr) {
           away_sp_hand: g.away_sp ? g.away_sp.hand : null,
           home_sp: g.home_sp ? g.home_sp.name : null,
           home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+          // statsapi bootstrap doesn't know about PRIM; null preserves any
+          // existing RotoWire-written value via COALESCE in upsertGame.
+          bulk_guy_away_announced: null,
+          bulk_guy_home_announced: null,
           // Preserve all downstream-written fields when the row already
           // exists. Bootstrap is matchup + SP only; everything else is owned
           // by other jobs (odds, model, lineup confirmations).
@@ -885,6 +894,11 @@ async function runLineupJob(dateStr) {
         away_sp_hand: writeAwayHand,
         home_sp: writeHomeSp,
         home_sp_hand: writeHomeHand,
+        // RotoWire's PRIM-tagged announced bulk pitcher. Null when no PRIM
+        // tag was found on this side; the upsert's COALESCE preserves any
+        // previously-captured value across refreshes.
+        bulk_guy_away_announced: g.away_bulk_announced ? g.away_bulk_announced.name : null,
+        bulk_guy_home_announced: g.home_bulk_announced ? g.home_bulk_announced.name : null,
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
@@ -2035,7 +2049,21 @@ async function detectOpeners(dateStr) {
           if (avgPitches == null || avgPitches < 30) {
             isOpener = true;
             plannedBatters = 4; // spec default until per-pitcher tuning lands
-            bulkGuy = identifyBulkGuy(team, dateStr, sp);
+            // Prefer RotoWire's PRIM-tagged announced bulk pitcher when
+            // available — high-confidence direct signal vs. identifyBulkGuy's
+            // historical-pattern scoring, which fails when a regular
+            // starter is used as bulk (the pitcher's profile doesn't look
+            // like a long-relief specialist so they score below threshold).
+            const announcedBulk = side === 'away'
+              ? g.bulk_guy_away_announced
+              : g.bulk_guy_home_announced;
+            if (announcedBulk) {
+              bulkGuy = announcedBulk;
+              console.log('[opener-detect] ' + g.game_id + '/' + side
+                + ': using announced bulk ' + announcedBulk + ' (RotoWire PRIM)');
+            } else {
+              bulkGuy = identifyBulkGuy(team, dateStr, sp);
+            }
           }
         }
       }

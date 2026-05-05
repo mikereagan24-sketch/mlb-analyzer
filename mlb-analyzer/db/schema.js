@@ -419,6 +419,10 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN is_opener_game_away INTEGER DEFAU
 try { db.exec("ALTER TABLE game_log ADD COLUMN is_opener_game_home INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) {}
+// RotoWire's PRIM-tagged announced bulk pitcher. High-confidence signal
+// preferred over identifyBulkGuy's historical-pattern scoring.
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_announced TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_announced TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
@@ -707,12 +711,14 @@ const q = {
     INSERT INTO game_log (
       game_date, game_id, away_team, home_team, game_time,
       away_sp, away_sp_hand, home_sp, home_sp_hand,
+      bulk_guy_away_announced, bulk_guy_home_announced,
       market_away_ml, market_home_ml, market_total, park_factor,
       model_away_ml, model_home_ml, model_total, lineup_source,
       venue_id, venue_name, game_number, game_pk, updated_at
     ) VALUES (
       @game_date, @game_id, @away_team, @home_team, @game_time,
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
+      @bulk_guy_away_announced, @bulk_guy_home_announced,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
       @model_away_ml, @model_home_ml, @model_total, @lineup_source,
       @venue_id, @venue_name, COALESCE(@game_number, 1), @game_pk, datetime('now')
@@ -726,6 +732,11 @@ const q = {
       away_sp_hand = COALESCE(excluded.away_sp_hand, game_log.away_sp_hand),
       home_sp = COALESCE(excluded.home_sp, game_log.home_sp),
       home_sp_hand = COALESCE(excluded.home_sp_hand, game_log.home_sp_hand),
+      -- COALESCE bulk_guy_*_announced so a RotoWire upsert without a PRIM
+      -- tag doesn't wipe a previously-captured announced bulk. RotoWire is
+      -- the only writer of these fields; statsapi never sets them.
+      bulk_guy_away_announced = COALESCE(excluded.bulk_guy_away_announced, game_log.bulk_guy_away_announced),
+      bulk_guy_home_announced = COALESCE(excluded.bulk_guy_home_announced, game_log.bulk_guy_home_announced),
       game_time = COALESCE(excluded.game_time, game_log.game_time),
       market_away_ml = excluded.market_away_ml, market_home_ml = excluded.market_home_ml,
       market_total = excluded.market_total, park_factor = excluded.park_factor,
