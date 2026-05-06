@@ -1,0 +1,53 @@
+MLB Analyzer — Pitcher IP Projection Upload Bookmarklet (canonical source)
+==========================================================================
+
+This bookmarklet fetches FanGraphs Depth Charts pitcher projections and
+POSTs the CSV to /api/upload/pit-proj-ip. The upload populates the
+pit_proj_ip table (player_name, team, season IP, season GS, derived
+IP/start). The lineup-job then looks up each game's SP via
+q.getPitcherProjIP and persists the resolved IP/start into game_log's
+new away_sp_proj_ip / home_sp_proj_ip columns for diagnostic visibility.
+
+Source URL the bookmarklet hits:
+  https://www.fangraphs.com/projections?pos=all&stats=pit&type=fangraphsdc
+
+Required columns in the CSV: Name, Team, IP, GS. The parser
+(routes/api.js parseCSVPitIP) is tolerant of extra columns and
+normalizes FG team abbreviations (KCR→KC, SDP→SD, etc.).
+
+Override behavior: rows with is_override=1 in pit_proj_ip are sticky —
+bulk re-uploads do NOT overwrite manual overrides set via
+POST /api/pit-proj-ip/override. Re-running the bookmarklet is safe
+month over month.
+
+DOM CAVEAT (verify before merging):
+The actuals bookmarklet (docs/bookmarklet-actuals.txt) polls each
+iframe for an `a[download][href^="data:"]` anchor — FG's standard
+Export-to-CSV pattern across leaderboard pages. The Depth Charts
+projections page is React-rendered (verified 2026-05-05: static HTML
+has zero `download=` attributes; the anchor is generated client-side
+after the table loads). Same pattern as splits-leaderboards, where
+the actuals bookmarklet works. If the projections export anchor
+turns out to render differently or beyond the 30-second poll timeout,
+the bookmarklet body's polling logic may need tuning. Test once in
+a real browser before relying on it; Mike's first run will reveal
+any issue.
+
+Usage: paste the entire `javascript:...` line below into the URL
+field of a browser bookmark. To run: navigate to any fangraphs.com
+page, then click the bookmark.
+
+Build: model the body on docs/bookmarklet-actuals.txt's structure with
+SPECS reduced to a single entry:
+  var SPECS = [
+    { key: 'pit-proj-ip', label: 'Pitcher Proj IP/GS' }
+  ];
+  function buildUrl() {
+    return 'https://www.fangraphs.com/projections'
+      + '?pos=all&stats=pit&type=fangraphsdc';
+  }
+The rest (overlay, iframe poll for export anchor, FormData upload to
+/api/upload/<key>) mirrors the actuals bookmarklet exactly.
+
+Bookmarklet:
+[BOOKMARKLET HERE — paste single-line javascript:... after building from this code, before merging this PR]

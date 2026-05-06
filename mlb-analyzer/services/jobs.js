@@ -593,6 +593,11 @@ async function ensureScheduleBootstrap(dateStr) {
       // a prior RotoWire pass already wrote.
       bulk_guy_away_announced: null,
       bulk_guy_home_announced: null,
+      // SP proj_ip is captured by the lineup-job (which has the canonical
+      // SP names). Bootstrap passes null and COALESCE preserves any value
+      // already written.
+      away_sp_proj_ip: null,
+      home_sp_proj_ip: null,
       market_away_ml: existingRow ? (existingRow.market_away_ml || null) : null,
       market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
       market_total:   existingRow ? existingRow.market_total : null,
@@ -662,6 +667,9 @@ async function runLineupJob(dateStr) {
           // existing RotoWire-written value via COALESCE in upsertGame.
           bulk_guy_away_announced: null,
           bulk_guy_home_announced: null,
+          // statsapi bootstrap leaves proj_ip to the lineup-job pass.
+          away_sp_proj_ip: null,
+          home_sp_proj_ip: null,
           // Preserve all downstream-written fields when the row already
           // exists. Bootstrap is matchup + SP only; everything else is owned
           // by other jobs (odds, model, lineup confirmations).
@@ -899,6 +907,20 @@ async function runLineupJob(dateStr) {
         // previously-captured value across refreshes.
         bulk_guy_away_announced: g.away_bulk_announced ? g.away_bulk_announced.name : null,
         bulk_guy_home_announced: g.home_bulk_announced ? g.home_bulk_announced.name : null,
+        // Look up SP projected IP/start from pit_proj_ip via the existing
+        // exact + last-name fallback in q.getPitcherProjIP. Resolves to the
+        // SP we're about to persist (writeAwaySp/writeHomeSp), preferring
+        // RotoWire's name when not preserved by statsapi. Falls back to
+        // statsapi's existing SP name if the RotoWire name was rejected by
+        // the reconciliation guard. Null means no projection match — the
+        // model's existing flat-weight fallback applies (model behavior
+        // unchanged by this column).
+        away_sp_proj_ip: q.getPitcherProjIP
+          ? q.getPitcherProjIP(writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || '')
+          : null,
+        home_sp_proj_ip: q.getPitcherProjIP
+          ? q.getPitcherProjIP(writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || '')
+          : null,
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API

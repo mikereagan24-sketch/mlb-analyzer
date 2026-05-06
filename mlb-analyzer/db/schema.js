@@ -423,6 +423,13 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) 
 // preferred over identifyBulkGuy's historical-pattern scoring.
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_announced TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_announced TEXT"); } catch(e) {}
+// SP projected IP/start from FG Depth Charts, captured at lineup-job time
+// for diagnostic visibility on /api/games/<date>. processGameSignals does
+// its own fresh lookup at signal-fire time via q.getPitcherProjIP, so
+// these columns are observability-only — model behavior reads from the
+// live lookup, not these stored values.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_proj_ip REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_proj_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
@@ -712,6 +719,7 @@ const q = {
       game_date, game_id, away_team, home_team, game_time,
       away_sp, away_sp_hand, home_sp, home_sp_hand,
       bulk_guy_away_announced, bulk_guy_home_announced,
+      away_sp_proj_ip, home_sp_proj_ip,
       market_away_ml, market_home_ml, market_total, park_factor,
       model_away_ml, model_home_ml, model_total, lineup_source,
       venue_id, venue_name, game_number, game_pk, updated_at
@@ -719,6 +727,7 @@ const q = {
       @game_date, @game_id, @away_team, @home_team, @game_time,
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
       @bulk_guy_away_announced, @bulk_guy_home_announced,
+      @away_sp_proj_ip, @home_sp_proj_ip,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
       @model_away_ml, @model_home_ml, @model_total, @lineup_source,
       @venue_id, @venue_name, COALESCE(@game_number, 1), @game_pk, datetime('now')
@@ -737,6 +746,11 @@ const q = {
       -- the only writer of these fields; statsapi never sets them.
       bulk_guy_away_announced = COALESCE(excluded.bulk_guy_away_announced, game_log.bulk_guy_away_announced),
       bulk_guy_home_announced = COALESCE(excluded.bulk_guy_home_announced, game_log.bulk_guy_home_announced),
+      -- COALESCE proj_ip so a non-lineup upsert (statsapi bootstrap) doesn't
+      -- wipe the value the lineup-job already captured. The lineup-job is
+      -- the only path that looks these up; everyone else passes null.
+      away_sp_proj_ip = COALESCE(excluded.away_sp_proj_ip, game_log.away_sp_proj_ip),
+      home_sp_proj_ip = COALESCE(excluded.home_sp_proj_ip, game_log.home_sp_proj_ip),
       game_time = COALESCE(excluded.game_time, game_log.game_time),
       market_away_ml = excluded.market_away_ml, market_home_ml = excluded.market_home_ml,
       market_total = excluded.market_total, park_factor = excluded.park_factor,
