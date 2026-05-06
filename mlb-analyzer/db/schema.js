@@ -1110,8 +1110,17 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // Always include fallback entries — a rostered callup will throw innings.
   const pool = primary.concat(fallbackList);
   if (!pool.length) return null;
-  const totalW = pool.reduce((s,p)=>s+(p.sample||20), 0);
-  const woba = pool.reduce((s,p)=>s+(p.woba*(p.sample||20)), 0) / totalW;
+  // Equal-weight aggregation across the pool. Each rostered RP (whether
+  // established, partial-projection, or fallback callup) contributes
+  // equally to the team's bullpen wOBA average. We don't know who the
+  // manager will deploy, and a thin-sample reliever shouldn't be penalized
+  // for being new — his fallback wOBA already encodes the "we don't know"
+  // uncertainty (UNKNOWN_PITCHER_WOBA, default 0.335). The 70/30 actuals
+  // blend per pitcher is preserved (above) — that gating happens BEFORE
+  // aggregation, so a pitcher with meaningful actuals still blends his
+  // projection and actuals into a single per-pitcher value before this
+  // pool-level mean.
+  const woba = pool.reduce((s,p)=>s+p.woba, 0) / pool.length;
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
 };
 
