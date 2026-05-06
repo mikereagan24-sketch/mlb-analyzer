@@ -368,8 +368,17 @@ function runModel(game, wobaIdx, settings, mode) {
     // existing pitWvsL/pitWvsR positional args still flow through but
     // are unused on the opener_aware path post-PR; standard path
     // continues to consume them as before).
-    const openerVsL = side === 'away' ? pwA.vsLHB : pwH.vsLHB;
-    const openerVsR = side === 'away' ? pwA.vsRHB : pwH.vsRHB;
+    //
+    // SP-null fallback: when statsapi hasn't named a probable yet but
+    // RotoWire's PRIM tag has flagged this as a bullpen game (set in
+    // jobs.js opener-detect), source the opener slot from the bullpen
+    // pool. Without this, getPitcherWoba(null,...) returns the global
+    // PIT_DFLT (~league-avg RHP), which is a worse prior than the
+    // pitching team's actual bullpen aggregate. Once statsapi populates
+    // the SP, this re-keys to the announced pitcher's splits.
+    const sideSp = side === 'away' ? game.away_sp : game.home_sp;
+    let openerVsL = side === 'away' ? pwA.vsLHB : pwH.vsLHB;
+    let openerVsR = side === 'away' ? pwA.vsRHB : pwH.vsRHB;
 
     // Per-hand bullpen wOBA splits for the pitching team. processGame-
     // Signals populates game.{home,away}BullpenVs{L,R} from
@@ -383,6 +392,19 @@ function runModel(game, wobaIdx, settings, mode) {
     const bullpenVsR = side === 'away'
       ? (game.awayBullpenVsR ?? game.awayBullpenWoba ?? BULLPEN_AVG)
       : (game.homeBullpenVsR ?? game.homeBullpenWoba ?? BULLPEN_AVG);
+
+    // SP-null + opener flag: jobs.js opener-detect set the opener flag
+    // because RotoWire's PRIM tag declared a bullpen game before
+    // statsapi named a probable. There is no SP to source opener splits
+    // from, so use the bullpen pool aggregate as the opener slot prior.
+    // Logged once per side so it's clear in cron-log when this kicks in.
+    if (!sideSp) {
+      openerVsL = bullpenVsL;
+      openerVsR = bullpenVsR;
+      console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+        + ': SP-null → opener slot sourced from bullpen pool'
+        + ' (vsL=' + bullpenVsL.toFixed(3) + ', vsR=' + bullpenVsR.toFixed(3) + ')');
+    }
 
     // Bullpen-game branch: opener flagged, no bulk man identified
     // (game_type_{side} = 'bullpen_game'). bulkFrac is 0 at every

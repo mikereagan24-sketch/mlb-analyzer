@@ -2040,9 +2040,34 @@ async function detectOpeners(dateStr) {
         continue;
       }
 
-      if (!team || !sp) {
-        // Nothing to detect off; clear flags so a previous run's value
-        // doesn't linger if the SP was removed.
+      if (!team) {
+        writeDetection(dateStr, g.game_id, side, false, null, null);
+        continue;
+      }
+
+      // SP-null + RotoWire PRIM-tagged bulk: this is RotoWire telling us
+      // it's a bullpen game even though statsapi hasn't named a probable
+      // yet (TB-style early announcement). Classify as opener mode with
+      // the PRIM-tagged name as bulk. Model.js sources the opener slot
+      // from the bullpen pool when SP is null, so the day-before estimate
+      // uses bullpen wOBA for the opener slot + Scholtens-style bulk
+      // wOBA for the bulk slot. When statsapi later populates the SP,
+      // this re-runs and the opener slot upgrades to the announced
+      // pitcher's actual splits.
+      if (!sp) {
+        const announcedBulkPrim = side === 'away'
+          ? g.bulk_guy_away_announced
+          : g.bulk_guy_home_announced;
+        if (announcedBulkPrim) {
+          writeDetection(dateStr, g.game_id, side, true, announcedBulkPrim, 4);
+          detectedCount++;
+          console.log('[opener-detect] ' + g.game_id + '/' + side
+            + ': SP-null + PRIM bulk → opener mode, bulk=' + announcedBulkPrim
+            + ' (opener slot will use bullpen wOBA until SP announced)');
+          continue;
+        }
+        // Otherwise nothing to detect off; clear flags so a previous
+        // run's value doesn't linger if the SP was removed.
         writeDetection(dateStr, g.game_id, side, false, null, null);
         continue;
       }
