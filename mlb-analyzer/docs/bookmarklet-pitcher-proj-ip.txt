@@ -1,0 +1,53 @@
+MLB Analyzer — Pitcher IP Projection Upload Bookmarklet (canonical source)
+==========================================================================
+
+This bookmarklet fetches FanGraphs Depth Charts pitcher projections and
+POSTs the CSV to /api/upload/pit-proj-ip. The upload populates the
+pit_proj_ip table (player_name, team, season IP, season GS, derived
+IP/start). The lineup-job then looks up each game's SP via
+q.getPitcherProjIP and persists the resolved IP/start into game_log's
+new away_sp_proj_ip / home_sp_proj_ip columns for diagnostic visibility.
+
+Source URL the bookmarklet hits:
+  https://www.fangraphs.com/projections?pos=all&stats=pit&type=fangraphsdc
+
+Required columns in the CSV: Name, Team, IP, GS. The parser
+(routes/api.js parseCSVPitIP) is tolerant of extra columns and
+normalizes FG team abbreviations (KCR→KC, SDP→SD, etc.).
+
+Override behavior: rows with is_override=1 in pit_proj_ip are sticky —
+bulk re-uploads do NOT overwrite manual overrides set via
+POST /api/pit-proj-ip/override. Re-running the bookmarklet is safe
+month over month.
+
+DOM CAVEAT (verify before merging):
+The actuals bookmarklet (docs/bookmarklet-actuals.txt) polls each
+iframe for an `a[download][href^="data:"]` anchor — FG's standard
+Export-to-CSV pattern across leaderboard pages. The Depth Charts
+projections page is React-rendered (verified 2026-05-05: static HTML
+has zero `download=` attributes; the anchor is generated client-side
+after the table loads). Same pattern as splits-leaderboards, where
+the actuals bookmarklet works. If the projections export anchor
+turns out to render differently or beyond the 30-second poll timeout,
+the bookmarklet body's polling logic may need tuning. Test once in
+a real browser before relying on it; Mike's first run will reveal
+any issue.
+
+Usage: paste the entire `javascript:...` line below into the URL
+field of a browser bookmark. To run: navigate to any fangraphs.com
+page, then click the bookmark.
+
+Build: model the body on docs/bookmarklet-actuals.txt's structure with
+SPECS reduced to a single entry:
+  var SPECS = [
+    { key: 'pit-proj-ip', label: 'Pitcher Proj IP/GS' }
+  ];
+  function buildUrl() {
+    return 'https://www.fangraphs.com/projections'
+      + '?pos=all&stats=pit&type=fangraphsdc';
+  }
+The rest (overlay, iframe poll for export anchor, FormData upload to
+/api/upload/<key>) mirrors the actuals bookmarklet exactly.
+
+Bookmarklet:
+javascript:(function%20bookmarklet()%20%7B%0Aif%20(%21%2F(%5E%7C%5C.)fangraphs%5C.com%24%2F.test(location.hostname))%20%7B%0Aalert(%27MLB%20Analyzer%20bookmarklet%3A%20open%20a%20fangraphs.com%20page%20first%2C%20then%20click%20the%20bookmark.%27)%3B%0Areturn%3B%0A%7D%0Avar%20API%20%3D%20%27https%3A%2F%2Fmlb-analyzer.onrender.com%2Fapi%2Fupload%2F%27%3B%0Avar%20SPECS%20%3D%20%5B%0A%7B%20key%3A%20%27pit-proj-ip%27%2C%20label%3A%20%27Pitcher%20Proj%20IP%2FGS%27%20%7D%0A%5D%3B%0Afunction%20buildUrl(s)%20%7B%0Areturn%20%27https%3A%2F%2Fwww.fangraphs.com%2Fprojections%27%0A%2B%20%27%3Fpos%3Dall%26stats%3Dpit%26type%3Dfangraphsdc%27%3B%0A%7D%0Avar%20overlay%20%3D%20document.createElement(%27div%27)%3B%0Aoverlay.setAttribute(%27data-mlb-analyzer-overlay%27%2C%20%271%27)%3B%0Aoverlay.style.cssText%20%3D%20%27position%3Afixed%3Btop%3A16px%3Bright%3A16px%3Bbackground%3A%231e1e2e%3Bcolor%3A%23fff%3Bpadding%3A14px%2016px%3Bborder-radius%3A8px%3Bfont%3A13px%2F1.45%20-apple-system%2Csystem-ui%2Csans-serif%3Bz-index%3A2147483647%3Bbox-shadow%3A0%204px%2022px%20rgba(0%2C0%2C0%2C0.45)%3Bmin-width%3A280px%3Bmax-width%3A360px%27%3B%0Aoverlay.innerHTML%20%3D%20%27%3Cdiv%20style%3D%22font-weight%3A600%3Bmargin-bottom%3A8px%22%3EMLB%20Analyzer%20%E2%80%94%20Upload%20SP%20Proj%20IP%3C%2Fdiv%3E%3Cdiv%20id%3D%22mlb-an-status%22%3E%3C%2Fdiv%3E%27%3B%0Adocument.body.appendChild(overlay)%3B%0Avar%20statusEl%20%3D%20overlay.querySelector(%27%23mlb-an-status%27)%3B%0Avar%20results%20%3D%20SPECS.map(function()%7B%20return%20%7B%20msg%3A%20%27%E2%80%A6%27%2C%20done%3A%20false%2C%20ok%3A%20null%20%7D%3B%20%7D)%3B%0Afunction%20render()%20%7B%0AstatusEl.innerHTML%20%3D%20SPECS.map(function(s%2C%20i)%20%7B%0Avar%20r%20%3D%20results%5Bi%5D%3B%0Avar%20dot%20%3D%20r.done%20%3F%20(r.ok%20%3F%20%27%E2%9C%93%27%20%3A%20%27%E2%9C%97%27)%20%3A%20%27%E2%80%A2%27%3B%0Avar%20color%20%3D%20r.done%20%3F%20(r.ok%20%3F%20%27%234ade80%27%20%3A%20%27%23f87171%27)%20%3A%20%27%239ca3af%27%3B%0Areturn%20%27%3Cdiv%20style%3D%22margin%3A2px%200%22%3E%3Cspan%20style%3D%22display%3Ainline-block%3Bwidth%3A14px%3Bcolor%3A%27%20%2B%20color%20%2B%20%27%22%3E%27%20%2B%20dot%20%2B%20%27%3C%2Fspan%3E%27%0A%2B%20%27%3Cspan%20style%3D%22color%3A%239ca3af%22%3E%27%20%2B%20s.label%20%2B%20%27%20%3Ccode%20style%3D%22background%3A%232a2a3a%3Bpadding%3A1px%204px%3Bborder-radius%3A2px%3Bfont-size%3A11px%22%3E%27%20%2B%20s.key%20%2B%20%27%3C%2Fcode%3E%3C%2Fspan%3E%20%27%0A%2B%20%27%3Cspan%3E%27%20%2B%20r.msg%20%2B%20%27%3C%2Fspan%3E%3C%2Fdiv%3E%27%3B%0A%7D).join(%27%27)%3B%0A%7D%0Afunction%20finalize()%20%7B%0Aif%20(overlay.querySelector(%27button%27))%20return%3B%0Avar%20btn%20%3D%20document.createElement(%27button%27)%3B%0Abtn.textContent%20%3D%20%27Close%27%3B%0Abtn.style.cssText%20%3D%20%27margin-top%3A10px%3Bpadding%3A5px%2012px%3Bbackground%3A%233b82f6%3Bcolor%3A%23fff%3Bborder%3A0%3Bborder-radius%3A4px%3Bcursor%3Apointer%3Bfont%3Ainherit%27%3B%0Abtn.onclick%20%3D%20function()%20%7B%20overlay.remove()%3B%20%7D%3B%0Aoverlay.appendChild(btn)%3B%0A%7D%0Afunction%20finishOne(i%2C%20ok%2C%20msg)%20%7B%0Aif%20(results%5Bi%5D.done)%20return%3B%0Aresults%5Bi%5D%20%3D%20%7B%20msg%3A%20msg%2C%20ok%3A%20ok%2C%20done%3A%20true%20%7D%3B%0Arender()%3B%0Aif%20(results.every(function(r)%20%7B%20return%20r.done%3B%20%7D))%20finalize()%3B%0A%7D%0Arender()%3B%0ASPECS.forEach(function(spec%2C%20i)%20%7B%0Avar%20iframe%20%3D%20document.createElement(%27iframe%27)%3B%0Aiframe.style.cssText%20%3D%20%27position%3Afixed%3Bleft%3A-99999px%3Btop%3A-99999px%3Bwidth%3A1280px%3Bheight%3A900px%3Bborder%3A0%27%3B%0Aiframe.src%20%3D%20buildUrl(spec)%3B%0Adocument.body.appendChild(iframe)%3B%0Avar%20timeout%20%3D%20setTimeout(function()%20%7B%0AfinishOne(i%2C%20false%2C%20%27timeout%20(no%20Export%20link%20in%2030s)%27)%3B%0Aif%20(iframe.parentNode)%20iframe.parentNode.removeChild(iframe)%3B%0A%7D%2C%2030000)%3B%0Avar%20poll%20%3D%20setInterval(function()%20%7B%0Avar%20doc%3B%0Atry%20%7B%20doc%20%3D%20iframe.contentDocument%3B%20%7D%20catch%20(e)%20%7B%20return%3B%20%7D%0Aif%20(%21doc%20%7C%7C%20%21doc.body)%20return%3B%0Avar%20anchors%20%3D%20doc.querySelectorAll(%27a%5Bdownload%5D%5Bhref%5E%3D%22data%3A%22%5D%27)%3B%0Avar%20link%20%3D%20null%3B%0Afor%20(var%20j%20%3D%200%3B%20j%20%3C%20anchors.length%3B%20j%2B%2B)%20%7B%0Avar%20name%20%3D%20anchors%5Bj%5D.getAttribute(%27download%27)%20%7C%7C%20%27%27%3B%0Aif%20(%2F%5C.csv%24%2Fi.test(name))%20%7B%20link%20%3D%20anchors%5Bj%5D%3B%20break%3B%20%7D%0A%7D%0Aif%20(%21link)%20return%3B%0AclearInterval(poll)%3B%0AclearTimeout(timeout)%3B%0Avar%20href%20%3D%20link.getAttribute(%27href%27)%20%7C%7C%20%27%27%3B%0Avar%20m%20%3D%20href.match(%2F%5Edata%3A(%5B%5E%2C%5D%2A)%2C(.%2A)%24%2F)%3B%0Aif%20(%21m)%20%7B%0AfinishOne(i%2C%20false%2C%20%27could%20not%20parse%20data%20URL%27)%3B%0Aif%20(iframe.parentNode)%20iframe.parentNode.removeChild(iframe)%3B%0Areturn%3B%0A%7D%0Avar%20meta%20%3D%20m%5B1%5D%2C%20payload%20%3D%20m%5B2%5D%2C%20csv%3B%0Atry%20%7B%0Acsv%20%3D%20%2F%3Bbase64%2Fi.test(meta)%20%3F%20atob(payload)%20%3A%20decodeURIComponent(payload)%3B%0A%7D%20catch%20(e)%20%7B%0AfinishOne(i%2C%20false%2C%20%27decode%20failed%3A%20%27%20%2B%20e.message)%3B%0Aif%20(iframe.parentNode)%20iframe.parentNode.removeChild(iframe)%3B%0Areturn%3B%0A%7D%0Avar%20fd%20%3D%20new%20FormData()%3B%0Afd.append(%27file%27%2C%20new%20Blob(%5Bcsv%5D%2C%20%7B%20type%3A%20%27text%2Fcsv%27%20%7D)%2C%20spec.key%20%2B%20%27.csv%27)%3B%0Afetch(API%20%2B%20spec.key%2C%20%7B%20method%3A%20%27POST%27%2C%20body%3A%20fd%20%7D)%0A.then(function(r)%20%7B%20return%20r.json().then(function(j)%20%7B%20return%20%7B%20status%3A%20r.status%2C%20body%3A%20j%20%7D%3B%20%7D)%3B%20%7D)%0A.then(function(x)%20%7B%0Aif%20(x.status%20%3E%3D%20200%20%26%26%20x.status%20%3C%20300%20%26%26%20x.body%20%26%26%20x.body.success)%20%7B%0AfinishOne(i%2C%20true%2C%20x.body.rows%20%2B%20%27%20rows%20uploaded%27)%3B%0A%7D%20else%20%7B%0AfinishOne(i%2C%20false%2C%20%27upload%20error%3A%20%27%20%2B%20((x.body%20%26%26%20x.body.error)%20%7C%7C%20(%27HTTP%20%27%20%2B%20x.status)))%3B%0A%7D%0A%7D)%0A.catch(function(e)%20%7B%20finishOne(i%2C%20false%2C%20%27network%3A%20%27%20%2B%20e.message)%3B%20%7D)%0A.then(function()%20%7B%20if%20(iframe.parentNode)%20iframe.parentNode.removeChild(iframe)%3B%20%7D)%3B%0A%7D%2C%20500)%3B%0A%7D)%3B%0A%7D)()
