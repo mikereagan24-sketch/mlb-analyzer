@@ -49,7 +49,7 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
-const { runModel, getSignals } = require('../services/model');
+const { runModel, getSignals, getBatterWoba, getPitcherWoba } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
@@ -2199,6 +2199,235 @@ router.get('/debug/bullpen-report', (req, res) => {
       weights: { W_PROJ, W_ACT, BP_SR, BP_WR, BP_SL, BP_WL },
       game_count: games.length,
       games: report,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
+// Debug: full model computation trace for a single game. Returns every
+// intermediate value runModel computes — pitcher wOBA reads, per-batter
+// expected wOBA, team aggregates, run/wOBA conversion components,
+// Pythagorean inputs, ML conversion — alongside what runModel actually
+// produced when called with the same inputs. The two should match to
+// within float-rounding; any divergence indicates this trace logic has
+// drifted from runModel and the trace block should be reconciled.
+//
+// Usage: GET /api/debug/model-trace?date=YYYY-MM-DD&game_id=tor-tb
+//        (optional) &mode=opener_aware  — default 'standard'
+//
+// Returns the trace as JSON; designed to be paste-friendly for offline
+// analysis. Read-only: never mutates game_log or signals.
+router.get('/debug/model-trace', (req, res) => {
+  try {
+    const date = req.query.date;
+    const gameId = req.query.game_id;
+    const mode = req.query.mode || 'standard';
+    if (!date || !gameId) return res.status(400).json({ error: 'date and game_id required' });
+
+    const gameRow = q.getGameById.get(date, gameId);
+    if (!gameRow) return res.status(404).json({ error: 'game not found', date, game_id: gameId });
+
+    const settings = getSettings();
+    const wobaIdx = getWobaIndex();
+
+    const tryParseLocal = (s) => { try { return JSON.parse(s); } catch { return null; } };
+    const num = (v, def) => { if (v == null || v === '') return def; const n = Number(v); return isNaN(n) ? def : n; };
+
+    // Mirror processGameSignals' game-row prep so the trace runs against
+    // the same `game` object runModel sees. Bullpen wOBA comes from
+    // q.getBullpenWobaBlended exactly as in jobs.js processGameSignals.
+    const awayParts = (gameRow.game_id || '').split('-');
+    const awayAbbr = awayParts[0] || '';
+    const homeAbbr = awayParts[1] || '';
+    const W_PROJ_ = num(settings.W_PROJ, 0.65);
+    const W_ACT_  = num(settings.W_ACT,  0.35);
+    const BP_SR_  = num(settings.BP_STRONG_WEIGHT_R, 0.55);
+    const BP_WR_  = num(settings.BP_WEAK_WEIGHT_R,   0.45);
+    const BP_SL_  = num(settings.BP_STRONG_WEIGHT_L, 0.35);
+    const BP_WL_  = num(settings.BP_WEAK_WEIGHT_L,   0.65);
+    const UNK_    = num(settings.UNKNOWN_PITCHER_WOBA, 0.335);
+    const MIN_BF_ = num(settings.MIN_BF, 100);
+    const LEAGUE_BP = 0.318;
+    let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP, awayBpWoba = LEAGUE_BP;
+    let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
+    const homeLineupArr = tryParseLocal(gameRow.home_lineup_json) || [];
+    const awayLineupArr = tryParseLocal(gameRow.away_lineup_json) || [];
+    try {
+      if (q.getBullpenWobaBlended) {
+        const aBp = q.getBullpenWobaBlended(awayAbbr, gameRow.away_sp || gameRow.away_pitcher || '', homeLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, MIN_BF_);
+        const hBp = q.getBullpenWobaBlended(homeAbbr, gameRow.home_sp || gameRow.home_pitcher || '', awayLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, MIN_BF_);
+        if (aBp?.vsRHB) awayBpVsR = aBp.vsRHB;
+        if (aBp?.vsLHB) awayBpVsL = aBp.vsLHB;
+        if (hBp?.vsRHB) homeBpVsR = hBp.vsRHB;
+        if (hBp?.vsLHB) homeBpVsL = hBp.vsLHB;
+        awayBpWoba = aBp?.woba || LEAGUE_BP;
+        homeBpWoba = hBp?.woba || LEAGUE_BP;
+      }
+    } catch(e) { /* fallback */ }
+
+    const game = {
+      ...gameRow,
+      awayLineup: awayLineupArr,
+      homeLineup: homeLineupArr,
+      awayBullpenWoba: awayBpWoba, homeBullpenWoba: homeBpWoba,
+      awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
+      homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
+    };
+
+    // Pull all settings constants now so the trace can show them alongside
+    // the computed values — these are exactly the constants runModel reads.
+    const RUN_MULT  = num(settings.RUN_MULT,  48);
+    const HFA_BOOST = num(settings.HFA_BOOST, 0.02);
+    const FAV_ADJ   = num(settings.FAV_ADJ,   0);
+    const DOG_ADJ   = num(settings.DOG_ADJ,   0);
+    const W_PIT     = num(settings.W_PIT,     0.5);
+    const W_BAT     = num(settings.W_BAT,     0.5);
+    const SP_WEIGHT     = num(settings.SP_WEIGHT,     0.77);
+    const RELIEF_WEIGHT = num(settings.RELIEF_WEIGHT, 0.23);
+    const SP_PIT_WEIGHT     = num(settings.SP_PIT_WEIGHT,     0.80);
+    const RELIEF_PIT_WEIGHT = num(settings.RELIEF_PIT_WEIGHT, 0.20);
+    const WOBA_BASELINE  = num(settings.WOBA_BASELINE,   0.230);
+    const PYTH_EXP       = num(settings.PYTH_EXP,        1.83);
+    const WIND_SCALE     = num(settings.WIND_SCALE,      2.0);
+    const MIN_PA         = num(settings.MIN_PA,          60);
+    const BAT_DFLT_START = num(settings.BAT_DFLT_START,  0.315);
+    const BAT_DFLT_OPP   = num(settings.BAT_DFLT_OPP,    0.320);
+    const WP_CLAMP_LO = num(settings.WP_CLAMP_LO, 0.25);
+    const WP_CLAMP_HI = num(settings.WP_CLAMP_HI, 0.75);
+
+    const PA_WEIGHTS = (Array.isArray(settings.PA_WEIGHTS) && settings.PA_WEIGHTS.length === 9)
+      ? settings.PA_WEIGHTS
+      : [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
+
+    // Per-batter trace. Mirrors perBatterEW (model.js lines 142-168) on
+    // the standard non-opener path. If runModel diverges, this block
+    // must be updated in lockstep — the actual_runModel block below acts
+    // as a sanity check.
+    const effHandLocal = (bh, ph) => bh==='S' ? (ph==='R'?'L':'R') : bh;
+    const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
+    const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
+
+    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar) => {
+      const eff = effHandLocal(b.hand, oppPitcherHand);
+      const bw  = getBatterWoba(wobaIdx, b.name, b.hand, null, W_PROJ_, W_ACT_, MIN_PA, settings);
+      const pitWvsBatter  = eff === 'L' ? pwOpp.vsLHB : pwOpp.vsRHB;
+      // Standard non-opener path (model.js lines 158-160) uses the
+      // combined bullpenWoba scalar — NOT the vsL/vsR splits. Splits are
+      // only consulted on the opener_aware path inside openerOpts.
+      const pitW = pitWvsBatter * SP_PIT_WEIGHT + oppBullpenScalar * RELIEF_PIT_WEIGHT;
+      const vsStart = oppPitcherHand === 'R' ? (bw.vsRHP ?? BAT_DFLT_START) : (bw.vsLHP ?? BAT_DFLT_START);
+      const vsOpp   = oppPitcherHand === 'R' ? (bw.vsLHP ?? BAT_DFLT_OPP)   : (bw.vsRHP ?? BAT_DFLT_OPP);
+      const batW = vsStart * SP_WEIGHT + vsOpp * RELIEF_WEIGHT;
+      const ew   = pitW * W_PIT + batW * W_BAT;
+      return {
+        name: b.name, hand: b.hand, eff_hand_vs_opp: eff,
+        batter_vsRHP: bw.vsRHP, batter_vsLHP: bw.vsLHP, batter_source: bw.source,
+        opp_pitcher_vsBatter: pitWvsBatter,
+        opp_bullpen_combined: oppBullpenScalar,
+        pitW: parseFloat(pitW.toFixed(5)),
+        batW_vsStart: vsStart, batW_vsOpp: vsOpp,
+        batW: parseFloat(batW.toFixed(5)),
+        expected_wOBA: parseFloat(ew.toFixed(5)),
+      };
+    };
+
+    // Side-asymmetry: away batters face HOME pitching.
+    // model.js line 445-446: awayVsBullpen = game.homeBullpenWoba.
+    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba) }));
+    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba) }));
+
+    const aWs = awayBatterTraces.reduce((s,t)=>s + t.expected_wOBA * t.pa_weight, 0);
+    const aWp = awayBatterTraces.reduce((s,t)=>s + t.pa_weight, 0);
+    const hWs = homeBatterTraces.reduce((s,t)=>s + t.expected_wOBA * t.pa_weight, 0);
+    const hWp = homeBatterTraces.reduce((s,t)=>s + t.pa_weight, 0);
+    const aTeamWoba = aWp > 0 ? aWs / aWp : BAT_DFLT_START;
+    const hTeamWoba = hWp > 0 ? hWs / hWp : BAT_DFLT_START;
+
+    const pf = game.park_factor || 1.0;
+    const aRuns = Math.max(0, (aTeamWoba - WOBA_BASELINE) * RUN_MULT * pf);
+    const hRuns = Math.max(0, (hTeamWoba - WOBA_BASELINE) * RUN_MULT * pf);
+
+    const rawHW = (aRuns<=0&&hRuns<=0) ? 0.5 : hRuns<=0 ? 0.25 : aRuns<=0 ? 0.75 :
+      Math.pow(hRuns, PYTH_EXP) / (Math.pow(hRuns, PYTH_EXP) + Math.pow(aRuns, PYTH_EXP));
+    const adjHW = Math.min(Math.max(rawHW + HFA_BOOST, WP_CLAMP_LO), WP_CLAMP_HI);
+    const adjAW = 1 - adjHW;
+
+    const rawAML = adjAW >= 0.5 ? -Math.round(adjAW/(1-adjAW)*100) : Math.round((1-adjAW)/adjAW*100);
+    const rawHML = adjHW >= 0.5 ? -Math.round(adjHW/(1-adjHW)*100) : Math.round((1-adjHW)/adjHW*100);
+
+    // Spread adjustment (FAV_ADJ shifts favorite, DOG_ADJ shifts dog)
+    const favIsAway = rawAML <= rawHML;
+    const adjFav = (favIsAway ? rawAML : rawHML) - FAV_ADJ;
+    const adjDog = (favIsAway ? rawHML : rawAML) + DOG_ADJ;
+    const aML = favIsAway ? adjFav : adjDog;
+    const hML = favIsAway ? adjDog : adjFav;
+
+    const windFactor = game.wind_factor || 0;
+    const tempRunAdj = game.temp_run_adj || 0;
+    const windRunAdj = windFactor * WIND_SCALE;
+    const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
+
+    // Sanity check: call the actual runModel with the same inputs and
+    // include its output. Any divergence between trace.* and actual.*
+    // means this trace has drifted.
+    const actual = runModel(game, wobaIdx, settings, mode);
+
+    res.json({
+      meta: {
+        date, game_id: gameId, mode,
+        away_team: game.away_team, home_team: game.home_team,
+        away_sp: game.away_sp, away_sp_hand: game.away_sp_hand,
+        home_sp: game.home_sp, home_sp_hand: game.home_sp_hand,
+        lineups_quality: game.lineups_quality,
+        lineups_complete: !!(game.lineups_complete),
+      },
+      settings: {
+        W_PROJ: W_PROJ_, W_ACT: W_ACT_,
+        W_PIT, W_BAT,
+        SP_WEIGHT, RELIEF_WEIGHT,
+        SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT,
+        BP_STRONG_R: BP_SR_, BP_WEAK_R: BP_WR_, BP_STRONG_L: BP_SL_, BP_WEAK_L: BP_WL_,
+        UNKNOWN_PITCHER_WOBA: UNK_,
+        MIN_PA, MIN_BF: MIN_BF_,
+        RUN_MULT, WOBA_BASELINE, PYTH_EXP, HFA_BOOST,
+        FAV_ADJ, DOG_ADJ, WIND_SCALE,
+        WP_CLAMP_LO, WP_CLAMP_HI,
+        BAT_DFLT_START, BAT_DFLT_OPP,
+        PA_WEIGHTS,
+      },
+      pitchers: {
+        away_sp_blended: pwA,
+        home_sp_blended: pwH,
+        away_bullpen: { vsL: awayBpVsL, vsR: awayBpVsR, woba: awayBpWoba, source: 'getBullpenWobaBlended' },
+        home_bullpen: { vsL: homeBpVsL, vsR: homeBpVsR, woba: homeBpWoba, source: 'getBullpenWobaBlended' },
+      },
+      env: {
+        park_factor: pf, park_factor_source: game.venue_id ? ('venue_id ' + game.venue_id) : 'home_team_default',
+        wind_factor: windFactor, wind_run_adj: windRunAdj,
+        temp_run_adj: tempRunAdj,
+      },
+      away_batter_traces: awayBatterTraces,
+      home_batter_traces: homeBatterTraces,
+      aggregates: {
+        away_team_woba: parseFloat(aTeamWoba.toFixed(5)),
+        home_team_woba: parseFloat(hTeamWoba.toFixed(5)),
+        away_runs_pre_weather: parseFloat(aRuns.toFixed(4)),
+        home_runs_pre_weather: parseFloat(hRuns.toFixed(4)),
+        raw_home_wp_pythagorean: parseFloat(rawHW.toFixed(5)),
+        adj_home_wp: parseFloat(adjHW.toFixed(5)),
+        adj_away_wp: parseFloat(adjAW.toFixed(5)),
+        raw_away_ml: rawAML, raw_home_ml: rawHML,
+        spread_adjusted_away_ml: aML, spread_adjusted_home_ml: hML,
+        est_total_runs: parseFloat(estTot.toFixed(4)),
+      },
+      actual_runModel: actual,
+      // Sanity: divergence indicates trace drift from runModel.
+      trace_vs_actual_diff: {
+        away_ml_diff: (actual.aML != null) ? aML - actual.aML : null,
+        home_ml_diff: (actual.hML != null) ? hML - actual.hML : null,
+        total_diff:   (actual.estTot != null) ? parseFloat((estTot - actual.estTot).toFixed(4)) : null,
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message, stack: err.stack });
