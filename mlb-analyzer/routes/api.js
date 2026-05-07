@@ -2308,9 +2308,9 @@ router.get('/debug/model-trace', (req, res) => {
     const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
     const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
 
-    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar) => {
+    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar, ownTeam) => {
       const eff = effHandLocal(b.hand, oppPitcherHand);
-      const bw  = getBatterWoba(wobaIdx, b.name, b.hand, null, W_PROJ_, W_ACT_, MIN_PA, settings);
+      const bw  = getBatterWoba(wobaIdx, b.name, b.hand, ownTeam, W_PROJ_, W_ACT_, MIN_PA, settings);
       const pitWvsBatter  = eff === 'L' ? pwOpp.vsLHB : pwOpp.vsRHB;
       // Standard non-opener path (model.js lines 158-160) uses the
       // combined bullpenWoba scalar — NOT the vsL/vsR splits. Splits are
@@ -2334,8 +2334,10 @@ router.get('/debug/model-trace', (req, res) => {
 
     // Side-asymmetry: away batters face HOME pitching.
     // model.js line 445-446: awayVsBullpen = game.homeBullpenWoba.
-    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba) }));
-    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba) }));
+    // teamHint mirrors runModel lines 440-441: own team's abbr is passed
+    // so fuzzyLookup can disambiguate name collisions in the wOBA index.
+    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba, game.away_team) }));
+    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba, game.home_team) }));
 
     const aWs = awayBatterTraces.reduce((s,t)=>s + t.expected_wOBA * t.pa_weight, 0);
     const aWp = awayBatterTraces.reduce((s,t)=>s + t.pa_weight, 0);
