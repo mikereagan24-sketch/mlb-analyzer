@@ -6,7 +6,7 @@ const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScore
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
-const { runModel, getSignals, calcPnl, calcRunlinePnl } = require('./model');
+const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName } = require('../utils/names');
 const { calcCLV } = require('./clv');
@@ -598,6 +598,12 @@ async function ensureScheduleBootstrap(dateStr) {
       // already written.
       away_sp_proj_ip: null,
       home_sp_proj_ip: null,
+      // F4 forecast IP is captured by the lineup-job too. Same null +
+      // COALESCE pattern as proj_ip — bootstrap never writes these.
+      away_sp_forecast_ip: null,
+      home_sp_forecast_ip: null,
+      away_bulk_forecast_ip: null,
+      home_bulk_forecast_ip: null,
       market_away_ml: existingRow ? (existingRow.market_away_ml || null) : null,
       market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
       market_total:   existingRow ? existingRow.market_total : null,
@@ -670,6 +676,11 @@ async function runLineupJob(dateStr) {
           // statsapi bootstrap leaves proj_ip to the lineup-job pass.
           away_sp_proj_ip: null,
           home_sp_proj_ip: null,
+          // F4 forecast IP also left to the lineup-job pass.
+          away_sp_forecast_ip: null,
+          home_sp_forecast_ip: null,
+          away_bulk_forecast_ip: null,
+          home_bulk_forecast_ip: null,
           // Preserve all downstream-written fields when the row already
           // exists. Bootstrap is matchup + SP only; everything else is owned
           // by other jobs (odds, model, lineup confirmations).
@@ -770,6 +781,42 @@ async function runLineupJob(dateStr) {
 
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
+
+    // F4 SP IP-per-start forecast index. Built once per slate; reused for
+    // every game. The pure forecast function (services/model.js
+    // forecastSpIP) takes this index and a pitcher mlb_id plus the game
+    // date, and returns a Bayesian-shrinkage IP forecast. Diagnostic in
+    // this PR — the model does not yet consume these values (PR 4 wires
+    // them into the SP/bullpen split).
+    const spStartIndex = buildSpStartIndex(db, settings);
+    if (spStartIndex.buildError) {
+      console.warn('[lineup-job] SP forecast index build failed: ' + spStartIndex.buildError + ' — forecasts will use league baseline fallback');
+    }
+    // Helper: resolve a pitcher name on a given team to their mlb_id via
+    // team_rosters, then call forecastSpIP. Returns the forecast IP (a
+    // number) or null when name was null, team_rosters had no match, or
+    // the forecast itself reported source='fallback'. PR 4's gate will
+    // accept any non-null number; the COALESCE in upsertGame preserves
+    // prior values when this is null.
+    const rosterLookup = db.prepare(
+      "SELECT mlb_id FROM team_rosters WHERE team=? AND player_name=?"
+    );
+    const forecastForPitcher = (pitcherName, team) => {
+      if (!pitcherName || !team) return null;
+      const r = rosterLookup.get(team, pitcherName);
+      const mlbId = r ? r.mlb_id : null;
+      const out = forecastSpIP({
+        index: spStartIndex,
+        pitcherMlbId: mlbId,
+        gameDate: dateStr,
+        settings,
+      });
+      // Only persist non-fallback values. league_only and shrinkage both
+      // produce defensible numbers; fallback (no index data at all) is
+      // a degenerate hardcoded 5.25 with no informational content.
+      if (out.source === 'fallback') return null;
+      return out.forecast;
+    };
     // updateLineup also writes the proj_* snapshot columns wrapped in
     // COALESCE so the FIRST non-empty projected write wins and subsequent
     // updates (still projected, or transitioned to confirmed) preserve the
@@ -921,6 +968,34 @@ async function runLineupJob(dateStr) {
         home_sp_proj_ip: q.getPitcherProjIP
           ? q.getPitcherProjIP(writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || '')
           : null,
+        // F4 forecast IP for the SP slot. Same name-resolution chain as
+        // proj_ip above. Resolves to mlb_id via team_rosters and computes
+        // the Bayesian-shrinkage EWMA forecast. Null when SP name is null
+        // (e.g., PRIM-detected bullpen game pre-announcement) — the SP
+        // forecast column stays null and the model's existing bullpen-
+        // sourced fallback for the opener slot continues to apply.
+        // Diagnostic only in this PR; PR 4 wires consumption.
+        away_sp_forecast_ip: forecastForPitcher(
+          writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
+          g.away_team
+        ),
+        home_sp_forecast_ip: forecastForPitcher(
+          writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
+          g.home_team
+        ),
+        // F4 forecast IP for the announced bulk pitcher in opener games.
+        // Null when no PRIM-tagged bulk was announced for this side (the
+        // common case). When announced, this is the bulk pitcher's
+        // historical IP signal — what PR 4 will use to size the bulk slot
+        // relative to the bullpen residual.
+        away_bulk_forecast_ip: forecastForPitcher(
+          g.away_bulk_announced ? g.away_bulk_announced.name : null,
+          g.away_team
+        ),
+        home_bulk_forecast_ip: forecastForPitcher(
+          g.home_bulk_announced ? g.home_bulk_announced.name : null,
+          g.home_team
+        ),
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API

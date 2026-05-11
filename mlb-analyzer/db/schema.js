@@ -430,6 +430,19 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_announced TEXT"); }
 // live lookup, not these stored values.
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_proj_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_proj_ip REAL"); } catch(e) {}
+// F4 SP IP-per-start forecast (Bayesian shrinkage; see services/model.js
+// forecastSpIP). Diagnostic-only in this PR — the model does not yet
+// consume these. PR 4 will wire them into the SP/bullpen weight split.
+// Populated by runLineupJob, which builds the start index once per slate
+// and forecasts for each side's SP and announced bulk pitcher. Standard
+// games leave bulk columns null; opener games with PRIM-tagged bulk
+// populate both. When SP is null (PRIM detected, no opener announced yet)
+// the SP forecast column stays null and the model uses its existing
+// bullpen-sourced fallback for the opener slot.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_forecast_ip REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_forecast_ip REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bulk_forecast_ip REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bulk_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
@@ -720,6 +733,8 @@ const q = {
       away_sp, away_sp_hand, home_sp, home_sp_hand,
       bulk_guy_away_announced, bulk_guy_home_announced,
       away_sp_proj_ip, home_sp_proj_ip,
+      away_sp_forecast_ip, home_sp_forecast_ip,
+      away_bulk_forecast_ip, home_bulk_forecast_ip,
       market_away_ml, market_home_ml, market_total, park_factor,
       model_away_ml, model_home_ml, model_total, lineup_source,
       venue_id, venue_name, game_number, game_pk, updated_at
@@ -728,6 +743,8 @@ const q = {
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
       @bulk_guy_away_announced, @bulk_guy_home_announced,
       @away_sp_proj_ip, @home_sp_proj_ip,
+      @away_sp_forecast_ip, @home_sp_forecast_ip,
+      @away_bulk_forecast_ip, @home_bulk_forecast_ip,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
       @model_away_ml, @model_home_ml, @model_total, @lineup_source,
       @venue_id, @venue_name, COALESCE(@game_number, 1), @game_pk, datetime('now')
@@ -751,6 +768,13 @@ const q = {
       -- the only path that looks these up; everyone else passes null.
       away_sp_proj_ip = COALESCE(excluded.away_sp_proj_ip, game_log.away_sp_proj_ip),
       home_sp_proj_ip = COALESCE(excluded.home_sp_proj_ip, game_log.home_sp_proj_ip),
+      -- COALESCE forecast_ip for the same reason as proj_ip: only the
+      -- lineup-job computes these. A statsapi-bootstrap upsert passes
+      -- null and must not wipe the lineup-job's value.
+      away_sp_forecast_ip = COALESCE(excluded.away_sp_forecast_ip, game_log.away_sp_forecast_ip),
+      home_sp_forecast_ip = COALESCE(excluded.home_sp_forecast_ip, game_log.home_sp_forecast_ip),
+      away_bulk_forecast_ip = COALESCE(excluded.away_bulk_forecast_ip, game_log.away_bulk_forecast_ip),
+      home_bulk_forecast_ip = COALESCE(excluded.home_bulk_forecast_ip, game_log.home_bulk_forecast_ip),
       game_time = COALESCE(excluded.game_time, game_log.game_time),
       market_away_ml = excluded.market_away_ml, market_home_ml = excluded.market_home_ml,
       market_total = excluded.market_total, park_factor = excluded.park_factor,
