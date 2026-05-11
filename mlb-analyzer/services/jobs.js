@@ -378,6 +378,29 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     db.prepare(`UPDATE game_log SET opener_model_away_ml=?, opener_model_home_ml=?, opener_model_total=?, opener_model_computed_at=datetime('now'), updated_at=datetime('now') WHERE game_date=? AND game_id=?`)
       .run(openerModel.aML, openerModel.hML, parseFloat(openerModel.estTot.toFixed(2)), gameRow.game_date, gameRow.game_id);
   }
+  // Bullpen wOBA persistence. Captures the values that fed runModel at this
+  // signal-fire time, independent of suppression status (bullpen wOBA is
+  // computed above at lines ~282-283 before suppression branches). Without
+  // this persistence, the model can't be replayed on historical games at
+  // new settings — woba_data is wiped+reloaded daily, so the inputs
+  // disappear. May 2026 calibration analysis flagged this as the blocker
+  // for any future settings-tuning backtest.
+  try {
+    db.prepare(`UPDATE game_log SET
+      away_bullpen_woba=?, home_bullpen_woba=?,
+      away_bullpen_woba_vs_l=?, away_bullpen_woba_vs_r=?,
+      home_bullpen_woba_vs_l=?, home_bullpen_woba_vs_r=?
+      WHERE game_date=? AND game_id=?`)
+      .run(
+        awayBpWoba, homeBpWoba,
+        awayBpVsL, awayBpVsR,
+        homeBpVsL, homeBpVsR,
+        gameRow.game_date, gameRow.game_id
+      );
+  } catch (e) {
+    // Non-critical — log and continue. Doesn't block signal firing.
+    console.warn('[bullpen-persist] ' + gameRow.game_id + ': ' + e.message);
+  }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
   // If game is already final (scored), freeze all signals — don't rewrite
