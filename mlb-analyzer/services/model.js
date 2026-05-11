@@ -733,4 +733,194 @@ function calcRunlinePnl(side, spreadLine, spreadPrice, awayScore, homeScore) {
   return { outcome: won ? 'win' : 'loss', pnl };
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP };
+// ============================================================
+// SP IP-per-start forecast (F4: Bayesian shrinkage of trailing-EWMA toward
+// 30-day league baseline). Scaffolding for v4 cohort — no callers in this
+// PR. Wiring into runModel ships in a later PR.
+//
+// Forecast structure (validated against historical data in
+// scripts/sp-ip-forecast-analysis.py — F4 RMSE 10.5% below F1 season-average
+// baseline on n=1,349 starts):
+//
+//   forecast = alpha * league_baseline_30d + (1 - alpha) * pitcher_ewma
+//   alpha    = SHRINKAGE_K / (SHRINKAGE_K + n_effective)
+//   ewma     = sum(lambda^(N-1-i) * ip_i) / sum(lambda^(N-1-i))   for i in trailing N clean starts
+//
+// "Clean" excludes anomaly starts (likely-injury exits): pitches < ANOMALY_PITCH_THRESHOLD
+// AND ip < ANOMALY_IP_THRESHOLD. Anomalies are filtered from forecast INPUTS;
+// the pitcher's future starts are still forecast normally.
+//
+// buildSpStartIndex(db) is the bridge between SQLite and the pure forecast
+// function — same shape as buildWobaIndex. Build once per signal-fire pass,
+// pass to forecastSpIP as { index, pitcherMlbId, gameDate, settings }.
+//
+// Returns { forecast: number, components: {...}, source: string }
+// where source ∈ {'shrinkage', 'league_only', 'fallback'}.
+
+const FORECAST_TRAILING_N_DEFAULT = 10;
+const FORECAST_DECAY_LAMBDA_DEFAULT = 0.85;
+const FORECAST_SHRINKAGE_K_DEFAULT = 10;
+const FORECAST_LEAGUE_WINDOW_DAYS_DEFAULT = 30;
+const FORECAST_ANOMALY_PITCH_THRESHOLD_DEFAULT = 50;
+const FORECAST_ANOMALY_IP_THRESHOLD_DEFAULT = 4;
+const FORECAST_FALLBACK_IP_DEFAULT = 5.25;
+
+function buildSpStartIndex(db, settings) {
+  // Loads every historical SP start, groups by pitcher_mlb_id ordered
+  // by date, and precomputes the 30-day league baseline per game_date.
+  // O(N) build; O(1) lookup downstream.
+  if (!db) return { byPitcher: {}, leagueBaselineByDate: {}, leagueDates: [] };
+  settings = settings || {};
+  const ANOM_P = parseFloat(settings.FORECAST_ANOMALY_PITCH_THRESHOLD) || FORECAST_ANOMALY_PITCH_THRESHOLD_DEFAULT;
+  const ANOM_IP = parseFloat(settings.FORECAST_ANOMALY_IP_THRESHOLD) || FORECAST_ANOMALY_IP_THRESHOLD_DEFAULT;
+  const WIN_DAYS = parseInt(settings.FORECAST_LEAGUE_WINDOW_DAYS, 10) || FORECAST_LEAGUE_WINDOW_DAYS_DEFAULT;
+
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT game_date, pitcher_mlb_id, pitcher_name, pitches_thrown, innings_pitched
+      FROM pitcher_game_log
+      WHERE outing_type = 'start'
+        AND innings_pitched IS NOT NULL
+        AND innings_pitched > 0
+        AND pitcher_mlb_id IS NOT NULL
+      ORDER BY pitcher_mlb_id ASC, game_date ASC
+    `).all();
+  } catch (e) {
+    // pitcher_game_log may not exist or outing_type column may be missing.
+    // Return an empty index; downstream calls fall back to league baseline only.
+    return { byPitcher: {}, leagueBaselineByDate: {}, leagueDates: [], buildError: e.message };
+  }
+
+  // Annotate and group by pitcher.
+  const byPitcher = {};
+  const cleanByDate = []; // for league baseline
+  for (const r of rows) {
+    const isAnomaly = (r.pitches_thrown != null && r.pitches_thrown < ANOM_P)
+                      && (r.innings_pitched < ANOM_IP);
+    const start = {
+      game_date: r.game_date,
+      ip: r.innings_pitched,
+      pitches: r.pitches_thrown,
+      is_anomaly: isAnomaly,
+    };
+    if (!byPitcher[r.pitcher_mlb_id]) byPitcher[r.pitcher_mlb_id] = [];
+    byPitcher[r.pitcher_mlb_id].push(start);
+    if (!isAnomaly) cleanByDate.push({ date: r.game_date, ip: r.innings_pitched });
+  }
+
+  // Build league baseline cache: for each unique date that has a clean
+  // start, compute avg IP of clean starts in [date - WIN_DAYS, date).
+  // Sorted-array sliding-window approach.
+  cleanByDate.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const uniqueDates = [];
+  let prev = null;
+  for (const c of cleanByDate) {
+    if (c.date !== prev) { uniqueDates.push(c.date); prev = c.date; }
+  }
+
+  const leagueBaselineByDate = {};
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  let leftIdx = 0;
+  for (const d of uniqueDates) {
+    const dt = new Date(d + 'T00:00:00Z').getTime();
+    const cutoff = dt - WIN_DAYS * MS_PER_DAY;
+    while (leftIdx < cleanByDate.length && new Date(cleanByDate[leftIdx].date + 'T00:00:00Z').getTime() < cutoff) leftIdx++;
+    let sum = 0, n = 0;
+    for (let i = leftIdx; i < cleanByDate.length; i++) {
+      const dti = new Date(cleanByDate[i].date + 'T00:00:00Z').getTime();
+      if (dti >= dt) break; // strictly before target date
+      sum += cleanByDate[i].ip;
+      n++;
+    }
+    leagueBaselineByDate[d] = n > 0 ? sum / n : null;
+  }
+
+  return {
+    byPitcher,
+    leagueBaselineByDate,
+    leagueDates: Object.keys(leagueBaselineByDate).sort(),
+  };
+}
+
+function _lookupLeagueBaseline(index, gameDate, fallbackIP) {
+  // Walk back from gameDate to the most recent prior date with a cached baseline.
+  // Used when gameDate isn't exactly in the cache (e.g. a date with no clean starts).
+  if (!index || !index.leagueBaselineByDate) return fallbackIP;
+  const direct = index.leagueBaselineByDate[gameDate];
+  if (direct != null) return direct;
+  const dates = index.leagueDates || [];
+  for (let i = dates.length - 1; i >= 0; i--) {
+    if (dates[i] < gameDate) {
+      const v = index.leagueBaselineByDate[dates[i]];
+      if (v != null) return v;
+    }
+  }
+  return fallbackIP;
+}
+
+function forecastSpIP({ index, pitcherMlbId, gameDate, settings }) {
+  settings = settings || {};
+  const N = parseInt(settings.FORECAST_TRAILING_N, 10) || FORECAST_TRAILING_N_DEFAULT;
+  const LAMBDA = parseFloat(settings.FORECAST_DECAY_LAMBDA) || FORECAST_DECAY_LAMBDA_DEFAULT;
+  const K = parseFloat(settings.FORECAST_SHRINKAGE_K) || FORECAST_SHRINKAGE_K_DEFAULT;
+  const FALLBACK = parseFloat(settings.FORECAST_FALLBACK_IP) || FORECAST_FALLBACK_IP_DEFAULT;
+
+  // League baseline always available (or fallback).
+  const f0 = _lookupLeagueBaseline(index, gameDate, FALLBACK);
+
+  // No pitcher id, no index, or no historical priors → league baseline only.
+  if (!pitcherMlbId || !index || !index.byPitcher || !index.byPitcher[pitcherMlbId]) {
+    return {
+      forecast: f0,
+      components: { f0_league: f0, f3_ewma: null, n_eff: 0, alpha: 1 },
+      source: f0 === FALLBACK ? 'fallback' : 'league_only',
+    };
+  }
+
+  // Filter to strictly-prior clean starts; take last N.
+  const allPriors = index.byPitcher[pitcherMlbId];
+  const cleanPriors = [];
+  for (const p of allPriors) {
+    if (p.game_date >= gameDate) break; // priors are date-sorted ascending
+    if (!p.is_anomaly) cleanPriors.push(p);
+  }
+  if (cleanPriors.length === 0) {
+    return {
+      forecast: f0,
+      components: { f0_league: f0, f3_ewma: null, n_eff: 0, alpha: 1 },
+      source: f0 === FALLBACK ? 'fallback' : 'league_only',
+    };
+  }
+  const window = cleanPriors.slice(-N);
+
+  // EWMA: most recent start weight 1.0, prior 0.85, etc.
+  let wsum = 0, wn = 0;
+  const L = window.length;
+  for (let i = 0; i < L; i++) {
+    const w = Math.pow(LAMBDA, L - 1 - i);
+    wsum += w * window[i].ip;
+    wn += w;
+  }
+  const ewma = wsum / wn;
+  const nEff = wn;
+
+  // Bayesian shrinkage toward F0.
+  const alpha = K / (K + nEff);
+  const forecast = alpha * f0 + (1 - alpha) * ewma;
+
+  return {
+    forecast,
+    components: {
+      f0_league: f0,
+      f3_ewma: ewma,
+      n_eff: nEff,
+      alpha,
+      window_size: L,
+      total_clean_priors: cleanPriors.length,
+    },
+    source: 'shrinkage',
+  };
+}
+
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP };
