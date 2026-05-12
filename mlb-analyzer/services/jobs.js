@@ -651,6 +651,8 @@ async function ensureScheduleBootstrap(dateStr) {
       home_sp_forecast_ip: null,
       away_bulk_forecast_ip: null,
       home_bulk_forecast_ip: null,
+      away_opener_forecast_ip: null,
+      home_opener_forecast_ip: null,
       market_away_ml: existingRow ? (existingRow.market_away_ml || null) : null,
       market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
       market_total:   existingRow ? existingRow.market_total : null,
@@ -728,6 +730,8 @@ async function runLineupJob(dateStr) {
           home_sp_forecast_ip: null,
           away_bulk_forecast_ip: null,
           home_bulk_forecast_ip: null,
+          away_opener_forecast_ip: null,
+          home_opener_forecast_ip: null,
           // Preserve all downstream-written fields when the row already
           // exists. Bootstrap is matchup + SP only; everything else is owned
           // by other jobs (odds, model, lineup confirmations).
@@ -848,7 +852,7 @@ async function runLineupJob(dateStr) {
     const rosterLookup = db.prepare(
       "SELECT mlb_id FROM team_rosters WHERE team=? AND player_name=?"
     );
-    const forecastForPitcher = (pitcherName, team) => {
+    const forecastForPitcher = (pitcherName, team, role) => {
       if (!pitcherName || !team) return null;
       const r = rosterLookup.get(team, pitcherName);
       const mlbId = r ? r.mlb_id : null;
@@ -857,6 +861,7 @@ async function runLineupJob(dateStr) {
         pitcherMlbId: mlbId,
         gameDate: dateStr,
         settings,
+        role: role || 'start',
       });
       // Only persist non-fallback values. league_only and shrinkage both
       // produce defensible numbers; fallback (no index data at all) is
@@ -1024,25 +1029,51 @@ async function runLineupJob(dateStr) {
         // Diagnostic only in this PR; PR 4 wires consumption.
         away_sp_forecast_ip: forecastForPitcher(
           writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
-          g.away_team
+          g.away_team,
+          'start'
         ),
         home_sp_forecast_ip: forecastForPitcher(
           writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
-          g.home_team
+          g.home_team,
+          'start'
         ),
         // F4 forecast IP for the announced bulk pitcher in opener games.
         // Null when no PRIM-tagged bulk was announced for this side (the
         // common case). When announced, this is the bulk pitcher's
         // historical IP signal — what PR 4 will use to size the bulk slot
-        // relative to the bullpen residual.
+        // relative to the bullpen residual. Role='bulk' uses the 5.4 IP
+        // baseline (matches design weight 0.60 × 9 IP), keeping bulk
+        // forecasts centered on bulk-role expectations.
         away_bulk_forecast_ip: forecastForPitcher(
           g.away_bulk_announced ? g.away_bulk_announced.name : null,
-          g.away_team
+          g.away_team,
+          'bulk'
         ),
         home_bulk_forecast_ip: forecastForPitcher(
           g.home_bulk_announced ? g.home_bulk_announced.name : null,
-          g.home_team
+          g.home_team,
+          'bulk'
         ),
+        // Opener-role forecast: only meaningful when this game IS opener-mode
+        // (away_bulk or home_bulk is announced, signaling the named SP is
+        // really an opener). Uses role='opener' which shrinks toward 1.35
+        // IP baseline (= design weight 0.15 × 9 IP), keeping the opener
+        // forecast in a role-appropriate range instead of being pulled up
+        // by the SP baseline. Null when not an opener game.
+        away_opener_forecast_ip: g.away_bulk_announced
+          ? forecastForPitcher(
+              writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
+              g.away_team,
+              'opener'
+            )
+          : null,
+        home_opener_forecast_ip: g.home_bulk_announced
+          ? forecastForPitcher(
+              writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
+              g.home_team,
+              'opener'
+            )
+          : null,
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API

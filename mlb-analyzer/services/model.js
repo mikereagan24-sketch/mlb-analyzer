@@ -817,6 +817,18 @@ const FORECAST_ANOMALY_PITCH_THRESHOLD_DEFAULT = 50;
 const FORECAST_ANOMALY_IP_THRESHOLD_DEFAULT = 4;
 const FORECAST_FALLBACK_IP_DEFAULT = 5.25;
 
+// Role-specific F4 shrinkage baselines. The SP role uses the data-driven
+// empirical baseline (avg IP across recent starts, ~5.4); opener and bulk
+// roles use design-derived baselines that reflect the IP-equivalent of
+// each slot's design weight. Per the v4 opener-mode redesign:
+//   opener_weight 0.15 × 9 IP = 1.35 IP baseline
+//   bulk_weight   0.60 × 9 IP = 5.40 IP baseline
+// These act as the shrinkage target in forecastSpIP — relievers used as
+// openers/bulks shrink toward role-appropriate IP rather than toward the
+// SP baseline (which inflates relief-only pitcher forecasts by ~3 IP).
+const FORECAST_OPENER_BASELINE_IP_DEFAULT = 1.35;
+const FORECAST_BULK_BASELINE_IP_DEFAULT   = 5.40;
+
 // PR 4: anchored mapping from per-game forecast IP to per-game SP pitching
 // weight. League-mean SP forecast (5.5 IP) maps to the existing fixed
 // 0.80 weight (no change for average pitchers). Slope of 0.07/IP means
@@ -980,22 +992,35 @@ function _lookupLeagueBaseline(index, gameDate, fallbackIP) {
   return fallbackIP;
 }
 
-function forecastSpIP({ index, pitcherMlbId, gameDate, settings }) {
+function forecastSpIP({ index, pitcherMlbId, gameDate, settings, role }) {
   settings = settings || {};
   const N = parseInt(settings.FORECAST_TRAILING_N, 10) || FORECAST_TRAILING_N_DEFAULT;
   const LAMBDA = parseFloat(settings.FORECAST_DECAY_LAMBDA) || FORECAST_DECAY_LAMBDA_DEFAULT;
   const K = parseFloat(settings.FORECAST_SHRINKAGE_K) || FORECAST_SHRINKAGE_K_DEFAULT;
   const FALLBACK = parseFloat(settings.FORECAST_FALLBACK_IP) || FORECAST_FALLBACK_IP_DEFAULT;
 
-  // League baseline always available (or fallback).
-  const f0 = _lookupLeagueBaseline(index, gameDate, FALLBACK);
+  // Role-aware F4 shrinkage baseline. Default 'start' uses the data-driven
+  // empirical league baseline (~5.4 IP avg across recent starts). Opener
+  // and bulk roles use design-derived baselines so relief-style pitchers
+  // shrink toward role-appropriate IP instead of being inflated by the
+  // starter baseline. Settings overrides allow tuning per role.
+  const roleUsed = (role === 'opener' || role === 'bulk') ? role : 'start';
+  let f0;
+  if (roleUsed === 'opener') {
+    f0 = parseFloat(settings.FORECAST_OPENER_BASELINE_IP) || FORECAST_OPENER_BASELINE_IP_DEFAULT;
+  } else if (roleUsed === 'bulk') {
+    f0 = parseFloat(settings.FORECAST_BULK_BASELINE_IP) || FORECAST_BULK_BASELINE_IP_DEFAULT;
+  } else {
+    // 'start' — keep empirical data-driven baseline unchanged
+    f0 = _lookupLeagueBaseline(index, gameDate, FALLBACK);
+  }
 
-  // No pitcher id, no index, or no historical priors → league baseline only.
+  // No pitcher id, no index, or no historical priors → role baseline only.
   if (!pitcherMlbId || !index || !index.byPitcher || !index.byPitcher[pitcherMlbId]) {
     return {
       forecast: f0,
-      components: { f0_league: f0, f3_ewma: null, n_eff: 0, alpha: 1 },
-      source: f0 === FALLBACK ? 'fallback' : 'league_only',
+      components: { f0_league: f0, f3_ewma: null, n_eff: 0, alpha: 1, role_used: roleUsed },
+      source: (roleUsed === 'start' && f0 === FALLBACK) ? 'fallback' : 'league_only',
     };
   }
 
@@ -1009,8 +1034,8 @@ function forecastSpIP({ index, pitcherMlbId, gameDate, settings }) {
   if (cleanPriors.length === 0) {
     return {
       forecast: f0,
-      components: { f0_league: f0, f3_ewma: null, n_eff: 0, alpha: 1 },
-      source: f0 === FALLBACK ? 'fallback' : 'league_only',
+      components: { f0_league: f0, f3_ewma: null, n_eff: 0, alpha: 1, role_used: roleUsed },
+      source: (roleUsed === 'start' && f0 === FALLBACK) ? 'fallback' : 'league_only',
     };
   }
   const window = cleanPriors.slice(-N);
@@ -1026,7 +1051,7 @@ function forecastSpIP({ index, pitcherMlbId, gameDate, settings }) {
   const ewma = wsum / wn;
   const nEff = wn;
 
-  // Bayesian shrinkage toward F0.
+  // Bayesian shrinkage toward F0 (role-specific baseline).
   const alpha = K / (K + nEff);
   const forecast = alpha * f0 + (1 - alpha) * ewma;
 
@@ -1039,6 +1064,7 @@ function forecastSpIP({ index, pitcherMlbId, gameDate, settings }) {
       alpha,
       window_size: L,
       total_clean_priors: cleanPriors.length,
+      role_used: roleUsed,
     },
     source: 'shrinkage',
   };
