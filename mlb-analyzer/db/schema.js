@@ -443,6 +443,20 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_forecast_ip REAL"); } cat
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bulk_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bulk_forecast_ip REAL"); } catch(e) {}
+// Bullpen wOBA persistence. Diagnostic capture of the bullpen wOBA values
+// that runModel actually consumed at signal-fire time. The blended scalar
+// (away/home_bullpen_woba) plus the by-hand splits (vs_l, vs_r) are written
+// by processGameSignals immediately after the model UPDATE. Doesn't affect
+// model behavior — purely enables future replay-style backtests at new
+// settings once we accumulate enough v3+v4 cohort signals. Closes the gap
+// flagged in the May 2026 calibration analysis where bullpen wOBA was
+// computed in-memory and never persisted, blocking historical replay.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba_vs_l REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba_vs_r REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba_vs_l REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba_vs_r REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
