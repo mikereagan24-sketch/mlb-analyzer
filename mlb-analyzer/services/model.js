@@ -336,14 +336,25 @@ function runModel(game, wobaIdx, settings, mode) {
   // scale opener and bulk down proportionally so they sum to 1 and
   // bullpenFrac is exactly 0 — never negative. With the default
   // distributions this overshoot branch never fires.
-  const buildPerPositionWeights = (mode_) => {
+  // PR 4 (v4 cohort): bulk slot scaled by F4 forecast IP. Default BULK_FACED
+  // sums to ~13.5 batters faced (≈4.5 IP at 3 BF/IP). When the bulk pitcher
+  // has a forecast IP > 4.5, we scale BULK_FACED entries up proportionally
+  // so the bulk slot absorbs more of the middle innings. The per-slot
+  // clamp inside buildPerPositionWeights prevents any one slot from
+  // exceeding 100% opener+bulk coverage. Bullpen slot absorbs the residual.
+  // BULK_DEFAULT_IP is the implied IP equivalent of the default distribution
+  // (~4.5 = 13.5/3). Slight rounding: derived from PA_WEIGHTS for honesty.
+  const BULK_DEFAULT_BF_SUM = BULK_FACED.reduce((s, v) => s + (v || 0), 0);
+  const BULK_DEFAULT_IP_EQUIV = Math.max(0.1, BULK_DEFAULT_BF_SUM / 3.0);
+  const buildPerPositionWeights = (mode_, bulkScale) => {
+    const scale = (typeof bulkScale === 'number' && bulkScale > 0) ? bulkScale : 1.0;
     const out = new Array(9);
     for (let i = 0; i < 9; i++) {
       const pa = PA_WEIGHTS[i] || 1; // PA_WEIGHTS[i] should never be 0/null but guard for safety
       let openerFrac = Math.max(0, Math.min(1, (OPENER_FACED[i] || 0) / pa));
       let bulkFrac   = mode_ === 'bullpen_game'
         ? 0
-        : Math.max(0, Math.min(1, (BULK_FACED[i] || 0) / pa));
+        : Math.max(0, Math.min(1, ((BULK_FACED[i] || 0) * scale) / pa));
       const sum = openerFrac + bulkFrac;
       if (sum > 1) {
         openerFrac = openerFrac / sum;
@@ -439,7 +450,16 @@ function runModel(game, wobaIdx, settings, mode) {
       bulkVsL = UNK_PIT_WOBA;
       bulkVsR = UNK_PIT_WOBA;
     }
-    const perPositionWeights = buildPerPositionWeights('opener');
+    // PR 4: scale BULK_FACED proportionally to the bulk pitcher's F4
+    // forecast IP. game_log columns away/home_bulk_forecast_ip are
+    // populated by services/jobs.js forecastForPitcher for opener games
+    // with PRIM-tagged bulk pitchers. Falls back to scale=1.0 (no change
+    // from v3 BULK_FACED default) when forecast is null. Captured for
+    // persistence below.
+    const bulkFcRaw = side === 'away' ? game.away_bulk_forecast_ip : game.home_bulk_forecast_ip;
+    const bulkFc = (bulkFcRaw != null) ? parseFloat(bulkFcRaw) : null;
+    const bulkScale = (bulkFc != null && bulkFc > 0) ? (bulkFc / BULK_DEFAULT_IP_EQUIV) : 1.0;
+    const perPositionWeights = buildPerPositionWeights('opener', bulkScale);
     const s0 = perPositionWeights[0], s4 = perPositionWeights[4], s8 = perPositionWeights[8];
     console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
       + ': opener+bulk per-batter (pos1 op=' + s0.opener.toFixed(3) + '/bk=' + s0.bulk.toFixed(3) + '/bp=' + s0.bullpen.toFixed(3)
@@ -452,6 +472,10 @@ function runModel(game, wobaIdx, settings, mode) {
       bullpenWobaVsL: bullpenVsL,
       bullpenWobaVsR: bullpenVsR,
       perPositionWeights,
+      // PR 4: bulk-slot scale used in this run for downstream persistence
+      // and tracing. null bulkFcUsed means we used the default distribution.
+      bulkScale,
+      bulkFcUsed: bulkFc,
     };
   };
   // Away batters face home pitching → away-side perBatterEW uses HOME's
@@ -471,11 +495,28 @@ function runModel(game, wobaIdx, settings, mode) {
   // buildPerPositionWeights can divide by it (see top of runModel).
   // The same constant feeds the per-batter loops below.
 
-  // Fixed SP/RP pitcher-side split from settings. The UI contract is that
-  // spPitW + relPitW = 1.0 (auto-paired in the form), so they're applied
-  // uniformly to both teams — no per-game adjustment based on starter
-  // projected IP anymore. Standard non-opener path only — opener_aware
-  // routes through perPositionWeights inside perBatterEW.
+  // PR 4 (v4 cohort cutover): per-game SP pitching weight derived from
+  // F4 forecast IP. Each side gets its own spPitW based on that side's
+  // SP forecast — the value persisted to game_log.{away,home}_sp_forecast_ip
+  // by the lineup-job (see services/jobs.js forecastForPitcher). Null
+  // forecast (e.g. lineup-job hasn't run since deploy, or pitcher had no
+  // shrinkage source) falls back to the fixed SP_PIT_WEIGHT, preserving
+  // v3 behavior. Bullpen weight is the complement so the pitching
+  // component always sums to 1.0.
+  //
+  // Note the cross-side mapping below: the AWAY batters are facing the
+  // HOME pitcher, so their perBatterEW call uses HOME's forecast to
+  // compute SP weight. Symmetric for HOME batters.
+  const awayFc = game.away_sp_forecast_ip != null ? parseFloat(game.away_sp_forecast_ip) : null;
+  const homeFc = game.home_sp_forecast_ip != null ? parseFloat(game.home_sp_forecast_ip) : null;
+  const awaySpPitW = computeSpPitWeightFromForecast(awayFc, settings) ?? SP_PIT_WEIGHT;
+  const homeSpPitW = computeSpPitWeightFromForecast(homeFc, settings) ?? SP_PIT_WEIGHT;
+  const awayRelPitW = 1 - awaySpPitW;
+  const homeRelPitW = 1 - homeSpPitW;
+  // Legacy single-value pair retained for any diagnostic code paths that
+  // reference them. Standard non-opener pitching weight is now the
+  // per-side awaySpPitW/homeSpPitW computed above; these constants
+  // match the v3 fixed defaults.
   const spPitW  = SP_PIT_WEIGHT;
   const relPitW = RELIEF_PIT_WEIGHT;
 
@@ -483,9 +524,9 @@ function runModel(game, wobaIdx, settings, mode) {
   // — perBatterEW uses it to index openerOpts.perPositionWeights when
   // opener_aware mode is active. Standard non-opener mode ignores it.
   let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts,i)*pa; aWp+=pa; });
+  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,homeSpPitW,homeRelPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts,i)*pa; aWp+=pa; });
   let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,spPitW,relPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts,i)*pa; hWp+=pa; });
+  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,awaySpPitW,awayRelPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts,i)*pa; hWp+=pa; });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
@@ -511,7 +552,18 @@ function runModel(game, wobaIdx, settings, mode) {
   const tempRunAdj = game.temp_run_adj || 0;
   const windRunAdj = windFactor * WIND_SCALE; // factor=1.0 â +2 runs, -1.0 â -2 runs
   const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
-  return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj };
+  return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj,
+    // PR 4: per-side SP weights used in this model run. Persisted to
+    // game_log.{away,home}_sp_weight_used by processGameSignals so
+    // future backtests can replay model with exact weight inputs.
+    // Bullpen weight is the complement (1 - sp_weight).
+    awaySpWeightUsed: awaySpPitW, homeSpWeightUsed: homeSpPitW,
+    // Bulk-slot scale factor when this side is in opener mode and has a
+    // bulk forecast. Null otherwise. The scale is multiplied into
+    // BULK_FACED inside buildPerPositionWeights; downstream persistence
+    // can also recover it as (sum(perPositionWeights[i].bulk)/sum(default)).
+    awayBulkWeightUsed: awayOpenerOpts && awayOpenerOpts.bulkFcUsed != null ? awayOpenerOpts.bulkScale : null,
+    homeBulkWeightUsed: homeOpenerOpts && homeOpenerOpts.bulkFcUsed != null ? homeOpenerOpts.bulkScale : null };
 }
 
 function catKey(signalType, signalSide, signalLabel, marketLine) {
@@ -758,12 +810,41 @@ function calcRunlinePnl(side, spreadLine, spreadPrice, awayScore, homeScore) {
 // where source ∈ {'shrinkage', 'league_only', 'fallback'}.
 
 const FORECAST_TRAILING_N_DEFAULT = 10;
-const FORECAST_DECAY_LAMBDA_DEFAULT = 0.85;
+const FORECAST_DECAY_LAMBDA_DEFAULT = 0.92;
 const FORECAST_SHRINKAGE_K_DEFAULT = 10;
 const FORECAST_LEAGUE_WINDOW_DAYS_DEFAULT = 30;
 const FORECAST_ANOMALY_PITCH_THRESHOLD_DEFAULT = 50;
 const FORECAST_ANOMALY_IP_THRESHOLD_DEFAULT = 4;
 const FORECAST_FALLBACK_IP_DEFAULT = 5.25;
+
+// PR 4: anchored mapping from per-game forecast IP to per-game SP pitching
+// weight. League-mean SP forecast (5.5 IP) maps to the existing fixed
+// 0.80 weight (no change for average pitchers). Slope of 0.07/IP means
+// a 1-IP forecast gap produces a 7pp SP weight gap, which translates to
+// roughly 1-2 cents of ML per game and a small total impact. Clamps
+// prevent extreme forecasts from collapsing bullpen exposure entirely
+// (high clamp) or driving SP weight below a sane floor (low clamp).
+//
+// Settings overrides:
+//   FORECAST_WEIGHT_ANCHOR_IP      anchor IP at which spPitW equals base (default 5.5)
+//   FORECAST_WEIGHT_ANCHOR_VALUE   spPitW at anchor (default 0.75 — moderate SP lean over literal share)
+//   FORECAST_WEIGHT_SLOPE          spPitW change per IP above/below anchor (default 0.10)
+//   FORECAST_WEIGHT_MIN            clamp floor (default 0.50)
+//   FORECAST_WEIGHT_MAX            clamp ceiling (default 0.95)
+//
+// Returns null when forecastIp is null/undefined — caller falls back to
+// fixed SP_PIT_WEIGHT, preserving v3 behavior for games with no forecast.
+function computeSpPitWeightFromForecast(forecastIp, settings) {
+  if (forecastIp == null) return null;
+  const anchor = parseFloat(settings?.FORECAST_WEIGHT_ANCHOR_IP) || 5.5;
+  const baseVal = parseFloat(settings?.FORECAST_WEIGHT_ANCHOR_VALUE) || 0.75;
+  const slope = parseFloat(settings?.FORECAST_WEIGHT_SLOPE);
+  const slopeUsed = (slope === slope) ? slope : 0.10; // NaN-safe; defaults to 0.10
+  const minW = parseFloat(settings?.FORECAST_WEIGHT_MIN) || 0.50;
+  const maxW = parseFloat(settings?.FORECAST_WEIGHT_MAX) || 0.95;
+  const raw = baseVal + (forecastIp - anchor) * slopeUsed;
+  return Math.max(minW, Math.min(maxW, raw));
+}
 
 function buildSpStartIndex(db, settings) {
   // Loads every historical SP start, groups by pitcher_mlb_id ordered
@@ -792,17 +873,37 @@ function buildSpStartIndex(db, settings) {
     return { byPitcher: {}, leagueBaselineByDate: {}, leagueDates: [], buildError: e.message };
   }
 
-  // Annotate and group by pitcher.
+  // Annotate and group by pitcher. Rows are sorted by
+  // (pitcher_mlb_id ASC, game_date ASC) per the SQL ORDER BY, so we can
+  // track first-start-of-season per pitcher with a single pass.
   const byPitcher = {};
   const cleanByDate = []; // for league baseline
+  let lastPitcherId = null;
+  let lastSeasonYear = null;
   for (const r of rows) {
-    const isAnomaly = (r.pitches_thrown != null && r.pitches_thrown < ANOM_P)
-                      && (r.innings_pitched < ANOM_IP);
+    // Detect first-start-of-season: each pitcher's earliest start in a
+    // given calendar year. May 2026 PR 4 tuning: pitchers ramp up pitch
+    // counts early-season regardless of role/team, so their first start
+    // is consistently shorter than steady-state. Filtering it out of the
+    // EWMA inputs prevents an artificial early-season downward bias on
+    // every pitcher's forecast. Already-flagged anomalies stay flagged.
+    const seasonYear = (r.game_date || '').substring(0, 4);
+    const isFirstStartOfSeason = (r.pitcher_mlb_id !== lastPitcherId)
+                                  || (seasonYear !== lastSeasonYear);
+    lastPitcherId = r.pitcher_mlb_id;
+    lastSeasonYear = seasonYear;
+
+    const isAnomalyBase = (r.pitches_thrown != null && r.pitches_thrown < ANOM_P)
+                          && (r.innings_pitched < ANOM_IP);
+    const isAnomaly = isAnomalyBase || isFirstStartOfSeason;
     const start = {
       game_date: r.game_date,
       ip: r.innings_pitched,
       pitches: r.pitches_thrown,
       is_anomaly: isAnomaly,
+      // Provenance for the debug endpoint — lets the reader see WHY a
+      // start was filtered (was it a short outing, or just a season opener?).
+      is_first_of_season: isFirstStartOfSeason,
     };
     if (!byPitcher[r.pitcher_mlb_id]) byPitcher[r.pitcher_mlb_id] = [];
     byPitcher[r.pitcher_mlb_id].push(start);
