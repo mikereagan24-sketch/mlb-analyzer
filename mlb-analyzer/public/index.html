@@ -487,18 +487,57 @@ function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
 function effAwayML(g){return g.is_opener_game_away&&g.opener_model_away_ml!=null?g.opener_model_away_ml:g.model_away_ml;}
 function effHomeML(g){return g.is_opener_game_home&&g.opener_model_home_ml!=null?g.opener_model_home_ml:g.model_home_ml;}
 function effTotal(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_total!=null?g.opener_model_total:g.model_total;}
-// v4 cohort: render the SP/bullpen weight ratio computed from F4 forecast
-// IP. Pulled from persisted game_log columns (away_sp_weight_used /
-// home_sp_weight_used) and surfaced inline next to each SP name. Bullpen
-// weight is the complement. Returns empty string when sp_weight is null
-// (lineup-job hasn't computed forecast yet — runModel fell back to fixed
-// SP_PIT_WEIGHT default). Tooltip surfaces the underlying forecast IP.
-function spBpRatio(spW){
-  if (spW == null) return '';
-  var sp = parseFloat(spW);
-  if (isNaN(sp)) return '';
-  var bp = 1 - sp;
-  return ' <span class="sp-bp-ratio" title="SP/bullpen weight from F4 forecast IP" style="display:inline-block;margin-left:4px;padding:1px 5px;font-size:10px;font-weight:500;background:var(--surface2,#eef2f7);color:var(--text2,#555);border-radius:3px;letter-spacing:0.2px">SP: '+sp.toFixed(2)+' / BP: '+bp.toFixed(2)+'</span>';
+// v4 cohort + PR B (opener-mode redesign): render the pitching-weight
+// breakdown next to each pitcher's name. Three display modes based on
+// which weights are populated on the game row:
+//
+//   1. Standard (non-opener): "SP: 0.74 / BP: 0.26"
+//      — uses *_sp_weight_used (PR 4 columns). Bullpen = 1 - SP.
+//
+//   2. Opener + bulk (typical opener game like SD-MIL): "O: 0.15 / B: 0.55 / BP: 0.30"
+//      — uses *_opener_weight_used / *_bulk_weight_used / *_bullpen_weight_used
+//        (PR B columns).
+//
+//   3. Bullpen game (opener mode, no bulk announced): "O: 0.15 / BP: 0.85"
+//      — opener_weight_used + bullpen_weight_used populated; bulk_weight_used
+//        is 0 (suppressed in display).
+//
+// Returns empty string when no weights are populated yet (lineup-job hasn't
+// computed forecast for this game yet). Tooltip surfaces the underlying
+// forecast IPs that drove the weights.
+function spBpRatio(g, side){
+  var spW    = side === 'away' ? g.away_sp_weight_used      : g.home_sp_weight_used;
+  var opW    = side === 'away' ? g.away_opener_weight_used  : g.home_opener_weight_used;
+  var bkW    = side === 'away' ? g.away_bulk_weight_used    : g.home_bulk_weight_used;
+  var bpW    = side === 'away' ? g.away_bullpen_weight_used : g.home_bullpen_weight_used;
+  var spFc   = side === 'away' ? g.away_sp_forecast_ip      : g.home_sp_forecast_ip;
+  var opFc   = side === 'away' ? g.away_opener_forecast_ip  : g.home_opener_forecast_ip;
+  var bkFc   = side === 'away' ? g.away_bulk_forecast_ip    : g.home_bulk_forecast_ip;
+  var fmt2 = function(v){ return parseFloat(v).toFixed(2); };
+  // Opener-mode game: opener weight is populated (PR B always writes it on
+  // opener games, including bullpen-games where bulk=0).
+  if (opW != null && bpW != null) {
+    var hasBulk = bkW != null && bkW > 0.001;
+    var tipParts = [];
+    if (opFc != null) tipParts.push('opener fc ' + parseFloat(opFc).toFixed(2) + ' IP');
+    if (hasBulk && bkFc != null) tipParts.push('bulk fc ' + parseFloat(bkFc).toFixed(2) + ' IP');
+    var tip = 'Opener/bulk weights from F4 forecast IP'
+              + (tipParts.length ? ' (' + tipParts.join(', ') + ')' : '');
+    var text = hasBulk
+      ? ('O: ' + fmt2(opW) + ' / B: ' + fmt2(bkW) + ' / BP: ' + fmt2(bpW))
+      : ('O: ' + fmt2(opW) + ' / BP: ' + fmt2(bpW));
+    return ' <span class="sp-bp-ratio" title="' + tip + '" style="display:inline-block;margin-left:4px;padding:1px 5px;font-size:10px;font-weight:500;background:var(--surface2,#eef2f7);color:var(--text2,#555);border-radius:3px;letter-spacing:0.2px">' + text + '</span>';
+  }
+  // Standard mode: just SP and BP.
+  if (spW != null) {
+    var sp = parseFloat(spW);
+    if (isNaN(sp)) return '';
+    var bp = 1 - sp;
+    var tipSp = 'SP/bullpen weight from F4 forecast IP'
+                + (spFc != null ? ' (sp fc ' + parseFloat(spFc).toFixed(2) + ' IP)' : '');
+    return ' <span class="sp-bp-ratio" title="' + tipSp + '" style="display:inline-block;margin-left:4px;padding:1px 5px;font-size:10px;font-weight:500;background:var(--surface2,#eef2f7);color:var(--text2,#555);border-radius:3px;letter-spacing:0.2px">SP: '+sp.toFixed(2)+' / BP: '+bp.toFixed(2)+'</span>';
+  }
+  return '';
 }
 // Render the bettable totals pair (O/U line + over/under juice). User
 // bets at the primary venue, so the UI shows ONLY the primary by
@@ -962,7 +1001,7 @@ function renderGameGrid(games,date){
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (!g.is_postponed&&sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
       '</div>'+
-      '<div class="gsp"'+(lineupsStyle?' style="'+lineupsStyle+'"':'')+'>'+(_isNeverLoaded(lineupsQ)?'<span title="lineups never loaded">— vs —</span>':((g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g.away_sp_weight_used)+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g.home_sp_weight_used)))+lineupsBadge+weatherBadge+(g.temp_f!=null ? (function(){
+      '<div class="gsp"'+(lineupsStyle?' style="'+lineupsStyle+'"':'')+'>'+(_isNeverLoaded(lineupsQ)?'<span title="lineups never loaded">— vs —</span>':((g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'away')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'home')))+lineupsBadge+weatherBadge+(g.temp_f!=null ? (function(){
         var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
         var roofClosed=(roofSt==='closed');
         var roofPartial=(roofSt==='partial');
