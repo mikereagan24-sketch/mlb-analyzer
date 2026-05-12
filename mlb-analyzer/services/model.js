@@ -859,10 +859,10 @@ function buildSpStartIndex(db, settings) {
   let rows;
   try {
     rows = db.prepare(`
-      SELECT game_date, pitcher_mlb_id, pitcher_name, pitches_thrown, innings_pitched
+      SELECT game_date, pitcher_mlb_id, pitcher_name, pitches_thrown,
+             innings_pitched, outing_type, was_starter
       FROM pitcher_game_log
-      WHERE outing_type = 'start'
-        AND innings_pitched IS NOT NULL
+      WHERE innings_pitched IS NOT NULL
         AND innings_pitched > 0
         AND pitcher_mlb_id IS NOT NULL
       ORDER BY pitcher_mlb_id ASC, game_date ASC
@@ -876,30 +876,48 @@ function buildSpStartIndex(db, settings) {
   // Annotate and group by pitcher. Rows are sorted by
   // (pitcher_mlb_id ASC, game_date ASC) per the SQL ORDER BY, so we can
   // track first-start-of-season per pitcher with a single pass.
+  //
+  // Outing-type awareness (PR for relief-aware F4):
+  //   - Pitch-count anomaly filter (pitches<50 AND ip<4) only applies to
+  //     starts. A 30-pitch / 1-IP appearance is normal for a reliever
+  //     but anomalous for a starter (he got pulled early). Without this
+  //     guard, every relief outing would be flagged anomalous and a
+  //     relief-only pitcher would have zero clean priors.
+  //   - First-start-of-season filter only applies to starts. The
+  //     "starters ramp up pitch counts on opening day" pattern doesn't
+  //     apply to relievers, who throw at full intensity from the start.
+  //   - The league baseline (cleanByDate) still comes from starts only,
+  //     preserving the existing 5.4 IP baseline that starter forecasts
+  //     shrink toward. Relief-only pitchers shrink toward this same
+  //     baseline (suboptimal but bounded — addressed in a follow-up
+  //     that adds role-specific baselines).
   const byPitcher = {};
-  const cleanByDate = []; // for league baseline
+  const cleanByDate = []; // for league baseline (starts only)
   let lastPitcherId = null;
   let lastSeasonYear = null;
   for (const r of rows) {
-    // Detect first-start-of-season: each pitcher's earliest start in a
-    // given calendar year. May 2026 PR 4 tuning: pitchers ramp up pitch
-    // counts early-season regardless of role/team, so their first start
-    // is consistently shorter than steady-state. Filtering it out of the
-    // EWMA inputs prevents an artificial early-season downward bias on
-    // every pitcher's forecast. Already-flagged anomalies stay flagged.
+    const isStart = (r.outing_type === 'start') || (r.was_starter === 1);
+    // First-start-of-season only meaningful for starts.
     const seasonYear = (r.game_date || '').substring(0, 4);
-    const isFirstStartOfSeason = (r.pitcher_mlb_id !== lastPitcherId)
-                                  || (seasonYear !== lastSeasonYear);
-    lastPitcherId = r.pitcher_mlb_id;
-    lastSeasonYear = seasonYear;
+    let isFirstStartOfSeason = false;
+    if (isStart) {
+      isFirstStartOfSeason = (r.pitcher_mlb_id !== lastPitcherId)
+                              || (seasonYear !== lastSeasonYear);
+      lastPitcherId = r.pitcher_mlb_id;
+      lastSeasonYear = seasonYear;
+    }
 
-    const isAnomalyBase = (r.pitches_thrown != null && r.pitches_thrown < ANOM_P)
-                          && (r.innings_pitched < ANOM_IP);
+    // Pitch-count anomaly filter only applies to starts. A 30-pitch
+    // relief outing is normal, not anomalous.
+    const isAnomalyBase = isStart
+      && (r.pitches_thrown != null && r.pitches_thrown < ANOM_P)
+      && (r.innings_pitched < ANOM_IP);
     const isAnomaly = isAnomalyBase || isFirstStartOfSeason;
     const start = {
       game_date: r.game_date,
       ip: r.innings_pitched,
       pitches: r.pitches_thrown,
+      outing_type: r.outing_type || (isStart ? 'start' : 'relief'),
       is_anomaly: isAnomaly,
       // Provenance for the debug endpoint — lets the reader see WHY a
       // start was filtered (was it a short outing, or just a season opener?).
@@ -907,7 +925,9 @@ function buildSpStartIndex(db, settings) {
     };
     if (!byPitcher[r.pitcher_mlb_id]) byPitcher[r.pitcher_mlb_id] = [];
     byPitcher[r.pitcher_mlb_id].push(start);
-    if (!isAnomaly) cleanByDate.push({ date: r.game_date, ip: r.innings_pitched });
+    // Only starts contribute to the league baseline. Relief outings would
+    // collapse the baseline toward ~1 IP and destroy starter forecasts.
+    if (!isAnomaly && isStart) cleanByDate.push({ date: r.game_date, ip: r.innings_pitched });
   }
 
   // Build league baseline cache: for each unique date that has a clean
