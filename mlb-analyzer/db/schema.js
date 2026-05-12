@@ -443,6 +443,13 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_forecast_ip REAL"); } cat
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bulk_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bulk_forecast_ip REAL"); } catch(e) {}
+// Opener forecasts: F4 forecast IP for the named opener pitcher in
+// opener-mode games, computed with role='opener' baseline (1.35 IP =
+// design weight 0.15 × 9). Only populated when bulk_guy_announced is
+// set; null on regular games. Powers the opener weight in the
+// upcoming opener/bulk redesign (PR B).
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_opener_forecast_ip REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_opener_forecast_ip REAL"); } catch(e) {}
 // Bullpen wOBA persistence. Diagnostic capture of the bullpen wOBA values
 // that runModel actually consumed at signal-fire time. The blended scalar
 // (away/home_bullpen_woba) plus the by-hand splits (vs_l, vs_r) are written
@@ -760,6 +767,7 @@ const q = {
       away_sp_proj_ip, home_sp_proj_ip,
       away_sp_forecast_ip, home_sp_forecast_ip,
       away_bulk_forecast_ip, home_bulk_forecast_ip,
+      away_opener_forecast_ip, home_opener_forecast_ip,
       market_away_ml, market_home_ml, market_total, park_factor,
       model_away_ml, model_home_ml, model_total, lineup_source,
       venue_id, venue_name, game_number, game_pk, updated_at
@@ -770,6 +778,7 @@ const q = {
       @away_sp_proj_ip, @home_sp_proj_ip,
       @away_sp_forecast_ip, @home_sp_forecast_ip,
       @away_bulk_forecast_ip, @home_bulk_forecast_ip,
+      @away_opener_forecast_ip, @home_opener_forecast_ip,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
       @model_away_ml, @model_home_ml, @model_total, @lineup_source,
       @venue_id, @venue_name, COALESCE(@game_number, 1), @game_pk, datetime('now')
@@ -800,6 +809,10 @@ const q = {
       home_sp_forecast_ip = COALESCE(excluded.home_sp_forecast_ip, game_log.home_sp_forecast_ip),
       away_bulk_forecast_ip = COALESCE(excluded.away_bulk_forecast_ip, game_log.away_bulk_forecast_ip),
       home_bulk_forecast_ip = COALESCE(excluded.home_bulk_forecast_ip, game_log.home_bulk_forecast_ip),
+      -- Opener forecasts: same COALESCE pattern. Populated only by
+      -- lineup-job when an opener game is detected (bulk_guy announced).
+      away_opener_forecast_ip = COALESCE(excluded.away_opener_forecast_ip, game_log.away_opener_forecast_ip),
+      home_opener_forecast_ip = COALESCE(excluded.home_opener_forecast_ip, game_log.home_opener_forecast_ip),
       game_time = COALESCE(excluded.game_time, game_log.game_time),
       market_away_ml = excluded.market_away_ml, market_home_ml = excluded.market_home_ml,
       market_total = excluded.market_total, park_factor = excluded.park_factor,
