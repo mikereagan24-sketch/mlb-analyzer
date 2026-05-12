@@ -353,15 +353,18 @@ function parseUnabatedOdds(data, dateStr) {
   for (const {g, away, home, gameNumber, finalKey} of Object.values(byMatchup)) {
     const lines = g.gameOddsMarketSourcesLines||{};
 
-    // Build bySource for ML (an0 only), totals (all an values), and
-    // spread (bt2 — runline). ML only honors an0 because alt MLs aren't
-    // a thing on MLB; totals/spreads scan all an values and pick the
-    // entry that carries real `points`. Spread prefers the entry whose
-    // points value is in MLB_RUNLINE_POINSet so alt spreads (±2.5+)
-    // don't displace the standard ±1.5 — defer the final sanity check
-    // to isSaneSpreadPrice / runline-set membership in the waterfall.
+    // Build bySource for ML (an0 only), totals (an0 preferred, fall back to
+    // any), and spread (bt2 — runline). ML only honors an0 because alt MLs
+    // aren't a thing on MLB. Totals previously accepted any an value, which
+    // let Kalshi alternate-line contracts (8.5/9.5 when the main line was
+    // 7.5) displace the primary depending on iteration order. Now totals
+    // also prefer an0; we only fall back to other an when no an0 is present.
+    // Spread prefers the entry whose points value is in MLB_RUNLINE_POINTS so
+    // alt spreads (±2.5+) don't displace the standard ±1.5 — defer the final
+    // sanity check to isSaneSpreadPrice / runline-set membership in the
+    // waterfall.
     const bySource = {};      // for ML — an0 only
-    const bySourceTot = {};   // for totals — keep entry with real points
+    const bySourceTot = {};   // for totals — an0 preferred, fallback ok
     const bySourceSpread = {}; // for spread — keep entry whose bt2.points is ±1.5
     Object.entries(lines).forEach(([key,val])=>{
       const [si,ms,an]=key.split(':');
@@ -372,11 +375,27 @@ function parseUnabatedOdds(data, dateStr) {
         if(!bySource[msId]) bySource[msId]={};
         bySource[msId][side]=val;
       }
-      // Totals: keep entry with real points (defer sanity check to isSaneTotal)
+      // Totals: prefer the primary contract (an0). The previous logic
+      // accepted any bt3 entry on a first-seen basis, which on Kalshi led
+      // to alternate-line contracts (e.g. 8.5/9.5 when the main line was
+      // 7.5) displacing the primary if they happened to iterate first.
+      // Now: write an0 unconditionally, and only write non-an0 entries
+      // when an0 hasn't been seen yet for this (msId, side). The previous
+      // null-points guard is preserved.
       if(val.bt3?.points!=null && val.bt3.points > 0){
         if(!bySourceTot[msId]) bySourceTot[msId]={};
-        if(!bySourceTot[msId][side] || bySourceTot[msId][side].bt3?.points==null){
-          bySourceTot[msId][side]=val;
+        const existing = bySourceTot[msId][side];
+        const existingIsAn0 = existing && existing.__an === 'an0';
+        const incomingIsAn0 = an === 'an0';
+        // Replace when: no existing entry, OR existing entry has null points,
+        // OR incoming is an0 and existing is not.
+        if (!existing
+            || existing.bt3?.points == null
+            || (incomingIsAn0 && !existingIsAn0)) {
+          // Stamp the variant so subsequent iterations can decide whether
+          // to overwrite. Non-destructive — just adds a __an property to
+          // the value object before storing.
+          bySourceTot[msId][side] = { ...val, __an: an };
         }
       }
       // Spread (bt2): keep the entry whose points value is the standard
