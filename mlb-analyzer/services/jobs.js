@@ -401,24 +401,31 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // Non-critical — log and continue. Doesn't block signal firing.
     console.warn('[bullpen-persist] ' + gameRow.game_id + ': ' + e.message);
   }
-  // PR 4 (v4 cohort): persist the SP/bulk weights runModel actually used.
-  // The values come from stdModel's return object (model.js's runModel
-  // exposes awaySpWeightUsed/homeSpWeightUsed/awayBulkWeightUsed/
-  // homeBulkWeightUsed). Gated on !suppressed because stdModel returns
-  // a partial-data object when suppressed and the weights are computed
-  // pre-suppression anyway. Non-critical write — wrap in try/catch so
-  // a schema mismatch doesn't kill signal firing.
+  // PR 4 + PR B: persist the weights runModel actually used. SP weights
+  // come from stdModel (standard non-opener path). Opener/bulk/bullpen
+  // weights come from openerModel — they're the realized PA-weighted
+  // totals from buildPerPositionWeights' renormalization, not raw
+  // forecast-derived numbers. Null on standard games (no openerModel).
+  // Gated on !suppressed because stdModel returns a partial-data object
+  // when suppressed. Non-critical write — wrap in try/catch.
   if (!suppressed && stdModel) {
     try {
+      const om = (openerModel && !openerModel._suppressed) ? openerModel : null;
       db.prepare(`UPDATE game_log SET
         away_sp_weight_used=?, home_sp_weight_used=?,
-        away_bulk_weight_used=?, home_bulk_weight_used=?
+        away_bulk_weight_used=?, home_bulk_weight_used=?,
+        away_opener_weight_used=?, home_opener_weight_used=?,
+        away_bullpen_weight_used=?, home_bullpen_weight_used=?
         WHERE game_date=? AND game_id=?`)
         .run(
           stdModel.awaySpWeightUsed != null ? stdModel.awaySpWeightUsed : null,
           stdModel.homeSpWeightUsed != null ? stdModel.homeSpWeightUsed : null,
-          stdModel.awayBulkWeightUsed != null ? stdModel.awayBulkWeightUsed : null,
-          stdModel.homeBulkWeightUsed != null ? stdModel.homeBulkWeightUsed : null,
+          om && om.awayBulkWeightUsed    != null ? om.awayBulkWeightUsed    : null,
+          om && om.homeBulkWeightUsed    != null ? om.homeBulkWeightUsed    : null,
+          om && om.awayOpenerWeightUsed  != null ? om.awayOpenerWeightUsed  : null,
+          om && om.homeOpenerWeightUsed  != null ? om.homeOpenerWeightUsed  : null,
+          om && om.awayBullpenWeightUsed != null ? om.awayBullpenWeightUsed : null,
+          om && om.homeBullpenWeightUsed != null ? om.homeBullpenWeightUsed : null,
           gameRow.game_date, gameRow.game_id
         );
     } catch (e) {

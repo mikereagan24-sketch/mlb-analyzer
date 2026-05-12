@@ -475,6 +475,14 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_weight_used REAL"); } cat
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_weight_used REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bulk_weight_used REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bulk_weight_used REAL"); } catch(e) {}
+// PR B (opener/bulk redesign): realized PA-weighted opener and bullpen
+// weights persisted alongside bulk weight. Only populated on opener-mode
+// games (is_opener_game_* = 1); null on standard games where the SP/
+// bullpen split is fully described by *_sp_weight_used + its complement.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_opener_weight_used REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_opener_weight_used REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_weight_used REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_weight_used REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}

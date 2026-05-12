@@ -336,32 +336,61 @@ function runModel(game, wobaIdx, settings, mode) {
   // scale opener and bulk down proportionally so they sum to 1 and
   // bullpenFrac is exactly 0 — never negative. With the default
   // distributions this overshoot branch never fires.
-  // PR 4 (v4 cohort): bulk slot scaled by F4 forecast IP. Default BULK_FACED
-  // sums to ~13.5 batters faced (≈4.5 IP at 3 BF/IP). When the bulk pitcher
-  // has a forecast IP > 4.5, we scale BULK_FACED entries up proportionally
-  // so the bulk slot absorbs more of the middle innings. The per-slot
-  // clamp inside buildPerPositionWeights prevents any one slot from
-  // exceeding 100% opener+bulk coverage. Bullpen slot absorbs the residual.
-  // BULK_DEFAULT_IP is the implied IP equivalent of the default distribution
-  // (~4.5 = 13.5/3). Slight rounding: derived from PA_WEIGHTS for honesty.
-  const BULK_DEFAULT_BF_SUM = BULK_FACED.reduce((s, v) => s + (v || 0), 0);
-  const BULK_DEFAULT_IP_EQUIV = Math.max(0.1, BULK_DEFAULT_BF_SUM / 3.0);
-  const buildPerPositionWeights = (mode_, bulkScale) => {
-    const scale = (typeof bulkScale === 'number' && bulkScale > 0) ? bulkScale : 1.0;
+  // PR B (opener/bulk redesign): replace PR 4's bulk-scale logic with
+  // target-renormalization. Instead of multiplying BULK_FACED by a scale
+  // factor (which produced inconsistent PA-weighted overall weights based
+  // on the BULK_FACED constants), this approach:
+  //   1. Computes per-position fractions from the existing matrix (shape
+  //      preserved — opener faces top of order, bulk faces middle).
+  //   2. Computes the current PA-weighted overall weights from that matrix.
+  //   3. Scales each slot to hit target PA-weighted weights, then
+  //      renormalizes each position so opener+bulk+bullpen=1.
+  // Targets come from F4 forecasts via computeOpenerPitWeightFromForecast
+  // and computeBulkPitWeightFromForecast. Bullpen is the residual.
+  // Bullpen_game mode (no bulk): bulk slot zeroed, bullpen absorbs.
+  const buildPerPositionWeights = (mode_, targetOpener, targetBulk) => {
     const out = new Array(9);
+    // Step 1: compute raw fractions and current PA-weighted overall.
+    let curOpenerSum = 0, curBulkSum = 0, curPaSum = 0;
+    const raw = new Array(9);
     for (let i = 0; i < 9; i++) {
-      const pa = PA_WEIGHTS[i] || 1; // PA_WEIGHTS[i] should never be 0/null but guard for safety
+      const pa = PA_WEIGHTS[i] || 1;
       let openerFrac = Math.max(0, Math.min(1, (OPENER_FACED[i] || 0) / pa));
       let bulkFrac   = mode_ === 'bullpen_game'
         ? 0
-        : Math.max(0, Math.min(1, ((BULK_FACED[i] || 0) * scale) / pa));
+        : Math.max(0, Math.min(1, (BULK_FACED[i] || 0) / pa));
       const sum = openerFrac + bulkFrac;
       if (sum > 1) {
         openerFrac = openerFrac / sum;
         bulkFrac   = bulkFrac   / sum;
       }
-      const bullpenFrac = 1 - openerFrac - bulkFrac;
-      out[i] = { opener: openerFrac, bulk: bulkFrac, bullpen: bullpenFrac };
+      raw[i] = { opener: openerFrac, bulk: bulkFrac, pa };
+      curOpenerSum += openerFrac * pa;
+      curBulkSum   += bulkFrac   * pa;
+      curPaSum     += pa;
+    }
+    const curOpener = curOpenerSum / curPaSum;
+    const curBulk   = curBulkSum   / curPaSum;
+    // Step 2: scale factors to hit targets. Guard against zero current
+    // weight (bullpen_game has curBulk=0 — bulk target ignored).
+    const tOpener = (targetOpener != null && targetOpener >= 0) ? targetOpener : curOpener;
+    const tBulk   = (mode_ === 'bullpen_game') ? 0
+                    : (targetBulk != null && targetBulk >= 0) ? targetBulk : curBulk;
+    const openerScale = curOpener > 0 ? tOpener / curOpener : 0;
+    const bulkScale   = curBulk   > 0 ? tBulk   / curBulk   : 0;
+    // Step 3: apply scales per position, renormalize to sum=1.
+    for (let i = 0; i < 9; i++) {
+      let o = raw[i].opener * openerScale;
+      let b = raw[i].bulk   * bulkScale;
+      // Clamp to non-negative and re-cap so o+b<=1 (preserves bullpen>=0).
+      o = Math.max(0, o);
+      b = Math.max(0, b);
+      if (o + b > 1) {
+        const renorm = 1 / (o + b);
+        o *= renorm;
+        b *= renorm;
+      }
+      out[i] = { opener: o, bulk: b, bullpen: 1 - o - b };
     }
     return out;
   };
@@ -418,15 +447,30 @@ function runModel(game, wobaIdx, settings, mode) {
     }
 
     // Bullpen-game branch: opener flagged, no bulk man identified
-    // (game_type_{side} = 'bullpen_game'). bulkFrac is 0 at every
-    // position; bullpenFrac absorbs the slot. bulk wOBA fields stay
-    // null so perBatterEW skips reading them.
+    // (game_type_{side} = 'bullpen_game'). bulk slot is forced to 0 by
+    // buildPerPositionWeights in bullpen_game mode; bullpen absorbs.
+    // Opener target weight still uses F4 forecast — the opener slot is
+    // present even without a named bulk pitcher.
     if (!bulkSp) {
-      const perPositionWeights = buildPerPositionWeights('bullpen_game');
+      const openerFcRaw = side === 'away' ? game.away_opener_forecast_ip : game.home_opener_forecast_ip;
+      const openerFc = (openerFcRaw != null) ? parseFloat(openerFcRaw) : null;
+      const targetOpenerWeight = computeOpenerPitWeightFromForecast(openerFc, settings)
+        ?? (parseFloat(settings?.OPENER_WEIGHT_ANCHOR_VALUE) || 0.15);
+      const perPositionWeights = buildPerPositionWeights('bullpen_game', targetOpenerWeight, 0);
       const sample = perPositionWeights[0];
+      // PA-weighted realized
+      let realizedOpener = 0, realizedBullpen = 0, paSum = 0;
+      for (let i = 0; i < 9; i++) {
+        const pa = PA_WEIGHTS[i] || 1;
+        realizedOpener  += perPositionWeights[i].opener  * pa;
+        realizedBullpen += perPositionWeights[i].bullpen * pa;
+        paSum += pa;
+      }
+      realizedOpener /= paSum;
+      realizedBullpen /= paSum;
       console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
-        + ': bullpen_game mode (no bulk man identified, per-batter weighting; pos1='
-        + 'opener=' + sample.opener.toFixed(3) + '/bullpen=' + sample.bullpen.toFixed(3) + ')');
+        + ': bullpen_game mode (no bulk, target_op=' + targetOpenerWeight.toFixed(3)
+        + ' realized op=' + realizedOpener.toFixed(3) + '/bp=' + realizedBullpen.toFixed(3) + ')');
       return {
         mode: 'bullpen_game',
         openerVsL, openerVsR,
@@ -434,6 +478,11 @@ function runModel(game, wobaIdx, settings, mode) {
         bullpenWobaVsL: bullpenVsL,
         bullpenWobaVsR: bullpenVsR,
         perPositionWeights,
+        openerWeightUsed:  realizedOpener,
+        bulkWeightUsed:    0,
+        bullpenWeightUsed: realizedBullpen,
+        openerFcUsed:      openerFc,
+        bulkFcUsed:        null,
       };
     }
 
@@ -450,19 +499,40 @@ function runModel(game, wobaIdx, settings, mode) {
       bulkVsL = UNK_PIT_WOBA;
       bulkVsR = UNK_PIT_WOBA;
     }
-    // PR 4: scale BULK_FACED proportionally to the bulk pitcher's F4
-    // forecast IP. game_log columns away/home_bulk_forecast_ip are
-    // populated by services/jobs.js forecastForPitcher for opener games
-    // with PRIM-tagged bulk pitchers. Falls back to scale=1.0 (no change
-    // from v3 BULK_FACED default) when forecast is null. Captured for
-    // persistence below.
-    const bulkFcRaw = side === 'away' ? game.away_bulk_forecast_ip : game.home_bulk_forecast_ip;
-    const bulkFc = (bulkFcRaw != null) ? parseFloat(bulkFcRaw) : null;
-    const bulkScale = (bulkFc != null && bulkFc > 0) ? (bulkFc / BULK_DEFAULT_IP_EQUIV) : 1.0;
-    const perPositionWeights = buildPerPositionWeights('opener', bulkScale);
+    // PR B (opener/bulk redesign): compute target weights from F4 forecasts.
+    // Opener uses *_opener_forecast_ip (role='opener' baseline 1.35), bulk
+    // uses *_bulk_forecast_ip (role='bulk' baseline 5.4). Each F4 forecast
+    // maps to a slot weight via its anchored helper, then the per-position
+    // matrix is renormalized to hit those PA-weighted overall targets.
+    //
+    // Null forecasts fall back to anchor weight defaults (0.15 opener / 0.60 bulk),
+    // matching v4 cohort's "what we use when we don't know" stance.
+    const openerFcRaw = side === 'away' ? game.away_opener_forecast_ip : game.home_opener_forecast_ip;
+    const openerFc = (openerFcRaw != null) ? parseFloat(openerFcRaw) : null;
+    const bulkFcRaw   = side === 'away' ? game.away_bulk_forecast_ip   : game.home_bulk_forecast_ip;
+    const bulkFc   = (bulkFcRaw != null) ? parseFloat(bulkFcRaw) : null;
+    const targetOpenerWeight = computeOpenerPitWeightFromForecast(openerFc, settings)
+      ?? (parseFloat(settings?.OPENER_WEIGHT_ANCHOR_VALUE) || 0.15);
+    const targetBulkWeight   = computeBulkPitWeightFromForecast(bulkFc, settings)
+      ?? (parseFloat(settings?.BULK_WEIGHT_ANCHOR_VALUE) || 0.60);
+    const perPositionWeights = buildPerPositionWeights('opener', targetOpenerWeight, targetBulkWeight);
     const s0 = perPositionWeights[0], s4 = perPositionWeights[4], s8 = perPositionWeights[8];
+    // Compute realized PA-weighted weights for logging + persistence.
+    let realizedOpener = 0, realizedBulk = 0, realizedBullpen = 0, paSum = 0;
+    for (let i = 0; i < 9; i++) {
+      const pa = PA_WEIGHTS[i] || 1;
+      realizedOpener  += perPositionWeights[i].opener  * pa;
+      realizedBulk    += perPositionWeights[i].bulk    * pa;
+      realizedBullpen += perPositionWeights[i].bullpen * pa;
+      paSum += pa;
+    }
+    realizedOpener  /= paSum;
+    realizedBulk    /= paSum;
+    realizedBullpen /= paSum;
     console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
-      + ': opener+bulk per-batter (pos1 op=' + s0.opener.toFixed(3) + '/bk=' + s0.bulk.toFixed(3) + '/bp=' + s0.bullpen.toFixed(3)
+      + ': targets op=' + targetOpenerWeight.toFixed(3) + '/bk=' + targetBulkWeight.toFixed(3)
+      + ' realized op=' + realizedOpener.toFixed(3) + '/bk=' + realizedBulk.toFixed(3) + '/bp=' + realizedBullpen.toFixed(3)
+      + ' (pos1 op=' + s0.opener.toFixed(3) + '/bk=' + s0.bulk.toFixed(3) + '/bp=' + s0.bullpen.toFixed(3)
       + '; pos5 op=' + s4.opener.toFixed(3) + '/bk=' + s4.bulk.toFixed(3) + '/bp=' + s4.bullpen.toFixed(3)
       + '; pos9 op=' + s8.opener.toFixed(3) + '/bk=' + s8.bulk.toFixed(3) + '/bp=' + s8.bullpen.toFixed(3) + ')');
     return {
@@ -472,10 +542,12 @@ function runModel(game, wobaIdx, settings, mode) {
       bullpenWobaVsL: bullpenVsL,
       bullpenWobaVsR: bullpenVsR,
       perPositionWeights,
-      // PR 4: bulk-slot scale used in this run for downstream persistence
-      // and tracing. null bulkFcUsed means we used the default distribution.
-      bulkScale,
-      bulkFcUsed: bulkFc,
+      // Realized PA-weighted weights for downstream persistence and tracing.
+      openerWeightUsed:  realizedOpener,
+      bulkWeightUsed:    realizedBulk,
+      bullpenWeightUsed: realizedBullpen,
+      openerFcUsed:      openerFc,
+      bulkFcUsed:        bulkFc,
     };
   };
   // Away batters face home pitching → away-side perBatterEW uses HOME's
@@ -556,14 +628,18 @@ function runModel(game, wobaIdx, settings, mode) {
     // PR 4: per-side SP weights used in this model run. Persisted to
     // game_log.{away,home}_sp_weight_used by processGameSignals so
     // future backtests can replay model with exact weight inputs.
-    // Bullpen weight is the complement (1 - sp_weight).
+    // Bullpen weight is the complement (1 - sp_weight) on standard path.
     awaySpWeightUsed: awaySpPitW, homeSpWeightUsed: homeSpPitW,
-    // Bulk-slot scale factor when this side is in opener mode and has a
-    // bulk forecast. Null otherwise. The scale is multiplied into
-    // BULK_FACED inside buildPerPositionWeights; downstream persistence
-    // can also recover it as (sum(perPositionWeights[i].bulk)/sum(default)).
-    awayBulkWeightUsed: awayOpenerOpts && awayOpenerOpts.bulkFcUsed != null ? awayOpenerOpts.bulkScale : null,
-    homeBulkWeightUsed: homeOpenerOpts && homeOpenerOpts.bulkFcUsed != null ? homeOpenerOpts.bulkScale : null };
+    // PR B (opener/bulk redesign): realized PA-weighted opener/bulk/bullpen
+    // weights from the opener-aware model run, when the side is opener-mode.
+    // Null when the side isn't opener-mode (standard SP-vs-bullpen split
+    // is fully described by *_sp_weight_used + its complement).
+    awayOpenerWeightUsed:  awayOpenerOpts ? awayOpenerOpts.openerWeightUsed  : null,
+    awayBulkWeightUsed:    awayOpenerOpts ? awayOpenerOpts.bulkWeightUsed    : null,
+    awayBullpenWeightUsed: awayOpenerOpts ? awayOpenerOpts.bullpenWeightUsed : null,
+    homeOpenerWeightUsed:  homeOpenerOpts ? homeOpenerOpts.openerWeightUsed  : null,
+    homeBulkWeightUsed:    homeOpenerOpts ? homeOpenerOpts.bulkWeightUsed    : null,
+    homeBullpenWeightUsed: homeOpenerOpts ? homeOpenerOpts.bullpenWeightUsed : null };
 }
 
 function catKey(signalType, signalSide, signalLabel, marketLine) {
@@ -858,6 +934,55 @@ function computeSpPitWeightFromForecast(forecastIp, settings) {
   return Math.max(minW, Math.min(maxW, raw));
 }
 
+// Opener-slot weight from F4 forecast IP. Anchored so a typical opener
+// forecast (a true 1-IP specialist's forecast under role='opener' baseline,
+// which lands around 1.23 IP) maps to the design weight 0.15. Slope 0.15
+// gives meaningful differentiation across the realistic opener forecast
+// range (~1.0-2.0 IP). Slightly tighter clamps than SP because opener
+// is structurally a small slot — even a long-relief opener shouldn't
+// absorb more than 30% of pitching wOBA in opener-mode.
+//
+// Settings overrides:
+//   OPENER_WEIGHT_ANCHOR_IP      anchor IP at which weight equals base (default 1.23)
+//   OPENER_WEIGHT_ANCHOR_VALUE   weight at anchor (default 0.15)
+//   OPENER_WEIGHT_SLOPE          weight change per IP above/below anchor (default 0.15)
+//   OPENER_WEIGHT_MIN            clamp floor (default 0.10)
+//   OPENER_WEIGHT_MAX            clamp ceiling (default 0.30)
+function computeOpenerPitWeightFromForecast(forecastIp, settings) {
+  if (forecastIp == null) return null;
+  const anchor = parseFloat(settings?.OPENER_WEIGHT_ANCHOR_IP) || 1.23;
+  const baseVal = parseFloat(settings?.OPENER_WEIGHT_ANCHOR_VALUE) || 0.15;
+  const slope = parseFloat(settings?.OPENER_WEIGHT_SLOPE);
+  const slopeUsed = (slope === slope) ? slope : 0.15;
+  const minW = parseFloat(settings?.OPENER_WEIGHT_MIN) || 0.10;
+  const maxW = parseFloat(settings?.OPENER_WEIGHT_MAX) || 0.30;
+  const raw = baseVal + (forecastIp - anchor) * slopeUsed;
+  return Math.max(minW, Math.min(maxW, raw));
+}
+
+// Bulk-slot weight from F4 forecast IP. Anchor IP 5.4 matches the bulk
+// shrinkage baseline (where a typical bulk pitcher's forecast lands).
+// Slope 0.125 produces ~10pp weight spread across the realistic bulk
+// forecast range (~5.0-5.7 IP).
+//
+// Settings overrides:
+//   BULK_WEIGHT_ANCHOR_IP        anchor IP at which weight equals base (default 5.4)
+//   BULK_WEIGHT_ANCHOR_VALUE     weight at anchor (default 0.60)
+//   BULK_WEIGHT_SLOPE            weight change per IP above/below anchor (default 0.125)
+//   BULK_WEIGHT_MIN              clamp floor (default 0.30)
+//   BULK_WEIGHT_MAX              clamp ceiling (default 0.85)
+function computeBulkPitWeightFromForecast(forecastIp, settings) {
+  if (forecastIp == null) return null;
+  const anchor = parseFloat(settings?.BULK_WEIGHT_ANCHOR_IP) || 5.4;
+  const baseVal = parseFloat(settings?.BULK_WEIGHT_ANCHOR_VALUE) || 0.60;
+  const slope = parseFloat(settings?.BULK_WEIGHT_SLOPE);
+  const slopeUsed = (slope === slope) ? slope : 0.125;
+  const minW = parseFloat(settings?.BULK_WEIGHT_MIN) || 0.30;
+  const maxW = parseFloat(settings?.BULK_WEIGHT_MAX) || 0.85;
+  const raw = baseVal + (forecastIp - anchor) * slopeUsed;
+  return Math.max(minW, Math.min(maxW, raw));
+}
+
 function buildSpStartIndex(db, settings) {
   // Loads every historical SP start, groups by pitcher_mlb_id ordered
   // by date, and precomputes the 30-day league baseline per game_date.
@@ -1070,4 +1195,4 @@ function forecastSpIP({ index, pitcherMlbId, gameDate, settings, role }) {
   };
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP };
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast };
