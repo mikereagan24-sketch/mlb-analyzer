@@ -401,6 +401,30 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // Non-critical — log and continue. Doesn't block signal firing.
     console.warn('[bullpen-persist] ' + gameRow.game_id + ': ' + e.message);
   }
+  // PR 4 (v4 cohort): persist the SP/bulk weights runModel actually used.
+  // The values come from stdModel's return object (model.js's runModel
+  // exposes awaySpWeightUsed/homeSpWeightUsed/awayBulkWeightUsed/
+  // homeBulkWeightUsed). Gated on !suppressed because stdModel returns
+  // a partial-data object when suppressed and the weights are computed
+  // pre-suppression anyway. Non-critical write — wrap in try/catch so
+  // a schema mismatch doesn't kill signal firing.
+  if (!suppressed && stdModel) {
+    try {
+      db.prepare(`UPDATE game_log SET
+        away_sp_weight_used=?, home_sp_weight_used=?,
+        away_bulk_weight_used=?, home_bulk_weight_used=?
+        WHERE game_date=? AND game_id=?`)
+        .run(
+          stdModel.awaySpWeightUsed != null ? stdModel.awaySpWeightUsed : null,
+          stdModel.homeSpWeightUsed != null ? stdModel.homeSpWeightUsed : null,
+          stdModel.awayBulkWeightUsed != null ? stdModel.awayBulkWeightUsed : null,
+          stdModel.homeBulkWeightUsed != null ? stdModel.homeBulkWeightUsed : null,
+          gameRow.game_date, gameRow.game_id
+        );
+    } catch (e) {
+      console.warn('[weight-persist] ' + gameRow.game_id + ': ' + e.message);
+    }
+  }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
   // If game is already final (scored), freeze all signals — don't rewrite

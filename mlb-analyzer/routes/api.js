@@ -2415,6 +2415,27 @@ router.get('/debug/model-trace', (req, res) => {
       ? settings.PA_WEIGHTS
       : [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
 
+    // PR 4 (v4 cohort): per-side SP pitching weights derived from F4
+    // forecast IP. Mirrors model.js's computeSpPitWeightFromForecast.
+    // The trace endpoint must mirror runModel exactly so
+    // trace_vs_actual_diff stays at zero. Anchor + slope + clamp values
+    // read from settings with the same defaults model.js uses.
+    const fcAnchor = num(settings.FORECAST_WEIGHT_ANCHOR_IP, 5.5);
+    const fcBase   = num(settings.FORECAST_WEIGHT_ANCHOR_VALUE, 0.75);
+    const fcSlope  = num(settings.FORECAST_WEIGHT_SLOPE, 0.10);
+    const fcMin    = num(settings.FORECAST_WEIGHT_MIN, 0.50);
+    const fcMax    = num(settings.FORECAST_WEIGHT_MAX, 0.95);
+    const computeSpPitW = (forecastIp) => {
+      if (forecastIp == null) return null;
+      return Math.max(fcMin, Math.min(fcMax, fcBase + (forecastIp - fcAnchor) * fcSlope));
+    };
+    const awayFc = game.away_sp_forecast_ip != null ? parseFloat(game.away_sp_forecast_ip) : null;
+    const homeFc = game.home_sp_forecast_ip != null ? parseFloat(game.home_sp_forecast_ip) : null;
+    const awaySpPitW = computeSpPitW(awayFc) ?? SP_PIT_WEIGHT;
+    const homeSpPitW = computeSpPitW(homeFc) ?? SP_PIT_WEIGHT;
+    const awayRelPitW = 1 - awaySpPitW;
+    const homeRelPitW = 1 - homeSpPitW;
+
     // Per-batter trace. Mirrors perBatterEW (model.js lines 142-168) on
     // the standard non-opener path. If runModel diverges, this block
     // must be updated in lockstep — the actual_runModel block below acts
@@ -2423,14 +2444,15 @@ router.get('/debug/model-trace', (req, res) => {
     const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
     const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
 
-    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar, ownTeam) => {
+    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar, ownTeam, spPitW_in, relPitW_in) => {
       const eff = effHandLocal(b.hand, oppPitcherHand);
       const bw  = getBatterWoba(wobaIdx, b.name, b.hand, ownTeam, W_PROJ_, W_ACT_, MIN_PA, settings);
       const pitWvsBatter  = eff === 'L' ? pwOpp.vsLHB : pwOpp.vsRHB;
       // Standard non-opener path (model.js lines 158-160) uses the
       // combined bullpenWoba scalar — NOT the vsL/vsR splits. Splits are
       // only consulted on the opener_aware path inside openerOpts.
-      const pitW = pitWvsBatter * SP_PIT_WEIGHT + oppBullpenScalar * RELIEF_PIT_WEIGHT;
+      // PR 4: SP pitching weight is now per-side from F4 forecast.
+      const pitW = pitWvsBatter * spPitW_in + oppBullpenScalar * relPitW_in;
       const vsStart = oppPitcherHand === 'R' ? (bw.vsRHP ?? BAT_DFLT_START) : (bw.vsLHP ?? BAT_DFLT_START);
       const vsOpp   = oppPitcherHand === 'R' ? (bw.vsLHP ?? BAT_DFLT_OPP)   : (bw.vsRHP ?? BAT_DFLT_OPP);
       const batW = vsStart * SP_WEIGHT + vsOpp * RELIEF_WEIGHT;
@@ -2440,6 +2462,8 @@ router.get('/debug/model-trace', (req, res) => {
         batter_vsRHP: bw.vsRHP, batter_vsLHP: bw.vsLHP, batter_source: bw.source,
         opp_pitcher_vsBatter: pitWvsBatter,
         opp_bullpen_combined: oppBullpenScalar,
+        sp_pit_weight_used: parseFloat(spPitW_in.toFixed(5)),
+        relief_pit_weight_used: parseFloat(relPitW_in.toFixed(5)),
         pitW: parseFloat(pitW.toFixed(5)),
         batW_vsStart: vsStart, batW_vsOpp: vsOpp,
         batW: parseFloat(batW.toFixed(5)),
@@ -2451,8 +2475,8 @@ router.get('/debug/model-trace', (req, res) => {
     // model.js line 445-446: awayVsBullpen = game.homeBullpenWoba.
     // teamHint mirrors runModel lines 440-441: own team's abbr is passed
     // so fuzzyLookup can disambiguate name collisions in the wOBA index.
-    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba, game.away_team) }));
-    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba, game.home_team) }));
+    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba, game.away_team, homeSpPitW, homeRelPitW) }));
+    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba, game.home_team, awaySpPitW, awayRelPitW) }));
 
     const aWs = awayBatterTraces.reduce((s,t)=>s + t.expected_wOBA * t.pa_weight, 0);
     const aWp = awayBatterTraces.reduce((s,t)=>s + t.pa_weight, 0);
@@ -2504,6 +2528,19 @@ router.get('/debug/model-trace', (req, res) => {
         W_PIT, W_BAT,
         SP_WEIGHT, RELIEF_WEIGHT,
         SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT,
+        // PR 4: per-side SP weights computed from F4 forecasts. When
+        // forecast is null, these fall back to SP_PIT_WEIGHT above.
+        away_sp_forecast_ip: awayFc,
+        home_sp_forecast_ip: homeFc,
+        away_sp_weight_used: parseFloat(awaySpPitW.toFixed(5)),
+        home_sp_weight_used: parseFloat(homeSpPitW.toFixed(5)),
+        away_relief_pit_weight_used: parseFloat(awayRelPitW.toFixed(5)),
+        home_relief_pit_weight_used: parseFloat(homeRelPitW.toFixed(5)),
+        FORECAST_WEIGHT_ANCHOR_IP: fcAnchor,
+        FORECAST_WEIGHT_ANCHOR_VALUE: fcBase,
+        FORECAST_WEIGHT_SLOPE: fcSlope,
+        FORECAST_WEIGHT_MIN: fcMin,
+        FORECAST_WEIGHT_MAX: fcMax,
         BP_STRONG_R: BP_SR_, BP_WEAK_R: BP_WR_, BP_STRONG_L: BP_SL_, BP_WEAK_L: BP_WL_,
         UNKNOWN_PITCHER_WOBA: UNK_,
         MIN_PA, MIN_BF: MIN_BF_,

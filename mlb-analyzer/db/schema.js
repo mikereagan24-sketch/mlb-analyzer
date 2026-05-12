@@ -457,6 +457,17 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba_vs_l REAL"); } 
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba_vs_r REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba_vs_l REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba_vs_r REAL"); } catch(e) {}
+// PR 4 (v4 cohort): SP/bulk weights actually used in runModel. Captures
+// the per-game variable weights derived from F4 forecasts, so future
+// backtests can replay runModel knowing exactly which weight values fed
+// the model at signal-fire time. NULL when the forecast was null (model
+// fell back to fixed SP_PIT_WEIGHT — value will be SP_PIT_WEIGHT setting
+// or default 0.80). bulk_weight_used is NULL except on opener-mode games
+// with PRIM-tagged bulk pitchers.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_weight_used REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_weight_used REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bulk_weight_used REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bulk_weight_used REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
