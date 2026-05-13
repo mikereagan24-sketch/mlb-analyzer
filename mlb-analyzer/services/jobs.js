@@ -508,7 +508,20 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       edge_pct: sig.edge,
       outcome,
       pnl,
-      cohort: gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',
+      // Cohort assignment by game_date. The model has gone through several
+      // major changes; cohort is used to filter backtest output so each
+      // version's ROI is measured cleanly against its own signals.
+      //
+      //   v3-pretuning : pre-2026-04-24 (early v3, before settings retune)
+      //   v3           : 2026-04-24 — 2026-05-11
+      //   v4           : 2026-05-12 onward
+      //                  (PR 4 merged 2026-05-12 14:18 UTC; subsequent
+      //                  refinements — F4 relief-aware index, role-aware
+      //                  baselines, opener/bulk anchored weight redesign —
+      //                  are all within-v4 refinements built on PR 4's
+      //                  forecast-modulated weights.)
+      cohort: gameRow.game_date >= '2026-05-12' ? 'v4'
+        : gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',
       companion_spread_line:    _spreadLine,
       companion_spread_price:   _spreadPrice,
       companion_spread_outcome: _spreadOutcome,
