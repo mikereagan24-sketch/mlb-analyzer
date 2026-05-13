@@ -1189,25 +1189,40 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         const wobaVsOppRaw = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
                            : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : null;
         const srcVsOpp = (projO&&actO)?'blend':projO?'proj':actO?'act':'default';
-        // Symmetric default policy: if EITHER side falls back to default,
-        // force the OTHER side to default too. Without this, a batter with
-        // 1 career PA against opposite-handed pitching (e.g. a rookie with
-        // a single extra-base hit) gets a wildly inflated wobaVsOpp like
-        // 0.529 from a tiny-sample act, while wobaVsSP correctly defaults
-        // to 0.290. The model then over-weights that batter against the
-        // opposite-hand bullpen. Symmetric defaults eliminate this class
-        // of bug — if we don't trust the SP-hand exposure, we don't
-        // trust the opp-hand exposure either (and vice versa).
-        const eitherDefault = (srcVsSP==='default' || srcVsOpp==='default');
-        const wobaVsSP  = eitherDefault ? +dfltV.toFixed(3)    : wobaVsSPraw;
-        const wobaVsOpp = eitherDefault ? +dfltVOpp.toFixed(3) : wobaVsOppRaw;
+        // Per-side default policy: independent by default, with one
+        // safety exception. The principle:
+        //  - Projections are high-confidence (Steamer regresses small
+        //    samples internally). If a batter has a projection on one
+        //    side, we trust it even if the opposite side has no data;
+        //    the opposite just defaults independently.
+        //  - Actuals can be tiny-sample flukes (e.g. a rookie with 4 PA
+        //    going 2-for-4 with a HR vs RHP → wOBA 0.529). If a batter
+        //    has actuals-only on one side AND the other side defaulted,
+        //    force both to default — the actual is likely a fluke
+        //    rather than real signal, and treating one side as real
+        //    while the other defaults creates an asymmetric distortion.
+        //
+        // Examples:
+        //  - Ewing (act-RHP fluke 0.529 + no LHP data): both sides default ✓
+        //  - Shewmake (proj-RHP 0.280, no LHP data): keep proj-RHP, default LHP ✓
+        //  - Normal batter (blend both sides): no change ✓
+        const wobaVsSP  = wobaVsSPraw  != null ? wobaVsSPraw  : +dfltV.toFixed(3);
+        const wobaVsOpp = wobaVsOppRaw != null ? wobaVsOppRaw : +dfltVOpp.toFixed(3);
+        // Safety: if one side is actuals-only AND the other defaulted,
+        // override both to defaults. Projections are exempt — they're
+        // confidence-regressed and trustworthy on their own.
+        const oneSideActFluke = (srcVsSP === 'act' && srcVsOpp === 'default')
+                             || (srcVsOpp === 'act' && srcVsSP === 'default');
+        const finalVsSP  = oneSideActFluke ? +dfltV.toFixed(3)    : wobaVsSP;
+        const finalVsOpp = oneSideActFluke ? +dfltVOpp.toFixed(3) : wobaVsOpp;
         // Blended wOBA: SP_WT% vs SP hand + REL_WT% vs opposite
-        const blended = +(wobaVsSP*SP_WT + wobaVsOpp*REL_WT).toFixed(3);
-        // Source reflects whether the batter has full data (both sides
-        // had real values) or fell back to defaults. 'blend' means real
-        // data on the SP-side AND we kept opp-side real too.
-        const finalSource = eitherDefault ? 'default' : srcVsSP;
-        return {woba:blended, wobaVsSP, wobaVsOpp, source:finalSource};
+        const blended = +(finalVsSP*SP_WT + finalVsOpp*REL_WT).toFixed(3);
+        // Source reports the SP-side classification, OR 'default' if
+        // both sides defaulted (no real data anywhere), OR 'default' if
+        // the act-fluke safety triggered.
+        const bothDefault = (srcVsSP === 'default' && srcVsOpp === 'default');
+        const finalSource = (oneSideActFluke || bothDefault) ? 'default' : srcVsSP;
+        return {woba:blended, wobaVsSP: finalVsSP, wobaVsOpp: finalVsOpp, source:finalSource};
       }
     function lookupPitcher(name, hand) {
       // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback
