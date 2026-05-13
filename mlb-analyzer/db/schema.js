@@ -650,6 +650,14 @@ try { db.exec("UPDATE bet_signals SET cohort='v3' WHERE cohort='v3-tainted'"); }
 // (new signals get cohort='v3' with today's game_date, which is post-cutoff).
 try { db.exec("UPDATE bet_signals SET cohort='v3-pretuning' WHERE cohort='v3' AND game_date < '2026-04-24'"); } catch(e) {}
 
+// v4 cohort backfill: PR 4 (v4 SP weight modulation) merged 2026-05-12.
+// Signals on or after that date should be tagged v4, not v3. Catches any
+// signals that fired between PR 4 merge and the jobs.js cohort-tagging
+// fix (the tagging code wasn't updated when PR 4 merged — about 24-48
+// hours of signals were stamped v3 by mistake). Idempotent: subsequent
+// boots update 0 rows because new signals are tagged v4 directly.
+try { db.exec("UPDATE bet_signals SET cohort='v4' WHERE cohort='v3' AND game_date >= '2026-05-12'"); } catch(e) {}
+
 // Runline companion capture (Step 2 of 3 in runline workstream).
 // ML signals snapshot the spread (-1.5 / +1.5) line + price + source
 // at fire time, then get graded against the eventual game result so

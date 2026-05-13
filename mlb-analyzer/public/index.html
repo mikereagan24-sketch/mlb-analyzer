@@ -300,7 +300,8 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <input type="date" id="bt-to" style="width:150px">
 <span style="color:var(--text2);margin-left:8px">cohort</span>
 <select id="bt-cohort" style="width:150px" onchange="loadBacktest()">
-  <option value="v3" selected>v3 (current)</option>
+  <option value="v4" selected>v4 (current)</option>
+  <option value="v3">v3</option>
   <option value="v3-pretuning">v3-pretuning (early)</option>
   <option value="v3-tainted">v3 (tainted)</option>
   <option value="v2-tainted">v2 (tainted)</option>
@@ -2102,7 +2103,7 @@ async function loadBacktest(){
   const from=document.getElementById('bt-from').value;
   const to=document.getElementById('bt-to').value;
   const cohortEl=document.getElementById('bt-cohort');
-  const cohort=cohortEl?cohortEl.value:'v3';
+  const cohort=cohortEl?cohortEl.value:'v4';
   btFrom=from;btTo=to;
   try{
     const d=await api('/backtest?from='+from+'&to='+to+'&cohort='+encodeURIComponent(cohort));
