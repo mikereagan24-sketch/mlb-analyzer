@@ -71,10 +71,30 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) 
     minPA, wProj, wAct
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
-  // Prefer per-hand BAT_DFLT from settings; fall back to module const for
-  // external callers (e.g. routes/api.js debug routes) that don't pass settings.
+  // Default selection has three priority layers:
+  //  1. settings.BAT_DFLT_START / BAT_DFLT_OPP — flat per-exposure defaults
+  //     configured on the model tab. Same-hand (batter-hand == pitcher-hand)
+  //     uses START; opposite-hand uses OPP. This is the authoritative source
+  //     and matches the values perBatterEW already uses as its backstop, so
+  //     getBatterWoba and perBatterEW stay consistent for defaulted batters.
+  //  2. settings.BAT_DFLT_<HAND>_VS_<PHAND> — per-batter-hand per-pitcher-hand
+  //     fine-tunable defaults if you want platoon-specific values different
+  //     from the flat START/OPP. Rarely populated; legacy.
+  //  3. Module const BAT_DFLT — platoon-realistic defaults (LHB hits RHP at
+  //     0.330, etc.). Used only when neither (1) nor (2) provides a value.
+  //     Callers without a settings object (e.g. some debug routes) land here.
   let d;
-  if (settings && settings.BAT_DFLT_R_VS_RHP != null) {
+  if (settings && settings.BAT_DFLT_START != null) {
+    const start = parseFloat(settings.BAT_DFLT_START);
+    const opp   = parseFloat(settings.BAT_DFLT_OPP);
+    // 'eff' represents the batter's effective hand (S → R). vsLHP is
+    // "same-hand" if eff==='L', "opposite-hand" if eff==='R'.
+    if (eff === 'L') {
+      d = { vsLHP: start, vsRHP: opp };
+    } else {
+      d = { vsLHP: opp, vsRHP: start };
+    }
+  } else if (settings && settings.BAT_DFLT_R_VS_RHP != null) {
     const byHand = {
       R: { vsRHP: settings.BAT_DFLT_R_VS_RHP, vsLHP: settings.BAT_DFLT_R_VS_LHP },
       L: { vsRHP: settings.BAT_DFLT_L_VS_RHP, vsLHP: settings.BAT_DFLT_L_VS_LHP },

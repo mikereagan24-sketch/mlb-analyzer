@@ -1114,7 +1114,25 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       const REL_WT     = num(settings.RELIEF_WEIGHT,     0.23);
       const SP_PIT_WT  = num(settings.SP_PIT_WEIGHT,     0.80);
       const REL_PIT_WT = num(settings.RELIEF_PIT_WEIGHT, 0.20);
-    const BAT_DFLT = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
+    const BAT_DFLT_PLATOON = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
+    // Authoritative defaults from the model tab: BAT_DFLT_START is the
+    // same-hand exposure value, BAT_DFLT_OPP is the opposite-hand value.
+    // For each batter hand, project START/OPP into vsRHP/vsLHP slots.
+    // Matches services/model.js getBatterWoba — both code paths now use
+    // the same flat defaults for batters without real wOBA data.
+    function _bDflt(hand) {
+      const start = settings.BAT_DFLT_START != null ? Number(settings.BAT_DFLT_START) : null;
+      const opp   = settings.BAT_DFLT_OPP   != null ? Number(settings.BAT_DFLT_OPP)   : null;
+      if (start != null && opp != null && !isNaN(start) && !isNaN(opp)) {
+        const eff = hand==='S' ? 'R' : (hand||'R');
+        // Same-hand (eff matches pitcher hand) gets START; opposite gets OPP.
+        return eff === 'L'
+          ? { vsLHP: start, vsRHP: opp }
+          : { vsLHP: opp,   vsRHP: start };
+      }
+      return BAT_DFLT_PLATOON[hand] || BAT_DFLT_PLATOON['R'];
+    }
+    const BAT_DFLT = { R: _bDflt('R'), L: _bDflt('L'), S: _bDflt('S') };
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
     function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
     function lookupBatter(name, hand, oppSpHand, teamHint) {
