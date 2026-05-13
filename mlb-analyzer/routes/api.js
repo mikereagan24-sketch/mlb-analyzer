@@ -1162,17 +1162,34 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         // Look up vs SP hand
         const projV    = findIn(wobaIdx[vsKey],  key, teamHint);
         const actV     = findIn(wobaIdx[actKey], key, teamHint);
-        const wobaVsSP = (projV&&actV) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
-                       : projV ? +projV.toFixed(3) : actV ? +actV.toFixed(3) : +dfltV.toFixed(3);
+        const wobaVsSPraw = (projV&&actV) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
+                          : projV ? +projV.toFixed(3) : actV ? +actV.toFixed(3) : null;
         const srcVsSP  = (projV&&actV)?'blend':projV?'proj':actV?'act':'default';
         // Look up vs opposite hand (for bullpen blend)
         const projO    = findIn(wobaIdx[oppKey],    key, teamHint);
         const actO     = findIn(wobaIdx[oppActKey], key, teamHint);
-        const wobaVsOpp = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
-                        : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : +dfltVOpp.toFixed(3);
+        const wobaVsOppRaw = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
+                           : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : null;
+        const srcVsOpp = (projO&&actO)?'blend':projO?'proj':actO?'act':'default';
+        // Symmetric default policy: if EITHER side falls back to default,
+        // force the OTHER side to default too. Without this, a batter with
+        // 1 career PA against opposite-handed pitching (e.g. a rookie with
+        // a single extra-base hit) gets a wildly inflated wobaVsOpp like
+        // 0.529 from a tiny-sample act, while wobaVsSP correctly defaults
+        // to 0.290. The model then over-weights that batter against the
+        // opposite-hand bullpen. Symmetric defaults eliminate this class
+        // of bug — if we don't trust the SP-hand exposure, we don't
+        // trust the opp-hand exposure either (and vice versa).
+        const eitherDefault = (srcVsSP==='default' || srcVsOpp==='default');
+        const wobaVsSP  = eitherDefault ? +dfltV.toFixed(3)    : wobaVsSPraw;
+        const wobaVsOpp = eitherDefault ? +dfltVOpp.toFixed(3) : wobaVsOppRaw;
         // Blended wOBA: SP_WT% vs SP hand + REL_WT% vs opposite
         const blended = +(wobaVsSP*SP_WT + wobaVsOpp*REL_WT).toFixed(3);
-        return {woba:blended, wobaVsSP, wobaVsOpp, source:srcVsSP};
+        // Source reflects whether the batter has full data (both sides
+        // had real values) or fell back to defaults. 'blend' means real
+        // data on the SP-side AND we kept opp-side real too.
+        const finalSource = eitherDefault ? 'default' : srcVsSP;
+        return {woba:blended, wobaVsSP, wobaVsOpp, source:finalSource};
       }
     function lookupPitcher(name, hand) {
       // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback
