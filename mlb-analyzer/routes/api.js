@@ -1189,9 +1189,10 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
           }
           // 5. Jr-stripped exact key
           const sk=stripJr(k);
-          if(tl&&idx[sk+' '+tl])return idx[sk+' '+tl].woba;
+          if(tl&&idx[sk+' '+tl]){const w=gate(idx[sk+' '+tl]); if(w!=null)return w;}
           const e2=Object.entries(idx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
-          return e2?e2[1].woba:null;
+          if(e2){const w=gate(e2[1]); if(w!=null)return w;}
+          return null;
         }
         // Look up vs SP hand
         const projV    = findIn(wobaIdx[vsKey],  key, teamHint);
