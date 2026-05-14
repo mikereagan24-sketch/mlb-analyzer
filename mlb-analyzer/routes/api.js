@@ -1116,6 +1116,10 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       const REL_WT     = num(settings.RELIEF_WEIGHT,     0.23);
       const SP_PIT_WT  = num(settings.SP_PIT_WEIGHT,     0.80);
       const REL_PIT_WT = num(settings.RELIEF_PIT_WEIGHT, 0.20);
+      // Apply same minPA gate to act-* lookups that blendWoba uses in
+      // services/model.js — tiny-sample actuals (rookie's 4 PA fluke)
+      // should fall back to defaults rather than leak into matchup display.
+      const MIN_PA = num(settings.MIN_PA, 60);
     const BAT_DFLT_PLATOON = { R:{vsRHP:0.305,vsLHP:0.325}, L:{vsRHP:0.330,vsLHP:0.290}, S:{vsRHP:0.322,vsLHP:0.308} };
     // Authoritative defaults from the model tab: BAT_DFLT_START is the
     // same-hand exposure value, BAT_DFLT_OPP is the opposite-hand value.
@@ -1149,13 +1153,23 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         const parts=key.split(' ');
         const isAbbrev=parts.length>=2&&parts[0].length===1;
         function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-        function findIn(idx,k,tHint){
+        function findIn(idx,k,tHint,minSample){
           if(!idx)return null;
+          // When minSample is set (act-* lookups), reject entries whose
+          // sample is below the gate. Matches blendWoba's minSample check
+          // in services/model.js — tiny-sample actuals (a rookie's 4 PA
+          // with 2 extra-base hits) are noise, not signal. proj-* lookups
+          // pass minSample=undefined and behave unchanged.
+          const gate = (entry) => {
+            if (!entry) return null;
+            if (minSample != null && (entry.sample == null || entry.sample < minSample)) return null;
+            return entry.woba;
+          };
           const tl=tHint?tHint.toLowerCase():null;
           // 1. Exact team key: "bobby witt kc"
-          if(tl&&idx[k+' '+tl])return idx[k+' '+tl].woba;
+          if(tl&&idx[k+' '+tl]){const w=gate(idx[k+' '+tl]); if(w!=null)return w;}
           // 2. Exact name
-          if(idx[k])return idx[k].woba;
+          if(idx[k]){const w=gate(idx[k]); if(w!=null)return w;}
           // 3. Search index entries where stripJr(indexKey w/o team) === k, same team
           // Catches "bobby witt jr kc" when looking up "bobby witt" + "kc"
           if(tl){
@@ -1164,14 +1178,14 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
               const base=n.slice(0,n.length-tl.length-1).trim();
               return stripJr(base)===k;
             });
-            if(jrEntry)return jrEntry[1].woba;
+            if(jrEntry){const w=gate(jrEntry[1]); if(w!=null)return w;}
           }
           // 4. Abbreviated name (M. Busch style)
           if(isAbbrev){
             const initial=parts[0],last=parts[parts.length-1];
-            if(tl){const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1].woba;}
+            if(tl){const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e){const w=gate(e[1]); if(w!=null)return w;}}
             const matches=Object.entries(idx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripJr(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
-            if(matches.length===1)return matches[0][1].woba;
+            if(matches.length===1){const w=gate(matches[0][1]); if(w!=null)return w;}
           }
           // 5. Jr-stripped exact key
           const sk=stripJr(k);
@@ -1181,13 +1195,13 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         }
         // Look up vs SP hand
         const projV    = findIn(wobaIdx[vsKey],  key, teamHint);
-        const actV     = findIn(wobaIdx[actKey], key, teamHint);
+        const actV     = findIn(wobaIdx[actKey], key, teamHint, MIN_PA);
         const wobaVsSPraw = (projV&&actV) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
                           : projV ? +projV.toFixed(3) : actV ? +actV.toFixed(3) : null;
         const srcVsSP  = (projV&&actV)?'blend':projV?'proj':actV?'act':'default';
         // Look up vs opposite hand (for bullpen blend)
         const projO    = findIn(wobaIdx[oppKey],    key, teamHint);
-        const actO     = findIn(wobaIdx[oppActKey], key, teamHint);
+        const actO     = findIn(wobaIdx[oppActKey], key, teamHint, MIN_PA);
         const wobaVsOppRaw = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
                            : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : null;
         const srcVsOpp = (projO&&actO)?'blend':projO?'proj':actO?'act':'default';
