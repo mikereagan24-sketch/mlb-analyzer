@@ -206,10 +206,11 @@ router.post('/jobs/refresh-fangraphs', async (req, res) => {
     const fetched = await refreshAllFanGraphs(cookieValue);
 
     if (dryRun) {
+      const search = (req.query.search || '').toLowerCase().trim();
       const preview = fetched.map(r => {
         if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
         const lines = r.csv.split('\n');
-        return {
+        const base = {
           name: r.name,
           key: r.key,
           success: true,
@@ -217,6 +218,15 @@ router.post('/jobs/refresh-fangraphs', async (req, res) => {
           headers: lines[0],
           sampleRows: lines.slice(1, 6),
         };
+        // Optional: search the raw CSV for matching rows (useful for
+        // diagnosing whether a player is absent from FG entirely or
+        // being filtered during ingest).
+        if (search) {
+          const matches = lines.slice(1).filter(line => line.toLowerCase().includes(search));
+          base.searchMatches = matches.slice(0, 20);
+          base.searchMatchCount = matches.length;
+        }
+        return base;
       });
       return res.json({ dryRun: true, results: preview });
     }
