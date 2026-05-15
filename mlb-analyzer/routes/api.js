@@ -92,9 +92,11 @@ function parseCSV(buffer, isPitcher) {
     const name = r[nameCol];
     const woba = parseFloat(r[wobaCol]);
     const sample = sampleCol ? parseFloat(r[sampleCol]) || 0 : 0;
-    // For batter CSVs: reject wOBA < 0.250 (filters pitchers accidentally in batter files)
+    // For batter CSVs: reject wOBA < 0.210 (filters pitchers accidentally in batter files,
+    //   keeps weak-hit defensive specialists like backup catchers — Sandy León at 0.226 is
+    //   a real RoS projection that was being silently dropped by the previous 0.250 floor).
     // For pitcher CSVs: allow as low as 0.05 (elite starters can allow very low wOBA)
-    const minWoba = isPitcher ? 0.05 : 0.250;
+    const minWoba = isPitcher ? 0.05 : 0.210;
     if (!name || isNaN(woba) || woba < minWoba || woba > 0.8) continue;
     // Normalize FanGraphs team abbr (KCR->KC, SDP->SD, etc.)
     const fgTeam = teamCol ? (r[teamCol]||'').trim().toUpperCase() : null;
