@@ -1064,36 +1064,43 @@ async function runLineupJob(dateStr) {
         // relative to the bullpen residual. Role='bulk' uses the 5.4 IP
         // baseline (matches design weight 0.60 × 9 IP), keeping bulk
         // forecasts centered on bulk-role expectations.
+        // Bulk forecast: pulls from either the RotoWire-announced bulk OR
+        // the opener-detection-inferred bulk (legacy bulk_guy_* column on
+        // game_log). model.js's buildOpenerOpts reads game.bulk_guy_away
+        // (the inferred column) — so the bulk forecast must populate
+        // whenever that's set, not only when RotoWire announces.
         away_bulk_forecast_ip: forecastForPitcher(
-          g.away_bulk_announced ? g.away_bulk_announced.name : null,
+          (g.away_bulk_announced && g.away_bulk_announced.name)
+            || existingRow?.bulk_guy_away
+            || null,
           g.away_team,
           'bulk'
         ),
         home_bulk_forecast_ip: forecastForPitcher(
-          g.home_bulk_announced ? g.home_bulk_announced.name : null,
+          (g.home_bulk_announced && g.home_bulk_announced.name)
+            || existingRow?.bulk_guy_home
+            || null,
           g.home_team,
           'bulk'
         ),
-        // Opener-role forecast: only meaningful when this game IS opener-mode
-        // (away_bulk or home_bulk is announced, signaling the named SP is
-        // really an opener). Uses role='opener' which shrinks toward 1.35
-        // IP baseline (= design weight 0.15 × 9 IP), keeping the opener
-        // forecast in a role-appropriate range instead of being pulled up
-        // by the SP baseline. Null when not an opener game.
-        away_opener_forecast_ip: g.away_bulk_announced
-          ? forecastForPitcher(
-              writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
-              g.away_team,
-              'opener'
-            )
-          : null,
-        home_opener_forecast_ip: g.home_bulk_announced
-          ? forecastForPitcher(
-              writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
-              g.home_team,
-              'opener'
-            )
-          : null,
+        // Opener-role forecast: forecasted unconditionally for every named
+        // SP. Used downstream only when is_opener_game_{side}=1 (set by the
+        // separate opener-detection pass). Previously gated on
+        // g.away_bulk_announced, but that missed bullpen-game patterns —
+        // an opener game with no named bulk follower (e.g. TOR-DET 5/16
+        // Spencer Miles). Architecturally cleaner to pre-compute for every
+        // SP since the per-game cost is one F4 lookup and the column sits
+        // unused on non-opener games (where the standard model handles them).
+        away_opener_forecast_ip: forecastForPitcher(
+          writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
+          g.away_team,
+          'opener'
+        ),
+        home_opener_forecast_ip: forecastForPitcher(
+          writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
+          g.home_team,
+          'opener'
+        ),
         // Lineup job NEVER overwrites odds — only the odds job writes market lines
       market_away_ml: existingRow ? (existingRow.market_away_ml||null) : null, // ML only from Odds API
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
@@ -2165,6 +2172,30 @@ async function detectOpeners(dateStr) {
     console.log('[opener-detect] no games for ' + dateStr);
     return { date: dateStr, detected: 0, unknown_bulk: 0 };
   }
+  // Build the F4 index once for this date (used for opener+bulk role
+  // forecasts after detection settles which pitcher is which).
+  const settings = getSettings();
+  let spStartIndex = null;
+  try {
+    spStartIndex = buildSpStartIndex(db, settings);
+  } catch (e) {
+    console.warn('[opener-detect] F4 index build failed (forecasts skipped): ' + e.message);
+  }
+  const rosterLookup = db.prepare("SELECT mlb_id FROM team_rosters WHERE team=? AND player_name=?");
+  const forecastForName = (pitcherName, team, role) => {
+    if (!pitcherName || !team || !spStartIndex) return null;
+    const r = rosterLookup.get(team, pitcherName);
+    const mlbId = r ? r.mlb_id : null;
+    const out = forecastSpIP({
+      index: spStartIndex,
+      pitcherMlbId: mlbId,
+      gameDate: dateStr,
+      settings,
+      role: role || 'start',
+    });
+    if (out.source === 'fallback') return null;
+    return out.forecast;
+  };
   const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters) => {
     // side comes from a closed { 'away', 'home' } enum below — safe to
     // splice into the column name. NEVER widen this to user input.
@@ -2187,6 +2218,32 @@ async function detectOpeners(dateStr) {
       + "opener_detected_at = datetime('now') "
       + "WHERE game_date = ? AND game_id = ?";
     db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, gameType, date, gameId);
+
+    // After writing detection state, refresh the role-specific forecast
+    // columns. The lineup-job's earlier upsertGame gated bulk_forecast_ip
+    // on RotoWire-announced bulk only, which misses cases where opener
+    // detection infers a bulk without RotoWire confirmation (e.g.
+    // TOR-DET 5/16: bulk_guy_away='Eric Lauer' inferred but
+    // bulk_guy_away_announced=null). Re-compute both forecast columns
+    // here once bulk_guy is settled.
+    //
+    // Look up the row to get the SP name for the opener-role forecast
+    // (the named SP IS the opener on opener-mode games).
+    const row = q.getGameById ? q.getGameById.get(date, gameId) : null;
+    if (!row) return;
+    const team = side === 'away' ? row.away_team : row.home_team;
+    const sp   = side === 'away' ? row.away_sp   : row.home_sp;
+    const openerFc = isOpener ? forecastForName(sp, team, 'opener') : null;
+    const bulkFc   = (isOpener && bulkGuy) ? forecastForName(bulkGuy, team, 'bulk') : null;
+    try {
+      const fcSql = "UPDATE game_log SET "
+        + (side === 'away' ? "away_opener_forecast_ip = ?, away_bulk_forecast_ip = ? "
+                           : "home_opener_forecast_ip = ?, home_bulk_forecast_ip = ? ")
+        + "WHERE game_date = ? AND game_id = ?";
+      db.prepare(fcSql).run(openerFc, bulkFc, date, gameId);
+    } catch (e) {
+      console.warn('[opener-detect] forecast persist failed: ' + e.message);
+    }
   };
 
   let detectedCount = 0, unknownBulkCount = 0;
