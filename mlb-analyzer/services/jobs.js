@@ -131,6 +131,31 @@ function getWobaIndex() {
     if (!idx[r.data_key]) idx[r.data_key] = {};
     idx[r.data_key][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
   }
+  // Apply pitcher wOBA overrides (e.g. when FG has a stale or wrong
+  // projection that's persisted across refreshes). The override patches
+  // the PROJECTION key only (pit-proj-lhb / pit-proj-rhb) — actuals
+  // are intentionally untouched. Sample is set high so blendWoba treats
+  // the override as a confident projection rather than something to be
+  // averaged down.
+  try {
+    const overrides = q.listWobaOverrides ? q.listWobaOverrides.all() : [];
+    for (const o of overrides) {
+      const key = o.vs_hand === 'L' ? 'pit-proj-lhb' : 'pit-proj-rhb';
+      if (!idx[key]) idx[key] = {};
+      const nameKey = normName(o.player_name);
+      idx[key][nameKey] = { woba: o.woba, sample: 600 };
+      // Also write the team-keyed variant if the existing entry had one,
+      // so team-hinted fuzzy lookups still resolve. Look for any existing
+      // index entry whose base-name matches and copy the override there too.
+      for (const existing of Object.keys(idx[key])) {
+        if (existing.startsWith(nameKey + ' ')) {
+          idx[key][existing] = { woba: o.woba, sample: 600 };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[woba-override] apply failed (non-fatal): ' + e.message);
+  }
   return idx;
 }
 

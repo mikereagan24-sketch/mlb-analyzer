@@ -804,6 +804,46 @@ router.get('/pitcher-role-override', (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Pitcher wOBA override CRUD. Used to patch obviously-wrong FG
+// projections that haven't been corrected upstream. Body for POST:
+//   { player_name, vs_hand: 'L'|'R', woba: number, reason?: string }
+// Applies to projection lookups only (not actuals). Removed by:
+//   DELETE /pitcher-woba-override/:player_name/:vs_hand
+router.post('/pitcher-woba-override', (req, res) => {
+  try {
+    const { player_name, vs_hand, woba, reason } = req.body || {};
+    if (!player_name || typeof player_name !== 'string') {
+      return res.status(400).json({ error: 'player_name (string) required' });
+    }
+    if (vs_hand !== 'L' && vs_hand !== 'R') {
+      return res.status(400).json({ error: 'vs_hand must be "L" or "R"' });
+    }
+    const w = parseFloat(woba);
+    if (isNaN(w) || w < 0 || w > 0.8) {
+      return res.status(400).json({ error: 'woba must be a number between 0 and 0.8' });
+    }
+    q.setWobaOverride.run(player_name, vs_hand, w, reason || null);
+    res.json({ success: true, player_name, vs_hand, woba: w, reason: reason || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/pitcher-woba-override/:player_name/:vs_hand', (req, res) => {
+  try {
+    const player_name = decodeURIComponent(req.params.player_name);
+    const vs_hand = req.params.vs_hand;
+    if (vs_hand !== 'L' && vs_hand !== 'R') {
+      return res.status(400).json({ error: 'vs_hand must be "L" or "R"' });
+    }
+    const info = q.deleteWobaOverride.run(player_name, vs_hand);
+    res.json({ success: true, player_name, vs_hand, removed: info.changes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/pitcher-woba-override', (req, res) => {
+  try { res.json(q.listWobaOverrides.all()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Manual opener override for a specific game-side. Wins over the
 // auto-detection in detectOpeners. Body:
 //   { game_date, game_id, side, is_opener, bulk_guy?, planned_batters?, set_by?, reason? }
