@@ -283,6 +283,22 @@ db.exec(`
     reason TEXT
   );
 
+  -- Pitcher wOBA override — patches the wOBA index in getWobaIndex().
+  -- Used when FG has a clearly-wrong projection (e.g. a stale value FG
+  -- hasn't refreshed). Name-keyed since wOBA lookups are name-based;
+  -- separate override per (pitcher_name, vs_hand) so vs LHB and vs RHB
+  -- can be overridden independently. set_at + reason for traceability
+  -- — keep these obvious so we remember to remove the override when
+  -- FG corrects the upstream data.
+  CREATE TABLE IF NOT EXISTS pitcher_woba_override (
+    player_name TEXT NOT NULL,
+    vs_hand TEXT NOT NULL CHECK(vs_hand IN ('L','R')),
+    woba REAL NOT NULL,
+    set_at TEXT NOT NULL DEFAULT (datetime('now')),
+    reason TEXT,
+    PRIMARY KEY (player_name, vs_hand)
+  );
+
   -- Per-game opener override. Wins over the auto-detection in
   -- detectOpeners. side ∈ ('away','home'). is_opener and planned_batters
   -- are stored as integers; bulk_guy is the pitcher name to write into
@@ -976,6 +992,18 @@ q.setRoleOverride = db.prepare(
 q.deleteRoleOverride = db.prepare("DELETE FROM pitcher_role_override WHERE mlb_id=?");
 q.getRoleOverride    = db.prepare("SELECT * FROM pitcher_role_override WHERE mlb_id=?");
 q.listRoleOverrides  = db.prepare("SELECT * FROM pitcher_role_override ORDER BY set_at DESC");
+
+// Pitcher wOBA override CRUD. Used to patch obviously-wrong FG
+// projections (e.g. stale RoS data the projection refresh hasn't
+// fixed yet). Active overrides are applied inside getWobaIndex().
+q.setWobaOverride = db.prepare(
+  "INSERT INTO pitcher_woba_override (player_name, vs_hand, woba, set_at, reason) " +
+  "VALUES (?, ?, ?, datetime('now'), ?) " +
+  "ON CONFLICT(player_name, vs_hand) DO UPDATE SET " +
+  "  woba=excluded.woba, set_at=excluded.set_at, reason=excluded.reason"
+);
+q.deleteWobaOverride = db.prepare("DELETE FROM pitcher_woba_override WHERE player_name=? AND vs_hand=?");
+q.listWobaOverrides  = db.prepare("SELECT * FROM pitcher_woba_override ORDER BY set_at DESC");
 
 q.setOpenerOverride = db.prepare(
   "INSERT INTO opener_override (game_date, game_id, side, is_opener, bulk_guy, planned_batters, set_at, set_by, reason) " +
