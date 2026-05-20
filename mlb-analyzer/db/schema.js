@@ -27,6 +27,25 @@ db.exec(`
     UNIQUE(data_key, player_name)
   );
   CREATE INDEX IF NOT EXISTS idx_woba_key_name ON woba_data(data_key, player_name);
+
+  -- Daily snapshot of woba_data. woba_data itself is wiped+reloaded on
+  -- every FanGraphs refresh, destroying the prior state — which means a
+  -- backtest can only ever see TODAY's wOBA values, not the values that
+  -- existed when a past game was scored. This table archives each key's
+  -- rows tagged with the calendar date the ingest ran, so date-accurate
+  -- backtests can ask "what did the index look like on day X". Captured
+  -- by ingestWobaCSV after each key's upsert. PK includes snapshot_date
+  -- so a same-day re-refresh overwrites (last write per day wins, which
+  -- matches what the model used by end of that day).
+  CREATE TABLE IF NOT EXISTS woba_data_snapshot (
+    snapshot_date TEXT NOT NULL,
+    data_key TEXT NOT NULL,
+    player_name TEXT NOT NULL,
+    woba REAL NOT NULL,
+    sample_size REAL DEFAULT 0,
+    PRIMARY KEY (snapshot_date, data_key, player_name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_woba_snap_date_key ON woba_data_snapshot(snapshot_date, data_key);
   CREATE TABLE IF NOT EXISTS upload_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data_key TEXT NOT NULL,
@@ -1137,6 +1156,35 @@ q.upsertWobaBatch = (key, rows) => {
   const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0); });
   tx(key, rows);
 };
+
+// Daily wOBA snapshot helpers (date-accurate backtest support).
+q._snapClearKeyDate = db.prepare("DELETE FROM woba_data_snapshot WHERE snapshot_date=? AND data_key=?");
+q._snapInsert = db.prepare(
+  "INSERT OR REPLACE INTO woba_data_snapshot (snapshot_date, data_key, player_name, woba, sample_size) VALUES (?,?,?,?,?)"
+);
+// Snapshot one key's rows for a given date. Clears any existing rows for
+// (date,key) first so a same-day re-refresh replaces rather than appends.
+// rows are the same expandedRows passed to upsertWobaBatch (name/woba/sample).
+q.snapshotWobaKey = (snapshotDate, key, rows) => {
+  const tx = db.transaction((d, k, rs) => {
+    q._snapClearKeyDate.run(d, k);
+    for (const r of rs) q._snapInsert.run(d, k, r.name, r.woba, r.sample || 0);
+  });
+  tx(snapshotDate, key, rows);
+};
+// List distinct snapshot dates (descending). For diagnostics / coverage checks.
+q.getSnapshotDates = db.prepare(
+  "SELECT snapshot_date, COUNT(DISTINCT data_key) AS keys, COUNT(*) AS rows " +
+  "FROM woba_data_snapshot GROUP BY snapshot_date ORDER BY snapshot_date DESC"
+);
+// Resolve the latest snapshot_date that is on or before the requested date.
+q.getSnapshotDateAsOf = db.prepare(
+  "SELECT MAX(snapshot_date) AS d FROM woba_data_snapshot WHERE snapshot_date <= ?"
+);
+// Load all rows for a specific snapshot_date.
+q.loadSnapshotRows = db.prepare(
+  "SELECT data_key, player_name, woba, sample_size FROM woba_data_snapshot WHERE snapshot_date=?"
+);
 
 
 // Initialize prepared statements that need new columns

@@ -167,6 +167,16 @@ function ingestWobaCSV(key, csvText, filename) {
     }
   }
   q.upsertWobaBatch(key, expandedRows);
+  // Snapshot this key's rows for date-accurate backtests. The calendar
+  // date is the server's local date at ingest time = "the data as it
+  // existed on day X". Non-fatal: a snapshot failure must never block
+  // the live wOBA load.
+  try {
+    const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    q.snapshotWobaKey(snapDate, key, expandedRows);
+  } catch (e) {
+    console.warn('[woba-snapshot] capture failed for ' + key + ' (non-fatal): ' + e.message);
+  }
   q.logUpload.run(key, filename, rows.length);
   return rows.length;
 }
