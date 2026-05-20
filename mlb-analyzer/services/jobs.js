@@ -2335,7 +2335,25 @@ async function detectOpeners(dateStr) {
       ).get(team, sp);
       let isOpener = false, bulkGuy = null, plannedBatters = null;
 
-      if (spRow && spRow.mlb_id) {
+      // Highest-confidence signal: RotoWire has PRIM-tagged a bulk
+      // pitcher behind a named SP. RotoWire's announcement is curated
+      // and trumps FG role heuristics — a "regular SP" being used as
+      // an opener won't have RP classification in FG, but RotoWire's
+      // announcement directly states this is opener mode. Without
+      // this branch, BOS-KC 5/19 (Bailey Falter SP, Luinder Avila
+      // announced bulk) was classified as standard because Falter's
+      // FG role is SP, ignoring the announced bulk entirely.
+      const announcedBulk = side === 'away'
+        ? g.bulk_guy_away_announced
+        : g.bulk_guy_home_announced;
+      if (announcedBulk) {
+        isOpener = true;
+        bulkGuy = announcedBulk;
+        plannedBatters = 4;
+        console.log('[opener-detect] ' + g.game_id + '/' + side
+          + ': RotoWire announced bulk ' + announcedBulk
+          + ' behind ' + sp + ' → opener mode (FG role disregarded)');
+      } else if (spRow && spRow.mlb_id) {
         const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
         const fgSaysReliever = fg && (fg.role === 'RP' || fg.role === 'CL');
         if (fgSaysReliever) {
@@ -2351,21 +2369,10 @@ async function detectOpeners(dateStr) {
           if (avgPitches == null || avgPitches < 30) {
             isOpener = true;
             plannedBatters = 4; // spec default until per-pitcher tuning lands
-            // Prefer RotoWire's PRIM-tagged announced bulk pitcher when
-            // available — high-confidence direct signal vs. identifyBulkGuy's
-            // historical-pattern scoring, which fails when a regular
-            // starter is used as bulk (the pitcher's profile doesn't look
-            // like a long-relief specialist so they score below threshold).
-            const announcedBulk = side === 'away'
-              ? g.bulk_guy_away_announced
-              : g.bulk_guy_home_announced;
-            if (announcedBulk) {
-              bulkGuy = announcedBulk;
-              console.log('[opener-detect] ' + g.game_id + '/' + side
-                + ': using announced bulk ' + announcedBulk + ' (RotoWire PRIM)');
-            } else {
-              bulkGuy = identifyBulkGuy(team, dateStr, sp);
-            }
+            // No announced bulk reached this branch (the early
+            // if-announcedBulk branch above handles those). Fall back
+            // to identifyBulkGuy's historical-pattern scoring.
+            bulkGuy = identifyBulkGuy(team, dateStr, sp);
           }
         }
       }
