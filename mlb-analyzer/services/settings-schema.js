@@ -73,9 +73,9 @@ const SETTINGS_SCHEMA = {
     help: 'Batting component weight.' },
 
   // --- Projection vs actual blend ------------------------------------------
-  w_proj: { type: 'number', min: 0.5, max: 1.0, default: 0.70,
+  w_proj: { type: 'number', min: 0.0, max: 1.0, default: 0.70,
     help: 'Steamer projection weight in batter wOBA blend.' },
-  w_act: { type: 'number', min: 0.0, max: 0.5, default: 0.30,
+  w_act: { type: 'number', min: 0.0, max: 1.0, default: 0.30,
     invariant: (v, all) => Math.abs(v + Number(all.w_proj) - 1.0) < 0.02,
     invariantMsg: 'w_proj + w_act must equal 1.0',
     help: 'FanGraphs actuals weight.' },
