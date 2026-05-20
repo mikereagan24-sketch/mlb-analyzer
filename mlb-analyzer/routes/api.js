@@ -1986,6 +1986,26 @@ router.get('/debug/bullpen', (req, res) => {
     const norm = n=>(n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
     const projRows = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?").all('pit-proj-'+hand,'% '+team);
     const actRows  = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=?").all('pit-act-'+hand);
+    // Apply pitcher_woba_override entries to projRows. The raw SQL above
+    // bypasses getWobaIndex(), so manually overlay overrides here so the
+    // bullpen report reflects the same projections the model uses.
+    try {
+      const idxForOverride = getWobaIndex();
+      const overrideKey = 'pit-proj-' + hand;
+      const overrideSection = idxForOverride[overrideKey] || {};
+      for (const r of projRows) {
+        // Normalize like the index key — getWobaIndex stores under normName
+        const nameNorm = norm(r.player_name);
+        const entry = overrideSection[nameNorm];
+        if (entry && entry.sample === 600) {
+          // sample=600 is the override marker (see services/jobs.js getWobaIndex)
+          r.woba = entry.woba;
+          r.sample_size = entry.sample;
+        }
+      }
+    } catch (e) {
+      console.warn('[bullpen-report] override overlay failed (non-fatal): ' + e.message);
+    }
     const actIdx={}; for(const r of actRows) actIdx[norm(r.player_name)]=r;
     const sets=getSettings(); const WP=sets.W_PROJ||0.65, WA=sets.W_ACT||0.35;
     const starterLast=sp?norm(sp).split(' ').pop():'';
