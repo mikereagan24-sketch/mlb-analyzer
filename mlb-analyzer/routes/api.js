@@ -2297,11 +2297,14 @@ router.get('/debug/bullpen-report', (req, res) => {
     const MIN_BF = settings.MIN_BF != null ? Number(settings.MIN_BF) : 100;
 
     const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
+    // Use getWobaIndex() rather than re-building from raw SQL — this
+    // ensures pitcher_woba_override entries are applied. Direct SQL
+    // queries against woba_data miss the override layer (same bug
+    // class previously fixed in /debug/bullpen and /debug/woba-lookup).
+    const fullIdx = getWobaIndex();
     const idx = {};
     for (const k of KEYS) {
-      idx[k] = {};
-      const rows = db.prepare('SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=?').all(k);
-      for (const r of rows) idx[k][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
+      idx[k] = fullIdx[k] || {};
     }
 
     const lookup = (key, name, teamAbbr) => {
