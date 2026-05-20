@@ -693,6 +693,16 @@ try { db.exec("UPDATE bet_signals SET cohort='v3-pretuning' WHERE cohort='v3' AN
 // boots update 0 rows because new signals are tagged v4 directly.
 try { db.exec("UPDATE bet_signals SET cohort='v4' WHERE cohort='v3' AND game_date >= '2026-05-12'"); } catch(e) {}
 
+// v5 cohort backfill: wOBA blend retuned from 0.70/0.30 to 0.45/0.55 on
+// 2026-05-20. Signals on or after that date belong to v5. NOTE: the
+// blend only actually changed mid-day 2026-05-20, so any 5/20 signals
+// fired that morning under the old blend must be RE-FIRED at the new
+// blend (via lineup-job rescore) for this tag to be accurate — the
+// re-fire is the source of truth, this UPDATE just keeps the tag
+// consistent. Idempotent: subsequent boots update 0 rows because new
+// signals are tagged v5 directly by jobs.js.
+try { db.exec("UPDATE bet_signals SET cohort='v5' WHERE cohort='v4' AND game_date >= '2026-05-20'"); } catch(e) {}
+
 // Runline companion capture (Step 2 of 3 in runline workstream).
 // ML signals snapshot the spread (-1.5 / +1.5) line + price + source
 // at fire time, then get graded against the eventual game result so
