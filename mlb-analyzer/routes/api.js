@@ -2232,16 +2232,26 @@ router.get('/debug/odds-raw', async (req, res) => {
 });
 
 
-// Debug: look up a player in woba_data
+// Debug: look up a player in the live wOBA index (matches what the
+// model sees — including any active pitcher_woba_override entries).
+// Previously queried woba_data directly; was misleading because the
+// override layer only applies inside getWobaIndex().
 router.get('/debug/woba-lookup', (req, res) => {
   const { name, team, key } = req.query;
   const keys = key ? [key] : ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
+  const idx = getWobaIndex();
+  const needle = (name || '').toLowerCase();
   const results = {};
   keys.forEach(k => {
-    const rows = db.prepare(
-      "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ? LIMIT 5"
-    ).all(k, '%'+(name||'')+'%');
-    results[k] = rows;
+    const section = idx[k] || {};
+    const matches = [];
+    for (const [indexKey, entry] of Object.entries(section)) {
+      if (!needle || indexKey.includes(needle)) {
+        matches.push({ player_name: indexKey, woba: entry.woba, sample_size: entry.sample });
+        if (matches.length >= 5) break;
+      }
+    }
+    results[k] = matches;
   });
   res.json(results);
 });
