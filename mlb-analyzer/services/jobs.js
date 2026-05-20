@@ -2388,7 +2388,36 @@ async function detectOpeners(dateStr) {
   }
   console.log('[opener-detect] ' + dateStr + ': ' + detectedCount
     + ' opener-led side(s), ' + unknownBulkCount + ' with unknown bulk-guy');
-  return { date: dateStr, detected: detectedCount, unknown_bulk: unknownBulkCount };
+
+  // Re-score any opener-flagged games. Signal-processing inside the
+  // lineup-job's per-game loop ran BEFORE detectOpeners, so games that
+  // flip to opener-mode here never had opener-aware weights applied to
+  // their model output. Re-running processGameSignals now picks up the
+  // updated is_opener_game_* flags and forecast columns, persists
+  // opener/bulk/bullpen weight breakdowns, and re-fires signals against
+  // the corrected model_line / model_total.
+  let rescored = 0;
+  try {
+    const openerGames = db.prepare(
+      "SELECT * FROM game_log WHERE game_date=? AND (is_opener_game_away=1 OR is_opener_game_home=1)"
+    ).all(dateStr);
+    if (openerGames.length) {
+      const wobaIdx = getWobaIndex();
+      for (const row of openerGames) {
+        try {
+          processGameSignals(row, wobaIdx, settings);
+          rescored++;
+        } catch (e) {
+          console.warn('[opener-detect] re-score failed for ' + row.game_id + ': ' + e.message);
+        }
+      }
+      console.log('[opener-detect] re-scored ' + rescored + '/' + openerGames.length + ' opener game(s)');
+    }
+  } catch (e) {
+    console.warn('[opener-detect] re-score pass failed (non-fatal): ' + e.message);
+  }
+
+  return { date: dateStr, detected: detectedCount, unknown_bulk: unknownBulkCount, rescored };
 }
 
 async function runRosterJob() {
