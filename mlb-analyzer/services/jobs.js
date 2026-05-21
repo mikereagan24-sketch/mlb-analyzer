@@ -2475,17 +2475,17 @@ async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
     const rosters = await fetchActiveRosters();
-    let totalPitchers = 0;
+    let totalPlayers = 0;
     const upsert = q.upsertRoster;
-    for (const [team, pitchers] of Object.entries(rosters)) {
-      if (!pitchers.length) continue;
+    for (const [team, players] of Object.entries(rosters)) {
+      if (!players.length) continue;
       q.clearRoster.run(team);
-      for (const p of pitchers) {
-        upsert.run(team, p.name, p.mlb_id, p.role, p.hand);
+      for (const p of players) {
+        upsert.run(team, p.name, p.mlb_id, p.role, p.hand, p.position || null);
       }
-      totalPitchers += pitchers.length;
+      totalPlayers += players.length;
     }
-    console.log(`[roster] statsapi pull done — ${totalPitchers} pitchers across ${Object.keys(rosters).length} teams`);
+    console.log(`[roster] statsapi pull done — ${totalPlayers} players across ${Object.keys(rosters).length} teams`);
 
     // Phase 2: FanGraphs RosterResource overlay. Fetches editorially-curated
     // SP/RP tags and overrides the GS/G heuristic where we have a match.
@@ -2517,7 +2517,7 @@ async function runRosterJob() {
     return {
       success: true,
       teams: Object.keys(rosters).length,
-      pitchers: totalPitchers,
+      pitchers: totalPlayers,
       fg: fgResult,
       overrides_applied: overridesApplied,
     };
@@ -2566,7 +2566,7 @@ async function runFangraphsRolesJob() {
     }
 
     const ourPitchers = db.prepare(
-      "SELECT player_name, mlb_id FROM team_rosters WHERE team=?"
+      "SELECT player_name, mlb_id FROM team_rosters WHERE team=? AND role IN ('SP','RP')"
     ).all(team);
     totalKnown += ourPitchers.length;
 

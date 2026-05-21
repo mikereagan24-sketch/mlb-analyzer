@@ -245,6 +245,7 @@ db.exec(`
     mlb_id INTEGER,
     role TEXT NOT NULL,
     hand TEXT,
+    position TEXT,
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(team, player_name)
   );
@@ -390,6 +391,10 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_over_price INTEGER"); } ca
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_under_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_total_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN total_source TEXT"); } catch(e) {}
+// team_rosters position column (Build A: roster expansion to position players).
+// Non-authoritative label — statsapi primary position; game logic reads the
+// lineup's pos field. NULL on existing pitcher rows until next roster refresh.
+try { db.exec("ALTER TABLE team_rosters ADD COLUMN position TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
@@ -1006,10 +1011,10 @@ const q = {
   updateWindData: null, // initialized lazily after migrations
   getAllSettings: db.prepare(`SELECT key, value FROM app_settings`),
 };
-q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,role,hand,updated_at)
-  VALUES (?,?,?,?,?,datetime('now'))
+q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,role,hand,position,updated_at)
+  VALUES (?,?,?,?,?,?,datetime('now'))
   ON CONFLICT(team,player_name) DO UPDATE SET
-    mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, updated_at=excluded.updated_at`);
+    mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, position=excluded.position, updated_at=excluded.updated_at`);
 q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
 q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
 

@@ -684,17 +684,31 @@ async function fetchActiveRosters() {
       // Get active 26-man roster with season stats hydrated.
       const url = `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active&season=2026&hydrate=person(stats(type=season,sportId=1))`;
       const data = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } }).then(r => r.json());
-      const pitchersAll = (data.roster || []).filter(p => p.position?.type === 'Pitcher');
-      // Diagnostic: surface any pitcher whose entry status isn't Active. With
-      // rosterType=active these should be zero; if any appear, the filter
-      // below catches them and the warning flags a contract drift.
-      const nonActive = pitchersAll.filter(p => p.status && p.status.code && p.status.code !== ACTIVE_STATUS_CODE);
+      const allRoster = data.roster || [];
+      // Active-status filter applied to the WHOLE roster (pitchers + position
+      // players), not just pitchers. rosterType=active should already exclude
+      // IL/restricted; this is defense in depth against a statsapi contract drift.
+      const nonActive = allRoster.filter(p => p.status && p.status.code && p.status.code !== ACTIVE_STATUS_CODE);
       for (const p of nonActive) {
         console.warn(`[roster] ${team}: filtered non-active ${p.person?.fullName} (status=${p.status?.code}/${p.status?.description})`);
       }
-      const pitchers = pitchersAll.filter(p => !p.status || !p.status.code || p.status.code === ACTIVE_STATUS_CODE);
+      const activeRoster = allRoster.filter(p => !p.status || !p.status.code || p.status.code === ACTIVE_STATUS_CODE);
 
-      results[team] = pitchers.map(p => {
+      results[team] = activeRoster.map(p => {
+        const isPitcher = p.position?.type === 'Pitcher';
+        const posAbbr = p.position?.abbreviation || null; // 'P','C','1B',... primary, non-authoritative label
+        if (!isPitcher) {
+          // Position player: role='POS' so existing role IN ('SP','RP')
+          // filters exclude them. position stored as a label only — game
+          // logic always reads the lineup's pos field, never this.
+          return {
+            name: p.person?.fullName || '',
+            mlb_id: p.person?.id || null,
+            role: 'POS',
+            hand: p.person?.batSide?.code || 'R',
+            position: posAbbr
+          };
+        }
         const stats = p.person?.stats?.[0]?.splits?.[0]?.stat || {};
         const gs = parseInt(stats.gamesStarted) || 0;
         const g  = parseInt(stats.gamesPitched) || 0;
@@ -704,10 +718,14 @@ async function fetchActiveRosters() {
           name: p.person?.fullName || '',
           mlb_id: p.person?.id || null,
           role,
-          hand: p.person?.pitchHand?.code || 'R'
+          hand: p.person?.pitchHand?.code || 'R',
+          position: posAbbr || 'P'
         };
       });
-      console.log(`[roster] ${team}: ${results[team].length} pitchers (${results[team].filter(p=>p.role==='SP').length} SP, ${results[team].filter(p=>p.role==='RP').length} RP)`);
+      const nSP = results[team].filter(p=>p.role==='SP').length;
+      const nRP = results[team].filter(p=>p.role==='RP').length;
+      const nPOS = results[team].filter(p=>p.role==='POS').length;
+      console.log(`[roster] ${team}: ${results[team].length} players (${nSP} SP, ${nRP} RP, ${nPOS} POS)`);
     } catch (e) {
       console.error(`[roster] ${team} error: ${e.message}`);
       results[team] = [];
