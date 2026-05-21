@@ -248,6 +248,21 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(team, player_name)
   );
+  -- Catcher framing run values (Statcast catcher-framing leaderboard).
+  -- Keyed by mlb_id, which Savant provides directly and which a lineup
+  -- catcher resolves to via team_rosters. rv_tot is cumulative season
+  -- framing runs (already ABS-haircut-adjusted in 2026 data — do NOT
+  -- re-scale). pitches drives the per-game conversion (≈145 pitches/game).
+  -- Empty until the Savant ingest is built; model wiring treats a missing
+  -- row as zero framing adjustment, and the whole feature is gated behind
+  -- the catcher_framing_enabled setting (default off).
+  CREATE TABLE IF NOT EXISTS catcher_framing (
+    mlb_id INTEGER PRIMARY KEY,
+    name TEXT,
+    rv_tot REAL NOT NULL DEFAULT 0,
+    pitches INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -997,6 +1012,24 @@ q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,r
     mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, updated_at=excluded.updated_at`);
 q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
 q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
+
+// Catcher framing: upsert (for the Savant ingest, built later), point
+// lookup by mlb_id, and a name→mlb_id bridge through team_rosters so a
+// lineup catcher (RotoWire "First Last" name, no id) resolves to the
+// Savant-keyed framing row. getFramingByCatcherName joins on team+name.
+q.upsertCatcherFraming = db.prepare(
+  "INSERT INTO catcher_framing (mlb_id,name,rv_tot,pitches,updated_at) " +
+  "VALUES (?,?,?,?,datetime('now')) " +
+  "ON CONFLICT(mlb_id) DO UPDATE SET " +
+  "  name=excluded.name, rv_tot=excluded.rv_tot, pitches=excluded.pitches, updated_at=excluded.updated_at"
+);
+q.getCatcherFramingById = db.prepare("SELECT mlb_id,name,rv_tot,pitches FROM catcher_framing WHERE mlb_id=?");
+q.getFramingByCatcherName = db.prepare(
+  "SELECT cf.mlb_id, cf.rv_tot, cf.pitches FROM team_rosters tr " +
+  "JOIN catcher_framing cf ON cf.mlb_id = tr.mlb_id " +
+  "WHERE tr.team=? AND tr.player_name=?"
+);
+q.listCatcherFraming = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing ORDER BY rv_tot DESC");
 
 // pitcher_fg_role + pitcher_role_override prepared statements.
 q.upsertPitcherFgRole = db.prepare(

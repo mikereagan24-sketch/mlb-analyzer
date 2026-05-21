@@ -323,6 +323,34 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       homeBpWoba = homeBp?.woba || LEAGUE_BP;
     }
   } catch(e) { /* fallback to league avg */ }
+  // Catcher framing (per-game run value). Extract each side's catcher
+  // from the lineup (pos==='C'), bridge name→mlb_id→rv_tot through
+  // team_rosters + catcher_framing, convert cumulative season runs to a
+  // per-game rate (≈145 pitches/game). Null when: no catcher in lineup,
+  // no roster/framing row, or the table is empty (ingest not built yet).
+  // runModel applies these only when CATCHER_FRAMING_ENABLED and a value
+  // is present — null is a clean no-op.
+  let awayCatcherFramingRvPerGame = null, homeCatcherFramingRvPerGame = null;
+  try {
+    if (q.getFramingByCatcherName) {
+      const PITCHES_PER_GAME = 145;
+      const findCatcher = (lu) => {
+        const arr = tryParse(lu) || [];
+        const c = arr.find(p => (p.pos || '').toUpperCase() === 'C');
+        return c ? c.name : null;
+      };
+      const perGame = (team, catcherName) => {
+        if (!catcherName) return null;
+        const row = q.getFramingByCatcherName.get(team, catcherName);
+        if (!row || !row.pitches || row.pitches <= 0) return null;
+        const gamesCaught = row.pitches / PITCHES_PER_GAME;
+        if (gamesCaught <= 0) return null;
+        return row.rv_tot / gamesCaught;
+      };
+      awayCatcherFramingRvPerGame = perGame(awayAbbr, findCatcher(gameRow.away_lineup_json));
+      homeCatcherFramingRvPerGame = perGame(homeAbbr, findCatcher(gameRow.home_lineup_json));
+    }
+  } catch (e) { /* missing table / ingest not built → null, no-op */ }
   // Projected IP/start for each SP, drives the dynamic SP/RP split in runModel.
   // Null when no projection row exists — runModel falls back to flat SP weight.
   // NOTE: existing bullpen code at line ~86 reads gameRow.away_pitcher which
@@ -343,6 +371,11 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
     // Starter projected IP (null when no projection uploaded)
     awaySpProjIP: awaySpProjIP, homeSpProjIP: homeSpProjIP,
+    // Catcher framing per-game run value (null when ingest not built,
+    // no catcher in lineup, or no framing row). Applied in runModel only
+    // when CATCHER_FRAMING_ENABLED.
+    awayCatcherFramingRvPerGame: awayCatcherFramingRvPerGame,
+    homeCatcherFramingRvPerGame: homeCatcherFramingRvPerGame,
   };
   const stdModel = runModel(game, wobaIdx, settings, 'standard');
   // Phase 2 shadow: compute the opener-aware model whenever a side is

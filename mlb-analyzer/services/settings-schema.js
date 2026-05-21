@@ -87,6 +87,12 @@ const SETTINGS_SCHEMA = {
     help: 'League-avg bullpen wOBA reference.' },
   hfa_boost: { type: 'number', min: 0.0, max: 0.10, default: 0.025,
     help: 'Home-field advantage boost on home WP.' },
+
+  // --- Catcher framing (run-environment adjustment) ------------------------
+  catcher_framing_enabled: { type: 'boolean', default: false,
+    help: 'Apply projected catcher framing runs to the opposing offense run estimate. Default OFF — requires the catcher_framing table to be populated by the Savant ingest. No-op when off or when no framing row exists for the catcher.' },
+  catcher_framing_mute: { type: 'number', min: 0.0, max: 1.0, default: 0.5,
+    help: 'Fraction of measured framing run value applied. <1 because pitcher wOBA-against already partially reflects framing from the usual batterymate; this captures the differential without double-counting. 0.5 = half credit.' },
   tot_slope: { type: 'number', min: 0.05, max: 0.15, default: 0.08,
     help: 'Total-runs slope in over/under conversion.' },
 
