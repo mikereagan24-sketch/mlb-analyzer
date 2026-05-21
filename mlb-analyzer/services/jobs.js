@@ -336,17 +336,32 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       const PITCHES_PER_GAME = 145;
       const findCatcher = (lu) => {
         const arr = tryParse(lu) || [];
+        if (!arr.length) return null;                 // no lineup posted → silent
         const c = arr.find(p => (p.pos || '').toUpperCase() === 'C');
-        return c ? c.name : null;
+        return c ? c.name : '';                        // '' = lineup present but no C
       };
+      const framingEnabled = !!(settings && settings.CATCHER_FRAMING_ENABLED);
       const perGame = (team, catcherName) => {
-        if (!catcherName) return null;
+        if (catcherName === null) return null;         // no lineup yet — silent
+        if (catcherName === '') {
+          if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
+            + ': lineup has no catcher (pos=C) — no framing applied');
+          return null;
+        }
         // Abbreviated lineup name ("A. Martinez") → mlb_id via roster
         // (accent-folded last+initial) → framing row.
         const mlbId = resolveCatcherMlbId(team, catcherName);
-        if (!mlbId) return null;
+        if (!mlbId) {
+          if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
+            + ': catcher "' + catcherName + '" did not resolve to a roster mlb_id — no framing applied (check roster / name format)');
+          return null;
+        }
         const row = q.getCatcherFramingById.get(mlbId);
-        if (!row || !row.pitches || row.pitches <= 0) return null;
+        if (!row || !row.pitches || row.pitches <= 0) {
+          if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
+            + ': catcher "' + catcherName + '" (id ' + mlbId + ') has no framing row — likely sub-qualifier backup, no framing applied');
+          return null;
+        }
         const gamesCaught = row.pitches / PITCHES_PER_GAME;
         if (gamesCaught <= 0) return null;
         return row.rv_tot / gamesCaught;
