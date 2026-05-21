@@ -2,7 +2,7 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchSchedule } = require('./scraper');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -332,7 +332,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   // is present — null is a clean no-op.
   let awayCatcherFramingRvPerGame = null, homeCatcherFramingRvPerGame = null;
   try {
-    if (q.getFramingByCatcherName) {
+    if (q.getCatcherFramingById && q.getPositionPlayers) {
       const PITCHES_PER_GAME = 145;
       const findCatcher = (lu) => {
         const arr = tryParse(lu) || [];
@@ -341,7 +341,11 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       };
       const perGame = (team, catcherName) => {
         if (!catcherName) return null;
-        const row = q.getFramingByCatcherName.get(team, catcherName);
+        // Abbreviated lineup name ("A. Martinez") → mlb_id via roster
+        // (accent-folded last+initial) → framing row.
+        const mlbId = resolveCatcherMlbId(team, catcherName);
+        if (!mlbId) return null;
+        const row = q.getCatcherFramingById.get(mlbId);
         if (!row || !row.pitches || row.pitches <= 0) return null;
         const gamesCaught = row.pitches / PITCHES_PER_GAME;
         if (gamesCaught <= 0) return null;
@@ -2471,6 +2475,57 @@ async function detectOpeners(dateStr) {
   return { date: dateStr, detected: detectedCount, unknown_bulk: unknownBulkCount, rescored };
 }
 
+// Resolve an abbreviated lineup catcher name (e.g. "A. Martinez") to an
+// mlb_id using the team's position players in team_rosters. Matches on
+// accent-folded last name + first initial. Returns mlb_id or null. Null
+// on ambiguity (two POS players, same last name + initial) — safer to
+// skip than guess wrong.
+function resolveCatcherMlbId(team, lineupName) {
+  if (!team || !lineupName) return null;
+  const norm = normName(lineupName);              // "a martinez"
+  const parts = norm.split(' ');
+  if (parts.length < 2) return null;
+  const last = parts[parts.length - 1];
+  const firstInit = parts[0][0];
+  let candidates = [];
+  try {
+    const players = q.getPositionPlayers.all(team);
+    for (const p of players) {
+      const pn = normName(p.player_name);          // "angel martinez"
+      const pp = pn.split(' ');
+      if (pp.length < 2) continue;
+      const pLast = pp[pp.length - 1];
+      const pInit = pp[0][0];
+      if (pLast === last && pInit === firstInit) candidates.push(p);
+    }
+  } catch (e) { return null; }
+  if (candidates.length === 1) return candidates[0].mlb_id;
+  return null; // 0 matches or ambiguous → no framing rather than wrong framing
+}
+
+// Fetch the Savant catcher-framing leaderboard and upsert into
+// catcher_framing (keyed by mlb_id). Non-fatal per-row; reports counts.
+async function runCatcherFramingJob(year) {
+  console.log('[framing] fetching Savant catcher-framing leaderboard...');
+  try {
+    const rows = await fetchCatcherFraming(year);
+    let applied = 0;
+    const tx = db.transaction((rs) => {
+      for (const r of rs) {
+        if (!r.mlb_id || !r.pitches || r.pitches <= 0) continue;
+        q.upsertCatcherFraming.run(r.mlb_id, r.name || null, r.rv_tot, r.pitches);
+        applied++;
+      }
+    });
+    tx(rows);
+    console.log('[framing] upserted ' + applied + '/' + rows.length + ' catchers');
+    return { success: true, fetched: rows.length, applied };
+  } catch (e) {
+    console.error('[framing] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -2635,4 +2690,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };

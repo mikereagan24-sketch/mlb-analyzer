@@ -734,6 +734,49 @@ async function fetchActiveRosters() {
   return results;
 }
 
+// Fetch the Statcast catcher-framing leaderboard CSV from Baseball Savant.
+// Savant returns the CSV only with a browser User-Agent (default fetch UA
+// gets an empty body — confirmed). Columns we use: id (mlb_id), name
+// ("Last, First"), pitches (called pitches), rv_tot (cumulative season
+// framing runs, already ABS-haircut-adjusted in 2026 — do NOT re-scale).
+// Returns [{mlb_id, name, rv_tot, pitches}]. The current year is derived
+// from the server date so it rolls over automatically each season.
+async function fetchCatcherFraming(year) {
+  const yr = year || new Date().getFullYear();
+  const url = `https://baseballsavant.mlb.com/leaderboard/catcher-framing?year=${yr}&csv=true`;
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/csv,*/*'
+    }
+  });
+  if (!resp.ok) throw new Error('savant framing fetch ' + resp.status);
+  const text = await resp.text();
+  // Guard the "got HTML instead of CSV" failure mode.
+  if (!text || text.trimStart().startsWith('<')) {
+    throw new Error('savant framing returned non-CSV (HTML?) — len=' + (text ? text.length : 0));
+  }
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  // Parse header to locate columns by name (don't assume positions).
+  const header = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim().toLowerCase());
+  const ci = (n) => header.indexOf(n);
+  const iId = ci('id'), iName = ci('name'), iPit = ci('pitches'), iRv = ci('rv_tot');
+  if (iId < 0 || iRv < 0) throw new Error('savant framing CSV missing expected columns: ' + header.join(','));
+  const out = [];
+  for (let r = 1; r < lines.length; r++) {
+    // Names contain a comma ("Last, First") and are quoted — split on commas
+    // outside quotes.
+    const cells = lines[r].match(/("([^"]*)")|([^,]+)|(?<=,)(?=,)/g) || [];
+    const clean = cells.map(c => c.replace(/^"|"$/g, '').trim());
+    const mlb_id = parseInt(clean[iId], 10);
+    const rv_tot = parseFloat(clean[iRv]);
+    const pitches = iPit >= 0 ? parseInt(clean[iPit], 10) : 0;
+    if (!mlb_id || isNaN(rv_tot)) continue;
+    out.push({ mlb_id, name: iName >= 0 ? clean[iName] : '', rv_tot, pitches: pitches || 0 });
+  }
+  return out;
+}
 // Statsapi schedule bootstrap. RotoWire only publishes today + tomorrow, and
 // only after their page rolls over (often late in the day). Statsapi has the
 // canonical schedule available a week+ ahead, so we use it to pre-create
@@ -1004,4 +1047,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
+module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
