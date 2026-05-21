@@ -988,8 +988,8 @@ async function runLineupJob(dateStr) {
 
     for (const g of games) {
       const gameId = g.game_id || makeGameId(g.away_team, g.home_team);
-      const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
-      const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand }));
+      const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
+      const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
       const existingRow = q.getGameById.get(dateStr, gameId);
         // Lock odds 10min before game start — only for TODAY's games, never future dates
         const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});
