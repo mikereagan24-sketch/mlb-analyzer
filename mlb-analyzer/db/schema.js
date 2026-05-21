@@ -1035,6 +1035,10 @@ q.getFramingByCatcherName = db.prepare(
   "WHERE tr.team=? AND tr.player_name=?"
 );
 q.listCatcherFraming = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing ORDER BY rv_tot DESC");
+// Position players for a team (for the abbreviated-lineup-name → mlb_id
+// resolver). Returns full names + ids; JS does accent-folded initial+last
+// matching since SQLite LIKE won't fold accents reliably.
+q.getPositionPlayers = db.prepare("SELECT player_name, mlb_id, position FROM team_rosters WHERE team=? AND role='POS'");
 
 // pitcher_fg_role + pitcher_role_override prepared statements.
 q.upsertPitcherFgRole = db.prepare(

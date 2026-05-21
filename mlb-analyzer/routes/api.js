@@ -48,7 +48,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -757,6 +757,21 @@ router.post('/jobs/rosters', async (req, res) => {
     const result = await runRosterJob();
     res.json(result);
   } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// Catcher framing ingest: pull Savant leaderboard → catcher_framing table.
+router.post('/jobs/catcher-framing', async (req, res) => {
+  console.log('[api] catcher-framing job fired');
+  try {
+    const result = await runCatcherFramingJob(req.body && req.body.year);
+    res.json(result);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// View the catcher_framing table (sorted by framing runs).
+router.get('/catcher-framing', (req, res) => {
+  try { res.json(q.listCatcherFraming.all()); }
+  catch(e) { res.status(500).json({error:e.message}); }
 });
 
 // Standalone FanGraphs RosterResource pull. The same job runs as phase 2
