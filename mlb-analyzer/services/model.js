@@ -283,6 +283,11 @@ function runModel(game, wobaIdx, settings, mode) {
     };
   const RUN_MULT  = num(settings.RUN_MULT,  48);
   const HFA_BOOST = num(settings.HFA_BOOST, 0.02);
+  // Catcher framing (default disabled; no-op until enabled AND a framing
+  // row exists for the catcher). MUTE discounts measured framing to the
+  // differential not already in pitcher wOBA-against.
+  const CATCHER_FRAMING_ENABLED = !!settings.CATCHER_FRAMING_ENABLED;
+  const CATCHER_FRAMING_MUTE = num(settings.CATCHER_FRAMING_MUTE, 0.5);
   const FAV_ADJ   = num(settings.FAV_ADJ,   0);
   const DOG_ADJ   = num(settings.DOG_ADJ,   0);
   const W_PIT     = num(settings.W_PIT,     0.5);
@@ -628,8 +633,26 @@ function runModel(game, wobaIdx, settings, mode) {
   // team is ARI (1.10) but the actual venue plays much hotter.
   const venueOverride = game.venue_id != null ? VENUE_OVERRIDES[game.venue_id] : null;
   const pf = venueOverride ? venueOverride.parkFactor : (game.park_factor || 1.0);
-  const aRuns = Math.max(0,(aTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
-  const hRuns = Math.max(0,(hTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
+  const aRunsRaw = Math.max(0,(aTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
+  const hRunsRaw = Math.max(0,(hTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
+  // Catcher framing adjustment. A good framing catcher steals strikes,
+  // suppressing the runs scored by the batters facing that battery. So
+  // the HOME catcher's framing reduces the AWAY offense's runs, and the
+  // AWAY catcher's framing reduces the HOME offense's runs. Positive
+  // rv_per_game = runs saved by that catcher = subtract from the opposing
+  // offense. Muted by CATCHER_FRAMING_MUTE (the value already in pitcher
+  // wOBA-against isn't re-added; this captures the differential). Gated:
+  // disabled by default, and null per-game values (no ingest / no row /
+  // no catcher) are a clean no-op.
+  let aFramingAdj = 0, hFramingAdj = 0;
+  if (CATCHER_FRAMING_ENABLED) {
+    const homeCF = game.homeCatcherFramingRvPerGame;
+    const awayCF = game.awayCatcherFramingRvPerGame;
+    if (typeof homeCF === 'number' && !isNaN(homeCF)) aFramingAdj = homeCF * CATCHER_FRAMING_MUTE;
+    if (typeof awayCF === 'number' && !isNaN(awayCF)) hFramingAdj = awayCF * CATCHER_FRAMING_MUTE;
+  }
+  const aRuns = Math.max(0, aRunsRaw - aFramingAdj);
+  const hRuns = Math.max(0, hRunsRaw - hFramingAdj);
 
   const rawHW = (aRuns<=0&&hRuns<=0)?0.5 : hRuns<=0?0.25 : aRuns<=0?0.75 :
     hRuns**PYTH_EXP/(hRuns**PYTH_EXP+aRuns**PYTH_EXP);
