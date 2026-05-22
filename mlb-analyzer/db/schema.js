@@ -264,6 +264,18 @@ db.exec(`
     pitches INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- Multi-year (2023-2025) framing baseline, fallback for catchers with
+  -- little/no current-season sample. Pre-ABS values; the model applies the
+  -- ABS scaling factor at use-time. season_start/end record the span pulled.
+  CREATE TABLE IF NOT EXISTS catcher_framing_historical (
+    mlb_id INTEGER PRIMARY KEY,
+    name TEXT,
+    rv_tot REAL NOT NULL DEFAULT 0,
+    pitches INTEGER NOT NULL DEFAULT 0,
+    season_start INTEGER,
+    season_end INTEGER,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1035,6 +1047,15 @@ q.getFramingByCatcherName = db.prepare(
   "WHERE tr.team=? AND tr.player_name=?"
 );
 q.listCatcherFraming = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing ORDER BY rv_tot DESC");
+q.upsertCatcherFramingHist = db.prepare(
+  "INSERT INTO catcher_framing_historical (mlb_id,name,rv_tot,pitches,season_start,season_end,updated_at) " +
+  "VALUES (?,?,?,?,?,?,datetime('now')) " +
+  "ON CONFLICT(mlb_id) DO UPDATE SET " +
+  "  name=excluded.name, rv_tot=excluded.rv_tot, pitches=excluded.pitches, " +
+  "  season_start=excluded.season_start, season_end=excluded.season_end, updated_at=excluded.updated_at"
+);
+q.getCatcherFramingHistById = db.prepare("SELECT mlb_id,name,rv_tot,pitches FROM catcher_framing_historical WHERE mlb_id=?");
+q.listCatcherFramingHist = db.prepare("SELECT mlb_id,name,rv_tot,pitches,season_start,season_end,updated_at FROM catcher_framing_historical ORDER BY rv_tot DESC");
 // Position players for a team (for the abbreviated-lineup-name → mlb_id
 // resolver). Returns full names + ids; JS does accent-folded initial+last
 // matching since SQLite LIKE won't fold accents reliably.

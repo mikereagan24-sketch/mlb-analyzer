@@ -751,22 +751,24 @@ async function fetchCatcherFraming(year) {
     }
   });
   if (!resp.ok) throw new Error('savant framing fetch ' + resp.status);
-  const text = await resp.text();
-  // Guard the "got HTML instead of CSV" failure mode.
+  return _parseFramingCsv(await resp.text());
+}
+
+// Shared CSV row-parser for the framing leaderboard. Returns
+// [{mlb_id, name, rv_tot, pitches}], one entry per CSV data row (NOT
+// aggregated — caller aggregates if pulling a multi-year range).
+function _parseFramingCsv(text) {
   if (!text || text.trimStart().startsWith('<')) {
     throw new Error('savant framing returned non-CSV (HTML?) — len=' + (text ? text.length : 0));
   }
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) return [];
-  // Parse header to locate columns by name (don't assume positions).
   const header = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim().toLowerCase());
   const ci = (n) => header.indexOf(n);
   const iId = ci('id'), iName = ci('name'), iPit = ci('pitches'), iRv = ci('rv_tot');
   if (iId < 0 || iRv < 0) throw new Error('savant framing CSV missing expected columns: ' + header.join(','));
   const out = [];
   for (let r = 1; r < lines.length; r++) {
-    // Names contain a comma ("Last, First") and are quoted — split on commas
-    // outside quotes.
     const cells = lines[r].match(/("([^"]*)")|([^,]+)|(?<=,)(?=,)/g) || [];
     const clean = cells.map(c => c.replace(/^"|"$/g, '').trim());
     const mlb_id = parseInt(clean[iId], 10);
@@ -776,6 +778,41 @@ async function fetchCatcherFraming(year) {
     out.push({ mlb_id, name: iName >= 0 ? clean[iName] : '', rv_tot, pitches: pitches || 0 });
   }
   return out;
+}
+
+// Multi-year (default 2023-2025) framing baseline, used as a fallback for
+// catchers with little/no current-season sample. Pulls the range via
+// seasonStart/seasonEnd, then AGGREGATES BY mlb_id in code (sums rv_tot
+// and pitches) — robust whether Savant returns one row per catcher-season
+// or a pre-aggregated row. Applies a min-pitches floor so we only keep
+// catchers with a stable multi-year sample. Pre-ABS values; the model
+// applies the ABS scaling factor at use-time, not here.
+async function fetchCatcherFramingHistorical(opts) {
+  const o = opts || {};
+  const startY = o.seasonStart || 2023;
+  const endY = o.seasonEnd || 2025;
+  const minPitches = o.minPitches != null ? o.minPitches : 750;
+  const url = `https://baseballsavant.mlb.com/leaderboard/catcher-framing`
+    + `?seasonStart=${startY}&seasonEnd=${endY}&type=catcher&csv=true`;
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/csv,*/*'
+    }
+  });
+  if (!resp.ok) throw new Error('savant historical framing fetch ' + resp.status);
+  const rows = _parseFramingCsv(await resp.text());
+  // Aggregate by mlb_id (handles per-season rows by summing).
+  const agg = new Map();
+  for (const r of rows) {
+    const cur = agg.get(r.mlb_id) || { mlb_id: r.mlb_id, name: r.name, rv_tot: 0, pitches: 0 };
+    cur.rv_tot += r.rv_tot;
+    cur.pitches += r.pitches;
+    if (!cur.name && r.name) cur.name = r.name;
+    agg.set(r.mlb_id, cur);
+  }
+  // Apply the min-pitches floor.
+  return [...agg.values()].filter(c => c.pitches >= minPitches);
 }
 // Statsapi schedule bootstrap. RotoWire only publishes today + tomorrow, and
 // only after their page rolls over (often late in the day). Statsapi has the
@@ -1047,4 +1084,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
+module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
