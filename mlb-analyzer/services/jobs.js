@@ -2,7 +2,7 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchSchedule } = require('./scraper');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -120,6 +120,18 @@ function getSettings() {
       if (raw == null) return _d('use_opener_logic', false);
       return raw === true || raw === 'true' || raw === '1' || raw === 1;
     })(),
+    // Catcher framing run-environment adjustment. Previously NOT surfaced
+    // here, which left settings.CATCHER_FRAMING_ENABLED undefined — the
+    // feature could never actually activate. Now wired so flipping the
+    // setting takes effect. Boolean coerced from TEXT like USE_OPENER_LOGIC.
+    CATCHER_FRAMING_ENABLED: (function() {
+      const raw = s['catcher_framing_enabled'];
+      if (raw == null) return _d('catcher_framing_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
+    CATCHER_FRAMING_MUTE:             num('catcher_framing_mute',             _d('catcher_framing_mute', 0.5)),
+    CATCHER_FRAMING_ABS_FACTOR:       num('catcher_framing_abs_factor',       _d('catcher_framing_abs_factor', 0.80)),
+    CATCHER_FRAMING_MIN_PITCHES_2026: num('catcher_framing_min_pitches_2026', _d('catcher_framing_min_pitches_2026', 750)),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -341,6 +353,16 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         return c ? c.name : '';                        // '' = lineup present but no C
       };
       const framingEnabled = !!(settings && settings.CATCHER_FRAMING_ENABLED);
+      const absFactor = (settings && settings.CATCHER_FRAMING_ABS_FACTOR != null)
+        ? Number(settings.CATCHER_FRAMING_ABS_FACTOR) : 0.80;
+      const min2026 = (settings && settings.CATCHER_FRAMING_MIN_PITCHES_2026 != null)
+        ? Number(settings.CATCHER_FRAMING_MIN_PITCHES_2026) : 750;
+      const rate = (rvTot, pitches) => {
+        if (!pitches || pitches <= 0) return null;
+        const gamesCaught = pitches / PITCHES_PER_GAME;
+        if (gamesCaught <= 0) return null;
+        return rvTot / gamesCaught;
+      };
       const perGame = (team, catcherName) => {
         if (catcherName === null) return null;         // no lineup yet — silent
         if (catcherName === '') {
@@ -356,15 +378,30 @@ function processGameSignals(gameRow, wobaIdx, settings) {
             + ': catcher "' + catcherName + '" did not resolve to a roster mlb_id — no framing applied (check roster / name format)');
           return null;
         }
+        // Primary: current-season (2026) framing, used as-is (already
+        // post-ABS). Only trusted when it clears the min-pitches floor —
+        // a 200-pitch 2026 sample is noisier than a 3-year baseline.
         const row = q.getCatcherFramingById.get(mlbId);
-        if (!row || !row.pitches || row.pitches <= 0) {
-          if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
-            + ': catcher "' + catcherName + '" (id ' + mlbId + ') has no framing row — likely sub-qualifier backup, no framing applied');
-          return null;
+        if (row && row.pitches >= min2026) {
+          return rate(row.rv_tot, row.pitches);
         }
-        const gamesCaught = row.pitches / PITCHES_PER_GAME;
-        if (gamesCaught <= 0) return null;
-        return row.rv_tot / gamesCaught;
+        // Fallback: 2023-2025 historical baseline, scaled by absFactor to
+        // express pre-ABS values in 2026-equivalent units. Applies when the
+        // 2026 row is missing entirely OR below the min-pitches floor.
+        if (q.getCatcherFramingHistById) {
+          const h = q.getCatcherFramingHistById.get(mlbId);
+          if (h && h.pitches > 0) {
+            const r = rate(h.rv_tot, h.pitches);
+            if (r != null) {
+              if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
+                + ': catcher "' + catcherName + '" (id ' + mlbId + ') low/no 2026 sample — using 2023-25 baseline ×' + absFactor);
+              return r * absFactor;
+            }
+          }
+        }
+        if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
+          + ': catcher "' + catcherName + '" (id ' + mlbId + ') has no 2026 or historical framing row — no framing applied');
+        return null;
       };
       awayCatcherFramingRvPerGame = perGame(awayAbbr, findCatcher(gameRow.away_lineup_json));
       homeCatcherFramingRvPerGame = perGame(homeAbbr, findCatcher(gameRow.home_lineup_json));
@@ -2541,6 +2578,33 @@ async function runCatcherFramingJob(year) {
   }
 }
 
+// Ingest the 2023-2025 historical framing baseline (fallback for catchers
+// with little/no current-season sample). Aggregated by mlb_id with a
+// min-pitches floor in fetchCatcherFramingHistorical.
+async function runCatcherFramingHistJob(opts) {
+  const o = opts || {};
+  const startY = o.seasonStart || 2023, endY = o.seasonEnd || 2025;
+  const minPitches = o.minPitches != null ? o.minPitches : 750;
+  console.log('[framing-hist] fetching ' + startY + '-' + endY + ' baseline (min ' + minPitches + ' pitches)...');
+  try {
+    const rows = await fetchCatcherFramingHistorical({ seasonStart: startY, seasonEnd: endY, minPitches });
+    let applied = 0;
+    const tx = db.transaction((rs) => {
+      for (const r of rs) {
+        if (!r.mlb_id || !r.pitches || r.pitches <= 0) continue;
+        q.upsertCatcherFramingHist.run(r.mlb_id, r.name || null, r.rv_tot, r.pitches, startY, endY);
+        applied++;
+      }
+    });
+    tx(rows);
+    console.log('[framing-hist] upserted ' + applied + ' catchers (>= ' + minPitches + ' pitches, ' + startY + '-' + endY + ')');
+    return { success: true, applied, season_start: startY, season_end: endY, min_pitches: minPitches };
+  } catch (e) {
+    console.error('[framing-hist] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -2705,4 +2769,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };

@@ -48,7 +48,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -771,6 +771,25 @@ router.post('/jobs/catcher-framing', async (req, res) => {
 // View the catcher_framing table (sorted by framing runs).
 router.get('/catcher-framing', (req, res) => {
   try { res.json(q.listCatcherFraming.all()); }
+  catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// Historical (2023-2025) framing baseline ingest. Body may override
+// seasonStart / seasonEnd / minPitches; defaults 2023, 2025, 750.
+router.post('/jobs/catcher-framing-historical', async (req, res) => {
+  console.log('[api] catcher-framing-historical job fired');
+  try {
+    const b = req.body || {};
+    const result = await runCatcherFramingHistJob({
+      seasonStart: b.seasonStart, seasonEnd: b.seasonEnd, minPitches: b.minPitches,
+    });
+    res.json(result);
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// View the catcher_framing_historical baseline (sorted by framing runs).
+router.get('/catcher-framing-historical', (req, res) => {
+  try { res.json(q.listCatcherFramingHist.all()); }
   catch(e) { res.status(500).json({error:e.message}); }
 });
 
