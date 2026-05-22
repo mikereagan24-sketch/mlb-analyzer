@@ -97,6 +97,8 @@ const SETTINGS_SCHEMA = {
     help: 'Scaling applied to the 2023-2025 historical framing baseline to express pre-ABS values in 2026-equivalent units (ABS cut framing ~20%). Only affects the historical fallback; current-season 2026 data is used as-is. Net effect on a fallback catcher: ×abs_factor ×mute.' },
   catcher_framing_min_pitches_2026: { type: 'number', min: 0, max: 5000, default: 750,
     help: 'Minimum 2026 called pitches for a catcher\'s current-season framing to be trusted. Below this, fall back to the 2023-2025 baseline (scaled by abs_factor). Matches the historical ingest floor.' },
+  catcher_framing_takes_per_game: { type: 'number', min: 30, max: 90, default: 58,
+    help: 'Leaguewide shadow-zone called takes per full team-game (~58). The framing pitches column counts these takes, not total pitches; per-game framing = (rv_tot/pitches) x this. Environmental constant, not a per-catcher estimate.' },
   tot_slope: { type: 'number', min: 0.05, max: 0.15, default: 0.08,
     help: 'Total-runs slope in over/under conversion.' },
 
