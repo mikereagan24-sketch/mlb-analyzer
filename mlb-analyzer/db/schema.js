@@ -276,6 +276,20 @@ db.exec(`
     season_end INTEGER,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- Statcast Fielding Run Value for NON-CATCHER position players (Build B,
+  -- defensive impact). total_runs is FRV in runs (range + DP + arm; for
+  -- non-catchers this is framing-free, so no double-count with the framing
+  -- feature). outs_total is the fielding-opportunity count, the denominator
+  -- for the per-opportunity → per-game conversion. position is the statsapi
+  -- position the row was pulled under (label; game logic reads lineup pos).
+  CREATE TABLE IF NOT EXISTS fielding_frv (
+    mlb_id INTEGER PRIMARY KEY,
+    name TEXT,
+    total_runs REAL NOT NULL DEFAULT 0,
+    outs_total INTEGER NOT NULL DEFAULT 0,
+    position TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1056,6 +1070,15 @@ q.upsertCatcherFramingHist = db.prepare(
 );
 q.getCatcherFramingHistById = db.prepare("SELECT mlb_id,name,rv_tot,pitches FROM catcher_framing_historical WHERE mlb_id=?");
 q.listCatcherFramingHist = db.prepare("SELECT mlb_id,name,rv_tot,pitches,season_start,season_end,updated_at FROM catcher_framing_historical ORDER BY rv_tot DESC");
+q.upsertFieldingFrv = db.prepare(
+  "INSERT INTO fielding_frv (mlb_id,name,total_runs,outs_total,position,updated_at) " +
+  "VALUES (?,?,?,?,?,datetime('now')) " +
+  "ON CONFLICT(mlb_id) DO UPDATE SET " +
+  "  name=excluded.name, total_runs=excluded.total_runs, outs_total=excluded.outs_total, " +
+  "  position=excluded.position, updated_at=excluded.updated_at"
+);
+q.getFieldingFrvById = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position FROM fielding_frv WHERE mlb_id=?");
+q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,updated_at FROM fielding_frv ORDER BY total_runs DESC");
 // Position players for a team (for the abbreviated-lineup-name → mlb_id
 // resolver). Returns full names + ids; JS does accent-folded initial+last
 // matching since SQLite LIKE won't fold accents reliably.

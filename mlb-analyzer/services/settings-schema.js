@@ -99,6 +99,14 @@ const SETTINGS_SCHEMA = {
     help: 'Minimum 2026 called pitches for a catcher\'s current-season framing to be trusted. Below this, fall back to the 2023-2025 baseline (scaled by abs_factor). Matches the historical ingest floor.' },
   catcher_framing_takes_per_game: { type: 'number', min: 30, max: 90, default: 58,
     help: 'Leaguewide shadow-zone called takes per full team-game (~58). The framing pitches column counts these takes, not total pitches; per-game framing = (rv_tot/pitches) x this. Environmental constant, not a per-catcher estimate.' },
+
+  // --- Defensive impact / Fielding Run Value (Build B) ---------------------
+  defense_frv_enabled: { type: 'boolean', default: false,
+    help: 'Apply team defensive Fielding Run Value (sum of 7 non-catcher fielders) to the opposing offense run estimate. Default OFF — requires the fielding_frv table to be populated. No-op when off or when no fielders resolve. Catcher defense is handled separately by the framing feature.' },
+  defense_frv_mute: { type: 'number', min: 0.0, max: 1.0, default: 0.5,
+    help: 'Fraction of team fielding run value applied. <1 because pitcher wOBA-against already partially reflects the defense played behind the pitcher in his sample; this captures the differential without double-counting.' },
+  defense_frv_opps_per_game: { type: 'number', min: 10, max: 40, default: 25,
+    help: 'Fielding opportunities a starting fielder sees per full game (~25, near-constant across non-catcher positions per the FRV outs_total data). Per-game FRV = (total_runs/outs_total) x this. Environmental constant.' },
   tot_slope: { type: 'number', min: 0.05, max: 0.15, default: 0.08,
     help: 'Total-runs slope in over/under conversion.' },
 
