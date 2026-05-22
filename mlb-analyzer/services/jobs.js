@@ -132,6 +132,7 @@ function getSettings() {
     CATCHER_FRAMING_MUTE:             num('catcher_framing_mute',             _d('catcher_framing_mute', 0.5)),
     CATCHER_FRAMING_ABS_FACTOR:       num('catcher_framing_abs_factor',       _d('catcher_framing_abs_factor', 0.80)),
     CATCHER_FRAMING_MIN_PITCHES_2026: num('catcher_framing_min_pitches_2026', _d('catcher_framing_min_pitches_2026', 750)),
+    CATCHER_FRAMING_TAKES_PER_GAME:   num('catcher_framing_takes_per_game',   _d('catcher_framing_takes_per_game', 58)),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -345,7 +346,6 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   let awayCatcherFramingRvPerGame = null, homeCatcherFramingRvPerGame = null;
   try {
     if (q.getCatcherFramingById && q.getPositionPlayers) {
-      const PITCHES_PER_GAME = 145;
       const findCatcher = (lu) => {
         const arr = tryParse(lu) || [];
         if (!arr.length) return null;                 // no lineup posted → silent
@@ -357,11 +357,22 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         ? Number(settings.CATCHER_FRAMING_ABS_FACTOR) : 0.80;
       const min2026 = (settings && settings.CATCHER_FRAMING_MIN_PITCHES_2026 != null)
         ? Number(settings.CATCHER_FRAMING_MIN_PITCHES_2026) : 750;
+      // Leaguewide shadow-zone called takes per full team-game (~58). This
+      // is the framing-relevant pitch count a STARTING catcher receives in
+      // a complete game — an environmental constant (property of the
+      // pitching/umpiring mix), NOT a per-catcher estimate.
+      const takesPerGame = (settings && settings.CATCHER_FRAMING_TAKES_PER_GAME != null)
+        ? Number(settings.CATCHER_FRAMING_TAKES_PER_GAME) : 58;
+      // Per-game framing runs = per-pitch rate × takes/game. Both rv_tot and
+      // pitches are real Statcast counts (pitches = framing-relevant shadow
+      // takes), so the rate needs no estimate. Per-pitch normalization is
+      // immune to the defensive-replacement / partial-game problem: a
+      // catcher's rate is computed from his actual takes regardless of how
+      // they were distributed across full vs partial games. We then project
+      // tonight's STARTING catcher to a full game's worth of takes.
       const rate = (rvTot, pitches) => {
         if (!pitches || pitches <= 0) return null;
-        const gamesCaught = pitches / PITCHES_PER_GAME;
-        if (gamesCaught <= 0) return null;
-        return rvTot / gamesCaught;
+        return (rvTot / pitches) * takesPerGame;
       };
       const perGame = (team, catcherName) => {
         if (catcherName === null) return null;         // no lineup yet — silent
