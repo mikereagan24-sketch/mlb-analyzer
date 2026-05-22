@@ -288,6 +288,10 @@ function runModel(game, wobaIdx, settings, mode) {
   // differential not already in pitcher wOBA-against.
   const CATCHER_FRAMING_ENABLED = !!settings.CATCHER_FRAMING_ENABLED;
   const CATCHER_FRAMING_MUTE = num(settings.CATCHER_FRAMING_MUTE, 0.5);
+  // Defensive impact (Build B). Team fielding run value reduces the
+  // opposing offense's runs, muted, gated, no-op when disabled/null.
+  const DEFENSE_FRV_ENABLED = !!settings.DEFENSE_FRV_ENABLED;
+  const DEFENSE_FRV_MUTE = num(settings.DEFENSE_FRV_MUTE, 0.5);
   const FAV_ADJ   = num(settings.FAV_ADJ,   0);
   const DOG_ADJ   = num(settings.DOG_ADJ,   0);
   const W_PIT     = num(settings.W_PIT,     0.5);
@@ -651,8 +655,19 @@ function runModel(game, wobaIdx, settings, mode) {
     if (typeof homeCF === 'number' && !isNaN(homeCF)) aFramingAdj = homeCF * CATCHER_FRAMING_MUTE;
     if (typeof awayCF === 'number' && !isNaN(awayCF)) hFramingAdj = awayCF * CATCHER_FRAMING_MUTE;
   }
-  const aRuns = Math.max(0, aRunsRaw - aFramingAdj);
-  const hRuns = Math.max(0, hRunsRaw - hFramingAdj);
+  // Team defense (Build B): the HOME team's fielding reduces the AWAY
+  // offense's runs (good defenders convert more batted balls into outs),
+  // and vice versa — same directional logic as framing. Positive team
+  // FRV/game = runs prevented = subtract from the opposing offense.
+  let aDefenseAdj = 0, hDefenseAdj = 0;
+  if (DEFENSE_FRV_ENABLED) {
+    const homeDef = game.homeFieldingRunsPerGame;
+    const awayDef = game.awayFieldingRunsPerGame;
+    if (typeof homeDef === 'number' && !isNaN(homeDef)) aDefenseAdj = homeDef * DEFENSE_FRV_MUTE;
+    if (typeof awayDef === 'number' && !isNaN(awayDef)) hDefenseAdj = awayDef * DEFENSE_FRV_MUTE;
+  }
+  const aRuns = Math.max(0, aRunsRaw - aFramingAdj - aDefenseAdj);
+  const hRuns = Math.max(0, hRunsRaw - hFramingAdj - hDefenseAdj);
 
   const rawHW = (aRuns<=0&&hRuns<=0)?0.5 : hRuns<=0?0.25 : aRuns<=0?0.75 :
     hRuns**PYTH_EXP/(hRuns**PYTH_EXP+aRuns**PYTH_EXP);

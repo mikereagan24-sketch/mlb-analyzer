@@ -814,6 +814,58 @@ async function fetchCatcherFramingHistorical(opts) {
   // Apply the min-pitches floor.
   return [...agg.values()].filter(c => c.pitches >= minPitches);
 }
+
+// Statcast Fielding Run Value for non-catcher position players. Pulls each
+// non-catcher position (3=1B..9=RF), parses id/name/total_runs/outs_total,
+// and aggregates by mlb_id so a player who appears at multiple positions
+// sums his FRV and opportunities into one row. total_runs is already in
+// runs (range+DP+arm; framing-free for non-catchers). Browser UA required.
+async function fetchFieldingFrv(opts) {
+  const o = opts || {};
+  const startY = o.seasonStart || new Date().getFullYear();
+  const endY = o.seasonEnd || startY;
+  const positions = o.positions || [3, 4, 5, 6, 7, 8, 9]; // 1B,2B,3B,SS,LF,CF,RF
+  const minResults = o.minResults != null ? o.minResults : 1;
+  const agg = new Map();
+  for (const pos of positions) {
+    const url = `https://baseballsavant.mlb.com/leaderboard/fielding-run-value`
+      + `?seasonStart=${startY}&seasonEnd=${endY}&type=fielder&position=${pos}`
+      + `&minInnings=1&minResults=${minResults}&csv=true`;
+    const resp = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/csv,*/*'
+      }
+    });
+    if (!resp.ok) throw new Error('savant FRV fetch pos ' + pos + ' ' + resp.status);
+    const text = await resp.text();
+    if (!text || text.trimStart().startsWith('<')) {
+      throw new Error('savant FRV pos ' + pos + ' returned non-CSV (HTML?) — len=' + (text ? text.length : 0));
+    }
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) continue;
+    const header = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim().toLowerCase());
+    const ci = (n) => header.indexOf(n);
+    const iId = ci('id'), iName = ci('name'), iRuns = ci('total_runs'), iOuts = ci('outs_total');
+    if (iId < 0 || iRuns < 0 || iOuts < 0) {
+      throw new Error('savant FRV pos ' + pos + ' CSV missing expected columns: ' + header.join(','));
+    }
+    for (let r = 1; r < lines.length; r++) {
+      const cells = lines[r].match(/("([^"]*)")|([^,]+)|(?<=,)(?=,)/g) || [];
+      const clean = cells.map(c => c.replace(/^"|"$/g, '').trim());
+      const mlb_id = parseInt(clean[iId], 10);
+      const total_runs = parseFloat(clean[iRuns]);
+      const outs_total = parseInt(clean[iOuts], 10);
+      if (!mlb_id || isNaN(total_runs)) continue;
+      const cur = agg.get(mlb_id) || { mlb_id, name: iName >= 0 ? clean[iName] : '', total_runs: 0, outs_total: 0, position: String(pos) };
+      cur.total_runs += total_runs;
+      cur.outs_total += (isNaN(outs_total) ? 0 : outs_total);
+      if (!cur.name && iName >= 0) cur.name = clean[iName];
+      agg.set(mlb_id, cur);
+    }
+  }
+  return [...agg.values()];
+}
 // Statsapi schedule bootstrap. RotoWire only publishes today + tomorrow, and
 // only after their page rolls over (often late in the day). Statsapi has the
 // canonical schedule available a week+ ahead, so we use it to pre-create
@@ -1084,4 +1136,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
+module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };

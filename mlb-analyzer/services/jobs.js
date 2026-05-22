@@ -2,7 +2,7 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -133,6 +133,14 @@ function getSettings() {
     CATCHER_FRAMING_ABS_FACTOR:       num('catcher_framing_abs_factor',       _d('catcher_framing_abs_factor', 0.80)),
     CATCHER_FRAMING_MIN_PITCHES_2026: num('catcher_framing_min_pitches_2026', _d('catcher_framing_min_pitches_2026', 750)),
     CATCHER_FRAMING_TAKES_PER_GAME:   num('catcher_framing_takes_per_game',   _d('catcher_framing_takes_per_game', 58)),
+    // Defensive impact (Build B). Same dormant-until-enabled pattern as framing.
+    DEFENSE_FRV_ENABLED: (function() {
+      const raw = s['defense_frv_enabled'];
+      if (raw == null) return _d('defense_frv_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
+    DEFENSE_FRV_MUTE:          num('defense_frv_mute',          _d('defense_frv_mute', 0.5)),
+    DEFENSE_FRV_OPPS_PER_GAME: num('defense_frv_opps_per_game', _d('defense_frv_opps_per_game', 25)),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -418,6 +426,52 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       homeCatcherFramingRvPerGame = perGame(homeAbbr, findCatcher(gameRow.home_lineup_json));
     }
   } catch (e) { /* missing table / ingest not built → null, no-op */ }
+  // Defensive impact (Build B): team fielding run value, summed over the 7
+  // non-catcher position players in the lineup. Catcher defense is handled
+  // by the framing feature; DH and pitcher fielding are excluded. Each
+  // fielder's per-game value = total_runs / outs_total × opps_per_game
+  // (per-opportunity rate scaled to a full game's ~25 opportunities, immune
+  // to partial-game distortion). Null when no fielders resolve (ingest not
+  // built / lineup not posted) → clean no-op.
+  let awayFieldingRunsPerGame = null, homeFieldingRunsPerGame = null;
+  try {
+    if (q.getFieldingFrvById && q.getPositionPlayers) {
+      const FIELD_POS = new Set(['1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF']);
+      const defEnabled = !!(settings && settings.DEFENSE_FRV_ENABLED);
+      const oppsPerGame = (settings && settings.DEFENSE_FRV_OPPS_PER_GAME != null)
+        ? Number(settings.DEFENSE_FRV_OPPS_PER_GAME) : 25;
+      const teamFielding = (team, lu) => {
+        const arr = tryParse(lu) || [];
+        if (!arr.length) return null;                 // no lineup → silent no-op
+        let sum = 0, resolved = 0, fielders = 0;
+        for (const p of arr) {
+          const pos = (p.pos || '').toUpperCase();
+          if (!FIELD_POS.has(pos)) continue;          // skip C, DH, P
+          fielders++;
+          const mlbId = resolveCatcherMlbId(team, p.name); // same name→id resolver
+          if (!mlbId) {
+            if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
+              + ': fielder "' + p.name + '" (' + pos + ') did not resolve to mlb_id');
+            continue;
+          }
+          const row = q.getFieldingFrvById.get(mlbId);
+          if (!row || !row.outs_total || row.outs_total <= 0) {
+            if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
+              + ': fielder "' + p.name + '" (id ' + mlbId + ') no FRV row — no defensive value');
+            continue;
+          }
+          sum += (row.total_runs / row.outs_total) * oppsPerGame;
+          resolved++;
+        }
+        // Only return a value if we resolved at least one fielder. Partial
+        // resolution (e.g. 5 of 7) returns the partial sum — better than
+        // discarding signal, and warnings above flag the misses.
+        return resolved > 0 ? sum : null;
+      };
+      awayFieldingRunsPerGame = teamFielding(awayAbbr, gameRow.away_lineup_json);
+      homeFieldingRunsPerGame = teamFielding(homeAbbr, gameRow.home_lineup_json);
+    }
+  } catch (e) { /* missing table / ingest not built → null, no-op */ }
   // Projected IP/start for each SP, drives the dynamic SP/RP split in runModel.
   // Null when no projection row exists — runModel falls back to flat SP weight.
   // NOTE: existing bullpen code at line ~86 reads gameRow.away_pitcher which
@@ -443,6 +497,11 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // when CATCHER_FRAMING_ENABLED.
     awayCatcherFramingRvPerGame: awayCatcherFramingRvPerGame,
     homeCatcherFramingRvPerGame: homeCatcherFramingRvPerGame,
+    // Team defensive run value (sum of 7 non-catcher fielders' per-game FRV);
+    // null when ingest not built / no fielders resolved. Applied in runModel
+    // only when DEFENSE_FRV_ENABLED.
+    awayFieldingRunsPerGame: awayFieldingRunsPerGame,
+    homeFieldingRunsPerGame: homeFieldingRunsPerGame,
   };
   const stdModel = runModel(game, wobaIdx, settings, 'standard');
   // Phase 2 shadow: compute the opener-aware model whenever a side is
@@ -2616,6 +2675,32 @@ async function runCatcherFramingHistJob(opts) {
   }
 }
 
+// Ingest Statcast Fielding Run Value for non-catcher position players
+// (Build B). Defaults to the current season; body may override the range.
+async function runFieldingFrvJob(opts) {
+  const o = opts || {};
+  const startY = o.seasonStart || new Date().getFullYear();
+  const endY = o.seasonEnd || startY;
+  console.log('[defense] fetching FRV ' + startY + '-' + endY + ' (positions 3-9)...');
+  try {
+    const rows = await fetchFieldingFrv({ seasonStart: startY, seasonEnd: endY });
+    let applied = 0;
+    const tx = db.transaction((rs) => {
+      for (const r of rs) {
+        if (!r.mlb_id) continue;
+        q.upsertFieldingFrv.run(r.mlb_id, r.name || null, r.total_runs, r.outs_total || 0, r.position || null);
+        applied++;
+      }
+    });
+    tx(rows);
+    console.log('[defense] upserted ' + applied + ' non-catcher fielders (' + startY + '-' + endY + ')');
+    return { success: true, applied, season_start: startY, season_end: endY };
+  } catch (e) {
+    console.error('[defense] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -2780,4 +2865,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };
