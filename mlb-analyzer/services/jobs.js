@@ -8,7 +8,7 @@ const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
-const { normName } = require('../utils/names');
+const { normName, stripSfx } = require('../utils/names');
 const { calcCLV } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
 
@@ -2604,7 +2604,7 @@ async function detectOpeners(dateStr) {
 // skip than guess wrong.
 function resolveCatcherMlbId(team, lineupName) {
   if (!team || !lineupName) return null;
-  const norm = normName(lineupName);              // "a martinez"
+  const norm = stripSfx(normName(lineupName)); // fold accents/case, then drop Jr/Sr/II/III/IV
   const parts = norm.split(' ');
   if (parts.length < 2) return null;
   const last = parts[parts.length - 1];
@@ -2613,7 +2613,7 @@ function resolveCatcherMlbId(team, lineupName) {
   try {
     const players = q.getPositionPlayers.all(team);
     for (const p of players) {
-      const pn = normName(p.player_name);          // "angel martinez"
+      const pn = stripSfx(normName(p.player_name)); // same: strip suffix so "acuna jr" → "acuna"
       const pp = pn.split(' ');
       if (pp.length < 2) continue;
       const pLast = pp[pp.length - 1];
@@ -2622,7 +2622,7 @@ function resolveCatcherMlbId(team, lineupName) {
     }
   } catch (e) { return null; }
   if (candidates.length === 1) return candidates[0].mlb_id;
-  return null; // 0 matches or ambiguous → no framing rather than wrong framing
+  return null; // 0 matches or ambiguous → no value rather than wrong value
 }
 
 // Fetch the Savant catcher-framing leaderboard and upsert into
