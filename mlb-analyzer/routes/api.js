@@ -2416,7 +2416,12 @@ router.get('/debug/bullpen-report', (req, res) => {
       const teamU = (teamAbbr||'').toUpperCase();
       const spNorm = normName(spName);
       const spLast = spNorm.split(' ').pop();
-      const roster = rosterStmt.all(teamU);
+      // team_rosters.role is one of SP / RP / POS. The report covers pitchers
+      // only; POS (position players) were leaking into the per-pitcher table
+      // because the roster query was unfiltered (the in_pool flag excluded them
+      // from the pool AVERAGE but they still rendered as rows). Filter to
+      // pitcher roles here.
+      const roster = rosterStmt.all(teamU).filter(p => p.role === 'SP' || p.role === 'RP');
       const fatigued = q.getFatiguedPitchers(teamU, date);
       const fatigueByExact = {};
       for (const f of fatigued) {
