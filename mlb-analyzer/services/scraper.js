@@ -822,15 +822,25 @@ async function fetchCatcherFramingHistorical(opts) {
 // runs (range+DP+arm; framing-free for non-catchers). Browser UA required.
 async function fetchFieldingFrv(opts) {
   const o = opts || {};
-  const startY = o.seasonStart || new Date().getFullYear();
-  const endY = o.seasonEnd || startY;
+  // Trailing 3-season window by default (e.g. 2024-2026): defensive run
+  // metrics are noisy year-to-year, so a multi-season sample stabilizes the
+  // per-opportunity rate. The season params aggregate across years
+  // server-side; we further aggregate across positions by mlb_id below.
+  const curY = new Date().getFullYear();
+  const startY = o.seasonStart || (curY - 2);
+  const endY = o.seasonEnd || curY;
   const positions = o.positions || [3, 4, 5, 6, 7, 8, 9]; // 1B,2B,3B,SS,LF,CF,RF
   const minResults = o.minResults != null ? o.minResults : 1;
+  // minInnings=200 (3-year cumulative): low enough to capture part-time /
+  // utility fielders who appear in lineups, high enough to exclude tiny
+  // emergency-fill-in samples. (Savant accepts only dropdown values; 200 is
+  // the lowest sensible one.)
+  const minInnings = o.minInnings != null ? o.minInnings : 200;
   const agg = new Map();
   for (const pos of positions) {
     const url = `https://baseballsavant.mlb.com/leaderboard/fielding-run-value`
       + `?seasonStart=${startY}&seasonEnd=${endY}&type=fielder&position=${pos}`
-      + `&minInnings=1&minResults=${minResults}&csv=true`;
+      + `&minInnings=${minInnings}&minResults=${minResults}&csv=true`;
     const resp = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -857,14 +867,18 @@ async function fetchFieldingFrv(opts) {
       const total_runs = parseFloat(clean[iRuns]);
       const outs_total = parseInt(clean[iOuts], 10);
       if (!mlb_id || isNaN(total_runs)) continue;
-      const cur = agg.get(mlb_id) || { mlb_id, name: iName >= 0 ? clean[iName] : '', total_runs: 0, outs_total: 0, position: String(pos) };
+      const cur = agg.get(mlb_id) || { mlb_id, name: iName >= 0 ? clean[iName] : '', total_runs: 0, outs_total: 0, position: String(pos), _posOuts: 0 };
       cur.total_runs += total_runs;
       cur.outs_total += (isNaN(outs_total) ? 0 : outs_total);
+      // Track primary position = the one with the most opportunities.
+      const thisOuts = isNaN(outs_total) ? 0 : outs_total;
+      if (thisOuts > cur._posOuts) { cur._posOuts = thisOuts; cur.position = String(pos); }
       if (!cur.name && iName >= 0) cur.name = clean[iName];
       agg.set(mlb_id, cur);
     }
   }
-  return [...agg.values()];
+  // Strip the internal tracking field.
+  return [...agg.values()].map(c => ({ mlb_id: c.mlb_id, name: c.name, total_runs: c.total_runs, outs_total: c.outs_total, position: c.position }));
 }
 // Statsapi schedule bootstrap. RotoWire only publishes today + tomorrow, and
 // only after their page rolls over (often late in the day). Statsapi has the

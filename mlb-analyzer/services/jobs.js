@@ -1891,6 +1891,11 @@ function startCronJobs() {
     console.log('[cron] 6AM PT roster refresh');
     try { await runRosterJob(); }
     catch(e) { console.error('[cron-roster] failed:', e && e.message); }
+    // Refresh the trailing-3yr Fielding Run Value after rosters (daily is
+    // ample — it's a multi-season aggregate that barely moves day to day).
+    // Non-fatal: a Savant hiccup must not abort the morning chain.
+    try { await runFieldingFrvJob(); }
+    catch(e) { console.error('[cron-frv] failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 7AM PT morning refresh: odds -> weather -> lineups -> rerun all games ---
@@ -2679,16 +2684,20 @@ async function runCatcherFramingHistJob(opts) {
 // (Build B). Defaults to the current season; body may override the range.
 async function runFieldingFrvJob(opts) {
   const o = opts || {};
-  const startY = o.seasonStart || new Date().getFullYear();
-  const endY = o.seasonEnd || startY;
-  console.log('[defense] fetching FRV ' + startY + '-' + endY + ' (positions 3-9)...');
+  // Default to the trailing 3-season window (currentYear-2 .. currentYear)
+  // for stability against year-to-year defensive noise. Daily refresh blends
+  // the current season in as it accumulates.
+  const curY = new Date().getFullYear();
+  const startY = o.seasonStart || (curY - 2);
+  const endY = o.seasonEnd || curY;
+  console.log('[defense] fetching FRV ' + startY + '-' + endY + ' (positions 3-9, min 200 inn)...');
   try {
     const rows = await fetchFieldingFrv({ seasonStart: startY, seasonEnd: endY });
     let applied = 0;
     const tx = db.transaction((rs) => {
       for (const r of rs) {
         if (!r.mlb_id) continue;
-        q.upsertFieldingFrv.run(r.mlb_id, r.name || null, r.total_runs, r.outs_total || 0, r.position || null);
+        q.upsertFieldingFrv.run(r.mlb_id, r.name || null, r.total_runs, r.outs_total || 0, r.position || null, startY, endY);
         applied++;
       }
     });
