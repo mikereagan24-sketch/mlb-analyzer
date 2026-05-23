@@ -1084,8 +1084,8 @@ q.upsertFieldingFrv = db.prepare(
   "  name=excluded.name, total_runs=excluded.total_runs, outs_total=excluded.outs_total, " +
   "  position=excluded.position, season_start=excluded.season_start, season_end=excluded.season_end, updated_at=excluded.updated_at"
 );
-q.getFieldingFrvById = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position FROM fielding_frv WHERE mlb_id=?");
-q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,updated_at FROM fielding_frv ORDER BY total_runs DESC");
+q.getFieldingFrvById = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end FROM fielding_frv WHERE mlb_id=?");
+q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at FROM fielding_frv ORDER BY total_runs DESC");
 // Position players for a team (for the abbreviated-lineup-name → mlb_id
 // resolver). Returns full names + ids; JS does accent-folded initial+last
 // matching since SQLite LIKE won't fold accents reliably.
