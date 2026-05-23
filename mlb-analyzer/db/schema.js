@@ -288,6 +288,8 @@ db.exec(`
     total_runs REAL NOT NULL DEFAULT 0,
     outs_total INTEGER NOT NULL DEFAULT 0,
     position TEXT,
+    season_start INTEGER,
+    season_end INTEGER,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
@@ -421,6 +423,11 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN total_source TEXT"); } catch(e) {
 // Non-authoritative label — statsapi primary position; game logic reads the
 // lineup's pos field. NULL on existing pitcher rows until next roster refresh.
 try { db.exec("ALTER TABLE team_rosters ADD COLUMN position TEXT"); } catch(e) {}
+// fielding_frv provenance (trailing-window ingest): which seasons the
+// aggregate spans. NULL on rows from the earlier single-season ingest until
+// the next refresh.
+try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_start INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_end INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
@@ -1071,11 +1078,11 @@ q.upsertCatcherFramingHist = db.prepare(
 q.getCatcherFramingHistById = db.prepare("SELECT mlb_id,name,rv_tot,pitches FROM catcher_framing_historical WHERE mlb_id=?");
 q.listCatcherFramingHist = db.prepare("SELECT mlb_id,name,rv_tot,pitches,season_start,season_end,updated_at FROM catcher_framing_historical ORDER BY rv_tot DESC");
 q.upsertFieldingFrv = db.prepare(
-  "INSERT INTO fielding_frv (mlb_id,name,total_runs,outs_total,position,updated_at) " +
-  "VALUES (?,?,?,?,?,datetime('now')) " +
+  "INSERT INTO fielding_frv (mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at) " +
+  "VALUES (?,?,?,?,?,?,?,datetime('now')) " +
   "ON CONFLICT(mlb_id) DO UPDATE SET " +
   "  name=excluded.name, total_runs=excluded.total_runs, outs_total=excluded.outs_total, " +
-  "  position=excluded.position, updated_at=excluded.updated_at"
+  "  position=excluded.position, season_start=excluded.season_start, season_end=excluded.season_end, updated_at=excluded.updated_at"
 );
 q.getFieldingFrvById = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position FROM fielding_frv WHERE mlb_id=?");
 q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,updated_at FROM fielding_frv ORDER BY total_runs DESC");
