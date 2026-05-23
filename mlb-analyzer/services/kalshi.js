@@ -20,6 +20,17 @@ const SERIES_TICKER = 'KXMLBGAME';
 const PAGE_LIMIT = 200;
 const MAX_PAGES = 10; // safety stop on the cursor loop
 
+// 429 (rate limit) retry schedule. Production hit a single throttle event
+// and the whole override silently fell through to backup — we want to try
+// genuinely hard before giving up. Array length = number of retries; each
+// entry is the delay BEFORE that retry. Total worst-case added latency is
+// the sum (1+2+4 = 7s), kept short so the odds-job critical path doesn't
+// stall too long.
+const KALSHI_RETRY_BACKOFF_MS = [1000, 2000, 4000];
+// Ceiling on honoring a Retry-After header. Defends against a misbehaving
+// upstream telling us to wait minutes.
+const KALSHI_MAX_BACKOFF_MS = 30000;
+
 // Liquidity gate. Kalshi's UI displays a per-event DOLLAR volume (e.g.
 // $299,325 for CWS-SF) that does NOT exactly equal the sum of the two
 // contracts' volume_24h_fp values (222,906 + 44,915 ≈ 267,821, not
@@ -250,8 +261,30 @@ function kalshiTakerFee(price, contracts) {
   return Math.ceil(raw * 100 - 1e-9) / 100;
 }
 
+// Parse a Retry-After response header. RFC 7231 allows either an integer
+// (delta-seconds) or an HTTP-date. Returns milliseconds-to-wait, or null
+// when absent / unparseable (caller falls back to the backoff schedule).
+function _parseRetryAfter(headerValue) {
+  if (!headerValue) return null;
+  const trimmed = String(headerValue).trim();
+  // delta-seconds form: pure integer.
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = parseInt(trimmed, 10);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  }
+  // HTTP-date form: parse and diff against now.
+  const asDate = Date.parse(trimmed);
+  if (Number.isFinite(asDate)) return Math.max(0, asDate - Date.now());
+  return null;
+}
+
 // Paginated /markets fetch. Follows the cursor field until empty or the
 // MAX_PAGES safety stop trips. Returns the flat list of market objects.
+// On HTTP 429 (rate limit), retries with exponential backoff per
+// KALSHI_RETRY_BACKOFF_MS, honoring a Retry-After header when present.
+// After retries are exhausted, throws — the override block's try/catch
+// in services/jobs.js catches it and falls through to the
+// Unabated/OddsAPI backup safely. Other non-OK statuses fail fast.
 async function fetchAllMarkets() {
   const all = [];
   let cursor = null;
@@ -260,8 +293,33 @@ async function fetchAllMarkets() {
     url.searchParams.set('series_ticker', SERIES_TICKER);
     url.searchParams.set('limit', String(PAGE_LIMIT));
     if (cursor) url.searchParams.set('cursor', cursor);
-    const resp = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
-    if (!resp.ok) throw new Error('Kalshi /markets HTTP ' + resp.status);
+
+    // 429-aware fetch loop. Each iteration either:
+    //   - returns a non-429 response (success OR a different error) and breaks
+    //   - returns 429 with retries remaining → wait then re-enter loop
+    //   - returns 429 with no retries left → break and let the throw fire
+    let resp = null;
+    for (let attempt = 0; attempt <= KALSHI_RETRY_BACKOFF_MS.length; attempt++) {
+      resp = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+      if (resp.status !== 429) break;
+      if (attempt === KALSHI_RETRY_BACKOFF_MS.length) break;
+      const headerWait = _parseRetryAfter(resp.headers.get('Retry-After'));
+      const wait = headerWait != null
+        ? Math.min(headerWait, KALSHI_MAX_BACKOFF_MS)
+        : KALSHI_RETRY_BACKOFF_MS[attempt];
+      console.warn('[kalshi] /markets 429 page=' + page
+        + ' attempt=' + (attempt + 1) + '/' + KALSHI_RETRY_BACKOFF_MS.length
+        + ' waiting=' + wait + 'ms'
+        + (headerWait != null ? ' (Retry-After honored)' : ' (backoff schedule)'));
+      await new Promise(r => setTimeout(r, wait));
+    }
+    if (!resp.ok) {
+      if (resp.status === 429) {
+        throw new Error('Kalshi /markets HTTP 429 — rate-limited after '
+          + KALSHI_RETRY_BACKOFF_MS.length + ' retries');
+      }
+      throw new Error('Kalshi /markets HTTP ' + resp.status);
+    }
     const data = await resp.json();
     const batch = Array.isArray(data.markets) ? data.markets : [];
     all.push(...batch);
