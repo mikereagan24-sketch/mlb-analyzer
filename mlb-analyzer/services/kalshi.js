@@ -33,18 +33,19 @@ const MIN_VOLUME = 0;
 // Kalshi abbr → game_log abbr. game_log uses (confirmed via DISTINCT scan):
 //   ARI ATH ATL BAL BOS CHC CIN CLE COL CWS DET HOU KC LAA LAD MIA MIL
 //   MIN NYM NYY PHI PIT SD SEA SF STL TB TEX TOR WAS
-// Confirmed Kalshi-vs-game_log differences: AZ → ARI. CWS already matches.
-// The remaining entries are best-guess mappings for abbrs Kalshi commonly
-// uses elsewhere that diverge from game_log's set; they need confirmation
-// against a real Kalshi response before any of them are trusted:
-//   OAK → ATH (Athletics — game_log uses ATH after the Sacramento move;
-//              UNCONFIRMED whether Kalshi has caught up)
-//   WSH → WAS (UNCONFIRMED — Kalshi might already use WAS)
-//   TBR → TB, KCR → KC, SDP → SD, SFG → SF, CHW → CWS (legacy FG-style
-//              abbrs; UNCONFIRMED whether Kalshi uses any of these)
+// Verified against a live Kalshi /markets response:
+//   AZ  → ARI : OBSERVED (e.g. KXMLBGAME-…COLAZ). Required.
+//   WSH → WAS : OBSERVED (e.g. KXMLBGAME-26MAY241610WSHATL). Required.
+//   ATH       : Kalshi already emits ATH (e.g. KXMLBGAME-…SEAATH),
+//               matching game_log — NO remap (intentionally absent).
+// Defensive entries below — Kalshi has NOT been observed emitting these
+// long-form abbrs, but if it ever does, the remap lands them in
+// game_log's short-form bucket:
+//   TBR → TB, KCR → KC, SDP → SD, SFG → SF, CHW → CWS
+// Do NOT remove AZ or WSH on the assumption they're hypothetical — both
+// are confirmed against live data and the resolver depends on them.
 const KALSHI_TO_GAMELOG = {
   AZ:  'ARI',
-  OAK: 'ATH',
   WSH: 'WAS',
   TBR: 'TB',
   KCR: 'KC',
@@ -196,14 +197,20 @@ async function getKalshiMlbLines(date) {
     // price AFTER the spread — i.e. the bettor's actual fill, not pure
     // mispricing. This is intentional: any edge calc layered on top will
     // already net out Kalshi's spread.
-    const ask = typeof m.yes_ask_dollars === 'number' ? m.yes_ask_dollars : null;
-    const bid = typeof m.yes_bid_dollars === 'number' ? m.yes_bid_dollars : null;
-    if (ask == null) continue;
+    //
+    // Kalshi returns these as JSON STRINGS ("0.4900", "62.64"), not
+    // numbers — the original typeof === 'number' guard was always false
+    // and dropped every market. parseFloat + Number.isFinite handles both
+    // representations (defensive in case Kalshi ever switches to numbers).
+    const ask = parseFloat(m.yes_ask_dollars);
+    const bid = parseFloat(m.yes_bid_dollars);
+    if (!Number.isFinite(ask)) continue;
     const win_prob_ask = ask; // dollars per $1 contract == implied probability
     const ask_ml = probToAmerican(win_prob_ask);
 
     const sideTeam = sideOfMarket(m.ticker);
-    const volume = typeof m.volume_24h_fp === 'number' ? m.volume_24h_fp : 0;
+    const volumeRaw = parseFloat(m.volume_24h_fp);
+    const volume = Number.isFinite(volumeRaw) ? volumeRaw : 0;
     if (volume < MIN_VOLUME) continue;
 
     if (!byEvent.has(eventTicker)) {
@@ -219,7 +226,12 @@ async function getKalshiMlbLines(date) {
       });
     }
     const evt = byEvent.get(eventTicker);
-    const side = { ask_ml, bid_dollars: bid, ask_dollars: ask, win_prob_ask };
+    const side = {
+      ask_ml,
+      bid_dollars: Number.isFinite(bid) ? bid : null,
+      ask_dollars: ask,
+      win_prob_ask,
+    };
     if (sideTeam === evt.away_team) {
       evt.away = side;
       evt.volume_24h_away = volume;
