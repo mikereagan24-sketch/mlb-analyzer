@@ -6,6 +6,7 @@ const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScore
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
+const { getKalshiMlbLines } = require('./kalshi');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
@@ -141,6 +142,13 @@ function getSettings() {
     })(),
     DEFENSE_FRV_MUTE:          num('defense_frv_mute',          _d('defense_frv_mute', 0.5)),
     DEFENSE_FRV_OPPS_PER_GAME: num('defense_frv_opps_per_game', _d('defense_frv_opps_per_game', 25)),
+    // Kalshi-direct ML override (services/jobs.js runOddsJob). Same dormant
+    // pattern: default off, no effect until flipped.
+    KALSHI_DIRECT_PRIMARY_ENABLED: (function() {
+      const raw = s['kalshi_direct_primary_enabled'];
+      if (raw == null) return _d('kalshi_direct_primary_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
     odds_api_key: s['odds_api_key'] || null,
   };
 }
@@ -2206,6 +2214,72 @@ async function runOddsJob(dateStr) {
       });
       if (oddsRaw.length < before) {
         console.log('[odds] gated out '+(before - oddsRaw.length)+' game(s) not in statsapi schedule');
+      }
+    }
+
+    // Kalshi-direct ML override (gated). When kalshi_direct_primary_enabled
+    // is on, fetch pre-game MLB moneylines directly from Kalshi and
+    // OVERRIDE the ML fields of any oddsRaw row Kalshi covers. The
+    // Unabated/OddsAPI rows remain in oddsRaw with their totals/spreads
+    // intact — Kalshi-direct is ML-only for now. Games Kalshi doesn't
+    // cover flow through unmodified, so the existing fetch IS the backup.
+    //
+    // Guardrails:
+    //   - Locked rows (odds_locked_at set) are skipped — locked line wins.
+    //   - Kalshi game_ids not in oddsRaw are LOGGED and SKIPPED, not
+    //     injected (statsapi/oddsRaw is authoritative for which games
+    //     exist; mirrors the phantom gate above).
+    //   - LOUD ON EMPTY: Kalshi returned data but matched zero oddsRaw
+    //     rows → WARN (likely a game_id mapping break), then proceed
+    //     unmodified.
+    //   - Whole block try/catch'd: any failure logs and falls through.
+    //     Kalshi-direct must never break the odds job.
+    if (settings.KALSHI_DIRECT_PRIMARY_ENABLED) {
+      try {
+        const kalshiRows = await getKalshiMlbLines(dateStr);
+        if (!kalshiRows.length) {
+          console.log('[odds] Kalshi-direct: no pre-game markets returned for ' + dateStr);
+        } else {
+          const oddsById = new Map();
+          for (const o of oddsRaw) oddsById.set(o.game_id, o);
+          let overridden = 0, skippedLocked = 0, missingFromOdds = 0;
+          for (const k of kalshiRows) {
+            // Same convention as the rest of the system: makeGameId lowercases
+            // and strips non-alpha. Kalshi-direct already normalized abbrs
+            // to game_log's set (e.g. AZ→ARI, WSH→WAS) inside kalshi.js.
+            const gameId = makeGameId(k.away_team, k.home_team);
+            const o = oddsById.get(gameId);
+            if (!o) {
+              console.warn('[odds] Kalshi-direct: ' + gameId
+                + ' not in oddsRaw — skipping (oddsRaw is authoritative for which games exist)');
+              missingFromOdds++;
+              continue;
+            }
+            const existing = q.getGameById.get(dateStr, gameId);
+            if (existing && existing.odds_locked_at) {
+              skippedLocked++;
+              continue;
+            }
+            // ML override only. Totals, spreads, sources for non-ML markets,
+            // and every other field stay as Unabated/OddsAPI set them.
+            o.market_away_ml = k.away.ask_ml;
+            o.market_home_ml = k.home.ask_ml;
+            o.ml_source = 'kalshi';
+            overridden++;
+          }
+          const backupCount = oddsRaw.length - overridden;
+          console.log('[odds] Kalshi-direct: ' + overridden + ' game(s) overridden, '
+            + backupCount + ' from backup (unabated/oddsapi)'
+            + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
+            + (missingFromOdds ? ', ' + missingFromOdds + ' kalshi-only (skipped, not in oddsRaw)' : ''));
+          if (overridden === 0 && missingFromOdds > 0) {
+            console.warn('[odds] Kalshi-direct: ' + kalshiRows.length
+              + ' Kalshi game(s) returned but ZERO matched oddsRaw game_ids — mapping likely broken'
+              + ' (check abbr normalization in services/kalshi.js). Proceeding with unmodified oddsRaw.');
+          }
+        }
+      } catch (e) {
+        console.warn('[odds] Kalshi-direct override failed (non-fatal, falling through): ' + e.message);
       }
     }
 
