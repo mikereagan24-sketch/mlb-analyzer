@@ -107,6 +107,10 @@ const SETTINGS_SCHEMA = {
     help: 'Fraction of team fielding run value applied. <1 because pitcher wOBA-against already partially reflects the defense played behind the pitcher in his sample; this captures the differential without double-counting.' },
   defense_frv_opps_per_game: { type: 'number', min: 10, max: 40, default: 25,
     help: 'Fielding opportunities a starting fielder sees per full game (~25, near-constant across non-catcher positions per the FRV outs_total data). Per-game FRV = (total_runs/outs_total) x this. Environmental constant.' },
+
+  // --- Kalshi-direct moneyline (override Unabated/OddsAPI ML primary) -------
+  kalshi_direct_primary_enabled: { type: 'boolean', default: false,
+    help: 'When ON, fetch MLB moneylines directly from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE the ML on any oddsRaw row that Kalshi covers. The Unabated/OddsAPI fetch still runs and supplies (a) ML for games Kalshi does not cover and (b) totals/spreads for every game (Kalshi-direct is ML-only for now). Locked games are skipped. Default OFF — dormant.' },
   tot_slope: { type: 'number', min: 0.05, max: 0.15, default: 0.08,
     help: 'Total-runs slope in over/under conversion.' },
 

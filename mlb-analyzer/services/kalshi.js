@@ -30,6 +30,16 @@ const MAX_PAGES = 10; // safety stop on the cursor loop
 // calibrated once the unit is pinned down.
 const MIN_VOLUME = 0;
 
+// Pre-game filter. Kalshi keeps a market status='active' DURING the game,
+// so without an explicit start-time check the client returns in-progress
+// prices (a 4:05 ET game appeared at 9:30 PT today with HOU-CHC -9900 and
+// SEA-KC -300 — those are live, not pre-game). Default GAME_START_BUFFER_MIN
+// is 0: a game is "live" the instant its scheduled start passes. Set
+// positive to exclude games that start within N minutes; e.g. 5 means
+// "drop games starting in the next 5 minutes too." Negative would let
+// just-started games through.
+const GAME_START_BUFFER_MIN = 0;
+
 // Kalshi abbr → game_log abbr. game_log uses (confirmed via DISTINCT scan):
 //   ARI ATH ATL BAL BOS CHC CIN CLE COL CWS DET HOU KC LAA LAD MIA MIL
 //   MIN NYM NYY PHI PIT SD SEA SF STL TB TEX TOR WAS
@@ -147,6 +157,99 @@ function probToAmerican(p) {
     :  Math.round(100 * (1 - p) / p);
 }
 
+// "ET wall-clock minutes" — a sortable integer representing a moment as
+// it reads on a clock in America/New_York. Used to compare game start
+// times (embedded ET in the event ticker) to the current ET wall-clock,
+// without ever caring whether ET is currently EDT or EST: both sides of
+// the comparison are reduced to wall-clock-of-ET, so DST shifts cancel.
+//
+// Implementation note: Date.UTC of (Y,M-1,D) gives UTC midnight of that
+// CALENDAR date, regardless of timezone. Adding the wall-clock hour+minute
+// produces a monotonic integer with the property that two such values
+// computed for the same timezone differ by exactly the wall-clock minute
+// gap between them. We never INTERPRET this number as a UTC instant.
+function _etWallClockMinutes(y, mo, d, h, mi) {
+  const dayUtc = Math.floor(Date.UTC(+y, +mo - 1, +d) / 60000);
+  return dayUtc + +h * 60 + +mi;
+}
+
+// Current "now" rendered as ET wall-clock minutes. Uses Intl with
+// timeZone:America/New_York so DST is handled by the platform, not by us.
+function etMinutesNow() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const p = {};
+  for (const x of parts) p[x.type] = x.value;
+  return _etWallClockMinutes(p.year, p.month, p.day, p.hour, p.minute);
+}
+
+// Game start as ET wall-clock minutes, derived from the ticker's embedded
+// YYMONDD+HHMM. Returns null on malformed input. Verified against today's
+// CWS@SF KXMLBGAME-26MAY231605CWSSF: game_date 2026-05-23, hhmm "1605"
+// → 16:05 ET (4:05 PM ET / 1:05 PM PT), which matches SF's Saturday
+// home start time.
+function etMinutesFromTicker(parsed) {
+  if (!parsed || !parsed.game_date || !parsed.hhmm) return null;
+  const [y, mo, d] = parsed.game_date.split('-');
+  if (!y || !mo || !d) return null;
+  const h = parsed.hhmm.slice(0, 2);
+  const mi = parsed.hhmm.slice(2, 4);
+  return _etWallClockMinutes(y, mo, d, h, mi);
+}
+
+// Kalshi taker fee.
+//
+// Formula (per Kalshi docs):
+//   fee_total = ceil_to_cent( COEF * C * (1 - C) * N )
+// where C = contract price in dollars, N = contracts. The C*(1-C) shape
+// charges the most around 50¢ contracts and tapers toward 0 at the price
+// extremes. Round UP to the next whole cent on the TOTAL order, not per
+// contract (Kalshi bills the order, not each contract individually).
+//
+// COEF: Kalshi's published guides say 0.07, but three real fills
+// back-solve to ~0.068. Numbers computed and verified, ceil-to-cent:
+//   $38.20 stake @ 0.62 → 61.6 contracts, slip says $0.99
+//     COEF=0.07  → $1.0159 raw → $1.02 charged  (off by 3¢)
+//     COEF=0.068 → $0.9869 raw → $0.99 charged  ✓
+//   $100.00 stake @ 0.62 → 161 contracts, slip says $2.60
+//     COEF=0.07  → $2.6552 raw → $2.66 charged  (off by 6¢)
+//     COEF=0.068 → $2.5793 raw → $2.58 charged  (off by 2¢)
+//   $100.00 stake @ 0.50 → 200 contracts, slip says $3.39
+//     COEF=0.07  → $3.5000 raw → $3.50 charged  (off by 11¢)
+//     COEF=0.068 → $3.4000 raw → $3.40 charged  (off by 1¢)
+// The third slip is the important one: C*(1-C) peaks at C=0.50, so the
+// fee is at its maximum sensitivity to COEF there. 0.07 misses by 11¢
+// at the peak; 0.068 misses by 1¢. That confirms 0.068 is the right
+// neighborhood, not just a coincidence at C=0.62. Holding 0.068 as the
+// default; treat as configurable and re-verify against fresh slips,
+// since the rate may vary by market or change over time.
+const KALSHI_FEE_COEF = 0.068;
+
+// Smooth per-contract fee rate (un-rounded). Useful for the model: edge
+// calculations need a differentiable per-contract cost, not the bucketed
+// per-order total. Returns dollars per contract at price C.
+function kalshiTakerFeeRate(price) {
+  const C = Number(price);
+  if (!Number.isFinite(C) || C <= 0 || C >= 1) return 0;
+  return KALSHI_FEE_COEF * C * (1 - C);
+}
+
+// Charged taker fee in dollars for an order of `contracts` at `price`.
+// This is what Kalshi actually debits: ceil-to-cent on the TOTAL.
+function kalshiTakerFee(price, contracts) {
+  const C = Number(price);
+  const N = Number(contracts);
+  if (!Number.isFinite(C) || C <= 0 || C >= 1) return 0;
+  if (!Number.isFinite(N) || N <= 0) return 0;
+  const raw = KALSHI_FEE_COEF * C * (1 - C) * N;
+  // Cent-rounding via integer arithmetic to dodge float drift
+  // (e.g. 0.058 → 5.7999999 cents → ceil should give 6, not 7).
+  return Math.ceil(raw * 100 - 1e-9) / 100;
+}
+
 // Paginated /markets fetch. Follows the cursor field until empty or the
 // MAX_PAGES safety stop trips. Returns the flat list of market objects.
 async function fetchAllMarkets() {
@@ -170,10 +273,23 @@ async function fetchAllMarkets() {
 
 // Public entrypoint. Returns the array of MLB moneyline pairs for the
 // requested date in the shape documented in the module header.
-async function getKalshiMlbLines(date) {
+//
+// opts.includeLive (default false): when false, drop games whose ET start
+//   time has passed (Kalshi keeps markets status='active' DURING the game
+//   and would otherwise feed in-progress prices into the consumer). When
+//   true, all matching games are returned with `is_live` flagged — used
+//   by the CLI for visual validation of the filter.
+// opts.bufferMin (default GAME_START_BUFFER_MIN): minutes of safety
+//   margin before scheduled start. With bufferMin=5, a game starting in
+//   3 minutes is treated as live.
+async function getKalshiMlbLines(date, opts) {
   if (!date) throw new Error('getKalshiMlbLines: date (YYYY-MM-DD) required');
+  const includeLive = !!(opts && opts.includeLive);
+  const bufferMin = (opts && opts.bufferMin != null)
+    ? Number(opts.bufferMin) : GAME_START_BUFFER_MIN;
 
   const nowIso = new Date().toISOString();
+  const nowEtMin = etMinutesNow();
   const raw = await fetchAllMarkets();
 
   // Two markets per event (one per side). Group by event_ticker, accumulate
@@ -214,11 +330,19 @@ async function getKalshiMlbLines(date) {
     if (volume < MIN_VOLUME) continue;
 
     if (!byEvent.has(eventTicker)) {
+      // Compute start time + live status ONCE per event (both market
+      // tickers share the same start). is_live=true means scheduled
+      // start (minus optional buffer) has already passed in ET wall-clock.
+      const startMin = etMinutesFromTicker(parsed);
+      const isLive = startMin != null
+        && (startMin - bufferMin) <= nowEtMin;
       byEvent.set(eventTicker, {
         game_date: parsed.game_date,
         away_team: parsed.away_team,
         home_team: parsed.home_team,
         event_ticker: eventTicker,
+        start_et: parsed.hhmm, // 4-digit ET HHMM, e.g. "1605"
+        is_live: isLive,
         away: null,
         home: null,
         volume_24h_away: null,
@@ -246,12 +370,22 @@ async function getKalshiMlbLines(date) {
   }
 
   // Only emit fully-populated events (both sides present). A half-fetched
-  // event would be a debugging foot-gun downstream.
-  return [...byEvent.values()].filter(e => e.away && e.home);
+  // event would be a debugging foot-gun downstream. Live games are dropped
+  // unless the caller opted in via includeLive — Kalshi keeps markets
+  // active during play, and an in-progress price would silently bleed
+  // into edge calculations that assume a pre-game line.
+  return [...byEvent.values()]
+    .filter(e => e.away && e.home)
+    .filter(e => includeLive || !e.is_live);
 }
 
 module.exports = {
   getKalshiMlbLines,
+  // Taker-fee helpers. kalshiTakerFee returns the dollars Kalshi will
+  // actually debit (ceil-to-cent total); kalshiTakerFeeRate returns the
+  // smooth per-contract rate for edge math.
+  kalshiTakerFee,
+  kalshiTakerFeeRate,
   // Exported for unit-testing / inspection. Not part of the stable surface.
   _internal: {
     parseEventTicker,
@@ -260,31 +394,68 @@ module.exports = {
     normalizeAbbr,
     splitTeamBlob,
     fetchAllMarkets,
+    etMinutesNow,
+    etMinutesFromTicker,
     KALSHI_TO_GAMELOG,
     GAMELOG_ABBRS,
     MIN_VOLUME,
+    GAME_START_BUFFER_MIN,
+    KALSHI_FEE_COEF,
   },
 };
 
 // CLI test: `node services/kalshi.js [YYYY-MM-DD]`. Prints today's lines
 // (or the supplied date) in a readable table for eyeball-comparison
 // against Unabated.
+//
+// Also: `node services/kalshi.js feecheck <price> <contracts>` prints
+// the computed taker fee so it can be validated against real Kalshi
+// slips. e.g. `feecheck 0.62 161` should report $2.58 (real slip $2.60).
 if (require.main === module) {
   (async () => {
     const arg = process.argv[2];
+    if (arg === 'feecheck') {
+      const price = parseFloat(process.argv[3]);
+      const contracts = parseFloat(process.argv[4]);
+      if (!Number.isFinite(price) || !Number.isFinite(contracts)) {
+        console.error('usage: node services/kalshi.js feecheck <price> <contracts>');
+        process.exit(2);
+      }
+      const ratePerContract = kalshiTakerFeeRate(price);
+      const rawTotal = ratePerContract * contracts;
+      const chargedTotal = kalshiTakerFee(price, contracts);
+      console.log('Kalshi taker fee (COEF = ' + KALSHI_FEE_COEF + ')');
+      console.log('  price          = $' + price.toFixed(4));
+      console.log('  contracts      = ' + contracts);
+      console.log('  rate/contract  = $' + ratePerContract.toFixed(6));
+      console.log('  raw total      = $' + rawTotal.toFixed(6));
+      console.log('  charged total  = $' + chargedTotal.toFixed(2) + '  (ceil-to-cent)');
+      return;
+    }
     const date = arg || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     console.log('Kalshi MLB moneylines for ' + date + ' (ASK-based, status=active)');
+    // CLI passes includeLive:true so the user can see BOTH pre-game and
+    // live games side by side and visually validate the filter is firing
+    // correctly. The default consumer call (no opts) excludes live games.
     try {
-      const rows = await getKalshiMlbLines(date);
+      const rows = await getKalshiMlbLines(date, { includeLive: true });
       if (!rows.length) {
         console.log('(no markets matched)');
         return;
       }
+      // Sort pre-game first, then live, by ET start time within each group.
+      rows.sort((a, b) => (Number(a.is_live) - Number(b.is_live))
+        || (a.start_et || '').localeCompare(b.start_et || ''));
       console.log(
-        ['away/home', 'away_ml', 'home_ml', 'p(home)', 'vol_away', 'vol_home', 'event_ticker'].join('\t')
+        ['status', 'start_et', 'away/home', 'away_ml', 'home_ml',
+          'p(home)', 'vol_away', 'vol_home', 'event_ticker'].join('\t')
       );
+      let pre = 0, live = 0;
       for (const r of rows) {
+        if (r.is_live) live++; else pre++;
         console.log([
+          r.is_live ? 'LIVE   ' : 'PREGAME',
+          r.start_et || '----',
           r.away_team + '@' + r.home_team,
           r.away.ask_ml,
           r.home.ask_ml,
@@ -294,6 +465,8 @@ if (require.main === module) {
           r.event_ticker,
         ].join('\t'));
       }
+      console.log('--');
+      console.log(pre + ' pre-game, ' + live + ' live (live rows would be EXCLUDED by default — opts.includeLive=false)');
     } catch (e) {
       console.error('error: ' + e.message);
       process.exit(1);
