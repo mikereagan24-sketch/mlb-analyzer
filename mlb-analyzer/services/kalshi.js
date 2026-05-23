@@ -147,6 +147,56 @@ function probToAmerican(p) {
     :  Math.round(100 * (1 - p) / p);
 }
 
+// Kalshi taker fee.
+//
+// Formula (per Kalshi docs):
+//   fee_total = ceil_to_cent( COEF * C * (1 - C) * N )
+// where C = contract price in dollars, N = contracts. The C*(1-C) shape
+// charges the most around 50¢ contracts and tapers toward 0 at the price
+// extremes. Round UP to the next whole cent on the TOTAL order, not per
+// contract (Kalshi bills the order, not each contract individually).
+//
+// COEF: Kalshi's published guides say 0.07, but three real fills
+// back-solve to ~0.068. Numbers computed and verified, ceil-to-cent:
+//   $38.20 stake @ 0.62 → 61.6 contracts, slip says $0.99
+//     COEF=0.07  → $1.0159 raw → $1.02 charged  (off by 3¢)
+//     COEF=0.068 → $0.9869 raw → $0.99 charged  ✓
+//   $100.00 stake @ 0.62 → 161 contracts, slip says $2.60
+//     COEF=0.07  → $2.6552 raw → $2.66 charged  (off by 6¢)
+//     COEF=0.068 → $2.5793 raw → $2.58 charged  (off by 2¢)
+//   $100.00 stake @ 0.50 → 200 contracts, slip says $3.39
+//     COEF=0.07  → $3.5000 raw → $3.50 charged  (off by 11¢)
+//     COEF=0.068 → $3.4000 raw → $3.40 charged  (off by 1¢)
+// The third slip is the important one: C*(1-C) peaks at C=0.50, so the
+// fee is at its maximum sensitivity to COEF there. 0.07 misses by 11¢
+// at the peak; 0.068 misses by 1¢. That confirms 0.068 is the right
+// neighborhood, not just a coincidence at C=0.62. Holding 0.068 as the
+// default; treat as configurable and re-verify against fresh slips,
+// since the rate may vary by market or change over time.
+const KALSHI_FEE_COEF = 0.068;
+
+// Smooth per-contract fee rate (un-rounded). Useful for the model: edge
+// calculations need a differentiable per-contract cost, not the bucketed
+// per-order total. Returns dollars per contract at price C.
+function kalshiTakerFeeRate(price) {
+  const C = Number(price);
+  if (!Number.isFinite(C) || C <= 0 || C >= 1) return 0;
+  return KALSHI_FEE_COEF * C * (1 - C);
+}
+
+// Charged taker fee in dollars for an order of `contracts` at `price`.
+// This is what Kalshi actually debits: ceil-to-cent on the TOTAL.
+function kalshiTakerFee(price, contracts) {
+  const C = Number(price);
+  const N = Number(contracts);
+  if (!Number.isFinite(C) || C <= 0 || C >= 1) return 0;
+  if (!Number.isFinite(N) || N <= 0) return 0;
+  const raw = KALSHI_FEE_COEF * C * (1 - C) * N;
+  // Cent-rounding via integer arithmetic to dodge float drift
+  // (e.g. 0.058 → 5.7999999 cents → ceil should give 6, not 7).
+  return Math.ceil(raw * 100 - 1e-9) / 100;
+}
+
 // Paginated /markets fetch. Follows the cursor field until empty or the
 // MAX_PAGES safety stop trips. Returns the flat list of market objects.
 async function fetchAllMarkets() {
@@ -252,6 +302,11 @@ async function getKalshiMlbLines(date) {
 
 module.exports = {
   getKalshiMlbLines,
+  // Taker-fee helpers. kalshiTakerFee returns the dollars Kalshi will
+  // actually debit (ceil-to-cent total); kalshiTakerFeeRate returns the
+  // smooth per-contract rate for edge math.
+  kalshiTakerFee,
+  kalshiTakerFeeRate,
   // Exported for unit-testing / inspection. Not part of the stable surface.
   _internal: {
     parseEventTicker,
@@ -263,15 +318,38 @@ module.exports = {
     KALSHI_TO_GAMELOG,
     GAMELOG_ABBRS,
     MIN_VOLUME,
+    KALSHI_FEE_COEF,
   },
 };
 
 // CLI test: `node services/kalshi.js [YYYY-MM-DD]`. Prints today's lines
 // (or the supplied date) in a readable table for eyeball-comparison
 // against Unabated.
+//
+// Also: `node services/kalshi.js feecheck <price> <contracts>` prints
+// the computed taker fee so it can be validated against real Kalshi
+// slips. e.g. `feecheck 0.62 161` should report $2.58 (real slip $2.60).
 if (require.main === module) {
   (async () => {
     const arg = process.argv[2];
+    if (arg === 'feecheck') {
+      const price = parseFloat(process.argv[3]);
+      const contracts = parseFloat(process.argv[4]);
+      if (!Number.isFinite(price) || !Number.isFinite(contracts)) {
+        console.error('usage: node services/kalshi.js feecheck <price> <contracts>');
+        process.exit(2);
+      }
+      const ratePerContract = kalshiTakerFeeRate(price);
+      const rawTotal = ratePerContract * contracts;
+      const chargedTotal = kalshiTakerFee(price, contracts);
+      console.log('Kalshi taker fee (COEF = ' + KALSHI_FEE_COEF + ')');
+      console.log('  price          = $' + price.toFixed(4));
+      console.log('  contracts      = ' + contracts);
+      console.log('  rate/contract  = $' + ratePerContract.toFixed(6));
+      console.log('  raw total      = $' + rawTotal.toFixed(6));
+      console.log('  charged total  = $' + chargedTotal.toFixed(2) + '  (ceil-to-cent)');
+      return;
+    }
     const date = arg || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     console.log('Kalshi MLB moneylines for ' + date + ' (ASK-based, status=active)');
     try {
