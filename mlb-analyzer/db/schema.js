@@ -122,6 +122,23 @@ db.exec(`
   proj_away_sp TEXT,
   proj_home_sp TEXT,
   proj_lineup_captured_at TEXT,
+  -- Per-source probable-SP capture. statsapi_*_sp is the probable starter
+  -- emitted by statsapi during the bootstrap pass; rotowire_*_sp is the
+  -- starter parsed from RotoWire's lineup page. Each column is owned by
+  -- exactly one source (the other passes null, COALESCE preserves), so
+  -- the two raw values are independently auditable regardless of how the
+  -- merged away_sp / home_sp landed under the existing Option B
+  -- precedence (statsapi wins on conflict). sp_source_conflict /
+  -- sp_source_conflict_note record the result of comparing the two raw
+  -- values with name-normalization (normName + stripSfx + last+initial),
+  -- recomputed every lineup-job pass; flag is FLAG-ONLY (signals are NOT
+  -- suppressed when set).
+  statsapi_away_sp TEXT,
+  statsapi_home_sp TEXT,
+  rotowire_away_sp TEXT,
+  rotowire_home_sp TEXT,
+  sp_source_conflict INTEGER DEFAULT 0,
+  sp_source_conflict_note TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -458,6 +475,18 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_lineup_json TEXT"); } c
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_lineup_captured_at TEXT"); } catch(e) {}
+// Per-source probable-SP capture (feat/pitcher-source-discrepancy-flag).
+// statsapi_*_sp written by bootstrap, rotowire_*_sp written by RotoWire
+// enrichment — each column owned by one source; the other passes null
+// and COALESCE in upsertGame preserves. sp_source_conflict /
+// sp_source_conflict_note are recomputed each lineup-job pass via a
+// separate UPDATE (q.updateSpSourceConflict) using the two raw values.
+try { db.exec("ALTER TABLE game_log ADD COLUMN statsapi_away_sp TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN statsapi_home_sp TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN rotowire_away_sp TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN rotowire_home_sp TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN sp_source_conflict INTEGER DEFAULT 0"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN sp_source_conflict_note TEXT"); } catch(e) {}
 // Soft-delete columns for the auto-prune path. fetchSchedule sets these
 // when a previously-bootstrapped row's game_pk disappears from statsapi
 // (cancellation, postponement to a different date, doubleheader
@@ -877,6 +906,8 @@ const q = {
     INSERT INTO game_log (
       game_date, game_id, away_team, home_team, game_time,
       away_sp, away_sp_hand, home_sp, home_sp_hand,
+      statsapi_away_sp, statsapi_home_sp,
+      rotowire_away_sp, rotowire_home_sp,
       bulk_guy_away_announced, bulk_guy_home_announced,
       away_sp_proj_ip, home_sp_proj_ip,
       away_sp_forecast_ip, home_sp_forecast_ip,
@@ -888,6 +919,8 @@ const q = {
     ) VALUES (
       @game_date, @game_id, @away_team, @home_team, @game_time,
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
+      @statsapi_away_sp, @statsapi_home_sp,
+      @rotowire_away_sp, @rotowire_home_sp,
       @bulk_guy_away_announced, @bulk_guy_home_announced,
       @away_sp_proj_ip, @home_sp_proj_ip,
       @away_sp_forecast_ip, @home_sp_forecast_ip,
@@ -906,6 +939,14 @@ const q = {
       away_sp_hand = COALESCE(excluded.away_sp_hand, game_log.away_sp_hand),
       home_sp = COALESCE(excluded.home_sp, game_log.home_sp),
       home_sp_hand = COALESCE(excluded.home_sp_hand, game_log.home_sp_hand),
+      -- Per-source SP capture. Each source-owned column COALESCEs against
+      -- itself so the writer for the OTHER source (passing null here) does
+      -- not wipe a previously-captured value. Bootstrap writes statsapi_*;
+      -- RotoWire enrichment writes rotowire_*; neither touches the other.
+      statsapi_away_sp = COALESCE(excluded.statsapi_away_sp, game_log.statsapi_away_sp),
+      statsapi_home_sp = COALESCE(excluded.statsapi_home_sp, game_log.statsapi_home_sp),
+      rotowire_away_sp = COALESCE(excluded.rotowire_away_sp, game_log.rotowire_away_sp),
+      rotowire_home_sp = COALESCE(excluded.rotowire_home_sp, game_log.rotowire_home_sp),
       -- COALESCE bulk_guy_*_announced so a RotoWire upsert without a PRIM
       -- tag doesn't wipe a previously-captured announced bulk. RotoWire is
       -- the only writer of these fields; statsapi never sets them.
@@ -949,6 +990,19 @@ const q = {
       actual_total = @away_score + @home_score,
       scores_source = @scores_source,
       scores_quality = 'fresh', scores_quality_at = datetime('now'),
+      updated_at = datetime('now')
+    WHERE game_date = @game_date AND game_id = @game_id
+  `),
+  // Recomputed each lineup-job pass: compares statsapi_*_sp vs
+  // rotowire_*_sp (after both sources have written their raw values)
+  // and persists the result. Caller owns the comparison + normalization;
+  // this statement just writes the boolean flag + note. Note text is
+  // null when flag is 0 (cleared on every pass so a resolved conflict
+  // doesn't leave a stale note behind).
+  updateSpSourceConflict: db.prepare(`
+    UPDATE game_log SET
+      sp_source_conflict = @sp_source_conflict,
+      sp_source_conflict_note = @sp_source_conflict_note,
       updated_at = datetime('now')
     WHERE game_date = @game_date AND game_id = @game_id
   `),

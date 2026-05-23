@@ -865,6 +865,15 @@ async function ensureScheduleBootstrap(dateStr) {
       away_sp_hand: g.away_sp ? g.away_sp.hand : null,
       home_sp: g.home_sp ? g.home_sp.name : null,
       home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+      // Per-source SP capture: bootstrap is the statsapi source. Persist
+      // statsapi's probable SPs distinctly so they survive even if the
+      // merged away_sp/home_sp gets a different value from a later pass.
+      // rotowire_*_sp null here → COALESCE preserves any value RotoWire
+      // already wrote.
+      statsapi_away_sp: g.away_sp ? g.away_sp.name : null,
+      statsapi_home_sp: g.home_sp ? g.home_sp.name : null,
+      rotowire_away_sp: null,
+      rotowire_home_sp: null,
       // statsapi never carries the announced bulk; only RotoWire's PRIM
       // tag does. Null here lets the upsert COALESCE preserve any value
       // a prior RotoWire pass already wrote.
@@ -948,6 +957,12 @@ async function runLineupJob(dateStr) {
           away_sp_hand: g.away_sp ? g.away_sp.hand : null,
           home_sp: g.home_sp ? g.home_sp.name : null,
           home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+          // Per-source SP capture: bootstrap is the statsapi source. Same
+          // pattern as ensureScheduleBootstrap above.
+          statsapi_away_sp: g.away_sp ? g.away_sp.name : null,
+          statsapi_home_sp: g.home_sp ? g.home_sp.name : null,
+          rotowire_away_sp: null,
+          rotowire_home_sp: null,
           // statsapi bootstrap doesn't know about PRIM; null preserves any
           // existing RotoWire-written value via COALESCE in upsertGame.
           bulk_guy_away_announced: null,
@@ -1241,6 +1256,17 @@ async function runLineupJob(dateStr) {
         away_sp_hand: writeAwayHand,
         home_sp: writeHomeSp,
         home_sp_hand: writeHomeHand,
+        // Per-source SP capture: RotoWire writes its RAW value (rwAwaySp /
+        // rwHomeSp), independent of the Option-B precedence merge above
+        // that may have rejected it in favor of statsapi for away_sp /
+        // home_sp. statsapi_*_sp null here → COALESCE preserves the
+        // bootstrap-written statsapi value. Both source columns thus end
+        // up holding each source's unfiltered original, which lets the
+        // post-upsert conflict detector compare apples to apples.
+        statsapi_away_sp: null,
+        statsapi_home_sp: null,
+        rotowire_away_sp: rwAwaySp,
+        rotowire_home_sp: rwHomeSp,
         // RotoWire's PRIM-tagged announced bulk pitcher. Null when no PRIM
         // tag was found on this side; the upsert's COALESCE preserves any
         // previously-captured value across refreshes.
@@ -1342,6 +1368,62 @@ async function runLineupJob(dateStr) {
       home_lineup_status: g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected'),
       lineup_status: g.lineup_status || 'projected',
       });
+      // SP source-discrepancy flag. Both sources have now written for this
+      // game (statsapi via bootstrap above, RotoWire via this upsert), so
+      // we can compare their raw values. existingRow.statsapi_*_sp is the
+      // statsapi value captured pre-RotoWire; rwAwaySp / rwHomeSp are
+      // RotoWire's raw values from this pass.
+      //
+      // Match logic (matches resolveCatcherMlbId pattern for SP-name
+      // robustness against "F. Valdez" vs "Framber Valdez" / accents /
+      // Jr-Sr-II suffixes):
+      //   1. Both null OR either null → not a conflict (one source
+      //      unconfirmed, not disagreement).
+      //   2. normName + stripSfx full-string equal → not a conflict.
+      //   3. Otherwise compare last-name + first-initial.
+      //   4. Else → CONFLICT.
+      //
+      // Behavior: FLAG ONLY. We persist the flag on the row so the UI /
+      // API can surface it, but signals are NOT suppressed — pre-game
+      // churn often produces brief disagreements that resolve on their
+      // own, and silencing legitimate signals on transient mismatch would
+      // cost more than the flag is worth.
+      const _statsapiAway = existingRow ? existingRow.statsapi_away_sp : null;
+      const _statsapiHome = existingRow ? existingRow.statsapi_home_sp : null;
+      const _spNamesMatch = (a, b) => {
+        if (!a || !b) return false;
+        const na = stripSfx(normName(a));
+        const nb = stripSfx(normName(b));
+        if (na === nb) return true;
+        const pa = na.split(' ');
+        const pb = nb.split(' ');
+        if (pa.length < 2 || pb.length < 2) return false;
+        return pa[pa.length - 1] === pb[pb.length - 1]
+            && pa[0][0] === pb[0][0];
+      };
+      const _conflictParts = [];
+      if (_statsapiAway && rwAwaySp && !_spNamesMatch(_statsapiAway, rwAwaySp)) {
+        _conflictParts.push('away: statsapi=' + _statsapiAway + ', rotowire=' + rwAwaySp);
+      }
+      if (_statsapiHome && rwHomeSp && !_spNamesMatch(_statsapiHome, rwHomeSp)) {
+        _conflictParts.push('home: statsapi=' + _statsapiHome + ', rotowire=' + rwHomeSp);
+      }
+      const _conflictFlag = _conflictParts.length > 0 ? 1 : 0;
+      const _conflictNote = _conflictParts.length > 0 ? _conflictParts.join(' | ') : null;
+      try {
+        q.updateSpSourceConflict.run({
+          game_date: dateStr,
+          game_id: gameId,
+          sp_source_conflict: _conflictFlag,
+          sp_source_conflict_note: _conflictNote,
+        });
+        if (_conflictFlag) {
+          console.warn('[sp-source-conflict] ' + gameId + ' → ' + _conflictNote);
+        }
+      } catch (e) {
+        // Non-fatal: a flag-write failure must not break the lineup-job.
+        console.warn('[sp-source-conflict] write failed for ' + gameId + ': ' + e.message);
+      }
       const awayStatus = g.away_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     const homeStatus = g.home_lineup_status || (g.lineup_status==='confirmed'?'confirmed':'projected');
     // Capture-once snapshot of the first non-empty projected lineup. Skips
