@@ -2410,10 +2410,14 @@ async function runOddsJob(dateStr) {
           for (const o of oddsRaw) oddsById.set(o.game_id, o);
           let overridden = 0, skippedLocked = 0, missingFromOdds = 0;
           for (const k of kalshiRows) {
-            // Same convention as the rest of the system: makeGameId lowercases
-            // and strips non-alpha. Kalshi-direct already normalized abbrs
-            // to game_log's set (e.g. AZ→ARI, WSH→WAS) inside kalshi.js.
-            const gameId = makeGameId(k.away_team, k.home_team);
+            // Prefer the game_id the Kalshi client emits — it includes the
+            // doubleheader nightcap suffix (e.g. "stl-cin-g2") that the
+            // rest of the system uses in game_log. makeGameId(team, team)
+            // produces only the unsuffixed form, which would map a G2
+            // event onto game 1's row. Fall back to makeGameId for the
+            // single-game case if k.game_id is ever absent — defensive
+            // against an older Kalshi-client build that doesn't emit it.
+            const gameId = k.game_id || makeGameId(k.away_team, k.home_team);
             const o = oddsById.get(gameId);
             if (!o) {
               console.warn('[odds] Kalshi-direct: ' + gameId
