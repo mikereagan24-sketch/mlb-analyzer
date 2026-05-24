@@ -461,6 +461,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 1★ edge (%)</label><input type="number" id="s-tot-lean" step="0.1"></div>
 </div>
 <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
+<!-- Admin token affordance. Writes require X-Admin-Token (see
+     services/jobs.js POST /settings auth, branch feat/auth-settings-write).
+     Token lives in localStorage and is prompted on first save; this link
+     lets the user rotate or clear it without having to wait for a 401. -->
+<button class="btn" style="margin-left:8px;font-size:11px" onclick="changeAdminToken()" title="Set or change the X-Admin-Token used for settings writes">admin token</button>
 <span id="settings-status" style="font-size:11px;color:var(--text2);margin-left:10px"></span>
 </div>
 </div>
@@ -647,6 +652,75 @@ async function api(path,opts={}){
     throw err;
   }
   return r.json();
+}
+
+// ─── Admin-token wrapper for write endpoints ───────────────────────────
+// POST /api/settings (and other admin writes) require an X-Admin-Token
+// header — see routes/api.js requireAdminToken (branch
+// feat/auth-settings-write). This is a separate gate from the existing
+// _appPassword / x-app-password layer; writes need BOTH if both are
+// configured, but reads stay open (the api() helper above is unchanged
+// and continues to handle GETs without an admin token).
+//
+// Storage: localStorage key 'mlb_admin_token'. Acceptable for a personal
+// tool — any JS on this page can read localStorage, so a compromised
+// extension or XSS would also see the token. If exposure is suspected,
+// rotate DB_DOWNLOAD_TOKEN on the server and click "admin token" to
+// re-enter the new value.
+function getAdminToken(forcePrompt){
+  if(!forcePrompt){
+    const existing = localStorage.getItem('mlb_admin_token');
+    if(existing) return existing;
+  }
+  const entered = window.prompt('Enter admin token (X-Admin-Token, used for settings writes):');
+  if(!entered) return null;
+  localStorage.setItem('mlb_admin_token', entered);
+  return entered;
+}
+function clearAdminToken(){
+  localStorage.removeItem('mlb_admin_token');
+}
+// "admin token" button handler — open a prompt seeded with the current
+// stored value so the user can rotate or clear without remembering it.
+function changeAdminToken(){
+  const current = localStorage.getItem('mlb_admin_token') || '';
+  const entered = window.prompt('Admin token (leave blank to clear):', current);
+  if(entered === null) return; // cancelled — leave existing alone
+  if(entered === ''){ clearAdminToken(); return; }
+  localStorage.setItem('mlb_admin_token', entered);
+}
+
+// Admin-token-aware POST. One automatic retry: if the first attempt 401s,
+// clear the cached token, re-prompt, and try once more. This handles a
+// rotated DB_DOWNLOAD_TOKEN gracefully — a wrong-token bug doesn't
+// silently wedge every future save.
+//
+// Carries through the _appPassword if set, so writes work behind both
+// layers (admin-token + app-password) when both are configured.
+async function adminPost(path, payload){
+  async function doPost(token){
+    const headers = {'Content-Type':'application/json', 'X-Admin-Token': token};
+    if(_appPassword) headers['x-app-password'] = _appPassword;
+    return fetch('/api'+path, {method:'POST', headers, body: JSON.stringify(payload)});
+  }
+  let token = getAdminToken(false);
+  if(!token) throw new Error('Admin token required');
+  let r = await doPost(token);
+  if(r.status === 401){
+    clearAdminToken();
+    token = getAdminToken(true);
+    if(!token) throw new Error('Admin token required');
+    r = await doPost(token);
+  }
+  let body = null;
+  try { body = await r.json(); } catch(_) {}
+  if(!r.ok){
+    const err = new Error('API '+path+' → '+r.status);
+    err.status = r.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
 }
 
 async function refreshWobaStatus(){
@@ -2501,17 +2575,22 @@ async function saveSettings(){
     tot_lean_edge:      get('s-tot-lean'),
   };
   try{
-    const resp = await api('/settings', {method:'POST', body:JSON.stringify(pairs)});
+    // Use adminPost — POST /settings requires X-Admin-Token (see
+    // requireAdminToken in routes/api.js). adminPost prompts for the
+    // token on first save, caches it in localStorage, and re-prompts
+    // automatically on 401 (handles a rotated token gracefully).
+    const resp = await adminPost('/settings', pairs);
     if (resp && resp.errors && resp.errors.length) {
       alert('Save failed:\n\n' + resp.errors.join('\n'));
       return;
     }
     document.getElementById('games-status').textContent='✓ Settings saved';
   } catch(e){
-    // The api() helper may throw with the parsed error body — surface schema
-    // validator messages so the user sees exactly which key failed.
+    // adminPost throws with the parsed error body attached — surface
+    // schema-validator messages so the user sees exactly which key failed.
     let msg = e && e.message || 'unknown error';
     if (e && e.body && Array.isArray(e.body.errors)) msg = e.body.errors.join('\n');
+    if (e && e.status === 401) msg = 'Admin token rejected. Click "admin token" to re-enter.';
     alert('Save failed:\n\n' + msg);
   }
 }
