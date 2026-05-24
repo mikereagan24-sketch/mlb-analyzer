@@ -108,6 +108,18 @@ const SETTINGS_SCHEMA = {
   defense_frv_opps_per_game: { type: 'number', min: 10, max: 40, default: 25,
     help: 'Fielding opportunities a starting fielder sees per full game (~25, near-constant across non-catcher positions per the FRV outs_total data). Per-game FRV = (total_runs/outs_total) x this. Environmental constant.' },
 
+  // --- Starting-pitcher source precedence ---------------------------------
+  // When ON, RotoWire wins on conflict with statsapi for away_sp/home_sp:
+  // RotoWire scrapes posted/announced lineups, which lead statsapi on
+  // reshuffled games (e.g. det-bal-g2 2026-05-24: statsapi had stale
+  // 'Framber Valdez', RotoWire had correct 'Troy Melton'). When a side's
+  // RotoWire value is NULL (not yet posted), statsapi is preserved
+  // regardless of this flag — a null RotoWire never blanks out a present
+  // statsapi value. Default ON because RotoWire-wins is the corrected
+  // behavior; flip OFF here (no redeploy) to roll back if it proves worse.
+  sp_prefer_rotowire: { type: 'boolean', default: true,
+    help: 'When ON (default), RotoWire wins over statsapi when both supply a starting pitcher and they disagree. RotoWire pulls confirmed/announced lineups, which lead statsapi probables on reshuffled / doubleheader games. A null/missing RotoWire SP is NEVER allowed to overwrite a present statsapi value (the null-safety check is independent of this flag). sp_source_conflict still fires on every disagreement regardless of which value wins. Flip OFF to fall back to statsapi-wins precedence.' },
+
   // --- Kalshi-direct moneyline (override Unabated/OddsAPI ML primary) -------
   kalshi_direct_primary_enabled: { type: 'boolean', default: false,
     help: 'When ON, fetch MLB moneylines directly from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE the ML on any oddsRaw row that Kalshi covers. The Unabated/OddsAPI fetch still runs and supplies (a) ML for games Kalshi does not cover and (b) totals/spreads for every game (Kalshi-direct is ML-only for now). Locked games are skipped. Default OFF — dormant.' },

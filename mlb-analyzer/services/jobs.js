@@ -142,6 +142,14 @@ function getSettings() {
     })(),
     DEFENSE_FRV_MUTE:          num('defense_frv_mute',          _d('defense_frv_mute', 0.5)),
     DEFENSE_FRV_OPPS_PER_GAME: num('defense_frv_opps_per_game', _d('defense_frv_opps_per_game', 25)),
+    // Starting-pitcher source precedence (services/jobs.js runLineupJob).
+    // Default TRUE — RotoWire wins on conflict. Reversible via this flag
+    // without a redeploy. See settings-schema.js for the full rationale.
+    SP_PREFER_ROTOWIRE: (function() {
+      const raw = s['sp_prefer_rotowire'];
+      if (raw == null) return _d('sp_prefer_rotowire', true);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
     // Kalshi-direct ML override (services/jobs.js runOddsJob). Same dormant
     // pattern: default off, no effect until flipped.
     KALSHI_DIRECT_PRIMARY_ENABLED: (function() {
@@ -1246,16 +1254,34 @@ async function runLineupJob(dateStr) {
             }
           }
         }
-        // Option B precedence: statsapi is the authoritative source for
-        // away_sp / home_sp / game_time. RotoWire is allowed to *fill in*
-        // those fields when statsapi hasn't published yet (existing is
-        // null), but never to *override* a non-null statsapi value. The
-        // upsert's COALESCE(excluded, existing) treats null as "preserve",
-        // so passing null here when we want to preserve statsapi's value
-        // is the trigger.
+        // SP source precedence (gated by sp_prefer_rotowire, default ON):
+        //   sp_prefer_rotowire = TRUE  (default, the current policy):
+        //     RotoWire wins on conflict. RotoWire scrapes posted /
+        //     announced lineups, which lead statsapi probables on
+        //     reshuffled or doubleheader games (det-bal-g2 2026-05-24
+        //     was the case that motivated this — statsapi had stale
+        //     'Framber Valdez', RotoWire had correct 'Troy Melton').
+        //   sp_prefer_rotowire = FALSE (legacy "Option B" precedence):
+        //     statsapi wins on conflict — RotoWire can fill in when
+        //     statsapi is null but cannot override a non-null statsapi.
+        //     Kept reachable via the toggle so we can roll back without
+        //     a redeploy if RotoWire-wins turns out worse.
         //
-        // Disagreements are warned, not silenced, so a bad RotoWire parse
-        // doesn't quietly diverge from statsapi truth in production logs.
+        // CRITICAL null-safety, INDEPENDENT OF THE TOGGLE: a NULL RotoWire
+        // value never overwrites a present statsapi value. Both conflict
+        // branches gate on `rwAwaySp` (resp. rwHomeSp) being truthy. When
+        // RotoWire hasn't posted, the default `writeAwaySp = rwAwaySp`
+        // is `null` and the upsert's COALESCE(excluded, existing) keeps
+        // the statsapi value.
+        //
+        // game_time precedence is UNCHANGED — statsapi continues to own
+        // game_time. Only the SP fields flip; the brief was explicit.
+        //
+        // sp_source_conflict still fires on every disagreement (in the
+        // post-upsert block below) regardless of which value won the
+        // merge — the flag is computed from the per-source columns, not
+        // from the merged result.
+        const SP_PREFER_ROTOWIRE = !!(settings && settings.SP_PREFER_ROTOWIRE);
         const rwAwaySp   = g.away_sp && g.away_sp.name || null;
         const rwHomeSp   = g.home_sp && g.home_sp.name || null;
         const rwAwayHand = g.away_sp && g.away_sp.hand || null;
@@ -1266,29 +1292,53 @@ async function runLineupJob(dateStr) {
         let writeTime   = rwTime;
         if (existingRow) {
           if (existingRow.away_sp && rwAwaySp && existingRow.away_sp !== rwAwaySp) {
-            console.warn('[lineups] not overwriting away_sp for ' + gameId
-              + ': statsapi=\'' + existingRow.away_sp + '\', rotowire=\'' + rwAwaySp + '\'');
-            writeAwaySp = null; writeAwayHand = null;
+            if (SP_PREFER_ROTOWIRE) {
+              console.warn('[lineups] SP conflict, using RotoWire over statsapi for ' + gameId
+                + ': statsapi=\'' + existingRow.away_sp + '\', rotowire=\'' + rwAwaySp + '\'');
+              // writeAwaySp already equals rwAwaySp by default — let RotoWire win.
+            } else {
+              console.warn('[lineups] SP conflict, preserving statsapi for ' + gameId
+                + ': statsapi=\'' + existingRow.away_sp + '\', rotowire=\'' + rwAwaySp + '\'');
+              writeAwaySp = null; writeAwayHand = null;
+            }
           }
           if (existingRow.home_sp && rwHomeSp && existingRow.home_sp !== rwHomeSp) {
-            console.warn('[lineups] not overwriting home_sp for ' + gameId
-              + ': statsapi=\'' + existingRow.home_sp + '\', rotowire=\'' + rwHomeSp + '\'');
-            writeHomeSp = null; writeHomeHand = null;
+            if (SP_PREFER_ROTOWIRE) {
+              console.warn('[lineups] SP conflict, using RotoWire over statsapi for ' + gameId
+                + ': statsapi=\'' + existingRow.home_sp + '\', rotowire=\'' + rwHomeSp + '\'');
+            } else {
+              console.warn('[lineups] SP conflict, preserving statsapi for ' + gameId
+                + ': statsapi=\'' + existingRow.home_sp + '\', rotowire=\'' + rwHomeSp + '\'');
+              writeHomeSp = null; writeHomeHand = null;
+            }
           }
+          // game_time unchanged — statsapi still owns it.
           if (existingRow.game_time && rwTime && existingRow.game_time !== rwTime) {
             console.warn('[lineups] not overwriting game_time for ' + gameId
               + ': statsapi=\'' + existingRow.game_time + '\', rotowire=\'' + rwTime + '\'');
             writeTime = null;
           }
         }
-        // Source attribution. "rotowire" when we accept RotoWire's value,
-        // "preserved-statsapi" when we declined to overwrite, "rotowire-fill"
-        // when we wrote because existing was null. Easy to grep when
-        // debugging which source landed which value.
+        // Source attribution. Greppable per-side labels so production logs
+        // make it obvious which source landed which value. Cases:
+        //   rotowire-null            — RotoWire didn't supply a value; whatever
+        //                              was in the row (likely statsapi-bootstrapped)
+        //                              is preserved via the upsert's COALESCE.
+        //   preserved-statsapi       — sp_prefer_rotowire is OFF and we declined
+        //                              to overwrite a non-null statsapi value
+        //                              (legacy Option-B precedence).
+        //   rotowire-fill            — existing was null; RotoWire fills.
+        //   rotowire-wins-conflict   — sp_prefer_rotowire is ON, existing was
+        //                              non-null and disagreed with RotoWire,
+        //                              and we overwrote with RotoWire's value
+        //                              (the policy that fixed det-bal-g2).
+        //   rotowire-overwrite-same  — existing == new value; merge is a no-op
+        //                              in terms of stored state.
         const fmtSrc = (rw, write, existing) => {
           if (rw == null) return 'rotowire-null';
           if (write == null && existing) return 'preserved-statsapi';
           if (existing == null) return 'rotowire-fill';
+          if (existing !== write) return 'rotowire-wins-conflict';
           return 'rotowire-overwrite-same'; // existing == new, no harm
         };
         console.log('[lineups] ' + gameId + ' write: '
