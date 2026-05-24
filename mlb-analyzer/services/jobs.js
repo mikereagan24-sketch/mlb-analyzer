@@ -6,7 +6,7 @@ const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScore
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
-const { getKalshiMlbLines, kalshiTakerFeeRate } = require('./kalshi');
+const { getKalshiMlbLines, getKalshiMlbTotals, kalshiTakerFeeRate } = require('./kalshi');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
@@ -147,6 +147,13 @@ function getSettings() {
     KALSHI_DIRECT_PRIMARY_ENABLED: (function() {
       const raw = s['kalshi_direct_primary_enabled'];
       if (raw == null) return _d('kalshi_direct_primary_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
+    // Kalshi-direct totals override. Independent flag — totals can be on
+    // while ML is off or vice versa.
+    KALSHI_DIRECT_TOTALS_ENABLED: (function() {
+      const raw = s['kalshi_direct_totals_enabled'];
+      if (raw == null) return _d('kalshi_direct_totals_enabled', false);
       return raw === true || raw === 'true' || raw === '1' || raw === 1;
     })(),
     odds_api_key: s['odds_api_key'] || null,
@@ -1742,6 +1749,16 @@ async function runScoreJob(dateStr) {
             } else {
               // Total: bet_line is the O/U number, NOT the price
               // Use over/under price from game_log, NOT closing_line (which stores the total number)
+              //
+              // ---- CLV / P&L CAVEAT ----
+              // When kalshi_direct_totals_enabled is on, gameRow.over_price
+              // / under_price are FEE-ADJUSTED Kalshi asks (set in
+              // runOddsJob's totals override block) — NOT raw market
+              // prices. Any P&L computed against them inherits the same
+              // per-contract fee skew documented at the ML CLV site
+              // (~line 1206) and at the override site itself. Known,
+              // accepted; see feat/kalshi-fee-adjusted-lines and the
+              // totals override block for the design rationale.
               const _price = sig.signal_side === 'over' ? (gameRow.over_price || -110) : (gameRow.under_price || -110);
               const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
               _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
@@ -2262,6 +2279,7 @@ function processOddsArray(dateStr, oddsRaw, settings) {
     db.prepare(`UPDATE game_log SET
       market_away_ml=?, market_home_ml=?,
       market_total=?, over_price=?, under_price=?, total_source=?,
+      kalshi_implied_total=COALESCE(?, kalshi_implied_total),
       ml_source=COALESCE(?, ml_source),
       xcheck_ml_source=COALESCE(?, xcheck_ml_source),
       xcheck_away_ml=?, xcheck_home_ml=?,
@@ -2279,6 +2297,7 @@ function processOddsArray(dateStr, oddsRaw, settings) {
       WHERE game_date=? AND game_id=?`)
       .run(o.market_away_ml, o.market_home_ml,
            o.market_total, o.over_price, o.under_price, o.total_source || null,
+           o.kalshi_implied_total != null ? o.kalshi_implied_total : null,
            o.ml_source || null,
            o.xcheck_ml_source || null,
            o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
@@ -2451,6 +2470,139 @@ async function runOddsJob(dateStr) {
         }
       } catch (e) {
         console.warn('[odds] Kalshi-direct override failed (non-fatal, falling through): ' + e.message);
+      }
+    }
+
+    // Kalshi-direct TOTALS override (gated). Mirrors the ML override above:
+    // when kalshi_direct_totals_enabled is on, fetch pre-game MLB totals
+    // from Kalshi and OVERRIDE over_price / under_price on any oddsRaw row
+    // Kalshi covers. We do NOT change market_total — the LINE stays from
+    // the Unabated/OddsAPI backup (which the model's existing edge calc
+    // expects); Kalshi supplies fee-adjusted PRICES for that same line.
+    //
+    // Line matching:
+    //   - Look up the existing market_total in Kalshi's strike ladder.
+    //   - Exact match → use that rung's over_ask / under_ask.
+    //   - No exact match → nearest, but only if within 0.5 of market_total
+    //     (a half-run gap). >0.5 apart means Kalshi and the consensus
+    //     disagree on the line itself; safer to leave on backup than to
+    //     paper over a real disagreement with a different-line price.
+    //
+    // Observation field: kalshi_implied_total holds Kalshi's auto-pick
+    // (the rung whose over_ask is closest to $0.50). Always populated when
+    // Kalshi covers the game, even when the price override is skipped.
+    // Surfaces a divergence signal without driving anything.
+    //
+    // ---- CLV CAVEAT — INHERITED FROM ML PATH ----
+    // over_price / under_price written here are FEE-ADJUSTED Kalshi asks
+    // (per-side, independent fee load — see feeAdjustAmericanFromC below),
+    // NOT raw market prices. The totals P&L computation later in this
+    // file (the per-side _price lookup ~ search "Total: bet_line is the
+    // O/U number") reads gameRow.over_price / under_price, so any CLV-
+    // adjacent metric derived from those values will be fee-skewed —
+    // systematically inflated by roughly the per-contract fee — just like
+    // ML. Known, accepted consequence; see feat/kalshi-fee-adjusted-lines.
+    //
+    // Guardrails: same as ML override.
+    //   - Pre-game gated by getKalshiMlbTotals.
+    //   - Locked games (odds_locked_at set) skipped.
+    //   - game_id match: prefer k.game_id (doubleheader-aware), fall back
+    //     to makeGameId(team, team) for older Kalshi-client builds.
+    //   - LOUD ON EMPTY: Kalshi returned data but matched zero oddsRaw
+    //     game_ids → WARN.
+    //   - Whole block try/catch'd: failure must never break the odds job.
+    if (settings.KALSHI_DIRECT_TOTALS_ENABLED) {
+      try {
+        const kalshiTotals = await getKalshiMlbTotals(dateStr);
+        if (!kalshiTotals.length) {
+          console.log('[odds] Kalshi-direct totals: no pre-game markets returned for ' + dateStr);
+        } else {
+          // Per-side, C-input fee adjustment. Same shape as the ML helper
+          // but starting from a contract dollar price (the ladder rung's
+          // raw over_ask / under_ask) instead of American odds.
+          function feeAdjustAmericanFromC(C) {
+            if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
+            const adj = C + kalshiTakerFeeRate(C);
+            if (!(adj > 0.001 && adj < 0.999)) return null;
+            return adj >= 0.5
+              ? -Math.round(100 * adj / (1 - adj))
+              :  Math.round(100 * (1 - adj) / adj);
+          }
+          const oddsById = new Map();
+          for (const o of oddsRaw) oddsById.set(o.game_id, o);
+          let overridden = 0, skippedLocked = 0, missingFromOdds = 0;
+          let skippedNoExistingTotal = 0, skippedLineGap = 0, skippedFeeFail = 0;
+          for (const k of kalshiTotals) {
+            const gameId = k.game_id || makeGameId(k.away_team, k.home_team);
+            const o = oddsById.get(gameId);
+            if (!o) {
+              console.warn('[odds] Kalshi-direct totals: ' + gameId
+                + ' not in oddsRaw — skipping');
+              missingFromOdds++;
+              continue;
+            }
+            // Need an existing line to know which rung to override against.
+            // If backup didn't supply market_total, leave the row alone.
+            if (o.market_total == null) {
+              skippedNoExistingTotal++;
+              continue;
+            }
+            const existing = q.getGameById.get(dateStr, gameId);
+            if (existing && existing.odds_locked_at) {
+              skippedLocked++;
+              continue;
+            }
+            // Observation-only: record Kalshi's auto-picked fair line.
+            // Set this BEFORE the line-gap skip so we capture divergence
+            // even when prices aren't overridden.
+            o.kalshi_implied_total = k.line;
+            // Pick the ladder rung at market_total (exact, then nearest
+            // within 0.5).
+            let chosenRung = k.ladder.find(r => r.strike === o.market_total);
+            if (!chosenRung) {
+              let best = null, bestDist = Infinity;
+              for (const r of k.ladder) {
+                const d = Math.abs(r.strike - o.market_total);
+                if (d < bestDist) { best = r; bestDist = d; }
+              }
+              if (!best || bestDist > 0.5) {
+                console.warn('[odds] Kalshi-direct totals: ' + gameId
+                  + ' nearest Kalshi rung (' + (best ? best.strike : 'none')
+                  + ') is >0.5 off existing total (' + o.market_total
+                  + ') — leaving on backup');
+                skippedLineGap++;
+                continue;
+              }
+              chosenRung = best;
+            }
+            const overFeeMl = feeAdjustAmericanFromC(chosenRung.over_ask);
+            const underFeeMl = feeAdjustAmericanFromC(chosenRung.under_ask);
+            if (overFeeMl == null || underFeeMl == null) {
+              skippedFeeFail++;
+              continue;
+            }
+            // Override prices + source. market_total stays from backup.
+            o.over_price = overFeeMl;
+            o.under_price = underFeeMl;
+            o.total_source = 'kalshi';
+            overridden++;
+          }
+          const backupCount = oddsRaw.length - overridden;
+          console.log('[odds] Kalshi-direct totals: ' + overridden + ' overridden, '
+            + backupCount + ' backup'
+            + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
+            + (skippedLineGap ? ', ' + skippedLineGap + ' line-gap >0.5 (skipped)' : '')
+            + (skippedNoExistingTotal ? ', ' + skippedNoExistingTotal + ' no existing total' : '')
+            + (skippedFeeFail ? ', ' + skippedFeeFail + ' fee-adj degenerate' : '')
+            + (missingFromOdds ? ', ' + missingFromOdds + ' kalshi-only (skipped)' : ''));
+          if (overridden === 0 && missingFromOdds > 0) {
+            console.warn('[odds] Kalshi-direct totals: ' + kalshiTotals.length
+              + ' Kalshi total event(s) returned but ZERO matched oddsRaw game_ids — mapping likely broken'
+              + ' (check abbr normalization / doubleheader suffix). Proceeding with unmodified oddsRaw.');
+          }
+        }
+      } catch (e) {
+        console.warn('[odds] Kalshi-direct totals override failed (non-fatal, falling through): ' + e.message);
       }
     }
 

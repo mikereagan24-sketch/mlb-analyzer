@@ -139,6 +139,12 @@ db.exec(`
   rotowire_home_sp TEXT,
   sp_source_conflict INTEGER DEFAULT 0,
   sp_source_conflict_note TEXT,
+  -- Kalshi's implied "fair" total (the strike rung whose over_ask is
+  -- closest to $0.50). Observation-only; the model continues to bet
+  -- against market_total. Lets us see when Kalshi's fair line diverges
+  -- from the consensus market line. Written by the Kalshi-direct totals
+  -- override block in runOddsJob when kalshi_direct_totals_enabled is on.
+  kalshi_implied_total REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(game_date, game_id)
@@ -487,6 +493,9 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN rotowire_away_sp TEXT"); } catch(
 try { db.exec("ALTER TABLE game_log ADD COLUMN rotowire_home_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN sp_source_conflict INTEGER DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN sp_source_conflict_note TEXT"); } catch(e) {}
+// Kalshi-direct totals: implied "fair" total (observation-only, see
+// runOddsJob's totals override block).
+try { db.exec("ALTER TABLE game_log ADD COLUMN kalshi_implied_total REAL"); } catch(e) {}
 // Soft-delete columns for the auto-prune path. fetchSchedule sets these
 // when a previously-bootstrapped row's game_pk disappears from statsapi
 // (cancellation, postponement to a different date, doubleheader

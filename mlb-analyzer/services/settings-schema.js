@@ -111,6 +111,11 @@ const SETTINGS_SCHEMA = {
   // --- Kalshi-direct moneyline (override Unabated/OddsAPI ML primary) -------
   kalshi_direct_primary_enabled: { type: 'boolean', default: false,
     help: 'When ON, fetch MLB moneylines directly from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE the ML on any oddsRaw row that Kalshi covers. The Unabated/OddsAPI fetch still runs and supplies (a) ML for games Kalshi does not cover and (b) totals/spreads for every game (Kalshi-direct is ML-only for now). Locked games are skipped. Default OFF — dormant.' },
+
+  // --- Kalshi-direct totals (override Unabated/OddsAPI over/under prices) ---
+  // Independent of the ML flag so totals can be toggled separately.
+  kalshi_direct_totals_enabled: { type: 'boolean', default: false,
+    help: 'When ON, fetch MLB totals from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE over_price/under_price on any oddsRaw row Kalshi covers. The total LINE (market_total) is preserved from the Unabated/OddsAPI backup; Kalshi only supplies fee-adjusted prices for that line. If Kalshi has no rung within 0.5 of market_total, the override is skipped (game stays on backup). Kalshi-implied fair total is recorded in kalshi_implied_total for divergence observation regardless. Locked games are skipped. Default OFF — dormant.' },
   tot_slope: { type: 'number', min: 0.05, max: 0.15, default: 0.08,
     help: 'Total-runs slope in over/under conversion.' },
 
