@@ -118,13 +118,18 @@ function splitTeamBlob(blob) {
 // before this is trusted. A late ET game could roll a UTC day, and if
 // game_log's game_date is stored in UTC for some games we could see drift.
 function parseEventTicker(eventTicker) {
-  // KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}[-{TEAM}]
-  // The market-level ticker has the trailing -{TEAM}; the event_ticker
-  // returned by /markets is the part WITHOUT the trailing team segment,
-  // but we accept either by stripping it.
-  if (!eventTicker || !eventTicker.startsWith('KXMLBGAME-')) return null;
-  const body = eventTicker.slice('KXMLBGAME-'.length);
-  // If a trailing -{TEAM} segment is present (market ticker), drop it.
+  // Accepts either series prefix:
+  //   KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}[-{TEAM}]    (moneylines)
+  //   KXMLBTOTAL-{YYMONDD}{HHMM}{AWAY}{HOME}[-{N}]       (totals strike rungs)
+  // Inside the prefix the format is identical, so one parser serves both.
+  // The market-level ticker has a trailing segment (-{TEAM} for ML or -{N}
+  // for totals); the event_ticker returned by /markets typically omits it.
+  // We strip the trailing segment regardless of which series it belongs to.
+  if (!eventTicker) return null;
+  const prefixMatch = eventTicker.match(/^(KXMLBGAME|KXMLBTOTAL)-/);
+  if (!prefixMatch) return null;
+  const body = eventTicker.slice(prefixMatch[0].length);
+  // If a trailing -{TEAM} (ML) or -{N} (totals) segment is present, drop it.
   const core = body.includes('-') ? body.split('-')[0] : body;
   // YY=2 + MON=3 + DD=2 + HHMM=4 = 11 chars before the team blob.
   if (core.length < 12) return null;
@@ -285,12 +290,17 @@ function _parseRetryAfter(headerValue) {
 // After retries are exhausted, throws — the override block's try/catch
 // in services/jobs.js catches it and falls through to the
 // Unabated/OddsAPI backup safely. Other non-OK statuses fail fast.
-async function fetchAllMarkets() {
+//
+// seriesTicker defaults to SERIES_TICKER (KXMLBGAME, moneylines) so the
+// existing ML caller works unchanged. getKalshiMlbTotals passes
+// 'KXMLBTOTAL' to pull the totals ladder instead.
+async function fetchAllMarkets(seriesTicker) {
+  const series = seriesTicker || SERIES_TICKER;
   const all = [];
   let cursor = null;
   for (let page = 0; page < MAX_PAGES; page++) {
     const url = new URL(KALSHI_URL);
-    url.searchParams.set('series_ticker', SERIES_TICKER);
+    url.searchParams.set('series_ticker', series);
     url.searchParams.set('limit', String(PAGE_LIMIT));
     if (cursor) url.searchParams.set('cursor', cursor);
 
@@ -437,8 +447,168 @@ async function getKalshiMlbLines(date, opts) {
     .filter(e => includeLive || !e.is_live);
 }
 
+// Public entrypoint for totals. Returns one row per matching event with
+// the chosen ladder rung (over/under prices + fee-adjusted American odds)
+// plus the full strike ladder for downstream consumers that want to pick
+// their own line. Pre-game gated like the ML path.
+//
+// Each Kalshi totals event has ~3–11 strike markets (one per half-run
+// rung), each a binary "Over floor_strike runs". yes = OVER, no = UNDER.
+//
+// opts.line (default null): target strike. When set, return the rung
+//   whose floor_strike equals it; if no exact match exists, return the
+//   nearest available rung. The returned `line` field is the ACTUAL strike
+//   used — never silently substitutes a different number; the caller
+//   sees the real value.
+// opts.includeLive (default false): include in-progress games. Default
+//   excludes them — Kalshi keeps totals markets active during play and
+//   their prices reflect live game state, not a pre-game line.
+// opts.bufferMin (default GAME_START_BUFFER_MIN): pre-start safety margin
+//   for the is_live check.
+// Default line when opts.line is not specified: the rung whose yes_ask
+//   (over price) is closest to $0.50 — matches Kalshi's UI "fair" pick
+//   and keeps the call usable without prior knowledge of typical totals.
+//
+// Fee adjustment: each side (over, under) is fee-loaded INDEPENDENTLY
+// using its own contract price, since C * (1 - C) differs by side.
+async function getKalshiMlbTotals(date, opts) {
+  if (!date) throw new Error('getKalshiMlbTotals: date (YYYY-MM-DD) required');
+  const includeLive = !!(opts && opts.includeLive);
+  const bufferMin = (opts && opts.bufferMin != null)
+    ? Number(opts.bufferMin) : GAME_START_BUFFER_MIN;
+  const targetLine = (opts && opts.line != null) ? Number(opts.line) : null;
+
+  const nowIso = new Date().toISOString();
+  const nowEtMin = etMinutesNow();
+  const raw = await fetchAllMarkets('KXMLBTOTAL');
+
+  // Group strike rungs by event_ticker. Each event has many rungs (one
+  // market per half-run line); the chosen rung is selected after all
+  // rungs for an event have been collected.
+  const byEvent = new Map();
+  for (const m of raw) {
+    // Same filters as ML: active + not-yet-settled.
+    if (m.status !== 'active') continue;
+    if (m.close_time && m.close_time <= nowIso) continue;
+
+    const eventTicker = m.event_ticker;
+    if (!eventTicker) continue;
+    const parsed = parseEventTicker(eventTicker);
+    if (!parsed) continue;
+    if (parsed.game_date !== date) continue;
+
+    // floor_strike comes through as a number from Kalshi (unlike the
+    // dollar fields, which are strings). Coerce anyway for safety.
+    const strike = Number(m.floor_strike);
+    if (!Number.isFinite(strike)) continue;
+
+    // Side prices are strings — same pattern as ML.
+    const overAsk = parseFloat(m.yes_ask_dollars);
+    const underAsk = parseFloat(m.no_ask_dollars);
+    if (!Number.isFinite(overAsk) || !Number.isFinite(underAsk)) continue;
+    const overBid = parseFloat(m.yes_bid_dollars);
+    const underBid = parseFloat(m.no_bid_dollars);
+
+    if (!byEvent.has(eventTicker)) {
+      const startMin = etMinutesFromTicker(parsed);
+      const isLive = startMin != null
+        && (startMin - bufferMin) <= nowEtMin;
+      byEvent.set(eventTicker, {
+        game_date: parsed.game_date,
+        away_team: parsed.away_team,
+        home_team: parsed.home_team,
+        event_ticker: eventTicker,
+        start_et: parsed.hhmm,
+        is_live: isLive,
+        rungs: [],
+      });
+    }
+    byEvent.get(eventTicker).rungs.push({
+      strike,
+      over_ask_dollars: overAsk,
+      over_bid_dollars: Number.isFinite(overBid) ? overBid : null,
+      under_ask_dollars: underAsk,
+      under_bid_dollars: Number.isFinite(underBid) ? underBid : null,
+    });
+  }
+
+  // Fee-adjust a single side's American odds. C is the side's ask price
+  // in dollars; the inversion through probToAmerican is float-fragile at
+  // the boundaries so we guard both ends. Returns null on degenerate input.
+  const feeAdjustAmericanFromC = (C) => {
+    if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
+    const adj = C + kalshiTakerFeeRate(C);
+    if (!(adj > 0.001 && adj < 0.999)) return null;
+    return probToAmerican(adj);
+  };
+
+  const results = [];
+  for (const evt of byEvent.values()) {
+    if (!includeLive && evt.is_live) continue;
+    if (!evt.rungs.length) continue;
+
+    // Sort ascending by strike so the ladder reads naturally and the
+    // nearest-strike search has a stable tie-break (first-seen at equal
+    // distance, but the lower strike wins by sort order — minor, but
+    // documenting so it's predictable if the caller hits a tie).
+    evt.rungs.sort((a, b) => a.strike - b.strike);
+
+    let chosen;
+    if (targetLine != null) {
+      // Target a specific line; if no exact match, take the nearest.
+      let best = null;
+      let bestDist = Infinity;
+      for (const r of evt.rungs) {
+        const d = Math.abs(r.strike - targetLine);
+        if (d < bestDist) { best = r; bestDist = d; }
+      }
+      chosen = best;
+    } else {
+      // No target — pick the rung whose OVER ask is closest to $0.50
+      // (Kalshi's implied "fair" line). Matches the UI's default pick.
+      let best = null;
+      let bestDist = Infinity;
+      for (const r of evt.rungs) {
+        const d = Math.abs(r.over_ask_dollars - 0.50);
+        if (d < bestDist) { best = r; bestDist = d; }
+      }
+      chosen = best;
+    }
+
+    const overC = chosen.over_ask_dollars;
+    const underC = chosen.under_ask_dollars;
+    results.push({
+      game_date: evt.game_date,
+      away_team: evt.away_team,
+      home_team: evt.home_team,
+      event_ticker: evt.event_ticker,
+      start_et: evt.start_et,
+      is_live: evt.is_live,
+      line: chosen.strike,
+      over: {
+        ask_dollars: overC,
+        ask_ml: probToAmerican(overC),
+        fee_adj_ml: feeAdjustAmericanFromC(overC),
+      },
+      under: {
+        ask_dollars: underC,
+        ask_ml: probToAmerican(underC),
+        fee_adj_ml: feeAdjustAmericanFromC(underC),
+      },
+      ladder: evt.rungs.map(r => ({
+        strike: r.strike,
+        over_ask: r.over_ask_dollars,
+        under_ask: r.under_ask_dollars,
+      })),
+    });
+  }
+
+  return results;
+}
+
 module.exports = {
   getKalshiMlbLines,
+  getKalshiMlbTotals,
   // Taker-fee helpers. kalshiTakerFee returns the dollars Kalshi will
   // actually debit (ceil-to-cent total); kalshiTakerFeeRate returns the
   // smooth per-contract rate for edge math.
@@ -488,6 +658,60 @@ if (require.main === module) {
       console.log('  rate/contract  = $' + ratePerContract.toFixed(6));
       console.log('  raw total      = $' + rawTotal.toFixed(6));
       console.log('  charged total  = $' + chargedTotal.toFixed(2) + '  (ceil-to-cent)');
+      return;
+    }
+    if (arg === 'totals') {
+      // `totals [YYYY-MM-DD] [line]` — default date is today (NY), default
+      // line is "closest to fair $0.50 over" (handled inside the function).
+      const tDate = process.argv[3]
+        || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const tLineArg = process.argv[4];
+      const tLine = (tLineArg != null && tLineArg !== '') ? parseFloat(tLineArg) : null;
+      const lineLabel = (tLine != null && Number.isFinite(tLine)) ? tLine.toFixed(1) : 'auto (closest to fair)';
+      console.log('Kalshi MLB totals for ' + tDate + ' (line target: ' + lineLabel + ')');
+      try {
+        const rows = await getKalshiMlbTotals(tDate, {
+          includeLive: true,
+          line: Number.isFinite(tLine) ? tLine : null,
+        });
+        if (!rows.length) {
+          console.log('(no markets matched)');
+          return;
+        }
+        rows.sort((a, b) => (Number(a.is_live) - Number(b.is_live))
+          || (a.start_et || '').localeCompare(b.start_et || ''));
+        console.log(
+          ['status', 'start_et', 'away/home', 'line', 'over_ml', 'under_ml',
+            'over_fee', 'under_fee', 'rungs', 'event_ticker'].join('\t')
+        );
+        let pre = 0, live = 0, lineMismatches = 0;
+        for (const r of rows) {
+          if (r.is_live) live++; else pre++;
+          // If the caller requested a specific line and the chosen one
+          // differs, surface that — never silently substitute.
+          if (Number.isFinite(tLine) && r.line !== tLine) lineMismatches++;
+          console.log([
+            r.is_live ? 'LIVE   ' : 'PREGAME',
+            r.start_et || '----',
+            r.away_team + '@' + r.home_team,
+            r.line.toFixed(1) + (Number.isFinite(tLine) && r.line !== tLine ? '*' : ''),
+            r.over.ask_ml,
+            r.under.ask_ml,
+            r.over.fee_adj_ml != null ? r.over.fee_adj_ml : '-',
+            r.under.fee_adj_ml != null ? r.under.fee_adj_ml : '-',
+            r.ladder.length,
+            r.event_ticker,
+          ].join('\t'));
+        }
+        console.log('--');
+        console.log(pre + ' pre-game, ' + live + ' live'
+          + (Number.isFinite(tLine) && lineMismatches > 0
+            ? ' (* = chosen line differs from requested ' + tLine.toFixed(1) + ' — nearest match used; ' + lineMismatches + ' total)'
+            : ''));
+      } catch (e) {
+        console.error('error: ' + e.message);
+        process.exit(1);
+      }
       return;
     }
     const date = arg || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
