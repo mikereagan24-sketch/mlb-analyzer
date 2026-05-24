@@ -838,6 +838,44 @@ function processGameSignals(gameRow, wobaIdx, settings) {
 //
 // Returns the array of rows from fetchSchedule (empty on fetch failure
 // — failure is non-fatal, callers degrade open).
+
+// statsapi-side SP capture with backfill, shared by both bootstrap paths
+// (ensureScheduleBootstrap above and runLineupJob's inline bootstrap loop).
+//
+// Priority order (highest wins):
+//   1. THIS pass's statsapi probable (bootObj.name) — fresh + authoritative.
+//   2. existingRow.statsapi_<away|home>_sp — already captured by a prior pass.
+//   3. existingRow.<away|home>_sp, IFF rotowire_<away|home>_sp doesn't
+//      match it (rules out RotoWire-fill as the source of the value).
+//      Catches:
+//       - rows written before this branch's schema existed (statsapi_*_sp
+//         was added recently; pre-branch writes never populated it).
+//       - mid-day bootstrap passes where statsapi cleared its probable
+//         (g.away_sp is null this pass, but earlier in the day it had a
+//         value that's now sitting in away_sp via the upsert's COALESCE).
+//         Without this backfill the column stays null and the conflict
+//         flag silently fails to fire for doubleheader g2 legs, which
+//         statsapi often shows-then-clears the probable for.
+//   4. null — preserve whatever's in the column (likely null).
+//
+// Live bug this fixes: det-bal-g2 on 2026-05-24 had bootstrap log
+// 'away_sp=null' but existingRow.away_sp held 'Framber Valdez' at merge
+// time (carried via COALESCE from an earlier pass / day). statsapi_away_sp
+// stayed null, so the conflict detector saw "either side null" and
+// returned 0 instead of catching the genuine Valdez-vs-Melton mismatch.
+function deriveStatsapiSp(bootObj, existing, sourceKey) {
+  if (bootObj && bootObj.name) return bootObj.name;
+  if (!existing) return null;
+  const existingStatsapi = existing['statsapi_' + sourceKey];
+  if (existingStatsapi) return existingStatsapi;
+  const existingMerged = existing[sourceKey];
+  const existingRotowire = existing['rotowire_' + sourceKey];
+  if (existingMerged && existingMerged !== existingRotowire) {
+    return existingMerged;
+  }
+  return null;
+}
+
 async function ensureScheduleBootstrap(dateStr) {
   let rows = [];
   try {
@@ -869,9 +907,11 @@ async function ensureScheduleBootstrap(dateStr) {
       // statsapi's probable SPs distinctly so they survive even if the
       // merged away_sp/home_sp gets a different value from a later pass.
       // rotowire_*_sp null here → COALESCE preserves any value RotoWire
-      // already wrote.
-      statsapi_away_sp: g.away_sp ? g.away_sp.name : null,
-      statsapi_home_sp: g.home_sp ? g.home_sp.name : null,
+      // already wrote. deriveStatsapiSp handles backfill when this pass's
+      // statsapi probable is null but the row already carries a non-
+      // RotoWire-sourced value (see helper definition above).
+      statsapi_away_sp: deriveStatsapiSp(g.away_sp, existingRow, 'away_sp'),
+      statsapi_home_sp: deriveStatsapiSp(g.home_sp, existingRow, 'home_sp'),
       rotowire_away_sp: null,
       rotowire_home_sp: null,
       // statsapi never carries the announced bulk; only RotoWire's PRIM
@@ -958,9 +998,12 @@ async function runLineupJob(dateStr) {
           home_sp: g.home_sp ? g.home_sp.name : null,
           home_sp_hand: g.home_sp ? g.home_sp.hand : null,
           // Per-source SP capture: bootstrap is the statsapi source. Same
-          // pattern as ensureScheduleBootstrap above.
-          statsapi_away_sp: g.away_sp ? g.away_sp.name : null,
-          statsapi_home_sp: g.home_sp ? g.home_sp.name : null,
+          // pattern as ensureScheduleBootstrap above. deriveStatsapiSp
+          // handles the backfill case (see helper definition near the top
+          // of this module) — critical for doubleheader g2 legs where
+          // statsapi sometimes shows-then-clears a probable mid-day.
+          statsapi_away_sp: deriveStatsapiSp(g.away_sp, existingRow, 'away_sp'),
+          statsapi_home_sp: deriveStatsapiSp(g.home_sp, existingRow, 'home_sp'),
           rotowire_away_sp: null,
           rotowire_home_sp: null,
           // statsapi bootstrap doesn't know about PRIM; null preserves any
