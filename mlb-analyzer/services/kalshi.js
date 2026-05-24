@@ -137,8 +137,30 @@ function parseEventTicker(eventTicker) {
   const mon = core.slice(2, 5);
   const dd = core.slice(5, 7);
   const hhmm = core.slice(7, 11);
-  const blob = core.slice(11);
+  let blob = core.slice(11);
   if (!(mon in MONTHS)) return null;
+
+  // Doubleheader suffix. Kalshi appends G<n> to the team-blob with NO
+  // separator on doubleheader nightcap markets — verified against
+  // KXMLBTOTAL-26MAY231915STLCING2 ("STLCIN" + "G2"). Strip BEFORE the
+  // team-blob split so splitTeamBlob sees a clean two-team string.
+  //
+  // Safety against false-match: confirmed (by enumeration over both the
+  // game_log abbr set and Kalshi-side variants) that NO MLB abbr ends in
+  // a letter+digit pattern matching /G\d$/. The regex can therefore only
+  // fire on a genuine suffix; a normal ticker (no doubleheader) passes
+  // through unchanged.
+  //
+  // game_number convention matches game_log: NULL/1 for single games,
+  // 2+ for doubleheader legs.
+  let game_number = 1;
+  const dhMatch = blob.match(/^(.+)G(\d)$/);
+  if (dhMatch) {
+    blob = dhMatch[1];
+    const n = parseInt(dhMatch[2], 10);
+    if (Number.isFinite(n) && n > 0) game_number = n;
+  }
+
   const year = 2000 + parseInt(yy, 10);
   const monthIdx = MONTHS[mon];
   const day = parseInt(dd, 10);
@@ -150,7 +172,7 @@ function parseEventTicker(eventTicker) {
     + String(day).padStart(2, '0');
   const teams = splitTeamBlob(blob);
   if (!teams) return null;
-  return { game_date, away_team: teams.away, home_team: teams.home, hhmm };
+  return { game_date, away_team: teams.away, home_team: teams.home, hhmm, game_number };
 }
 
 // Identify which side of an event a market ticker refers to. Market tickers
@@ -161,6 +183,18 @@ function sideOfMarket(marketTicker) {
   const parts = marketTicker.split('-');
   if (parts.length < 3) return null;
   return normalizeAbbr(parts[parts.length - 1]);
+}
+
+// Build a game_id matching the rest of the system's convention. Mirrors
+// services/scraper.js makeGameId's normalization (lowercase, strip non-
+// alpha, hyphen-join), then appends "-g<N>" for doubleheader nightcaps
+// — matches game_log values like "col-nym-g2" written by fetchSchedule.
+// gameNumber omitted / 1 / 0 → no suffix. gameNumber 2+ → "-g{N}".
+function buildGameId(awayTeam, homeTeam, gameNumber) {
+  const a = (awayTeam || '').toLowerCase().replace(/[^a-z]/g, '');
+  const h = (homeTeam || '').toLowerCase().replace(/[^a-z]/g, '');
+  const base = a + '-' + h;
+  return (gameNumber && gameNumber > 1) ? base + '-g' + gameNumber : base;
 }
 
 // Probability → American moneyline.
@@ -408,6 +442,11 @@ async function getKalshiMlbLines(date, opts) {
         game_date: parsed.game_date,
         away_team: parsed.away_team,
         home_team: parsed.home_team,
+        // game_number + game_id let consumers map directly to game_log
+        // rows. Doubleheader nightcaps (G2+) get the "-g{N}" suffix that
+        // matches game_log; single games / game-1 stay unsuffixed.
+        game_number: parsed.game_number,
+        game_id: buildGameId(parsed.away_team, parsed.home_team, parsed.game_number),
         event_ticker: eventTicker,
         start_et: parsed.hhmm, // 4-digit ET HHMM, e.g. "1605"
         is_live: isLive,
@@ -517,6 +556,11 @@ async function getKalshiMlbTotals(date, opts) {
         game_date: parsed.game_date,
         away_team: parsed.away_team,
         home_team: parsed.home_team,
+        // Doubleheader-aware game_id (see buildGameId helper). Single
+        // games / game-1 pass through unsuffixed; G2+ tickers get the
+        // "-g{N}" suffix matching game_log.
+        game_number: parsed.game_number,
+        game_id: buildGameId(parsed.away_team, parsed.home_team, parsed.game_number),
         event_ticker: eventTicker,
         start_et: parsed.hhmm,
         is_live: isLive,
@@ -581,6 +625,8 @@ async function getKalshiMlbTotals(date, opts) {
       game_date: evt.game_date,
       away_team: evt.away_team,
       home_team: evt.home_team,
+      game_number: evt.game_number,
+      game_id: evt.game_id,
       event_ticker: evt.event_ticker,
       start_et: evt.start_et,
       is_live: evt.is_live,
@@ -619,6 +665,7 @@ module.exports = {
     parseEventTicker,
     sideOfMarket,
     probToAmerican,
+    buildGameId,
     normalizeAbbr,
     splitTeamBlob,
     fetchAllMarkets,
