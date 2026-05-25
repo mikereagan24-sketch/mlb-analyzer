@@ -1290,8 +1290,57 @@ async function runLineupJob(dateStr) {
         let writeAwaySp = rwAwaySp, writeAwayHand = rwAwayHand;
         let writeHomeSp = rwHomeSp, writeHomeHand = rwHomeHand;
         let writeTime   = rwTime;
+
+        // Piece 4 / durability guard (feat/opener-name-override): when
+        // an opener_override carries a non-null opener_name for this
+        // side, pin the SP to it BEFORE the conflict logic runs. Without
+        // this, detectOpeners pins the SP correctly but the next
+        // runLineupJob pass overwrites it with RotoWire's value
+        // (was-cle 2026-05-25 case: RotoWire keeps reporting the bulk
+        // pitcher in the SP slot, so without this guard the pin reverts
+        // every lineup-job run).
+        //
+        // Per-side independent: an away override only pins away_sp;
+        // home conflict logic still runs for the home side, and vice
+        // versa. Bulk-only overrides (opener_name null) DO NOT touch
+        // the SP — they only affect is_opener/bulk_guy via detectOpeners.
+        //
+        // The hand for the pinned name is set to null because the
+        // override doesn't carry hand info — letting the upsert's
+        // COALESCE preserve whatever's already in the row is safer
+        // than asserting RotoWire's hand for the wrong pitcher (e.g.
+        // RotoWire's rwAwayHand would be Littell's hand when the
+        // override pins Poulin).
+        //
+        // Survives the SP_PREFER_ROTOWIRE toggle: a manual override is
+        // more authoritative than either auto-source.
+        const _ovAway = q.getOpenerOverride.get(dateStr, gameId, 'away');
+        const _ovHome = q.getOpenerOverride.get(dateStr, gameId, 'home');
+        const _awaySpPinned = !!(_ovAway && _ovAway.opener_name);
+        const _homeSpPinned = !!(_ovHome && _ovHome.opener_name);
+        if (_awaySpPinned) {
+          writeAwaySp = _ovAway.opener_name;
+          writeAwayHand = null;
+          console.log('[lineups] ' + gameId + '/away: SP pinned by opener_override'
+            + " (opener_name='" + _ovAway.opener_name + "')"
+            + (rwAwaySp && rwAwaySp !== _ovAway.opener_name
+                ? ", RotoWire value '" + rwAwaySp + "' ignored"
+                : ''));
+        }
+        if (_homeSpPinned) {
+          writeHomeSp = _ovHome.opener_name;
+          writeHomeHand = null;
+          console.log('[lineups] ' + gameId + '/home: SP pinned by opener_override'
+            + " (opener_name='" + _ovHome.opener_name + "')"
+            + (rwHomeSp && rwHomeSp !== _ovHome.opener_name
+                ? ", RotoWire value '" + rwHomeSp + "' ignored"
+                : ''));
+        }
+
         if (existingRow) {
-          if (existingRow.away_sp && rwAwaySp && existingRow.away_sp !== rwAwaySp) {
+          // Skip the away conflict logic when an override pinned the SP —
+          // the override is more authoritative than either auto-source.
+          if (!_awaySpPinned && existingRow.away_sp && rwAwaySp && existingRow.away_sp !== rwAwaySp) {
             if (SP_PREFER_ROTOWIRE) {
               console.warn('[lineups] SP conflict, using RotoWire over statsapi for ' + gameId
                 + ': statsapi=\'' + existingRow.away_sp + '\', rotowire=\'' + rwAwaySp + '\'');
@@ -1302,7 +1351,7 @@ async function runLineupJob(dateStr) {
               writeAwaySp = null; writeAwayHand = null;
             }
           }
-          if (existingRow.home_sp && rwHomeSp && existingRow.home_sp !== rwHomeSp) {
+          if (!_homeSpPinned && existingRow.home_sp && rwHomeSp && existingRow.home_sp !== rwHomeSp) {
             if (SP_PREFER_ROTOWIRE) {
               console.warn('[lineups] SP conflict, using RotoWire over statsapi for ' + gameId
                 + ': statsapi=\'' + existingRow.home_sp + '\', rotowire=\'' + rwHomeSp + '\'');
@@ -1334,7 +1383,13 @@ async function runLineupJob(dateStr) {
         //                              (the policy that fixed det-bal-g2).
         //   rotowire-overwrite-same  — existing == new value; merge is a no-op
         //                              in terms of stored state.
-        const fmtSrc = (rw, write, existing) => {
+        //   opener-override-pin      — feat/opener-name-override piece 4:
+        //                              the side's SP was pinned by an
+        //                              opener_override.opener_name BEFORE
+        //                              the merge ran; both RotoWire and
+        //                              statsapi are bypassed for this side.
+        const fmtSrc = (rw, write, existing, pinned) => {
+          if (pinned) return 'opener-override-pin';
           if (rw == null) return 'rotowire-null';
           if (write == null && existing) return 'preserved-statsapi';
           if (existing == null) return 'rotowire-fill';
@@ -1342,9 +1397,9 @@ async function runLineupJob(dateStr) {
           return 'rotowire-overwrite-same'; // existing == new, no harm
         };
         console.log('[lineups] ' + gameId + ' write: '
-          + 'away_sp=' + (writeAwaySp ?? existingRow?.away_sp ?? 'null') + '(' + fmtSrc(rwAwaySp, writeAwaySp, existingRow?.away_sp) + '), '
-          + 'home_sp=' + (writeHomeSp ?? existingRow?.home_sp ?? 'null') + '(' + fmtSrc(rwHomeSp, writeHomeSp, existingRow?.home_sp) + '), '
-          + 'game_time=' + (writeTime ?? existingRow?.game_time ?? 'null') + '(' + fmtSrc(rwTime, writeTime, existingRow?.game_time) + ')');
+          + 'away_sp=' + (writeAwaySp ?? existingRow?.away_sp ?? 'null') + '(' + fmtSrc(rwAwaySp, writeAwaySp, existingRow?.away_sp, _awaySpPinned) + '), '
+          + 'home_sp=' + (writeHomeSp ?? existingRow?.home_sp ?? 'null') + '(' + fmtSrc(rwHomeSp, writeHomeSp, existingRow?.home_sp, _homeSpPinned) + '), '
+          + 'game_time=' + (writeTime ?? existingRow?.game_time ?? 'null') + '(' + fmtSrc(rwTime, writeTime, existingRow?.game_time, false) + ')');
 
         q.upsertGame.run({
         game_date: dateStr,
