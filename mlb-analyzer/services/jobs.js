@@ -2836,10 +2836,109 @@ async function detectOpeners(dateStr) {
     console.warn('[opener-detect] F4 index build failed (forecasts skipped): ' + e.message);
   }
   const rosterLookup = db.prepare("SELECT mlb_id FROM team_rosters WHERE team=? AND player_name=?");
+  // Fallback resolver: pitcher_game_log keeps a (team, pitcher_name,
+  // pitcher_mlb_id) row for every pitching appearance. A pitcher called
+  // up after the most recent runRosterJob hasn't landed in team_rosters
+  // yet, but the moment they appear in a box score they're in this
+  // table. Pull the team's distinct (id, name) pairs and let the JS
+  // resolver below do the normalized-name match.
+  // pitcher_game_log uses statsapi-style team abbrs for two clubs
+  // (WSH for the Nationals, AZ for the Diamondbacks), while game_log /
+  // team_rosters use the post-normalization app convention (WAS, ARI).
+  // Verified by distinct-team scan against the local DB. Without this
+  // map the fallback would query `team='WAS'` and miss every Poulin /
+  // WAS-bullpen row that exists under 'WSH'. The IN (?, ?) below always
+  // gets two values — when no alias applies, both slots receive the
+  // same value (harmless dedup at the SQL level).
+  //
+  // Other potentially-divergent abbrs:
+  //  - OAK / ATH: pitcher_game_log uses ATH only (no OAK rows observed
+  //    in current data — verified). game_log uses ATH. No alias needed.
+  //  - Other 28 teams: identical between the tables.
+  const TEAM_ALIAS_PGL = { WAS: 'WSH', ARI: 'AZ' };
+  const gameLogLookup = db.prepare(
+    "SELECT DISTINCT pitcher_mlb_id, pitcher_name FROM pitcher_game_log "
+    + "WHERE team IN (?, ?) AND pitcher_mlb_id IS NOT NULL"
+  );
+
+  // Resolve a pitcher's mlb_id by team + name. Two-tier:
+  //   1. team_rosters exact match (existing behavior, fastest path).
+  //   2. pitcher_game_log normalized-name match within the team —
+  //      catches recently-called-up pitchers who aren't in team_rosters
+  //      yet (e.g. PJ Poulin called up 5/24, not in team_rosters but
+  //      mlb_id 676571 reachable via pitcher_game_log entries).
+  //
+  // Name normalization mirrors _spNamesMatch (~line 1493 in this file
+  // used by the sp_source_conflict detector): stripSfx(normName(...))
+  // for full-string equality first, then a last-name + first-initial
+  // fallback so "P.J. Poulin" matches "PJ Poulin" and "Acuna Jr." would
+  // match "Acuna".
+  //
+  // Constrained to the requested team so a same-named pitcher on a
+  // different team can't poison the resolution. Multiple matches on
+  // the same team → return null (prefer no resolution to a wrong one);
+  // a warn line surfaces the ambiguity in logs.
+  const resolveMlbId = (team, pitcherName) => {
+    if (!team || !pitcherName) return null;
+    const r = rosterLookup.get(team, pitcherName);
+    if (r) return r.mlb_id;
+    // Roster missed — try pitcher_game_log by normalized name. Query
+    // both team spellings (app convention + statsapi alias, e.g.
+    // 'WAS' + 'WSH') so the lookup is robust to which convention the
+    // log rows happen to use.
+    const targetNorm = stripSfx(normName(pitcherName));
+    if (!targetNorm) return null;
+    const altTeam = TEAM_ALIAS_PGL[team] || team;
+    const candidates = gameLogLookup.all(team, altTeam);
+    if (!candidates.length) return null;
+    const matchedIds = new Set();
+    let matchKind = null;
+    let firstMatchName = null;
+    // Pass 1: full-string normalized equality.
+    for (const c of candidates) {
+      if (!c.pitcher_name) continue;
+      if (stripSfx(normName(c.pitcher_name)) === targetNorm) {
+        matchedIds.add(c.pitcher_mlb_id);
+        if (!firstMatchName) firstMatchName = c.pitcher_name;
+        matchKind = 'exact-norm';
+      }
+    }
+    // Pass 2: last-name + first-initial (only if pass 1 produced nothing).
+    if (matchedIds.size === 0) {
+      const ta = targetNorm.split(' ');
+      if (ta.length >= 2) {
+        const tLast = ta[ta.length - 1];
+        const tInit = ta[0][0];
+        for (const c of candidates) {
+          if (!c.pitcher_name) continue;
+          const ca = stripSfx(normName(c.pitcher_name)).split(' ');
+          if (ca.length < 2) continue;
+          if (ca[ca.length - 1] === tLast && ca[0][0] === tInit) {
+            matchedIds.add(c.pitcher_mlb_id);
+            if (!firstMatchName) firstMatchName = c.pitcher_name;
+            matchKind = 'last+initial';
+          }
+        }
+      }
+    }
+    if (matchedIds.size === 1) {
+      const mlbId = [...matchedIds][0];
+      console.log('[forecast-fallback] ' + team + '/' + pitcherName
+        + ' not in team_rosters → resolved via pitcher_game_log: '
+        + firstMatchName + ' (mlb_id=' + mlbId + ', match=' + matchKind + ')');
+      return mlbId;
+    }
+    if (matchedIds.size > 1) {
+      console.warn('[forecast-fallback] ' + team + '/' + pitcherName
+        + ' ambiguous in pitcher_game_log (' + matchedIds.size
+        + ' candidates) — returning null to avoid wrong-pitcher match');
+    }
+    return null;
+  };
+
   const forecastForName = (pitcherName, team, role) => {
     if (!pitcherName || !team || !spStartIndex) return null;
-    const r = rosterLookup.get(team, pitcherName);
-    const mlbId = r ? r.mlb_id : null;
+    const mlbId = resolveMlbId(team, pitcherName);
     const out = forecastSpIP({
       index: spStartIndex,
       pitcherMlbId: mlbId,
