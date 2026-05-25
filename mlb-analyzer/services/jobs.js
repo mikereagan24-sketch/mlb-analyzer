@@ -3008,6 +3008,30 @@ async function detectOpeners(dateStr) {
       // Manual override always wins. Detection logic skips entirely.
       const ov = q.getOpenerOverride.get(dateStr, g.game_id, side);
       if (ov) {
+        // Piece 3 of feat/opener-name-override: when ov.opener_name is
+        // set, pin it into away_sp/home_sp for this side BEFORE
+        // writeDetection. writeDetection's tail (~line 2890) reads the
+        // row back to compute the opener IP forecast, so updating the
+        // SP first means the forecast resolves against the pinned name
+        // (e.g. PJ Poulin's real ~1.1 IP from the pitcher_game_log
+        // fallback) rather than whatever the lineup-job last wrote
+        // (e.g. RotoWire's stale bulk-as-SP value).
+        //
+        // KNOWN LIMITATION (this commit only): a subsequent runLineupJob
+        // SP-precedence merge (~line 1255) can overwrite away_sp back
+        // to RotoWire's value. Piece 4 of this branch adds the
+        // durability guard. Until that lands, the override only sticks
+        // until the next lineup-job pass touches this row.
+        if (ov.opener_name && typeof ov.opener_name === 'string') {
+          db.prepare(
+            "UPDATE game_log SET "
+              + (side === 'away' ? 'away_sp' : 'home_sp') + " = ? "
+            + "WHERE game_date=? AND game_id=?"
+          ).run(ov.opener_name, dateStr, g.game_id);
+          console.log('[opener-detect] ' + g.game_id + '/' + side
+            + ': override pinned opener_name=\'' + ov.opener_name + '\''
+            + ' (replaced ' + (sp || 'null') + ')');
+        }
         writeDetection(
           dateStr, g.game_id, side,
           !!ov.is_opener,
@@ -3018,7 +3042,7 @@ async function detectOpeners(dateStr) {
           detectedCount++;
           if (!ov.bulk_guy) unknownBulkCount++;
           console.log('[opener-detect] ' + g.game_id + '/' + side + ': override applied — opener='
-            + (sp || 'unknown') + ' → bulk-guy ' + (ov.bulk_guy || 'UNKNOWN'));
+            + (ov.opener_name || sp || 'unknown') + ' → bulk-guy ' + (ov.bulk_guy || 'UNKNOWN'));
         }
         continue;
       }

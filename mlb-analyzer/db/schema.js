@@ -388,13 +388,19 @@ db.exec(`
   -- Per-game opener override. Wins over the auto-detection in
   -- detectOpeners. side ∈ ('away','home'). is_opener and planned_batters
   -- are stored as integers; bulk_guy is the pitcher name to write into
-  -- bulk_guy_{side}. set_by + reason are free-form for debugging.
+  -- bulk_guy_{side}. opener_name (optional) pins the opener's name
+  -- into away_sp/home_sp for the side — needed because opener identity
+  -- otherwise comes from RotoWire/statsapi via the lineup-job path and
+  -- can't be corrected for misclassified games (e.g. was-cle 2026-05-25
+  -- where RotoWire's lineup feed put the bulk in the SP slot). set_by
+  -- + reason are free-form for debugging.
   CREATE TABLE IF NOT EXISTS opener_override (
     game_date TEXT NOT NULL,
     game_id TEXT NOT NULL,
     side TEXT NOT NULL CHECK(side IN ('away','home')),
     is_opener INTEGER NOT NULL,
     bulk_guy TEXT,
+    opener_name TEXT,
     planned_batters INTEGER,
     set_at TEXT NOT NULL DEFAULT (datetime('now')),
     set_by TEXT,
@@ -496,6 +502,12 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN sp_source_conflict_note TEXT"); }
 // Kalshi-direct totals: implied "fair" total (observation-only, see
 // runOddsJob's totals override block).
 try { db.exec("ALTER TABLE game_log ADD COLUMN kalshi_implied_total REAL"); } catch(e) {}
+// opener_override.opener_name (piece 1 of feat/opener-name-override).
+// Allows a manual override to pin the OPENER's name into
+// away_sp/home_sp, not just is_opener/bulk_guy. Existing override rows
+// keep their existing semantics (NULL opener_name = "don't touch the
+// SP slot"); new rows can optionally pin a name.
+try { db.exec("ALTER TABLE opener_override ADD COLUMN opener_name TEXT"); } catch(e) {}
 // Soft-delete columns for the auto-prune path. fetchSchedule sets these
 // when a previously-bootstrapped row's game_pk disappears from statsapi
 // (cancellation, postponement to a different date, doubleheader
@@ -1191,10 +1203,11 @@ q.deleteWobaOverride = db.prepare("DELETE FROM pitcher_woba_override WHERE playe
 q.listWobaOverrides  = db.prepare("SELECT * FROM pitcher_woba_override ORDER BY set_at DESC");
 
 q.setOpenerOverride = db.prepare(
-  "INSERT INTO opener_override (game_date, game_id, side, is_opener, bulk_guy, planned_batters, set_at, set_by, reason) " +
-  "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?) " +
+  "INSERT INTO opener_override (game_date, game_id, side, is_opener, bulk_guy, opener_name, planned_batters, set_at, set_by, reason) " +
+  "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?) " +
   "ON CONFLICT(game_date, game_id, side) DO UPDATE SET " +
   "  is_opener=excluded.is_opener, bulk_guy=excluded.bulk_guy, " +
+  "  opener_name=excluded.opener_name, " +
   "  planned_batters=excluded.planned_batters, set_at=excluded.set_at, " +
   "  set_by=excluded.set_by, reason=excluded.reason"
 );

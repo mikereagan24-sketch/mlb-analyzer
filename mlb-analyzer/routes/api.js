@@ -978,10 +978,19 @@ router.post('/opener-override', (req, res) => {
     if (b.is_opener !== 0 && b.is_opener !== 1) {
       return res.status(400).json({ error: 'is_opener must be 0 or 1' });
     }
+    // opener_name (piece 2 of feat/opener-name-override): optional pin
+    // for the OPENER's pitcher name. When set, detectOpeners writes it
+    // into away_sp/home_sp for the side so the opener-forecast path
+    // resolves against the correct pitcher. Null/missing = "don't
+    // touch the SP slot", which is the legacy behavior.
+    if (b.opener_name != null && typeof b.opener_name !== 'string') {
+      return res.status(400).json({ error: 'opener_name must be a string if present' });
+    }
     q.setOpenerOverride.run(
       b.game_date, b.game_id, b.side,
       b.is_opener,
       b.bulk_guy || null,
+      (typeof b.opener_name === 'string' && b.opener_name.trim()) ? b.opener_name.trim() : null,
       Number.isInteger(b.planned_batters) ? b.planned_batters : null,
       b.set_by || null,
       b.reason || null
