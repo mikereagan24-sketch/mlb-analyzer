@@ -2976,12 +2976,61 @@ async function detectOpeners(dateStr) {
         ? g.bulk_guy_away_announced
         : g.bulk_guy_home_announced;
       if (announcedBulk) {
+        // Self-bulk case: RotoWire's lineup feed sometimes places the
+        // bulk pitcher in the SP slot when the opener hasn't been
+        // announced yet (was-cle 2026-05-25: away_sp='Zack Littell'
+        // AND bulk_guy_away_announced='Zack Littell'; ground truth
+        // per RotoWire news was Poulin opens, Littell bulks — the
+        // lineup feed put the bulk in the SP slot and had no opener
+        // name).
+        //
+        // When announcedBulk name-normalizes-equal to sp, this is
+        // "known bulk, unknown opener". Mechanism: NULL out the SP on
+        // the row so model.js's buildOpenerOpts (services/model.js
+        // ~line 470 "if (!sideSp)") sees sideSp=null and sources the
+        // opener slot from the bullpen pool — exactly the path the
+        // existing SP-null + PRIM-bulk branch above (~line 2941)
+        // already uses. The named pitcher becomes the bulk; bulk
+        // forecast computes from the announced name; opener forecast
+        // naturally becomes null because forecastForName(null, ...)
+        // short-circuits in writeDetection's forecast block.
+        //
+        // The SP-null update happens BEFORE writeDetection so the
+        // forecast read inside writeDetection sees the nulled SP and
+        // skips the opener forecast computation cleanly.
+        //
+        // Steady state: on the next detectOpeners run, the row's sp
+        // is already null and the existing SP-null + PRIM-bulk branch
+        // above handles it identically. If a later RotoWire scrape
+        // repopulates sp with the bulk's name again, the next
+        // detectOpeners-after-lineup-job pass re-nulls it.
+        //
+        // statsapi_*_sp / rotowire_*_sp source columns are NOT
+        // nulled — they exist for divergence observation and don't
+        // affect model behavior. sp_source_conflict will likely fire
+        // here too (statsapi probable vs RotoWire's bulk-as-SP), which
+        // is informative.
+        const _spNorm   = sp ? stripSfx(normName(sp)) : null;
+        const _bulkNorm = stripSfx(normName(announcedBulk));
+        if (_spNorm && _bulkNorm && _spNorm === _bulkNorm) {
+          db.prepare(
+            "UPDATE game_log SET "
+              + (side === 'away' ? 'away_sp' : 'home_sp') + " = NULL, "
+              + (side === 'away' ? 'away_sp_hand' : 'home_sp_hand') + " = NULL "
+            + "WHERE game_date=? AND game_id=?"
+          ).run(dateStr, g.game_id);
+          console.log('[opener-detect] ' + g.game_id + '/' + side
+            + ': announced bulk == named SP (' + announcedBulk + ')'
+            + ' → treating ' + announcedBulk + ' as BULK, opener UNKNOWN'
+            + ' (bullpen wOBA for opener slot)');
+        } else {
+          console.log('[opener-detect] ' + g.game_id + '/' + side
+            + ': RotoWire announced bulk ' + announcedBulk
+            + ' behind ' + sp + ' → opener mode (FG role disregarded)');
+        }
         isOpener = true;
         bulkGuy = announcedBulk;
         plannedBatters = 4;
-        console.log('[opener-detect] ' + g.game_id + '/' + side
-          + ': RotoWire announced bulk ' + announcedBulk
-          + ' behind ' + sp + ' → opener mode (FG role disregarded)');
       } else if (spRow && spRow.mlb_id) {
         const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
         const fgSaysReliever = fg && (fg.role === 'RP' || fg.role === 'CL');
