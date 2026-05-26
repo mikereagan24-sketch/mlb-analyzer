@@ -15,3 +15,7 @@ forecasts.csv
 
 # Local editor/agent
 .claude/
+
+# Additional frv scratch (any extension)
+frv-*.cjs
+frv-*.py
