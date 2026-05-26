@@ -407,6 +407,27 @@ db.exec(`
     reason TEXT,
     PRIMARY KEY (game_date, game_id, side)
   );
+  -- Manual lineup override (feat/lineup-override-backend). Stores a full
+  -- 9-batter replacement for a side, used while the RotoWire-projected
+  -- lineup is stale (e.g. opposing SP flipped handedness and the team
+  -- hasn't posted the platoon-adjusted lineup yet). Applied by
+  -- runLineupJob ONLY while the side's incoming status is 'projected' —
+  -- once RotoWire posts a 'confirmed' lineup, the override is
+  -- auto-deleted (real beats guess).
+  --
+  -- lineup_json: JSON-serialized array of exactly 9 {name, hand, pos}
+  -- entries IN BATTING ORDER. Order matters — perBatterEW
+  -- (services/model.js ~162) weights each slot by PA_WEIGHTS[slot].
+  CREATE TABLE IF NOT EXISTS lineup_override (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('away','home')),
+    lineup_json TEXT NOT NULL,
+    set_at TEXT NOT NULL DEFAULT (datetime('now')),
+    set_by TEXT,
+    reason TEXT,
+    PRIMARY KEY (game_date, game_id, side)
+  );
 `);
 
 
@@ -1219,6 +1240,27 @@ q.getOpenerOverride = db.prepare(
 );
 q.listOpenerOverridesByDate = db.prepare(
   "SELECT * FROM opener_override WHERE game_date=? ORDER BY game_id, side"
+);
+
+// Manual lineup override (feat/lineup-override-backend). Mirrors the
+// opener_override CRUD shape — same key (game_date, game_id, side),
+// same upsert/get/delete/list-by-date set. Applied at runLineupJob
+// write time only while the side's incoming status is 'projected'.
+q.setLineupOverride = db.prepare(
+  "INSERT INTO lineup_override (game_date, game_id, side, lineup_json, set_at, set_by, reason) " +
+  "VALUES (?, ?, ?, ?, datetime('now'), ?, ?) " +
+  "ON CONFLICT(game_date, game_id, side) DO UPDATE SET " +
+  "  lineup_json=excluded.lineup_json, set_at=excluded.set_at, " +
+  "  set_by=excluded.set_by, reason=excluded.reason"
+);
+q.deleteLineupOverride = db.prepare(
+  "DELETE FROM lineup_override WHERE game_date=? AND game_id=? AND side=?"
+);
+q.getLineupOverride = db.prepare(
+  "SELECT * FROM lineup_override WHERE game_date=? AND game_id=? AND side=?"
+);
+q.listLineupOverridesByDate = db.prepare(
+  "SELECT * FROM lineup_override WHERE game_date=? ORDER BY game_id, side"
 );
 
 // 10 positional args: game_date, team, pitcher_name, pitcher_mlb_id,

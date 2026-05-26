@@ -1021,6 +1021,158 @@ router.get('/opener-override/:game_date', (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Manual lineup override CRUD (feat/lineup-override-backend). Allows a
+// caller to replace a side's 9-batter lineup while RotoWire's
+// projection is stale (e.g. opposing SP flipped hand and the team
+// hasn't posted the platoon-adjusted lineup yet). Applied at lineup
+// write time only while the side's incoming status is 'projected';
+// 'confirmed' RotoWire lineup auto-clears the override. Auth-gated
+// like other writes; reads stay open.
+router.post('/lineup-override', requireAdminToken, (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.game_date || !/^\d{4}-\d{2}-\d{2}$/.test(b.game_date)) {
+      return res.status(400).json({ error: 'game_date (YYYY-MM-DD) required' });
+    }
+    if (!b.game_id || typeof b.game_id !== 'string') {
+      return res.status(400).json({ error: 'game_id (string) required' });
+    }
+    if (b.side !== 'away' && b.side !== 'home') {
+      return res.status(400).json({ error: 'side must be "away" or "home"' });
+    }
+    // Lineup validation: exactly 9 batters, each with non-empty name
+    // and hand ∈ {L,R,S}. Order is preserved verbatim (slot N gets
+    // PA_WEIGHTS[N] downstream — see services/model.js perBatterEW).
+    if (!Array.isArray(b.lineup) || b.lineup.length !== 9) {
+      return res.status(400).json({ error: 'lineup must be an array of exactly 9 batters' });
+    }
+    for (let i = 0; i < 9; i++) {
+      const x = b.lineup[i];
+      if (!x || typeof x !== 'object') {
+        return res.status(400).json({ error: 'lineup[' + i + '] must be an object' });
+      }
+      if (typeof x.name !== 'string' || !x.name.trim()) {
+        return res.status(400).json({ error: 'lineup[' + i + '].name must be a non-empty string' });
+      }
+      if (x.hand !== 'L' && x.hand !== 'R' && x.hand !== 'S') {
+        return res.status(400).json({ error: 'lineup[' + i + '].hand must be "L", "R", or "S"' });
+      }
+    }
+
+    // Normalize the lineup entries to the shape RotoWire-parsed
+    // lineups use ({name, hand, pos}), so downstream code can treat
+    // an override identically to a projected lineup.
+    const normalizedLineup = b.lineup.map(x => ({
+      name: x.name.trim(),
+      hand: x.hand,
+      pos: (typeof x.pos === 'string' && x.pos.trim()) ? x.pos.trim() : null,
+    }));
+
+    // Name-resolution warning. getBatterWoba (services/model.js ~61)
+    // resolves a batter by normName lookup against the bat-proj-*
+    // indexes (with fuzzyLookup fallbacks). A name with no normName
+    // match will silently fall back to BAT_DFLT — the model still
+    // runs, but the caller probably wants to know. Pull the live
+    // wOBA index and check each name's normalized form against the
+    // proj-side indexes (most batters appear in both LHP and RHP
+    // splits; missing both is the "won't resolve" case).
+    let unresolvedNames = [];
+    try {
+      const idx = getWobaIndex();
+      const lhp = idx['bat-proj-lhp'] || {};
+      const rhp = idx['bat-proj-rhp'] || {};
+      // Also check the actuals side — some recently-called-up bats
+      // appear there before projections refresh.
+      const lhpAct = idx['bat-act-lhp'] || {};
+      const rhpAct = idx['bat-act-rhp'] || {};
+      for (const x of normalizedLineup) {
+        const k = normName(x.name);
+        // Exact-key check across all four indexes. fuzzyLookup has
+        // additional matching strategies (jr-stripped, abbreviated,
+        // team-keyed), so this can OVER-report unresolved — the
+        // warning is conservative: a flagged name MIGHT still
+        // resolve via fuzzyLookup, but a name that hits any of the
+        // four indexes here is definitely safe.
+        const hit = idx['bat-proj-lhp']
+          && (lhp[k] || rhp[k] || lhpAct[k] || rhpAct[k]
+              // tolerate the "name + team-tag" suffixed keys (e.g.
+              // "judge nyy") by scanning for prefix matches too
+              || Object.keys(lhp).some(kk => kk === k || kk.startsWith(k + ' '))
+              || Object.keys(rhp).some(kk => kk === k || kk.startsWith(k + ' ')));
+        if (!hit) unresolvedNames.push(x.name);
+      }
+    } catch (e) {
+      console.warn('[lineup-override] name-resolution check failed (non-fatal): ' + e.message);
+    }
+
+    q.setLineupOverride.run(
+      b.game_date, b.game_id, b.side,
+      JSON.stringify(normalizedLineup),
+      b.set_by || null,
+      b.reason || null
+    );
+
+    // Immediate model rerun. Write the overridden lineup into game_log
+    // directly + flag the side's status as 'projected' (override is a
+    // guess, not confirmed), then call processGameSignals on the
+    // refreshed row. The next lineup-job pass will re-apply the
+    // override (idempotent via the integration in services/jobs.js),
+    // so this immediate write is for snappy feedback only — durability
+    // comes from the lineup-job integration.
+    let modelRerun = null;
+    try {
+      const sideCol = b.side === 'away' ? 'away_lineup_json' : 'home_lineup_json';
+      const statusCol = b.side === 'away' ? 'away_lineup_status' : 'home_lineup_status';
+      const lineupJsonStr = JSON.stringify(normalizedLineup);
+      db.prepare(
+        "UPDATE game_log SET " + sideCol + "=?, " + statusCol + "=?,"
+        + " updated_at=datetime('now')"
+        + " WHERE game_date=? AND game_id=?"
+      ).run(lineupJsonStr, 'projected', b.game_date, b.game_id);
+      const row = q.getGameById.get(b.game_date, b.game_id);
+      if (row) {
+        const wobaIdx = getWobaIndex();
+        const settings = getSettings();
+        processGameSignals(row, wobaIdx, settings);
+        modelRerun = 'ok';
+      } else {
+        modelRerun = 'no-row';
+      }
+    } catch (e) {
+      modelRerun = 'failed: ' + e.message;
+      console.warn('[lineup-override] post-write rerun failed: ' + e.message);
+    }
+
+    res.json({
+      success: true,
+      game_date: b.game_date,
+      game_id: b.game_id,
+      side: b.side,
+      batters: normalizedLineup.length,
+      unresolved_names: unresolvedNames,
+      model_rerun: modelRerun,
+      set_by: b.set_by || null,
+      reason: b.reason || null,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/lineup-override/:game_date/:game_id/:side', requireAdminToken, (req, res) => {
+  try {
+    const { game_date, game_id, side } = req.params;
+    if (side !== 'away' && side !== 'home') {
+      return res.status(400).json({ error: 'side must be "away" or "home"' });
+    }
+    const info = q.deleteLineupOverride.run(game_date, game_id, side);
+    res.json({ success: true, removed: info.changes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/lineup-override/:game_date', (req, res) => {
+  try { res.json(q.listLineupOverridesByDate.all(req.params.game_date)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Manual detection trigger — runs detectOpeners standalone for a date.
 // Useful after editing an opener_override row, or for backfilling
 // detection on past dates.

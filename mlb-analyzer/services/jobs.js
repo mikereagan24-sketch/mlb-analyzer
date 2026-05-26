@@ -1195,8 +1195,62 @@ async function runLineupJob(dateStr) {
 
     for (const g of games) {
       const gameId = g.game_id || makeGameId(g.away_team, g.home_team);
-      const awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
-      const homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
+      let awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
+      let homeLU = (g.home_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
+
+      // Manual lineup-override integration (feat/lineup-override-backend).
+      // Rule: CONFIRMED WINS. The override is applied ONLY while the
+      // incoming side's status is 'projected' (or null/bootstrap). When
+      // RotoWire posts a 'confirmed' lineup for the side, the override
+      // is auto-deleted and RotoWire's confirmed lineup is used (real
+      // beats guess).
+      //
+      // Per-side independence: away override doesn't affect home, and
+      // vice versa. Null-safety: no override → existing behavior
+      // unchanged.
+      const _luIncomingAwayStatus = g.away_lineup_status
+        || (g.lineup_status === 'confirmed' ? 'confirmed' : 'projected');
+      const _luIncomingHomeStatus = g.home_lineup_status
+        || (g.lineup_status === 'confirmed' ? 'confirmed' : 'projected');
+      const _luOvAway = q.getLineupOverride
+        ? q.getLineupOverride.get(dateStr, gameId, 'away') : null;
+      const _luOvHome = q.getLineupOverride
+        ? q.getLineupOverride.get(dateStr, gameId, 'home') : null;
+      if (_luOvAway) {
+        if (_luIncomingAwayStatus === 'confirmed') {
+          q.deleteLineupOverride.run(dateStr, gameId, 'away');
+          console.log('[lineups] ' + gameId + '/away: confirmed lineup posted, clearing manual override');
+        } else {
+          try {
+            const ovLu = JSON.parse(_luOvAway.lineup_json);
+            if (Array.isArray(ovLu) && ovLu.length > 0) {
+              awayLU = ovLu;
+              console.log('[lineups] ' + gameId + '/away: using manual lineup_override ('
+                + ovLu.length + ' batters), RotoWire projected lineup ignored');
+            }
+          } catch (e) {
+            console.warn('[lineups] ' + gameId + '/away: lineup_override JSON parse failed (using RotoWire): ' + e.message);
+          }
+        }
+      }
+      if (_luOvHome) {
+        if (_luIncomingHomeStatus === 'confirmed') {
+          q.deleteLineupOverride.run(dateStr, gameId, 'home');
+          console.log('[lineups] ' + gameId + '/home: confirmed lineup posted, clearing manual override');
+        } else {
+          try {
+            const ovLu = JSON.parse(_luOvHome.lineup_json);
+            if (Array.isArray(ovLu) && ovLu.length > 0) {
+              homeLU = ovLu;
+              console.log('[lineups] ' + gameId + '/home: using manual lineup_override ('
+                + ovLu.length + ' batters), RotoWire projected lineup ignored');
+            }
+          } catch (e) {
+            console.warn('[lineups] ' + gameId + '/home: lineup_override JSON parse failed (using RotoWire): ' + e.message);
+          }
+        }
+      }
+
       const existingRow = q.getGameById.get(dateStr, gameId);
         // Lock odds 10min before game start — only for TODAY's games, never future dates
         const todayForLock = new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});
