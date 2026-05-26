@@ -2254,6 +2254,23 @@ function gameHasStarted(gameRow, gameDate) {
   return minsToGame < -5; // started more than 5 min ago
 }
 
+// Plausibility band for market_total. Source-agnostic gate applied
+// inside processOddsArray before haveTot is computed — a feed-emitted
+// total outside this band is treated as missing rather than written
+// straight to game_log. Mirrors what checkOddsSanity (line ~232) does
+// for the ML side: refuse to display / bet against a value the data
+// itself says is wrong.
+//
+// Real MLB totals run ~6.5–12.5 (Kalshi's strike ladder is 2.5–12.5
+// but the traded band is tighter). 6.0/14.5 is intentionally
+// conservative — rejects clear garbage (4.5, 2.5, 20) without ever
+// rejecting a legitimate line. The 2026-05-26 MIA@TOR incident
+// (market_total=4.5 with -563/+457 prices from the Unabated/OddsAPI
+// feed) motivated this; the gate would have nulled the bad row and
+// the existing "no sane totals" flag string would have surfaced it.
+const TOTAL_MIN_PLAUSIBLE = 6.0;
+const TOTAL_MAX_PLAUSIBLE = 14.5;
+
 // Pure post-fetch processing: dedup -> per-game flag build + UPDATE +
 // processGameSignals. Extracted from runOddsJob so the snapshot-replay
 // endpoint (POST /api/replay/odds) can re-run the same logic against a
@@ -2295,6 +2312,32 @@ function processOddsArray(dateStr, oddsRaw, settings) {
       if (sanityReason) reasons.push(sanityReason);
       if (divergenceReason) reasons.push(divergenceReason);
     }
+
+    // Totals plausibility gate. Refuse to surface an implausible
+    // market_total (and the prices reported alongside it) — null both
+    // sides so the existing "no sane totals" flag fires through the
+    // unchanged haveTot path below. Applied symmetrically to xcheck.
+    // Source-agnostic: this catches a bad value regardless of which
+    // book the feed sourced it from.
+    if (o.market_total != null
+        && (o.market_total < TOTAL_MIN_PLAUSIBLE || o.market_total > TOTAL_MAX_PLAUSIBLE)) {
+      console.warn('[odds] rejecting implausible total for ' + o.game_id
+        + ': ' + o.market_total + ' (outside ['
+        + TOTAL_MIN_PLAUSIBLE + ', ' + TOTAL_MAX_PLAUSIBLE + ']) — treating as missing');
+      o.market_total = null;
+      o.over_price = null;
+      o.under_price = null;
+    }
+    if (o.xcheck_total != null
+        && (o.xcheck_total < TOTAL_MIN_PLAUSIBLE || o.xcheck_total > TOTAL_MAX_PLAUSIBLE)) {
+      console.warn('[odds] rejecting implausible xcheck total for ' + o.game_id
+        + ': ' + o.xcheck_total + ' (outside ['
+        + TOTAL_MIN_PLAUSIBLE + ', ' + TOTAL_MAX_PLAUSIBLE + ']) — treating as missing');
+      o.xcheck_total = null;
+      o.xcheck_over_price = null;
+      o.xcheck_under_price = null;
+    }
+
     const haveTot = o.market_total != null && o.over_price != null && o.under_price != null;
     const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
     if (!haveTot && !haveXcheckTot) {
