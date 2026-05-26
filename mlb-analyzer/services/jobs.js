@@ -2657,10 +2657,15 @@ async function runOddsJob(dateStr) {
               skippedLocked++;
               continue;
             }
-            // Observation-only: record Kalshi's auto-picked fair line.
+            // Observation-only: record Kalshi's implied fair total.
+            // Prefer the continuous interpolated value (from de-vigged
+            // ladder, see kalshi.js computeImpliedTotal) so divergence
+            // vs market_total isn't quantized to .5 steps. Falls back
+            // to the snapped bettable rung when the ladder doesn't
+            // bracket pOver=0.50 (k.implied_total null in that case).
             // Set this BEFORE the line-gap skip so we capture divergence
             // even when prices aren't overridden.
-            o.kalshi_implied_total = k.line;
+            o.kalshi_implied_total = (k.implied_total != null) ? k.implied_total : k.line;
             // Pick the ladder rung at market_total (exact, then nearest
             // within 0.5).
             let chosenRung = k.ladder.find(r => r.strike === o.market_total);

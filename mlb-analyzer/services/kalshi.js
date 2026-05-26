@@ -586,6 +586,57 @@ async function getKalshiMlbTotals(date, opts) {
     return probToAmerican(adj);
   };
 
+  // Interpolated fair total (observation-only — does NOT change `line`,
+  // which remains the snapped bettable rung). De-vig each rung's over
+  // price to remove Kalshi's spread, then find the adjacent rung pair
+  // where pOver crosses 0.50 and linearly interpolate between the two
+  // strikes for a continuous fair-total estimate.
+  //
+  // Why: without this, kalshi_implied_total downstream snapped to the
+  // chosen rung's .5 value (e.g. chc-pit 2026-05-26 with over crossing
+  // 0.50 between strike 7.5 (over $0.55) and 8.5 (over $0.47) — true
+  // fair ~8.03 — was reported as 8.5, showing a fake ±1.00 divergence
+  // vs market 7.5). Interpolation lands the observation field on the
+  // honest sub-run value the rungs actually imply.
+  //
+  // Guards:
+  //   - Need at least 2 priced rungs to bracket. Returns null otherwise.
+  //   - Degenerate rung (over+under <= 0 or non-finite): skipped,
+  //     doesn't participate in pair-walking.
+  //   - Non-monotonic pair (pOver_low < pOver_high): a well-priced
+  //     ladder always has pOver strictly decreasing as strike rises;
+  //     a pair violating that is stale/illiquid on one side, skip.
+  //   - No crossover at all (entire ladder >= 0.50 or all < 0.50):
+  //     returns null — DO NOT extrapolate beyond the ladder. Caller
+  //     (jobs.js) falls back to the snapped `line` in that case.
+  const computeImpliedTotal = (rungs) => {
+    if (!rungs || rungs.length < 2) return null;
+    const priced = [];
+    for (const r of rungs) {
+      const o = r.over_ask_dollars;
+      const u = r.under_ask_dollars;
+      const sum = o + u;
+      if (!(Number.isFinite(o) && Number.isFinite(u) && o > 0 && u > 0 && sum > 0)) continue;
+      priced.push({ strike: r.strike, pOver: o / sum });
+    }
+    if (priced.length < 2) return null;
+    // Caller sorted rungs ascending by strike before invoking us, so
+    // priced[] is also strike-ascending.
+    for (let i = 0; i < priced.length - 1; i++) {
+      const lo = priced[i];
+      const hi = priced[i + 1];
+      if (lo.pOver < hi.pOver) continue; // non-monotonic, skip
+      if (lo.pOver >= 0.50 && hi.pOver < 0.50) {
+        const span = lo.pOver - hi.pOver;
+        if (!(span > 0)) return null; // defensive — caught by monotonic check
+        const frac = (lo.pOver - 0.50) / span;
+        const interp = lo.strike + frac * (hi.strike - lo.strike);
+        return Math.round(interp * 100) / 100;
+      }
+    }
+    return null;
+  };
+
   const results = [];
   for (const evt of byEvent.values()) {
     if (!includeLive && evt.is_live) continue;
@@ -596,6 +647,10 @@ async function getKalshiMlbTotals(date, opts) {
     // distance, but the lower strike wins by sort order — minor, but
     // documenting so it's predictable if the caller hits a tie).
     evt.rungs.sort((a, b) => a.strike - b.strike);
+
+    // Continuous fair-total estimate from the de-vigged ladder. Observation
+    // only — `chosen.strike` below (and the per-side prices) are unchanged.
+    const impliedTotal = computeImpliedTotal(evt.rungs);
 
     let chosen;
     if (targetLine != null) {
@@ -630,7 +685,13 @@ async function getKalshiMlbTotals(date, opts) {
       event_ticker: evt.event_ticker,
       start_et: evt.start_et,
       is_live: evt.is_live,
+      // `line` is the snapped bettable rung (what the model bets
+      // against). `implied_total` is the continuous interpolated fair
+      // value from the de-vigged ladder — null when the ladder doesn't
+      // bracket pOver=0.50, in which case callers should fall back to
+      // `line`. Storage downstream uses interpolated when present.
       line: chosen.strike,
+      implied_total: impliedTotal,
       over: {
         ask_dollars: overC,
         ask_ml: probToAmerican(overC),
