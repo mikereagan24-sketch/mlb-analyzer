@@ -2,3 +2,16 @@ node_modules/
 data/
 .env
 *.db
+
+# Scratch / debug probes (one-off analysis, not part of the app)
+probe-*.cjs
+*-test.cjs
+check-*.js
+today-impact.cjs
+
+# CSV scratch output
+frv-*.csv
+forecasts.csv
+
+# Local editor/agent
+.claude/
