@@ -491,8 +491,8 @@ function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
 // column is populated; otherwise fall back to model_*. Visibility
 // gates and proj_model_* (frozen pre-lineup snapshot, intentional)
 // still read model_* directly.
-function effAwayML(g){return g.is_opener_game_away&&g.opener_model_away_ml!=null?g.opener_model_away_ml:g.model_away_ml;}
-function effHomeML(g){return g.is_opener_game_home&&g.opener_model_home_ml!=null?g.opener_model_home_ml:g.model_home_ml;}
+function effAwayML(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_away_ml!=null?g.opener_model_away_ml:g.model_away_ml;}
+function effHomeML(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_home_ml!=null?g.opener_model_home_ml:g.model_home_ml;}
 function effTotal(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_total!=null?g.opener_model_total:g.model_total;}
 // v4 cohort + PR B (opener-mode redesign): render the pitching-weight
 // breakdown next to each pitcher's name. Three display modes based on
