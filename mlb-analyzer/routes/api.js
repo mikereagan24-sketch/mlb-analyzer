@@ -1572,10 +1572,10 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         const finalSource = (oneSideActFluke || bothDefault) ? 'default' : srcVsSP;
         return {woba:blended, wobaVsSP: finalVsSP, wobaVsOpp: finalVsOpp, source:finalSource};
       }
-    function lookupPitcher(name, hand) {
+    function lookupPitcher(name, hand, team) {
       // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback
       const { getPitcherWoba } = require('../services/model');
-      const result = getPitcherWoba(wobaIdx, name, hand||'R', null, W_PROJ, W_ACT);
+      const result = getPitcherWoba(wobaIdx, name, hand||'R', team, W_PROJ, W_ACT);
       return {
         vsLHB: { woba: result.vsLHB, rawWoba: result.vsLHB, source: result.source },
         vsRHB: { woba: result.vsRHB, rawWoba: result.vsRHB, source: result.source },
@@ -1585,8 +1585,8 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const homeLineup=tryParse(game.home_lineup_json)||[];
     res.json({
       game_id:gameId,
-      away_sp_woba:lookupPitcher(game.away_sp,game.away_sp_hand||'R'),
-      home_sp_woba:lookupPitcher(game.home_sp,game.home_sp_hand||'R'),
+      away_sp_woba:lookupPitcher(game.away_sp,game.away_sp_hand||'R',game.away_team),
+      home_sp_woba:lookupPitcher(game.home_sp,game.home_sp_hand||'R',game.home_team),
       away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R',game.away_team)})),
       home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R',game.home_team)})),
     });
