@@ -1152,17 +1152,56 @@ async function runLineupJob(dateStr) {
     }
     // Helper: resolve a pitcher name on a given team to their mlb_id via
     // team_rosters, then call forecastSpIP. Returns the forecast IP (a
-    // number) or null when name was null, team_rosters had no match, or
-    // the forecast itself reported source='fallback'. PR 4's gate will
-    // accept any non-null number; the COALESCE in upsertGame preserves
-    // prior values when this is null.
+    // number), or null when:
+    //   * name was missing,
+    //   * neither the exact nor the diacritic-normalized roster row
+    //     matched (pitcher not in team_rosters — produce a VISIBLE null
+    //     rather than the silent league baseline that source!=='fallback'
+    //     used to let through),
+    //   * the forecast itself reported source='fallback' (no index data).
+    // PR 4's gate accepts any non-null number; the COALESCE in upsertGame
+    // preserves prior values when this is null.
     const rosterLookup = db.prepare(
       "SELECT mlb_id FROM team_rosters WHERE team=? AND player_name=?"
     );
+    // Normalized-name fallback for accents / casing / punctuation.
+    // Rotowire and other ingestion paths sometimes flatten 'Martín Pérez'
+    // to 'Martin Perez', which the exact-match SQL above misses — the
+    // pitcher was then silently treated as unknown and forecastSpIP
+    // returned the ~5.45 IP league baseline tagged 'league_only'. With
+    // 'league_only' upstream of the (source!=='fallback') gate, that
+    // baseline flowed through as a real forecast. The map below catches
+    // those cases at JS level. Built once per slate (small table, ~1200
+    // rows). normName already does NFD-strip + lowercase + punctuation
+    // collapse so it covers the brief's requested normalization and a
+    // bit more.
+    const rosterByNorm = new Map();
+    for (const row of db.prepare(
+      "SELECT team, player_name, mlb_id FROM team_rosters WHERE team IS NOT NULL AND player_name IS NOT NULL"
+    ).all()) {
+      const key = row.team + ':' + normName(row.player_name);
+      // First write wins — if two roster rows normalize to the same key
+      // on the same team, prefer the first (rare; would indicate a
+      // duplicate roster row anyway).
+      if (!rosterByNorm.has(key)) rosterByNorm.set(key, row.mlb_id);
+    }
     const forecastForPitcher = (pitcherName, team, role) => {
       if (!pitcherName || !team) return null;
+      // 1. Exact match (fast path, unchanged behavior for clean names).
+      let mlbId = null;
       const r = rosterLookup.get(team, pitcherName);
-      const mlbId = r ? r.mlb_id : null;
+      if (r) mlbId = r.mlb_id;
+      // 2. Normalized-name fallback for diacritics / casing.
+      if (mlbId == null) {
+        const key = team + ':' + normName(pitcherName);
+        if (rosterByNorm.has(key)) mlbId = rosterByNorm.get(key);
+      }
+      // 3. Still unresolved -> return null immediately. Pre-fix the code
+      // fell through to forecastSpIP, which produced source='league_only'
+      // (~5.45 IP) for an unknown mlbId; the existing gate only filtered
+      // 'fallback' so the baseline leaked through as a real value.
+      // The honest semantic for "pitcher not in roster" is null.
+      if (mlbId == null) return null;
       const out = forecastSpIP({
         index: spStartIndex,
         pitcherMlbId: mlbId,
@@ -1171,7 +1210,8 @@ async function runLineupJob(dateStr) {
         role: role || 'start',
       });
       // Only persist non-fallback values. league_only and shrinkage both
-      // produce defensible numbers; fallback (no index data at all) is
+      // produce defensible numbers (the pitcher IS in the roster — we
+      // just lack recent priors); fallback (no index data at all) is
       // a degenerate hardcoded 5.25 with no informational content.
       if (out.source === 'fallback') return null;
       return out.forecast;
