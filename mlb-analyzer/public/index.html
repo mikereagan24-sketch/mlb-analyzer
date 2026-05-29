@@ -453,12 +453,13 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Fav ML adjustment (±N)</label><input type="number" id="s-fav-adj" step="1"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Dog ML adjustment (+N)</label><input type="number" id="s-dog-adj" step="1"></div>
 </div>
-<div class="slabel">Signal thresholds</div>
+<div class="slabel">Continuous-edge signals</div>
 <div class="grid-2" style="gap:8px;margin-bottom:12px">
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 3★ threshold (pts diff)</label><input type="number" id="s-ml-3star" step="1" min="0"></div><div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 2★ threshold (pts diff)</label><input type="number" id="s-ml-val" step="0.01"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML 1★ threshold (pts diff)</label><input type="number" id="s-ml-lean" step="0.01"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 3★ edge (%)</label><input type="number" id="s-tot-3star" step="0.01" min="0"></div><div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 2★ edge (%)</label><input type="number" id="s-tot-val" step="0.1"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Total 1★ edge (%)</label><input type="number" id="s-tot-lean" step="0.1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Signal emit floor (prob pts)</label><input type="number" id="s-emit-floor" step="0.005" min="0"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML favorite highlight min (prob pts)</label><input type="number" id="s-hl-ml-fav" step="0.005" min="0"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML dog highlight min (prob pts)</label><input type="number" id="s-hl-ml-dog" step="0.005" min="0"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Totals under highlight min (prob pts)</label><input type="number" id="s-hl-tot-under" step="0.005" min="0"></div>
+<div style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label style="font-size:11px;color:var(--text2)" for="s-hl-tot-overs">Totals overs highlight enabled</label><input type="checkbox" id="s-hl-tot-overs"></div>
 </div>
 <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
 <!-- Admin token affordance. Writes require X-Admin-Token (see
@@ -1231,13 +1232,63 @@ function analyzeGame(gameId,date){
   document.getElementById('a-tot').textContent=effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—';
   document.getElementById('a-runs').textContent='Market: '+fmtML(g.market_away_ml)+' / '+fmtML(g.market_home_ml)+' · O/U '+g.market_total;
   const sigs=g.signals||[];
+  // Continuous-edge rendering (feat/continuous-edge-score). Mixed
+  // display: legacy rows carry a non-null signal_label ("1★"/"2★"/
+  // "3★") and render that string; new rows carry signal_label=null
+  // and edge_pct as a raw probability decimal, and render as
+  // "X.Xpp" rounded to nearest 0.5pp. Highlight class is direction-
+  // specific (settings: ui_highlight_ml_fav/dog/tot_under_min_pp +
+  // ui_highlight_tot_overs_enabled).
+  function _roundScorePp(edge) {
+    if (edge == null || isNaN(edge)) return null;
+    return Math.round(Number(edge) * 100 / 0.5) * 0.5;
+  }
+  function _shouldHighlight(sig, settings) {
+    if (!sig) return false;
+    if (sig.signal_label) {
+      // Legacy row: 2★ and 3★ historically highlighted; preserve.
+      return sig.signal_label === '2★' || sig.signal_label === '3★';
+    }
+    const score = _roundScorePp(sig.edge_pct);
+    if (score == null) return false;
+    const overs = settings && (settings.ui_highlight_tot_overs_enabled === 'true'
+                            || settings.ui_highlight_tot_overs_enabled === true
+                            || settings.ui_highlight_tot_overs_enabled === '1');
+    if (sig.signal_type === 'ML') {
+      const mkt = Number(sig.market_line);
+      const thr = mkt < 0
+        ? Number((settings && settings.ui_highlight_ml_fav_min_pp) || 0.02) * 100
+        : Number((settings && settings.ui_highlight_ml_dog_min_pp) || 0.045) * 100;
+      return score >= thr;
+    }
+    if (sig.signal_type === 'Total') {
+      if (sig.signal_side === 'over') return overs ? true : false; // overs highlight gated entirely off by default
+      const thr = Number((settings && settings.ui_highlight_tot_under_min_pp) || 0.07) * 100;
+      return score >= thr;
+    }
+    return false;
+  }
   function setComp(boxId,lId,mId,mktId,edgId,label,modelVal,mktVal,sig){
     document.getElementById(lId).textContent=label;
     document.getElementById(mId).textContent=modelVal;
     document.getElementById(mktId).textContent='Market: '+mktVal;
     const box=document.getElementById(boxId);
-    if(sig){const col=sig.signal_label==='Value'?'var(--green)':'var(--blue)';document.getElementById(edgId).innerHTML='<span style="color:'+col+';font-weight:500">'+sig.signal_label+'</span>';box.className='rbox value';}
-    else{document.getElementById(edgId).textContent='—';box.className='rbox';}
+    const settings = window._appSettings || {};
+    if(sig){
+      let text;
+      if (sig.signal_label != null && sig.signal_label !== '') {
+        text = sig.signal_label; // legacy row
+      } else {
+        const score = _roundScorePp(sig.edge_pct);
+        text = score != null ? (score.toFixed(1) + 'pp') : '—';
+      }
+      const hl = _shouldHighlight(sig, settings);
+      const col = hl ? 'var(--blue)' : 'var(--text2)';
+      document.getElementById(edgId).innerHTML = '<span style="color:'+col+';font-weight:500">'+text+'</span>';
+      box.className = hl ? 'rbox value' : 'rbox';
+    } else {
+      document.getElementById(edgId).textContent='—'; box.className='rbox';
+    }
   }
   setComp('comp-a','ca-lbl','ca-model','ca-mkt','ca-edge',g.away_team+' Moneyline',effAwayML(g)!=null?fmtML(effAwayML(g)):'—',g.market_away_ml?fmtML(g.market_away_ml):'—',sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML'));
   setComp('comp-h','ch-lbl','ch-model','ch-mkt','ch-edge',g.home_team+' Moneyline',effHomeML(g)!=null?fmtML(effHomeML(g)):'—',g.market_home_ml?fmtML(g.market_home_ml):'—',sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML'));
@@ -2316,15 +2367,9 @@ async function loadCronLog(){
         <option value="home">Home</option>
       </select>
     </div>
-    <div class="manual-row">
-      <label>Star Rating</label>
-      <select id="mb-stars">
-        <option value="unrated">unrated (0★)</option>
-        <option value="1★">1★</option>
-        <option value="2★">2★</option>
-        <option value="3★">3★</option>
-      </select>
-    </div>
+    <!-- Star Rating dropdown removed in feat/continuous-edge-score.
+         Manual bets log without a tier label; the rounded-pp edge is
+         derived server-side and shown in the calc preview below. -->
     <div class="manual-row">
       <label>Market Line (e.g. +153 or 6.5)</label>
       <input type="number" id="mb-mktline" step="0.5" placeholder="e.g. +153 or 6.5">
@@ -2392,8 +2437,13 @@ const _SETTINGS_SCHEMA_ID_MAP = {
   wp_clamp_lo: 's-wp-clamp-lo', wp_clamp_hi: 's-wp-clamp-hi',
   tot_prob_lo: 's-tot-prob-lo', tot_prob_hi: 's-tot-prob-hi',
   market_total_dflt: 's-market-total-dflt',
-  ml_lean_edge: 's-ml-lean', ml_value_edge: 's-ml-val', ml_3star_edge: 's-ml-3star',
-  tot_lean_edge: 's-tot-lean', tot_value_edge: 's-tot-val', tot_3star_edge: 's-tot-3star',
+  // Continuous-edge keys (feat/continuous-edge-score). Replaces the
+  // legacy ml_/tot_ lean/value/3star tier map.
+  signal_emit_floor_pp: 's-emit-floor',
+  ui_highlight_ml_fav_min_pp: 's-hl-ml-fav',
+  ui_highlight_ml_dog_min_pp: 's-hl-ml-dog',
+  ui_highlight_tot_under_min_pp: 's-hl-tot-under',
+  ui_highlight_tot_overs_enabled: 's-hl-tot-overs',
 };
 let _SETTINGS_SCHEMA_CACHE = null;
 
@@ -2560,12 +2610,15 @@ async function loadSettings(){
     window._appSettings = s;
     set('s-fav-adj',       s.fav_adj);
     set('s-dog-adj',       s.dog_adj);
-    set('s-ml-3star',      s.ml_3star_edge);
-    set('s-ml-val',        s.ml_value_edge);
-    set('s-ml-lean',       s.ml_lean_edge);
-    set('s-tot-3star',     s.tot_3star_edge);
-    set('s-tot-val',       s.tot_value_edge);
-    set('s-tot-lean',      s.tot_lean_edge);
+    // Continuous-edge settings (feat/continuous-edge-score).
+    set('s-emit-floor',     s.signal_emit_floor_pp);
+    set('s-hl-ml-fav',      s.ui_highlight_ml_fav_min_pp);
+    set('s-hl-ml-dog',      s.ui_highlight_ml_dog_min_pp);
+    set('s-hl-tot-under',   s.ui_highlight_tot_under_min_pp);
+    var _overs = (document.getElementById('s-hl-tot-overs')||{});
+    _overs.checked = s.ui_highlight_tot_overs_enabled === 'true'
+                  || s.ui_highlight_tot_overs_enabled === true
+                  || s.ui_highlight_tot_overs_enabled === '1';
   } catch(e){ console.error('loadSettings error',e); }
 }
 
@@ -2617,12 +2670,12 @@ async function saveSettings(){
         market_total_dflt:  get('s-market-total-dflt'),
     fav_adj:            get('s-fav-adj'),
     dog_adj:            get('s-dog-adj'),
-    ml_3star_edge:      get('s-ml-3star'),
-    ml_value_edge:      get('s-ml-val'),
-    ml_lean_edge:       get('s-ml-lean'),
-    tot_3star_edge:     get('s-tot-3star'),
-    tot_value_edge:     get('s-tot-val'),
-    tot_lean_edge:      get('s-tot-lean'),
+    // Continuous-edge settings (feat/continuous-edge-score).
+    signal_emit_floor_pp:           get('s-emit-floor'),
+    ui_highlight_ml_fav_min_pp:     get('s-hl-ml-fav'),
+    ui_highlight_ml_dog_min_pp:     get('s-hl-ml-dog'),
+    ui_highlight_tot_under_min_pp:  get('s-hl-tot-under'),
+    ui_highlight_tot_overs_enabled: (document.getElementById('s-hl-tot-overs')||{}).checked ? 'true' : 'false',
   };
   try{
     // Use adminPost — POST /settings requires X-Admin-Token (see
@@ -2686,38 +2739,47 @@ function calcManualEdge(){
   var game = window._mbGame;
   if (!game) return;
   function iP(ml){ml=parseFloat(ml);if(isNaN(ml)||ml===0)return 0.524;return ml<0?Math.abs(ml)/(Math.abs(ml)+100):100/(ml+100);}
-  var edgeTxt='', starTxt='', catTxt='';
-  var settings = {ML_LEAN_EDGE:15,ML_VALUE_EDGE:30,ML_3STAR_EDGE:45,TOT_LEAN_EDGE:0.04,TOT_VALUE_EDGE:0.07,TOT_3STAR_EDGE:0.10};
-  if (type==='ML') {
-    var modelLine = side==='away'?game.model_away_ml:game.model_home_ml;
-    var mktLine = isNaN(mkt)?( side==='away'?game.market_away_ml:game.market_home_ml ) : mkt;
-    var betLine = isNaN(bet)?mktLine:bet;
-    // Edge = abs distance between model ML and bet ML
-    function mlEdge(mktL,mdl){var md=mktL>0?mktL-100:-mktL-100;var dd=mdl>0?mdl-100:-mdl-100;return (mktL>0)!==(mdl>0)?md+dd:Math.abs(mktL-mdl);}
-    var e=mlEdge(betLine,modelLine||0);
-    var star=e>=settings.ML_3STAR_EDGE?'3★':e>=settings.ML_VALUE_EDGE?'2★':e>=settings.ML_LEAN_EDGE?'1★':'unrated';
-    var isFav=betLine<0;
-    catTxt=(star==='unrated'?'0star':star.replace('★','star'))+'-'+(isFav?'fav':'dog');
-    edgeTxt='Edge: '+(betLine>0?'+':'')+betLine+' vs model '+(modelLine>0?'+':'')+modelLine+' = '+Math.round(e)+' pts';
-    starTxt=star;
+  // Continuous-edge preview (feat/continuous-edge-score).
+  // No tier labels — show raw pp + rounded score, gated by
+  // direction-specific highlight thresholds from app settings.
+  var edgeTxt = '', scoreTxt = '', catTxt = '';
+  var ap = window._appSettings || {};
+  function roundScore(e){ return Math.round(e * 100 / 0.5) * 0.5; }
+  if (type === 'ML') {
+    var modelLine = side === 'away' ? game.model_away_ml : game.model_home_ml;
+    var mktLine = isNaN(mkt) ? (side === 'away' ? game.market_away_ml : game.market_home_ml) : mkt;
+    var betLine = isNaN(bet) ? mktLine : bet;
+    var e = iP(modelLine || 0) - iP(betLine);
+    if (e < 0) e = 0;
+    var score = roundScore(e);
+    var isFav = betLine < 0;
+    catTxt = isFav ? 'fav' : 'dog';
+    var thr = isFav
+      ? Number(ap.ui_highlight_ml_fav_min_pp || 0.02) * 100
+      : Number(ap.ui_highlight_ml_dog_min_pp || 0.045) * 100;
+    var hl = score >= thr ? ' (highlight)' : '';
+    edgeTxt = 'bet ' + (betLine > 0 ? '+' : '') + betLine + ' vs model ' + (modelLine > 0 ? '+' : '') + modelLine + ' = raw ' + (e * 100).toFixed(2) + 'pp';
+    scoreTxt = score.toFixed(1) + 'pp' + hl;
   } else {
-    // Total: edge = modelOverP - implied(price)
-    var modelTot = parseFloat(game.model_total)||8.5;
-    var mktTot = isNaN(mkt)?(game.market_total||8.5):mkt;
-    var betTot = isNaN(bet)?mktTot:bet;
-    var betPrice = isNaN(price)?-110:price;
-    var runDiff = modelTot-betTot;
-    var modelP = Math.min(Math.max(0.5+runDiff*0.08,0.20),0.80);
-    if (side==='under') modelP=1-modelP;
+    var modelTot = parseFloat(game.model_total) || 8.5;
+    var mktTot = isNaN(mkt) ? (game.market_total || 8.5) : mkt;
+    var betTot = isNaN(bet) ? mktTot : bet;
+    var betPrice = isNaN(price) ? -110 : price;
+    var runDiff = modelTot - betTot;
+    var modelP = Math.min(Math.max(0.5 + runDiff * 0.08, 0.20), 0.80);
+    if (side === 'under') modelP = 1 - modelP;
     var mktP = iP(betPrice);
-    var e=modelP-mktP;
-    var star=e>=settings.TOT_3STAR_EDGE?'3★':e>=settings.TOT_VALUE_EDGE?'2★':e>=settings.TOT_LEAN_EDGE?'1★':e>0?'unrated':'no edge';
-    catTxt=(star==='unrated'||star==='no edge'?'0star':star.replace('★','star'))+'-'+side;
-    edgeTxt='Model: '+modelTot.toFixed(2)+' vs bet '+side+' '+betTot+(betPrice>0?'+':'')+betPrice+' → edge '+(e*100).toFixed(1)+'%';
-    starTxt=star;
+    var e = Math.max(0, modelP - mktP);
+    var score = roundScore(e);
+    catTxt = side;
+    var oversEnabled = ap.ui_highlight_tot_overs_enabled === 'true' || ap.ui_highlight_tot_overs_enabled === true || ap.ui_highlight_tot_overs_enabled === '1';
+    var hl;
+    if (side === 'over') hl = oversEnabled ? ' (highlight)' : ' (overs gated off)';
+    else hl = score >= Number(ap.ui_highlight_tot_under_min_pp || 0.07) * 100 ? ' (highlight)' : '';
+    edgeTxt = 'Model ' + modelTot.toFixed(2) + ' vs bet ' + side + ' ' + betTot + (betPrice > 0 ? '+' : '') + betPrice + ' raw ' + (e * 100).toFixed(2) + 'pp';
+    scoreTxt = score.toFixed(1) + 'pp' + hl;
   }
-  document.getElementById('mb-stars').value=starTxt==='unrated'||starTxt==='no edge'?'unrated':starTxt;
-  res.innerHTML='<b>'+starTxt+'</b> — '+edgeTxt+'<br><small style="color:var(--text3)">Category: '+catTxt+'</small>';
+  res.innerHTML = '<b>' + scoreTxt + '</b> ' + edgeTxt + '<br><small style="color:var(--text3)">Category: ' + catTxt + '</small>';
   prev.classList.add('visible');
 }
 function updateMbSide(){
@@ -2748,7 +2810,6 @@ async function submitManualBet(){
   var game=document.getElementById('mb-game').value;
   var type=document.getElementById('mb-type').value;
   var side=document.getElementById('mb-side').value;
-  var stars=document.getElementById('mb-stars').value;
   var price=(document.getElementById('mb-price')||{}).value;
   var mkt=document.getElementById('mb-mktline').value;
   var bet=document.getElementById('mb-betline').value;
@@ -2756,9 +2817,12 @@ async function submitManualBet(){
   if(!date||!game||!mkt){st.textContent='Please fill in all required fields';st.style.color='#e05';return;}
   st.textContent='Saving...';st.style.color='var(--text2)';
   try{
+    // signal_label intentionally omitted (feat/continuous-edge-score):
+    // POST /signals/manual stores NULL and derives a direction-only
+    // category server-side; the raw pp edge_pct is the source of truth.
     var r=await api('/signals/manual',{method:'POST',body:JSON.stringify({
       game_date:date,game_id:game,signal_type:type,signal_side:side,
-      signal_label:stars,market_line:Number(mkt),bet_line:bet?Number(bet):null,bet_price:price?Number(price):null
+      market_line:Number(mkt),bet_line:bet?Number(bet):null,bet_price:price?Number(price):null
     })});
     if(r.success){
       st.textContent='Logged! '+r.category+' outcome='+r.outcome;st.style.color='var(--green)';

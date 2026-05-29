@@ -157,10 +157,28 @@ db.exec(`
     game_id TEXT NOT NULL,
     signal_type TEXT NOT NULL,
     signal_side TEXT NOT NULL,
-    signal_label TEXT NOT NULL,
+    -- signal_label and category column semantics CHANGED in
+    -- feat/continuous-edge-score. Pre-cutover rows store star labels
+    -- ('1*'/'2*'/'3*') and compound categories ('1star-fav',
+    -- '2star-over', etc.). Post-cutover rows store NULL label and
+    -- direction-only categories ('fav'|'dog'|'over'|'under').
+    -- NOT NULL was dropped from signal_label by a one-time table
+    -- recreate (see the migration block below — guarded by
+    -- sqlite_master inspection so it runs once). Historical rows are
+    -- intentionally NOT backfilled; the UI dispatches on (label != null)
+    -- to render whichever shape the row stores.
+    signal_label TEXT,
     category TEXT NOT NULL,
     market_line INTEGER,
     model_line INTEGER,
+    -- edge_pct unit history (units stored in this column have shifted):
+    --   * Legacy ML rows (pre-feat/probability-based-signal-thresholds):
+    --     American-odds cents distance (e.g. 30 = 30-cent edge).
+    --   * Legacy Total rows: probability-point decimal (e.g. 0.083).
+    --   * Post-cutover (feat/continuous-edge-score): raw
+    --     probability-point decimal for BOTH ML and Total (e.g.
+    --     0.0437 = 4.37pp). The UI computes a rounded-0.5pp display
+    --     score from edge_pct; the raw column is the source of truth.
     edge_pct REAL,
     outcome TEXT,
     pnl REAL DEFAULT 0,
@@ -214,12 +232,12 @@ db.exec(`
   INSERT OR IGNORE INTO app_settings VALUES ('w_bat', '0.5');
   INSERT OR IGNORE INTO app_settings VALUES ('w_proj', '0.65');
   INSERT OR IGNORE INTO app_settings VALUES ('w_act', '0.35');
-  INSERT OR IGNORE INTO app_settings VALUES ('ml_value_edge', '40');
-  INSERT OR IGNORE INTO app_settings VALUES ('ml_lean_edge', '20');
-  INSERT OR IGNORE INTO app_settings VALUES ('tot_value_edge', '1.0');
-INSERT OR IGNORE INTO app_settings VALUES ('ml_3star_edge', '60');
-INSERT OR IGNORE INTO app_settings VALUES ('tot_3star_edge', '0.12');
-  INSERT OR IGNORE INTO app_settings VALUES ('tot_lean_edge', '0.5');
+  -- Pre-cutover tier-threshold seeds (ml_value_edge, ml_lean_edge,
+  -- ml_3star_edge, tot_value_edge, tot_lean_edge, tot_3star_edge)
+  -- were removed in feat/continuous-edge-score. The continuous-edge
+  -- settings are seeded by the migration block at the bottom of this
+  -- file via INSERT OR IGNORE so fresh installs and existing DBs
+  -- both end up with the right keys.
 INSERT OR IGNORE INTO app_settings VALUES ('sp_weight', '0.77');
 INSERT OR IGNORE INTO app_settings VALUES ('relief_weight', '0.23');
 INSERT OR IGNORE INTO app_settings VALUES ('sp_pit_weight', '0.80');
@@ -1561,6 +1579,85 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
 // Add is_active and notes columns if not present
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1").run(); } catch(e) {}
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN notes TEXT").run(); } catch(e) {}
+
+// ============================================================
+// feat/continuous-edge-score migrations
+// ============================================================
+// 1. Drop NOT NULL on bet_signals.signal_label so post-cutover
+//    continuous-edge rows can be inserted with label=NULL. SQLite
+//    has no ALTER COLUMN; the standard procedure is to recreate
+//    the table with the desired schema and copy rows over. Guarded
+//    by sqlite_master inspection so subsequent boots are a no-op.
+// 2. DELETE the six legacy tier-threshold rows from app_settings.
+//    Idempotent — re-running just produces a 0-row delete.
+// 3. INSERT OR IGNORE the five new continuous-edge settings. Also
+//    idempotent.
+(function migrateContinuousEdge() {
+  try {
+    const tblRow = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='bet_signals'"
+    ).get();
+    if (tblRow && /signal_label\s+TEXT\s+NOT\s+NULL/i.test(tblRow.sql)) {
+      console.log('[migrate:continuous-edge] dropping NOT NULL on bet_signals.signal_label');
+      const cols = db.prepare("PRAGMA table_info('bet_signals')").all();
+      // Build a faithful CREATE TABLE from the live shape, stripping
+      // NOT NULL only on signal_label. Preserve PK / AUTOINCREMENT /
+      // type / default on every other column so the row data round-trips
+      // unchanged.
+      const colSpecs = cols.map(c => {
+        let spec = '"' + c.name + '"';
+        if (c.type) spec += ' ' + c.type;
+        if (c.pk === 1) spec += ' PRIMARY KEY AUTOINCREMENT';
+        if (c.notnull === 1 && c.name !== 'signal_label' && c.pk !== 1) spec += ' NOT NULL';
+        if (c.dflt_value !== null) {
+          // SQLite requires function-call defaults like datetime('now')
+          // to be parenthesized; literals like 0 or 'v1' don't strictly
+          // need parens but tolerate them. Always wrap to keep it safe.
+          const raw = String(c.dflt_value);
+          const wrapped = raw.includes('(') ? '(' + raw + ')' : raw;
+          spec += ' DEFAULT ' + wrapped;
+        }
+        return spec;
+      });
+      const ddl = 'CREATE TABLE bet_signals_new ('
+        + colSpecs.join(', ')
+        + ', FOREIGN KEY (game_log_id) REFERENCES game_log(id))';
+      const colList = cols.map(c => '"' + c.name + '"').join(', ');
+      // PRAGMA foreign_keys must be toggled OUTSIDE the transaction
+      // per SQLite docs. Inside the tx: create + copy + drop + rename.
+      db.exec('PRAGMA foreign_keys = OFF');
+      const tx = db.transaction(() => {
+        db.exec(ddl);
+        db.exec('INSERT INTO bet_signals_new (' + colList + ') SELECT ' + colList + ' FROM bet_signals');
+        db.exec('DROP TABLE bet_signals');
+        db.exec('ALTER TABLE bet_signals_new RENAME TO bet_signals');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_signals_date ON bet_signals(game_date)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_signals_category ON bet_signals(category)');
+      });
+      tx();
+      db.exec('PRAGMA foreign_keys = ON');
+      console.log('[migrate:continuous-edge] bet_signals.signal_label NOT NULL dropped');
+    }
+  } catch (e) {
+    console.error('[migrate:continuous-edge] table recreate FAILED:', e.message);
+    // Re-enable FKs even on failure so we don't leave the DB in a
+    // weakened state.
+    try { db.exec('PRAGMA foreign_keys = ON'); } catch (_) {}
+    throw e;
+  }
+
+  // app_settings cleanup. Idempotent on both directions: DELETE of a
+  // non-existent key is a no-op; INSERT OR IGNORE of an existing key
+  // is a no-op.
+  db.exec(
+    "DELETE FROM app_settings WHERE key IN ('ml_lean_edge','ml_value_edge','ml_3star_edge','tot_lean_edge','tot_value_edge','tot_3star_edge'); " +
+    "INSERT OR IGNORE INTO app_settings VALUES ('signal_emit_floor_pp', '0.01'); " +
+    "INSERT OR IGNORE INTO app_settings VALUES ('ui_highlight_ml_fav_min_pp', '0.02'); " +
+    "INSERT OR IGNORE INTO app_settings VALUES ('ui_highlight_ml_dog_min_pp', '0.045'); " +
+    "INSERT OR IGNORE INTO app_settings VALUES ('ui_highlight_tot_under_min_pp', '0.07'); " +
+    "INSERT OR IGNORE INTO app_settings VALUES ('ui_highlight_tot_overs_enabled', 'false');"
+  );
+})();
 
 const _insertAuditStmt = db.prepare(
   "INSERT INTO bet_signal_audit (signal_id, game_date, game_id, signal_type, signal_side, action, bet_line, closing_line, clv, source, detail) " +

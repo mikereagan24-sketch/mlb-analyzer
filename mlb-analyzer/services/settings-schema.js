@@ -145,29 +145,38 @@ const SETTINGS_SCHEMA = {
     invariantMsg: 'tot_prob_lo must be less than tot_prob_hi',
     help: 'Upper bound on model over/under probability.' },
 
-  // --- Signal thresholds: ML (in cents / American-odds points) -------------
-  ml_lean_edge: { type: 'number', min: 5, max: 50, default: 18,
-    help: 'Edge (cents) for 1-star ML signal.' },
-  ml_value_edge: { type: 'number', min: 10, max: 75, default: 30,
-    invariant: (v, all) => Number(all.ml_lean_edge) < v,
-    invariantMsg: 'ml_lean_edge must be less than ml_value_edge',
-    help: 'Edge (cents) for 2-star ML signal.' },
-  ml_3star_edge: { type: 'number', min: 15, max: 100, default: 45,
-    invariant: (v, all) => Number(all.ml_value_edge) < v,
-    invariantMsg: 'ml_value_edge must be less than ml_3star_edge',
-    help: 'Edge (cents) for 3-star ML signal.' },
-
-  // --- Signal thresholds: Total (implied-prob points) ----------------------
-  tot_lean_edge: { type: 'number', min: 0.02, max: 0.20, default: 0.05,
-    help: 'Implied-prob edge for 1-star Total signal.' },
-  tot_value_edge: { type: 'number', min: 0.04, max: 0.25, default: 0.08,
-    invariant: (v, all) => Number(all.tot_lean_edge) < v,
-    invariantMsg: 'tot_lean_edge must be less than tot_value_edge',
-    help: 'Implied-prob edge for 2-star Total signal.' },
-  tot_3star_edge: { type: 'number', min: 0.06, max: 0.30, default: 0.11,
-    invariant: (v, all) => Number(all.tot_value_edge) < v,
-    invariantMsg: 'tot_value_edge must be less than tot_3star_edge',
-    help: 'Implied-prob edge for 3-star Total signal.' },
+  // --- Continuous-edge thresholds (feat/continuous-edge-score) -------------
+  // Replaces the legacy ml_/tot_lean/value/3star tier system. ALL units
+  // are probability points as decimals (0.05 = 5pp). getSignals emits
+  // every signal with raw edge >= signal_emit_floor_pp; the UI decides
+  // highlighting against direction-specific minimums independently. The
+  // floor exists primarily to bound the bet_signals write rate — every
+  // emitted row is forward-collected data for threshold refinement.
+  signal_emit_floor_pp: { type: 'number', min: 0.005, max: 0.10, default: 0.01,
+    help: 'Minimum raw probability-edge for any signal (ML or Total) to be persisted. Set low to collect data.' },
+  // Direction-specific UI highlight minimums. Comparison is against the
+  // ROUNDED 0.5pp score (Math.round(edge*100/0.5)*0.5/100), not the raw
+  // edge, so the UI display and highlight condition stay consistent.
+  // Defaults are seeded from a 1270+/625-candidate backtest:
+  //   * Favorites historically performed at lower edge thresholds.
+  //   * Dog edges needed more cushion before becoming +EV.
+  //   * Totals UNDERS at >=7pp were the strongest signal in backtest;
+  //     overs were flat/negative at every threshold, so highlighting
+  //     is gated behind an explicit enabled flag.
+  ui_highlight_ml_fav_min_pp: { type: 'number', min: 0.005, max: 0.10, default: 0.02,
+    invariant: (v, all) => v >= Number(all.signal_emit_floor_pp),
+    invariantMsg: 'ui_highlight_ml_fav_min_pp must be >= signal_emit_floor_pp',
+    help: 'Rounded-score (pp) threshold above which an ML favorite signal is highlighted.' },
+  ui_highlight_ml_dog_min_pp: { type: 'number', min: 0.005, max: 0.10, default: 0.045,
+    invariant: (v, all) => v >= Number(all.signal_emit_floor_pp),
+    invariantMsg: 'ui_highlight_ml_dog_min_pp must be >= signal_emit_floor_pp',
+    help: 'Rounded-score (pp) threshold above which an ML underdog signal is highlighted.' },
+  ui_highlight_tot_under_min_pp: { type: 'number', min: 0.01, max: 0.20, default: 0.07,
+    invariant: (v, all) => v >= Number(all.signal_emit_floor_pp),
+    invariantMsg: 'ui_highlight_tot_under_min_pp must be >= signal_emit_floor_pp',
+    help: 'Rounded-score (pp) threshold above which a Totals under signal is highlighted.' },
+  ui_highlight_tot_overs_enabled: { type: 'boolean', default: false,
+    help: 'When false, Totals over signals are never highlighted regardless of edge (backtest showed no edge in overs).' },
 
   // --- Misc -----------------------------------------------------------------
   woba_baseline: { type: 'number', min: 0.20, max: 0.30, default: 0.230,

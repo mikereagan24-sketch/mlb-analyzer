@@ -2012,22 +2012,30 @@ router.post('/signals/manual', (req, res) => {
       }
       return res.json({success:true, recalculated:updated});
     }
-    const { game_date, game_id, signal_type, signal_side, signal_label, market_line, bet_line, bet_price } = req.body;
-    if (!game_date||!game_id||!signal_type||!signal_side||!signal_label||market_line==null)
+    const { game_date, game_id, signal_type, signal_side, market_line, bet_line, bet_price } = req.body;
+    if (!game_date||!game_id||!signal_type||!signal_side||market_line==null)
       return res.status(400).json({error:'Missing required fields'});
     const gl = q.getGameById.get(game_date, game_id);
     if (!gl) return res.status(404).json({error:'Game not found: '+game_date+'/'+game_id});
-    // category e.g. "2star-dog", "1star-over"
-    const stars = {'1ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ':'1star','2ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ':'2star','3ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ':'3star','unrated':'0star'}[signal_label]||'0star';
-    const sideKey = signal_type==='ML' ? (Number(market_line)>0?'dog':'fav') : signal_side;
-    const category = stars+'-'+sideKey;
+    // Direction-only category (feat/continuous-edge-score).
+    // Pre-cutover manual posts built compound categories like
+    // '2star-dog' from a signal_label request field; that field is
+    // deprecated. signal_label is stored as NULL for all new rows.
+    const category = signal_type === 'ML'
+      ? (Number(market_line) < 0 ? 'fav' : 'dog')
+      : signal_side;
     // model line from current DB
     const model_line = signal_type==='ML'
       ? (signal_side==='away' ? gl.model_away_ml : gl.model_home_ml)
       : gl.model_total;
-    // edge
+    // Raw probability-point edge (4-decimal float). Was an integer
+    // edge%-times-100 pre-cutover; the column is in pp for both ML
+    // and Total post-cutover. See bet_signals.edge_pct comment in
+    // db/schema.js.
     function iP(ml){ml=Number(ml);return ml<0?Math.abs(ml)/(Math.abs(ml)+100):100/(ml+100);}
-    const edge_pct = model_line ? Math.round(Math.abs(iP(Number(market_line))-iP(Number(model_line)))*100) : null;
+    const edge_pct = model_line
+      ? parseFloat(Math.abs(iP(Number(market_line)) - iP(Number(model_line))).toFixed(4))
+      : null;
     // outcome if already scored
     const { calcPnl } = require('../services/model');
     let outcome='pending', pnl=0;
@@ -2044,7 +2052,7 @@ router.post('/signals/manual', (req, res) => {
       (game_log_id,game_date,game_id,signal_type,signal_side,signal_label,category,
        market_line,model_line,edge_pct,outcome,pnl,bet_line,cohort,bet_locked_at,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
-      .run(gl.id,game_date,game_id,signal_type,signal_side,signal_label,category,
+      .run(gl.id,game_date,game_id,signal_type,signal_side,null,category,
            Number(market_line),model_line,edge_pct,outcome,pnl,
            bet_line!=null?Number(bet_line):null,'v3');
     try {
@@ -2371,33 +2379,20 @@ router.get('/model-compare', (req, res) => {
     ).all(from, to);
     gameRows.forEach(g => { games[g.game_date + '_' + g.game_id] = g; });
 
-    // Signal threshold helpers (mirrors model.js getSignals)
-    const settings = q.getSettings ? q.getSettings.all().reduce((a,r)=>{a[r.key]=r.value;return a;},{}) : {};
-    const TOT_1STAR = Number(settings.tot_lean_edge  ?? 0.04);
-    const TOT_2STAR = Number(settings.tot_value_edge ?? 0.08);
-    const TOT_3STAR = Number(settings.tot_3star_edge ?? 0.12);
-    const ML_1STAR  = Number(settings.ml_lean_edge   ?? 15);
-    const ML_2STAR  = Number(settings.ml_value_edge  ?? 30);
-    const ML_3STAR  = Number(settings.ml_3star_edge  ?? 60);
-
-    function totLabel(edge) {
-      if (edge >= TOT_3STAR) return '3ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ';
-      if (edge >= TOT_2STAR) return '2ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ';
-      if (edge >= TOT_1STAR) return '1ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ';
-      return null;
-    }
-    function mlLabel(edge) {
-      if (edge >= ML_3STAR) return '3ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ';
-      if (edge >= ML_2STAR) return '2ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ';
-      if (edge >= ML_1STAR) return '1ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ';
-      return null;
-    }
+    // Continuous-edge audit (feat/continuous-edge-score). The legacy
+    // tier-based comparator (totLabel/mlLabel from ml_/tot_*_edge
+    // settings) was replaced with raw probability-point edges; the
+    // audit now reports old vs new edge directly, and "flipped" means
+    // the rounded 0.5pp score changed, not that a star-tier moved.
     function impliedP(price) {
       price = parseFloat(price);
       return price < 0 ? Math.abs(price)/(Math.abs(price)+100) : 100/(price+100);
     }
     function modelOverP(estTot, mkt) {
       return Math.min(Math.max(0.5 + (estTot - mkt) * 0.08, 0.20), 0.80);
+    }
+    function roundedScorePp(edge) {
+      return Math.round(edge * 100 / 0.5) * 0.5; // 0.5pp precision, ties up
     }
 
     const results = [];
@@ -2438,23 +2433,26 @@ router.get('/model-compare', (req, res) => {
       const overImp  = impliedP(overP);
       const underImp = impliedP(underP);
 
-      // Old label for this signal
-      let oldLabel, newLabel;
+      // Edge-based audit (feat/continuous-edge-score). Total signals
+      // get a fresh edge under hypothetical new park/temp; ML signals
+      // are treated as unchanged at these deltas. "oldEdge" comes
+      // from the stored bet_signals.edge_pct so historical-cohort
+      // comparisons work even when the stored row's units predate the
+      // cutover (raw edge_pct is the source of truth either way).
+      let oldEdge, newEdge;
       if (s.signal_type === 'Total') {
-        const oldEdge = s.signal_side === 'over'
+        oldEdge = s.signal_side === 'over'
           ? modelOverP(oldEst, mkt) - overImp
           : (1 - modelOverP(oldEst, mkt)) - underImp;
-        const newEdge = s.signal_side === 'over'
+        newEdge = s.signal_side === 'over'
           ? modelOverP(newEst, mkt) - overImp
           : (1 - modelOverP(newEst, mkt)) - underImp;
-        oldLabel = totLabel(oldEdge);
-        newLabel = totLabel(newEdge);
       } else {
-        // ML signals: only affected if park factor change is large enough to shift ML
-        // For simplicity treat as unchanged (park factor affects totals much more than ML at these deltas)
-        oldLabel = s.signal_label;
-        newLabel = s.signal_label;
+        oldEdge = s.edge_pct != null ? Number(s.edge_pct) : 0;
+        newEdge = oldEdge; // park factor barely moves ML at these deltas
       }
+      const oldScore = roundedScorePp(oldEdge);
+      const newScore = roundedScorePp(newEdge);
 
       // PnL helper: to-win-$100
       function pnl(ml, won) {
@@ -2466,13 +2464,16 @@ router.get('/model-compare', (req, res) => {
       const betLine = parseFloat(s.bet_line) || parseFloat(s.market_line) || 0;
       const sigPnl = pnl(betLine, actualWon);
 
-      // Old model: signal fired (it's in the DB) ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ count it
-      if (oldLabel) { oldW += actualWon?1:0; oldL += actualWon?0:1; oldPnl += sigPnl; }
+      // Continuous-edge audit (feat/continuous-edge-score):
+      // count every historical signal in oldW (they all fired
+      // under the prior thresholds). newW counts only those whose
+      // refreshed edge stays above the current emit floor (0.01pp
+      // default) — refreshed edge IS the new park/temp output.
+      const EMIT_FLOOR = 0.01;
+      if (oldEdge >= EMIT_FLOOR) { oldW += actualWon?1:0; oldL += actualWon?0:1; oldPnl += sigPnl; }
+      if (newEdge >= EMIT_FLOOR) { newW += actualWon?1:0; newL += actualWon?0:1; newPnl += sigPnl; }
 
-      // New model: signal fires only if newLabel is non-null
-      if (newLabel) { newW += actualWon?1:0; newL += actualWon?0:1; newPnl += sigPnl; }
-
-      const didFlip = oldLabel !== newLabel;
+      const didFlip = oldScore !== newScore;
       if (didFlip || Math.abs(newEst - oldEst) > 0.05) {
         results.push({
           date: s.game_date, game: s.game_id.toUpperCase(),
@@ -2484,7 +2485,9 @@ router.get('/model-compare', (req, res) => {
           totalDelta: parseFloat((newEst - oldEst).toFixed(3)),
           tempDelta: parseFloat(tempDelta.toFixed(3)),
           pfDelta: parseFloat(pfRunDelta.toFixed(3)),
-          oldLabel, newLabel, flipped: didFlip,
+          oldEdge: parseFloat(oldEdge.toFixed(4)),
+          newEdge: parseFloat(newEdge.toFixed(4)),
+          oldScore, newScore, flipped: didFlip,
           outcome: s.outcome, pnl: sigPnl
         });
       }

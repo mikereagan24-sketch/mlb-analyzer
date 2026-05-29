@@ -736,12 +736,15 @@ function getSignals(game, modelResult, settings) {
   // have valid ML but null totals (suppress only Total) or vice versa.
   const haveAnyTot = (game.market_total != null && game.over_price != null && game.under_price != null) ||
                      (game.xcheck_total != null && game.xcheck_over_price != null && game.xcheck_under_price != null);
-  const ML_1STAR = typeof settings.ML_LEAN_EDGE    !== 'undefined' ? Number(settings.ML_LEAN_EDGE)    : 15;
-  const ML_2STAR = typeof settings.ML_VALUE_EDGE   !== 'undefined' ? Number(settings.ML_VALUE_EDGE)   : 30;
-  const ML_3STAR = typeof settings.ML_3STAR_EDGE   !== 'undefined' ? Number(settings.ML_3STAR_EDGE)   : 60;
-  const TOT_1STAR = typeof settings.TOT_LEAN_EDGE  !== 'undefined' ? Number(settings.TOT_LEAN_EDGE)  : 0.04;
-  const TOT_2STAR = typeof settings.TOT_VALUE_EDGE !== 'undefined' ? Number(settings.TOT_VALUE_EDGE) : 0.08;
-  const TOT_3STAR = typeof settings.TOT_3STAR_EDGE !== 'undefined' ? Number(settings.TOT_3STAR_EDGE) : 0.12;
+  // Continuous-edge architecture (feat/continuous-edge-score). The
+  // 1★/2★/3★ tier bucketing is gone. getSignals emits every signal
+  // whose raw probability-edge meets a single low floor; the UI
+  // does direction-specific highlighting against rounded scores
+  // independently. Storing every raw edge above the floor gives us
+  // forward data to refine thresholds and bet-sizing-by-edge from
+  // the resolved-outcome table.
+  const SIGNAL_EMIT_FLOOR = typeof settings.SIGNAL_EMIT_FLOOR_PP !== 'undefined'
+    ? Number(settings.SIGNAL_EMIT_FLOOR_PP) : 0.01;
   const TOT_SLOPE = typeof settings.TOT_SLOPE      !== 'undefined' ? Number(settings.TOT_SLOPE)      : 0.08;
   const TOT_PROB_LO = typeof settings.TOT_PROB_LO !== 'undefined' ? Number(settings.TOT_PROB_LO) : 0.20;
   const TOT_PROB_HI = typeof settings.TOT_PROB_HI !== 'undefined' ? Number(settings.TOT_PROB_HI) : 0.80;
@@ -753,26 +756,24 @@ function getSignals(game, modelResult, settings) {
   const aMarket = game.market_away_ml;
   const hMarket = game.market_home_ml;
 
-  function mlEdge(market, model) {
-    const mktDist = market > 0 ? market - 100 : -market - 100;
-    const mdlDist = model  > 0 ? model  - 100 : -model  - 100;
-    return (market > 0) !== (model > 0) ? mktDist + mdlDist : Math.abs(market - model);
+  // Probability-point edge: model implied prob minus market implied
+  // prob. Sign-consistent across the fav/dog boundary (which the
+  // old cents-distance mlEdge was working around). Clamped at 0 —
+  // a negative edge isn't a "lean against this side" signal, it
+  // just means the model doesn't favor this side here.
+  const awayEdge = Math.max(0, impliedP(aModel) - impliedP(aMarket));
+  const homeEdge = Math.max(0, impliedP(hModel) - impliedP(hMarket));
+
+  // Emit every signal at or above SIGNAL_EMIT_FLOOR. label is NULL
+  // for continuous-edge rows; the UI computes a rounded score from
+  // edge and decides highlighting against direction-specific
+  // thresholds independently.
+  if (haveAnyML && awayEdge >= SIGNAL_EMIT_FLOOR) {
+    signals.push({type:'ML',side:'away',label:null,marketLine:aMarket,modelLine:aModel,edge:parseFloat(awayEdge.toFixed(4))});
   }
-
-  const awayEdge = (aMarket > 0 && aModel < 0) || (aMarket > aModel) ? mlEdge(aMarket, aModel) : 0;
-  const homeEdge = (hMarket > 0 && hModel < 0) || (hMarket > hModel) ? mlEdge(hMarket, hModel) : 0;
-
-  function mlLabel(edge) {
-    if (edge >= ML_3STAR) return '3★';
-    if (edge >= ML_2STAR) return '2★';
-    if (edge >= ML_1STAR) return '1★';
-    return null;
+  if (haveAnyML && homeEdge >= SIGNAL_EMIT_FLOOR) {
+    signals.push({type:'ML',side:'home',label:null,marketLine:hMarket,modelLine:hModel,edge:parseFloat(homeEdge.toFixed(4))});
   }
-
-  const aLabel = mlLabel(awayEdge);
-  const hLabel = mlLabel(homeEdge);
-  if (haveAnyML && aLabel) signals.push({type:'ML',side:'away',label:aLabel,marketLine:aMarket,modelLine:aModel,edge:Math.round(awayEdge)});
-  if (haveAnyML && hLabel) signals.push({type:'ML',side:'home',label:hLabel,marketLine:hMarket,modelLine:hModel,edge:Math.round(homeEdge)});
 
   // Use the PRIMARY source for the total-side edge calc. The user bets at
   // the primary venue (typically Kalshi); EV is what's available at the
@@ -801,13 +802,6 @@ function getSignals(game, modelResult, settings) {
   const overEdge  = modelOverP  - overImplied;
   const underEdge = modelUnderP - underImplied;
 
-  function totLabel(edge) {
-    if (edge >= TOT_3STAR) return '3★';
-    if (edge >= TOT_2STAR) return '2★';
-    if (edge >= TOT_1STAR) return '1★';
-    return null;
-  }
-
   // Carry both the primary (venue) and xcheck (edge-calc) totals on every
   // Total signal so the UI / logs can show "model used xcheck line=X.X
   // from <source>" without losing the user's actual betting venue price.
@@ -821,12 +815,27 @@ function getSignals(game, modelResult, settings) {
     primary_over_price: game.over_price ?? null,
     primary_under_price: game.under_price ?? null,
   };
-  const oLabel = totLabel(overEdge);
-  const uLabel = totLabel(underEdge);
-  if (haveAnyTot && oLabel) signals.push({type:'Total',side:'over', label:oLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
-  if (haveAnyTot && uLabel) signals.push({type:'Total',side:'under',label:uLabel,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
+  if (haveAnyTot && overEdge >= SIGNAL_EMIT_FLOOR) {
+    signals.push({type:'Total',side:'over', label:null,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(overEdge.toFixed(4)), ...totSigExtras});
+  }
+  if (haveAnyTot && underEdge >= SIGNAL_EMIT_FLOOR) {
+    signals.push({type:'Total',side:'under',label:null,marketLine:mktTotal,modelLine:parseFloat(estTot.toFixed(1)),overPrice,underPrice,edge:parseFloat(underEdge.toFixed(4)), ...totSigExtras});
+  }
 
-  return signals.map(s=>({...s,category:catKey(s.type,s.side,s.label,s.marketLine)}));
+  // Direction-only categories (feat/continuous-edge-score). Pre-cutover
+  // rows used the legacy "<N-star>-<fav|dog|over|under>" shape; new
+  // rows use just the direction. catKey is intentionally NOT used for
+  // new emissions — it embeds the now-null label as 'star-' which
+  // would corrupt category-based grouping.
+  return signals.map(s => {
+    let category;
+    if (s.type === 'ML') {
+      category = parseInt(s.marketLine) < 0 ? 'fav' : 'dog';
+    } else {
+      category = s.side; // 'over' or 'under'
+    }
+    return { ...s, category };
+  });
 }
 
 // "To win $100" P&L. Hoisted to module scope (was inner-defined inside
