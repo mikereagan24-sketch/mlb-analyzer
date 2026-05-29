@@ -85,6 +85,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .result-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
 .rbox{border-radius:var(--r-md);padding:7px 8px;text-align:center;background:var(--bg);border:.5px solid var(--border)}
 .rbox.s1{background:var(--yellow-bg);border-color:var(--yellow-border)}.rbox.s2{background:var(--green-bg);border-color:var(--green-border)}.rbox.s3{background:#e8f0ff;border-color:#4477cc}
+/* Per-bet-box tinted-green highlight for signals that meet their
+   direction-specific threshold (favs >=2.0pp, dogs >=4.5pp,
+   unders >=7.0pp; legacy 2★/3★ also qualify). Background only —
+   borders, font color, and other rbox properties unchanged. For
+   legacy 2★/3★ rows the vc()-applied .rbox.s2/.s3 class already
+   provides a tinted background; .bet-box-highlight is a no-op in
+   that case. For new continuous-edge rows (where vc() returns ''
+   because the label is null), this is the sole tint trigger. */
+.rbox.bet-box-highlight{background:var(--green-bg)}
 .rbox-label{font-size:9px;color:var(--text2);margin-bottom:2px}
 .rbox-val{font-size:16px;font-weight:500}
 .rbox-mkt{font-size:9px;color:var(--text2)}
@@ -495,6 +504,30 @@ function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
 function effAwayML(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_away_ml!=null?g.opener_model_away_ml:g.model_away_ml;}
 function effHomeML(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_home_ml!=null?g.opener_model_home_ml:g.model_home_ml;}
 function effTotal(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_total!=null?g.opener_model_total:g.model_total;}
+
+// Shared highlight-threshold gate. Used by sig pill rendering
+// (renderGameGrid) and per-bet-box tinting (renderGameResult). Legacy
+// rows: only 2★/3★ qualify — 1★ was always low-emphasis pre-cutover
+// and shouldn't trigger the box tint. New continuous-edge rows: the
+// rounded 0.5pp score must clear a direction-specific threshold
+// (favs ≥2.0pp, dogs ≥4.5pp, unders ≥7.0pp; overs never).
+function signalMeetsHighlightThreshold(s) {
+  if (!s) return false;
+  if (s.signal_label !== null && s.signal_label !== undefined) {
+    return s.signal_label === '2★' || s.signal_label === '3★';
+  }
+  const score = Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
+  if (s.signal_type === 'ML') {
+    if (s.market_line < 0) return score >= 2.0;
+    if (s.market_line > 0) return score >= 4.5;
+    return false;
+  }
+  if (s.signal_type === 'Total') {
+    if (s.signal_side === 'under') return score >= 7.0;
+    return false; // overs never highlight
+  }
+  return false;
+}
 // v4 cohort + PR B (opener-mode redesign): render the pitching-weight
 // breakdown next to each pitcher's name. Three display modes based on
 // which weights are populated on the game row:
@@ -1068,15 +1101,10 @@ function renderGameGrid(games,date){
     }
     const score = Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
     const scoreText = score.toFixed(1) + 'PP';
-    let isHighlight = false;
-    if (s.signal_type === 'ML') {
-      if (s.market_line < 0) isHighlight = score >= 2.0;
-      else if (s.market_line > 0) isHighlight = score >= 4.5;
-    } else if (s.signal_type === 'Total') {
-      if (s.signal_side === 'under') isHighlight = score >= 7.0;
-      // Overs never highlighted regardless of score
-    }
-    const cls = isHighlight ? 's2' : 's1';
+    // Use the shared gate (same logic for new rows). Overs always
+    // fall to s1 here too — signalMeetsHighlightThreshold returns
+    // false for them regardless of edge.
+    const cls = signalMeetsHighlightThreshold(s) ? 's2' : 's1';
     return '<span class="sig-pill ' + cls + '">' + scoreText + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>';
   }
   document.getElementById('game-grid').innerHTML=games.map(g=>{
@@ -1210,10 +1238,18 @@ function renderGameResult(g){
     + 'Spread: ' + g.away_team + ' ' + aSpread + ' (' + aSpreadPrice + ') / '
     + g.home_team + ' ' + hSpread + ' (' + hSpreadPrice + ')' + spreadSrc
     + '</div>';
+  // Per-bet-box tinting: each rbox is evaluated independently
+  // against signalMeetsHighlightThreshold. The vc()-applied tier
+  // class still drives legacy 2★/3★ tinting; .bet-box-highlight
+  // adds the same green tint for qualifying new continuous-edge
+  // rows (where vc() returns '' because signal_label is null).
+  const aBoxHl = signalMeetsHighlightThreshold(aEdge) ? ' bet-box-highlight' : '';
+  const tBoxHl = signalMeetsHighlightThreshold(totEdge) ? ' bet-box-highlight' : '';
+  const hBoxHl = signalMeetsHighlightThreshold(hEdge) ? ' bet-box-highlight' : '';
   return'<div class="result-grid">'+
-    '<div class="rbox '+vc(aEdge)+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
-    '<div class="rbox '+vc(totEdge)+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
-    '<div class="rbox '+vc(hEdge)+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
+    '<div class="rbox '+vc(aEdge)+aBoxHl+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
+    '<div class="rbox '+vc(totEdge)+tBoxHl+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(g.market_total||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
+    '<div class="rbox '+vc(hEdge)+hBoxHl+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
     '</div>'+
     spreadRow +
     (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
