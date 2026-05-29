@@ -1213,7 +1213,8 @@ async function runLineupJob(dateStr) {
       // produce defensible numbers (the pitcher IS in the roster — we
       // just lack recent priors); fallback (no index data at all) is
       // a degenerate hardcoded 5.25 with no informational content.
-      if (out.source === 'fallback') return null;
+      console.log('[forecast-for-pitcher] name=' + pitcherName + ' team=' + team + ' role=' + (role || 'start') + ' mlbId=' + mlbId + ' source=' + out.source + ' forecast=' + (out.forecast != null ? out.forecast.toFixed(4) : 'null'));
+      if (out.source === 'fallback' || out.source === 'league_only') return null;
       return out.forecast;
     };
     // updateLineup also writes the proj_* snapshot columns wrapped in
