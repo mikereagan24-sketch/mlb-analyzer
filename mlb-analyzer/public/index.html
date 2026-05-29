@@ -1053,6 +1053,32 @@ function _isNeverLoaded(q){ return q==='never_loaded'; }
 
 function renderGameGrid(games,date){
   if(!games.length){document.getElementById('game-grid').innerHTML='';return;}
+  // Mixed-display sig pill render. Legacy rows carry a star
+  // signal_label ('1★'/'2★'/'3★') and use the tier-based class; new
+  // continuous-edge rows carry signal_label=null and edge_pct as a
+  // decimal pp, and render as a rounded 0.5pp score with class s2
+  // (highlighted) when the rounded score meets the direction-
+  // specific threshold (fav>=2.0pp, dog>=4.5pp, under>=7.0pp; overs
+  // never highlight), else s1. Pre-cutover .toUpperCase() on null
+  // crashed the whole grid render.
+  function sigPillHtml(s) {
+    if (s.signal_label !== null && s.signal_label !== undefined) {
+      const cls = s.signal_label === '3★' ? 's3' : s.signal_label === '2★' ? 's2' : 's1';
+      return '<span class="sig-pill ' + cls + '">' + s.signal_label.toUpperCase() + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>';
+    }
+    const score = Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
+    const scoreText = score.toFixed(1) + 'PP';
+    let isHighlight = false;
+    if (s.signal_type === 'ML') {
+      if (s.market_line < 0) isHighlight = score >= 2.0;
+      else if (s.market_line > 0) isHighlight = score >= 4.5;
+    } else if (s.signal_type === 'Total') {
+      if (s.signal_side === 'under') isHighlight = score >= 7.0;
+      // Overs never highlighted regardless of score
+    }
+    const cls = isHighlight ? 's2' : 's1';
+    return '<span class="sig-pill ' + cls + '">' + scoreText + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>';
+  }
   document.getElementById('game-grid').innerHTML=games.map(g=>{
     const sigs=g.signals||[];
     const score=g.away_score!=null?g.away_score+'-'+g.home_score:'';
@@ -1076,7 +1102,7 @@ function renderGameGrid(games,date){
       ((g.game_number||1)>1?' <span style="color:var(--text2);font-size:11px;font-weight:500;margin-left:4px">(G'+g.game_number+')</span>':'')+
       (g.is_postponed?' <span style="background:#cc3333;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px;letter-spacing:0.5px">POSTPONED</span>':'')+
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
-      (!g.is_postponed&&sigs.length?' '+sigs.map(s=>'<span class="sig-pill '+(s.signal_label==='3★'?'s3':s.signal_label==='2★'?'s2':'s1')+'">'+s.signal_label.toUpperCase()+' '+s.signal_side.toUpperCase()+' '+s.signal_type.toUpperCase()+'</span>').join(' '):'')+
+      (!g.is_postponed&&sigs.length?' '+sigs.map(sigPillHtml).join(' '):'')+
       '</div>'+
       '<div class="gsp"'+(lineupsStyle?' style="'+lineupsStyle+'"':'')+'>'+(_isNeverLoaded(lineupsQ)?'<span title="lineups never loaded">— vs —</span>':((g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'away')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'home')))+lineupsBadge+weatherBadge+(g.temp_f!=null ? (function(){
         var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
@@ -1145,7 +1171,31 @@ function renderGameResult(g){
   const hEdge=sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML');
   const totEdge=sigs.find(s=>s.signal_type==='Total');
   const vc=sig=>sig?({'3★':'s3','2★':'s2','1★':'s1'}[sig.signal_label]||''):'';
-  const vd=sig=>{if(!sig)return'<span style="color:var(--text2);font-size:9px">—</span>';const col={'3★':'#4477cc','2★':'var(--green)','1★':'var(--yellow)'}[sig.signal_label]||'var(--yellow)';return'<span style="color:'+col+';font-size:9px;font-weight:500">'+sig.signal_label.toUpperCase()+'</span>';};
+  // Mixed-display badge. Pre-cutover called sig.signal_label
+  // .toUpperCase() unconditionally and crashed on new continuous-
+  // edge rows (signal_label=null). Legacy rows still render their
+  // star label uppercased with the tier-coded color; new rows
+  // render the rounded 0.5pp score, green when the direction-
+  // specific highlight threshold is met (fav>=2.0pp, dog>=4.5pp,
+  // under>=7.0pp; overs never), yellow otherwise.
+  const vd = sig => {
+    if (!sig) return '<span style="color:var(--text2);font-size:9px">—</span>';
+    if (sig.signal_label !== null && sig.signal_label !== undefined) {
+      const col = {'3★':'#4477cc','2★':'var(--green)','1★':'var(--yellow)'}[sig.signal_label] || 'var(--yellow)';
+      return '<span style="color:' + col + ';font-size:9px;font-weight:500">' + sig.signal_label.toUpperCase() + '</span>';
+    }
+    const score = Math.round((sig.edge_pct || 0) * 100 / 0.5) * 0.5;
+    const scoreText = score.toFixed(1) + 'PP';
+    let isHighlight = false;
+    if (sig.signal_type === 'ML') {
+      if (sig.market_line < 0) isHighlight = score >= 2.0;
+      else if (sig.market_line > 0) isHighlight = score >= 4.5;
+    } else if (sig.signal_type === 'Total' && sig.signal_side === 'under') {
+      isHighlight = score >= 7.0;
+    }
+    const col = isHighlight ? 'var(--green)' : 'var(--yellow)';
+    return '<span style="color:' + col + ';font-size:9px;font-weight:500">' + scoreText + '</span>';
+  };
   // Spread (runline) row — Step 1 ingest from Unabated. Display only;
   // Mike isn't betting these yet. Shows "—" for missing sides rather
   // than hiding the row, so a glance reveals which games carry spread
