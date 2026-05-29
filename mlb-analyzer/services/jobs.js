@@ -62,12 +62,12 @@ function getSettings() {
     W_BAT:          num('w_bat',             _d('w_bat', 0.5)),
     W_PROJ:         num('w_proj',            _d('w_proj', 0.65)),
     W_ACT:          num('w_act',             _d('w_act', 0.35)),
-    // Continuous-edge thresholds (feat/continuous-edge-score). The
-    // legacy ml_/tot_ lean/value/3star tier keys are gone; getSignals
-    // now reads SIGNAL_EMIT_FLOOR_PP only. The UI_HIGHLIGHT_*
-    // settings are read separately by the UI via /api/settings — the
-    // model does not consume them.
-    SIGNAL_EMIT_FLOOR_PP: num('signal_emit_floor_pp', _d('signal_emit_floor_pp', 0.01)),
+    ML_VALUE_EDGE:  num('ml_value_edge',     _d('ml_value_edge', 40)),
+    ML_LEAN_EDGE:   num('ml_lean_edge',      _d('ml_lean_edge', 20)),
+    TOT_VALUE_EDGE: num('tot_value_edge',    _d('tot_value_edge', 0.08)),
+    ML_3STAR_EDGE:  num('ml_3star_edge',     _d('ml_3star_edge', 60)),
+    TOT_3STAR_EDGE: num('tot_3star_edge',    _d('tot_3star_edge', 0.12)),
+    TOT_LEAN_EDGE:  num('tot_lean_edge',     _d('tot_lean_edge', 0.05)),
     SP_WEIGHT:      num('sp_weight',         _d('sp_weight', 0.77)),
     RELIEF_WEIGHT:     num('relief_weight',     _d('relief_weight', 0.23)),
     SP_PIT_WEIGHT:     num('sp_pit_weight',     _d('sp_pit_weight', 0.80)),
@@ -719,10 +719,6 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       game_id: gameRow.game_id,
       signal_type: sig.type,
       signal_side: sig.side,
-      // signal_label is NULL for continuous-edge rows
-      // (feat/continuous-edge-score); pre-cutover rows carry their
-      // legacy "1★"/"2★"/"3★" string. category is direction-only
-      // ('fav'|'dog'|'over'|'under') post-cutover.
       signal_label: sig.label,
       category: sig.category,
       market_line: sig.type === 'ML'
