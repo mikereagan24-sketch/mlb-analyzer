@@ -1174,6 +1174,46 @@ router.get('/lineup-override/:game_date', (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Parameter sweep — admin-only diagnostic that re-scores a historical
+// date window under a battery of settings combinations and reports ROI
+// by bet direction. Snapshot-aware: each game's date determines which
+// woba_data_snapshot rows feed runModel, so the sweep sees only the
+// information available at game time (current woba_data is hindsight-
+// contaminated and intentionally NOT consulted).
+//
+// Modes:
+//   univariate — 4 params x 9 settings each, others held at base.
+//   joint      — 5^4 = 625 cartesian combinations.
+//
+// Joint mode is heavy: 625 combinations x ~120 games x runModel cost
+// may take minutes. Run from a host that can hold the connection.
+router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const mode = b.mode;
+    if (mode !== 'univariate' && mode !== 'joint') {
+      return res.status(400).json({ error: 'mode must be "univariate" or "joint"' });
+    }
+    if (!b.from || !/^\d{4}-\d{2}-\d{2}$/.test(b.from)) {
+      return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    }
+    if (!b.to || !/^\d{4}-\d{2}-\d{2}$/.test(b.to)) {
+      return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    }
+    if (b.from > b.to) {
+      return res.status(400).json({ error: 'from must be <= to' });
+    }
+    const { runParameterSweep } = require('../services/parameter-sweep');
+    const { getSettings } = require('../services/jobs');
+    const baseSettings = getSettings();
+    const out = await runParameterSweep(db, baseSettings, { mode, from: b.from, to: b.to });
+    res.json(out);
+  } catch (e) {
+    console.error('[parameter-sweep] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Manual detection trigger — runs detectOpeners standalone for a date.
 // Useful after editing an opener_override row, or for backfilling
 // detection on past dates.
