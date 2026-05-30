@@ -6,6 +6,18 @@ const cors = require('cors');
 const path = require('path');
 const { startCronJobs, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
 
+// One-shot row migrations. db/schema.js's require() opened the DB and
+// ran its schema migrations (CREATE TABLE IF NOT EXISTS, idempotent
+// ALTER TABLE attempts) at module load. applyPendingMigrations does
+// the next layer — row-level normalizations gated by a
+// migrations_applied bookkeeping table so each one runs at most once.
+// Synchronous + sequenced before app.listen so any /api request
+// served after listen() sees fully-normalized rows. Aborts the boot
+// on failure rather than coming up half-migrated.
+const { db } = require('./db/schema');
+const { applyPendingMigrations } = require('./services/migrations');
+applyPendingMigrations(db);
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
