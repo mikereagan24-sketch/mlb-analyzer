@@ -94,6 +94,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
    that case. For new continuous-edge rows (where vc() returns ''
    because the label is null), this is the sole tint trigger. */
 .rbox.bet-box-highlight{background:var(--green-bg)}
+/* Backtest pp-bucket section: heading + table per direction.
+   The threshold row (e.g. 2.0-2.5 for Favs) gets the same green-bg
+   tint as the bet-box-highlight, so the eye lands on "where would
+   we have started highlighting this signal in production" without
+   doing any threshold math. */
+.bt-bucket-section{margin-bottom:1rem}
+.bt-bucket-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.bt-bucket-tbl th,.bt-bucket-tbl td{padding:5px 8px;text-align:right;border-bottom:.5px solid var(--border)}
+.bt-bucket-tbl th:first-child,.bt-bucket-tbl td:first-child{text-align:left}
+.bt-bucket-tbl tbody tr.bucket-threshold-row{background:var(--green-bg)}
+.bt-bucket-tbl tbody tr.bucket-threshold-row td:first-child{font-weight:600;color:var(--green)}
+.bt-bucket-tbl tbody tr.bucket-empty td{color:var(--text3)}
 .rbox-label{font-size:9px;color:var(--text2);margin-bottom:2px}
 .rbox-val{font-size:16px;font-weight:500}
 .rbox-mkt{font-size:9px;color:var(--text2)}
@@ -308,15 +320,10 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <span style="color:var(--text2)">to</span>
 <input type="date" id="bt-to" style="width:150px">
 <span style="color:var(--text2);margin-left:8px">cohort</span>
-<select id="bt-cohort" style="width:150px" onchange="loadBacktest()">
-  <option value="v5" selected>v5 (current)</option>
-  <option value="v4">v4</option>
-  <option value="v3">v3</option>
-  <option value="v3-pretuning">v3-pretuning (early)</option>
-  <option value="v3-tainted">v3 (tainted)</option>
-  <option value="v2-tainted">v2 (tainted)</option>
-  <option value="v1">v1 (legacy)</option>
-  <option value="all">all</option>
+<select id="bt-cohort" style="width:180px" onchange="loadBacktest()">
+  <option value="v6" selected>v6 (current)</option>
+  <option value="v5">v5 (legacy)</option>
+  <option value="v5+v6">v6 + v5 combined</option>
 </select>
 <button class="btn btn-primary btn-sm" onclick="loadBacktest()">Run backtest</button>
 <button class="btn btn-ghost btn-sm" onclick="exportCSV()">Export CSV</button>
@@ -335,10 +342,12 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Stable = |Δtotal| &lt; 0.3 runs AND |ΔML| &lt; 2.5pp. Shifted = either gate ≥ 0.3 / 2.5pp. Large shift = ≥ 0.8 runs OR ≥ 6pp on either ML. ML deltas are implied-probability percentage points (cross-sign safe). Hypothesis: locked bets on shifted/large-shift games may underperform stable ones.</div>
 <table class="cat-tbl"><thead><tr><th>Bucket</th><th>Plays</th><th>W-L-P</th><th>P&L</th><th>ROI</th></tr></thead><tbody id="bt-lineup-sens-body"></tbody></table>
 </div>
-<div class="card">
-<div class="slabel">P&L by category — $100/play</div>
-<table class="cat-tbl"><thead><tr><th>Category</th><th>Plays</th><th>W-L-P</th><th>P&L</th><th>ROI</th></tr></thead><tbody id="bt-cat-body"></tbody></table>
-</div>
+<!-- Continuous-edge pp-bucket backtest tables (replaces legacy
+     category table). Four stacked sections, each a 0.5pp-bucket
+     breakdown of bets in that direction, with the operative
+     ui_highlight_*_min_pp threshold row visually marked. Populated
+     by renderBucketSections() inside loadBacktest. -->
+<div id="bt-bucket-sections"></div>
 </div>
 <div class="card">
 <div class="slabel">Job history</div>
@@ -2311,35 +2320,175 @@ function renderSignalTracking(signals) {
 
   renderPoissonTracking(signals);
 }
+// Continuous-edge backtest helpers (feat/cohort-v6-and-backtest-ui).
+// Compute per-signal wagered + per-bucket aggregates in the UI so the
+// "v6 + v5 combined" mode works against a single ?cohort=all roundtrip
+// without needing API changes, and so the bucket sections aren't
+// coupled to the legacy byCategory aggregate.
+
+// Wagered amount per signal (mirrors the SQL in /api/backtest overall):
+//   ML positive bet_line  -> round(10000/line, 2)
+//   ML negative bet_line  -> abs(line)
+//   Total                 -> 110 (flat -110 juice assumption)
+// bet_line falls back to market_line when not explicitly logged.
+function wageredForSignal(s){
+  if (s.signal_type === 'ML') {
+    var ln = s.bet_line != null ? s.bet_line : s.market_line;
+    if (ln == null) return 0;
+    ln = Number(ln);
+    if (ln > 0) return Math.round((10000.0 / ln) * 100) / 100;
+    return Math.abs(ln);
+  }
+  return 110.0; // Total
+}
+
+// Bucket helpers. 0.5pp buckets indexed by floor(edge*100/0.5).
+// Display range "1.0-1.5" through "9.5-10.0" maps to indices 2..19,
+// edges of exactly 10.0+pp pin to the last bucket (index 19). Edges
+// under 1.0pp don't display (they're below the emit floor anyway).
+var BUCKET_FIRST = 2, BUCKET_LAST = 19;
+function bucketIndexFor(edgePctDecimal){
+  if (edgePctDecimal == null) return null;
+  var pp = Number(edgePctDecimal) * 100;
+  if (pp < 1.0) return null;
+  var idx = Math.floor(pp / 0.5);
+  if (idx >= BUCKET_LAST) return BUCKET_LAST; // 10.0+pp clamps to last row
+  return idx;
+}
+function bucketRangeText(idx){
+  var lo = (idx * 0.5).toFixed(1);
+  var hi = ((idx + 1) * 0.5).toFixed(1);
+  return lo + '-' + hi;
+}
+
+// Aggregate the resolved signals matched by (typeMatch, categoryMatch)
+// into 18 buckets. typeMatch/categoryMatch are strings checked against
+// s.signal_type / s.category. Returns { buckets: [{plays, wins, losses,
+// pushes, pnl, wagered}], totals: {...} }.
+function aggregateBuckets(signals, typeMatch, categoryMatch){
+  var buckets = {};
+  for (var i = BUCKET_FIRST; i <= BUCKET_LAST; i++) {
+    buckets[i] = { plays:0, wins:0, losses:0, pushes:0, pnl:0, wagered:0 };
+  }
+  var totals = { plays:0, wins:0, losses:0, pushes:0, pnl:0, wagered:0 };
+  for (var k = 0; k < signals.length; k++) {
+    var s = signals[k];
+    if (s.signal_type !== typeMatch) continue;
+    if (s.category !== categoryMatch) continue;
+    if (s.outcome !== 'win' && s.outcome !== 'loss' && s.outcome !== 'push') continue;
+    var idx = bucketIndexFor(s.edge_pct);
+    if (idx == null) continue;
+    var w = wageredForSignal(s);
+    var pnl = Number(s.pnl) || 0;
+    var b = buckets[idx];
+    b.plays++; totals.plays++;
+    if (s.outcome === 'win')  { b.wins++;   totals.wins++; }
+    if (s.outcome === 'loss') { b.losses++; totals.losses++; }
+    if (s.outcome === 'push') { b.pushes++; totals.pushes++; }
+    b.pnl += pnl; totals.pnl += pnl;
+    // ROI denominator excludes pushes (mirrors the API formula).
+    if (s.outcome !== 'push') { b.wagered += w; totals.wagered += w; }
+  }
+  return { buckets: buckets, totals: totals };
+}
+
+function renderBucketSections(signals){
+  // Four sections in fixed order. thresholdBucket is the index of the
+  // row that gets the green-bg highlight (=ui_highlight_*_min_pp/0.5).
+  // Overs have no threshold-row highlight (ui_highlight_tot_overs_enabled
+  // defaults false — backtest showed no edge in overs).
+  var sections = [
+    { key:'fav',   label:'Favs',   type:'ML',    cat:'fav',   thresholdBucket: 4 },  // 2.0/0.5 = 4 (row 2.0-2.5)
+    { key:'dog',   label:'Dogs',   type:'ML',    cat:'dog',   thresholdBucket: 9 },  // 4.5/0.5 = 9 (row 4.5-5.0)
+    { key:'over',  label:'Overs',  type:'Total', cat:'over',  thresholdBucket: null },
+    { key:'under', label:'Unders', type:'Total', cat:'under', thresholdBucket: 14 }, // 7.0/0.5 = 14 (row 7.0-7.5)
+  ];
+  var html = '';
+  for (var s = 0; s < sections.length; s++) {
+    var sec = sections[s];
+    var agg = aggregateBuckets(signals, sec.type, sec.cat);
+    var t = agg.totals;
+    var sectionRoi = t.wagered > 0 ? (t.pnl / t.wagered * 100) : null;
+    var roiClass = sectionRoi == null ? 'muted' : (sectionRoi >= 0 ? 'green' : 'red');
+    var roiText = sectionRoi == null ? '—' : ((sectionRoi >= 0 ? '+' : '') + sectionRoi.toFixed(2) + '%');
+    html += '<div class="card bt-bucket-section">';
+    html += '<div class="slabel">' + sec.label + ' — '
+         + t.plays + ' bets · W-L-P ' + t.wins + '-' + t.losses + '-' + t.pushes
+         + ' · ROI <span class="' + roiClass + '">' + roiText + '</span></div>';
+    html += '<table class="bt-bucket-tbl"><thead><tr>'
+         + '<th>PP Range</th><th>Bets</th><th>Wins</th><th>Losses</th><th>Pushes</th><th>ROI%</th>'
+         + '</tr></thead><tbody>';
+    for (var i = BUCKET_FIRST; i <= BUCKET_LAST; i++) {
+      var b = agg.buckets[i];
+      var rowClass = '';
+      if (sec.thresholdBucket === i) rowClass = 'bucket-threshold-row';
+      else if (b.plays === 0) rowClass = 'bucket-empty';
+      var roi = b.wagered > 0 ? (b.pnl / b.wagered * 100) : null;
+      var rCls = roi == null ? 'muted' : (roi >= 0 ? 'green' : 'red');
+      var rTxt = roi == null ? '—' : ((roi >= 0 ? '+' : '') + roi.toFixed(2) + '%');
+      var range = bucketRangeText(i);
+      if (i === BUCKET_LAST) range += '+'; // last row absorbs 10.0+
+      html += '<tr' + (rowClass ? ' class="' + rowClass + '"' : '') + '>'
+           + '<td>' + range + 'pp</td>'
+           + '<td>' + b.plays + '</td>'
+           + '<td>' + b.wins  + '</td>'
+           + '<td>' + b.losses + '</td>'
+           + '<td>' + b.pushes + '</td>'
+           + '<td class="' + rCls + '">' + rTxt + '</td>'
+           + '</tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  document.getElementById('bt-bucket-sections').innerHTML = html;
+}
+
 async function loadBacktest(){
   const from=document.getElementById('bt-from').value;
   const to=document.getElementById('bt-to').value;
   const cohortEl=document.getElementById('bt-cohort');
-  const cohort=cohortEl?cohortEl.value:'v5';
+  const cohort=cohortEl?cohortEl.value:'v6';
   btFrom=from;btTo=to;
   try{
-    const d=await api('/backtest?from='+from+'&to='+to+'&cohort='+encodeURIComponent(cohort));
-    
-    const ov=d.overall||{};
-    document.getElementById('bt-summary').innerHTML=
-      '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(( ov.total_pnl||0)>=0?'green':'red')+'">'+(( ov.total_pnl||0)>=0?'+':'')+'$'+(ov.total_pnl||0).toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
-      '<div class="metric-card"><div class="metric-label">ROI</div><div class="metric-val '+((ov.roi||0)>=0?'green':'red')+'">'+((ov.roi||0)>=0?'+':'')+(ov.roi||0).toFixed(1)+'%</div><div class="metric-sub">'+(ov.plays||0)+' plays</div></div>'+
-      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+(ov.wins||0)+'-'+(ov.losses||0)+'-'+(ov.pushes||0)+'</div><div class="metric-sub">'+(ov.wins&&ov.losses?((ov.wins/(ov.wins+ov.losses))*100).toFixed(1)+'% win':'—')+'</div></div>'+
-      '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+(+(ov.wagered||0)).toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
-    const cats=d.byCategory||[];
-    renderRunlineCompanion(d.signals||[]);
-    renderSignalTracking(d.signals||[]);
+    // 'v5+v6' is a UI-only combined view. Request all cohorts from the
+    // API and filter client-side so the bucket sections, summary cards,
+    // and downstream consumers (runline, signal tracking) all see the
+    // same filtered slice.
+    const apiCohort = cohort === 'v5+v6' ? 'all' : cohort;
+    const d=await api('/backtest?from='+from+'&to='+to+'&cohort='+encodeURIComponent(apiCohort));
+    let signals = d.signals || [];
+    if (cohort === 'v5+v6') {
+      signals = signals.filter(s => s.cohort === 'v5' || s.cohort === 'v6');
+    }
 
-  document.getElementById('bt-cat-body').innerHTML=Object.keys(CAT_LABELS).map(key=>{
-      const c=cats.find(x=>x.category===key)||{plays:0,wins:0,losses:0,pushes:0,total_pnl:0,roi:0};
-      if(!c.plays)return'<tr><td>'+CAT_LABELS[key]+'</td><td class="muted">0</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>';
-      var _r=(c.wins||0)+(c.losses||0)+(c.pushes||0);var _p=c.pending>0?_r+'<span style="font-size:10px;color:var(--text3)"> (+'+c.pending+' pending)</span>':String(_r);return'<tr><td>'+CAT_LABELS[key]+'</td><td>'+_p+'</td><td>'+c.wins+'-'+c.losses+'-'+(c.pushes||0)+'</td><td class="'+((c.total_pnl||0)>=0?'green':'red')+'">'+((c.total_pnl||0)>=0?'+':'')+'$'+(+(c.total_pnl||0)).toFixed(0)+'</td><td class="'+((c.roi||0)>=0?'green':'red')+'">'+((c.roi||0)>=0?'+':'')+(+(c.roi||0)).toFixed(1)+'%</td></tr>';
-    }).join('');
+    // Summary cards — computed from the filtered signals so combined mode
+    // matches what the bucket sections show (the API-provided `overall`
+    // would aggregate across all cohorts when apiCohort='all').
+    let sumPnl = 0, sumWagered = 0, wins = 0, losses = 0, pushes = 0, plays = 0;
+    for (const s of signals) {
+      if (s.outcome !== 'win' && s.outcome !== 'loss' && s.outcome !== 'push') continue;
+      plays++;
+      if (s.outcome === 'win') wins++;
+      else if (s.outcome === 'loss') losses++;
+      else pushes++;
+      sumPnl += Number(s.pnl) || 0;
+      if (s.outcome !== 'push') sumWagered += wageredForSignal(s);
+    }
+    const roi = sumWagered > 0 ? (sumPnl / sumWagered * 100) : 0;
+    const winRate = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : null;
+    document.getElementById('bt-summary').innerHTML=
+      '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(sumPnl>=0?'green':'red')+'">'+(sumPnl>=0?'+':'')+'$'+sumPnl.toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
+      '<div class="metric-card"><div class="metric-label">ROI</div><div class="metric-val '+(roi>=0?'green':'red')+'">'+(roi>=0?'+':'')+roi.toFixed(2)+'%</div><div class="metric-sub">'+plays+' plays</div></div>'+
+      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+wins+'-'+losses+'-'+pushes+'</div><div class="metric-sub">'+(winRate!=null?winRate.toFixed(1)+'% win':'—')+'</div></div>'+
+      '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+sumWagered.toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
+    renderRunlineCompanion(signals);
+    renderSignalTracking(signals);
+    renderBucketSections(signals);
   // Lineup-sensitivity ROI: separate roundtrip so the existing /backtest
   // payload stays unchanged and the join-on-game_log only happens when the
   // user is actually looking at this view.
   try {
-    const ls = await api('/backtest/lineup-sensitivity?from='+from+'&to='+to+'&cohort='+encodeURIComponent(cohort));
+    // Same v5+v6 -> all dispatch as the main backtest call.
+    const ls = await api('/backtest/lineup-sensitivity?from='+from+'&to='+to+'&cohort='+encodeURIComponent(apiCohort));
     const card = document.getElementById('bt-lineup-sens-card');
     const body = document.getElementById('bt-lineup-sens-body');
     const totalSettled = (ls.stable.settled_count||0) + (ls.shifted.settled_count||0) + ((ls.large_shift && ls.large_shift.settled_count)||0);

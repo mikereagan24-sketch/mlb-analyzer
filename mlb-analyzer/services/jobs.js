@@ -744,11 +744,18 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       //                  (PR 4 forecast-modulated weights + opener/bulk
       //                  redesign + role-aware F4 baselines; wOBA blend
       //                  W_PROJ/W_ACT = 0.70/0.30)
-      //   v5           : 2026-05-20 onward
+      //   v5           : 2026-05-20 — 2026-05-29
       //                  (wOBA blend retuned to 0.45/0.55 after the blend
       //                  sweep showed actuals were underweighted — ROI
       //                  peaked near 0.45/0.55 across 545 games)
-      cohort: gameRow.game_date >= '2026-05-20' ? 'v5'
+      //   v6           : 2026-05-30 onward
+      //                  (continuous edge score replaces star tiers;
+      //                  signals report raw pp edges via edge_pct,
+      //                  signal_label NULL. Plus forecastForPitcher
+      //                  defensive fix — null on league_only instead of
+      //                  leaking 5.45 baseline.)
+      cohort: gameRow.game_date >= '2026-05-30' ? 'v6'
+        : gameRow.game_date >= '2026-05-20' ? 'v5'
         : gameRow.game_date >= '2026-05-12' ? 'v4'
         : gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',
       companion_spread_line:    _spreadLine,
