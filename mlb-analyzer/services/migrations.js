@@ -69,6 +69,42 @@ const MIGRATIONS = [
       + "SET edge_pct = edge_pct / 100.0 "
       + "WHERE cohort = 'v5' AND signal_type = 'ML' AND edge_pct >= 1;\n",
   },
+  {
+    name: 'v5-ml-edge-pct-recompute-001',
+    description:
+      'Recompute v5 ML edge_pct from market_line + model_line using '
+      + 'the v6 probability-point formula '
+      + '(MAX(0, impliedP(model) - impliedP(market))). Migration 001 '
+      + 'divided v5 ML edge_pct by 100 under the false assumption that '
+      + 'the original integers were percentage-points; they were '
+      + 'actually the legacy mlEdge() American-cents distance, so the '
+      + 'divided values bucket every v5 ML row into the 9.5-10.0+pp '
+      + 'top bucket (a 30-cent distance becomes 0.30, which trips the '
+      + 'last bucket\'s 10pp clamp). market_line + model_line are '
+      + 'authoritative and intact; recomputing from them lands every '
+      + 'row on the correct decimal-pp axis. This migration is '
+      + 'naturally idempotent — the recompute is deterministic from '
+      + 'the same inputs — but the migrations_applied gate is still '
+      + 'used for consistency + audit. cohort=v5 filter scopes the '
+      + 'change away from continuous-edge v6 rows that already carry '
+      + 'correct decimal pp values.',
+    sql:
+      "UPDATE bet_signals "
+      + "SET edge_pct = MAX(0, "
+      + "  CASE "
+      + "    WHEN model_line IS NULL OR model_line = 0 THEN 0.5 "
+      + "    WHEN model_line < 0 THEN ABS(model_line) * 1.0 / (ABS(model_line) + 100) "
+      + "    ELSE 100.0 / (model_line + 100) "
+      + "  END "
+      + "  - "
+      + "  CASE "
+      + "    WHEN market_line IS NULL OR market_line = 0 THEN 0.5 "
+      + "    WHEN market_line < 0 THEN ABS(market_line) * 1.0 / (ABS(market_line) + 100) "
+      + "    ELSE 100.0 / (market_line + 100) "
+      + "  END "
+      + ") "
+      + "WHERE cohort = 'v5' AND signal_type = 'ML';\n",
+  },
 ];
 
 // Ensure the bookkeeping table exists. Schema:
