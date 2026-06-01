@@ -1192,4 +1192,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
+module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, shiftToScreenValue };

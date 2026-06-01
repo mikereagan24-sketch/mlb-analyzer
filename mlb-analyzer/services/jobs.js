@@ -2,7 +2,7 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, shiftToScreenValue } = require('./scraper');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -2648,37 +2648,22 @@ async function runOddsJob(dateStr) {
         if (!kalshiRows.length) {
           console.log('[odds] Kalshi-direct: no pre-game markets returned for ' + dateStr);
         } else {
-          // Fee-adjust Kalshi's raw ask to the all-in price the bettor
-          // actually pays: convert American → implied prob C, add Kalshi's
-          // per-contract taker fee rate (0.068 * C * (1 - C), single-sourced
-          // from kalshi.js's KALSHI_FEE_COEF), convert back to American.
-          // Verified against three live slates (DET@BAL 117/-117 → 109/-125,
-          // CWS@SF -104/-100 → -111/-107, PIT@TOR 138/-144 → 129/-154).
+          // Apply shiftToScreenValue (services/scraper.js) to the raw
+          // Kalshi ask price. This is a 1-cent unfavorable shift that
+          // makes the stored market_*_ml match Kalshi's screen display
+          // exactly. Mike places maker (limit) orders on Kalshi so the
+          // previous feeAdjustAmerican path was wrong for him — it
+          // represented the all-in taker price he doesn't actually
+          // pay. The shift is small but the consistency with screen
+          // prices removes a confusing off-by-one for users comparing
+          // edge calculations against Kalshi.
           //
-          // ---- CLV IMPACT — KNOWN, ACCEPTED ----
-          // market_*_ml here is the FEE-ADJUSTED Kalshi price (per
-          // kalshi_direct_primary), NOT the raw market. The CLV / closing-
-          // line computation in this same file (see the closing-lock branch
-          // around line ~1151, calcCLV call) reads market_*_ml as the
-          // closing line, so CLV is therefore computed against a fee-loaded
-          // number rather than the true market close — systematically
-          // inflating CLV by roughly the fee. This change does NOT fix
-          // CLV; it just documents that the inflation is a deliberate
-          // consequence of storing the all-in line everywhere. See
-          // feat/kalshi-fee-adjusted-lines.
-          function feeAdjustAmerican(ml) {
-            if (typeof ml !== 'number' || !Number.isFinite(ml)) return ml;
-            const C = ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100);
-            // Skip on degenerate inputs: C*(1-C) → 0 at the extremes so
-            // the adjustment is tiny anyway, and the inversion back through
-            // probToAmerican is float-fragile near the boundaries.
-            if (!(C > 0.001 && C < 0.999)) return ml;
-            const adj = C + kalshiTakerFeeRate(C);
-            if (!(adj > 0.001 && adj < 0.999)) return ml;
-            return adj >= 0.5
-              ? -Math.round(100 * adj / (1 - adj))
-              :  Math.round(100 * (1 - adj) / adj);
-          }
+          // The screen-aligned line also flows into the CLV / closing-
+          // line computation downstream (see the closing-lock branch
+          // around line ~1151, calcCLV call). Pre-change, CLV was
+          // computed against the all-in fee-loaded number — that
+          // inflation goes away with this switch and CLV now reflects
+          // actual screen-quoted closing lines.
           const oddsById = new Map();
           for (const o of oddsRaw) oddsById.set(o.game_id, o);
           let overridden = 0, skippedLocked = 0, missingFromOdds = 0;
@@ -2703,11 +2688,12 @@ async function runOddsJob(dateStr) {
               skippedLocked++;
               continue;
             }
-            // ML override only. Totals, spreads, sources for non-ML markets,
-            // and every other field stay as Unabated/OddsAPI set them. ML
-            // values are FEE-ADJUSTED (see CLV note above the helper).
-            o.market_away_ml = feeAdjustAmerican(k.away.ask_ml);
-            o.market_home_ml = feeAdjustAmerican(k.home.ask_ml);
+            // ML override only. Totals, spreads, sources for non-ML
+            // markets, and every other field stay as Unabated/OddsAPI
+            // set them. ML values are SCREEN-ALIGNED via
+            // shiftToScreenValue — see comment block above.
+            o.market_away_ml = shiftToScreenValue(k.away.ask_ml);
+            o.market_home_ml = shiftToScreenValue(k.home.ask_ml);
             o.ml_source = 'kalshi';
             overridden++;
           }
