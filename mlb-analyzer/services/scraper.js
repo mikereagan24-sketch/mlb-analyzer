@@ -425,34 +425,6 @@ function teamToAbbr(name) {
   return TEAM_NAME_MAP[name] || null;
 }
 
-// Post-ingest cent shift for the OddsAPI Kalshi feed. OddsAPI's Kalshi
-// quotes consistently come back 1 American-cent more bettor-favorable
-// than what Kalshi's actual screen shows. Left as-is, edge_pct
-// over-states the bettor's real edge by ~0.5pp on most lines.
-// shiftToScreenValue subtracts 1 American cent in the bettor-
-// unfavorable direction so the stored market_*_ml matches Kalshi
-// screen. Applied ONLY on bookmakerKey==='kalshi' in
-// parseOddsAPIResponse — DraftKings, Polymarket, and the (currently
-// dormant) Kalshi-direct override path all stay unchanged.
-//
-// Edge cases:
-//   * null / undefined: pass through (no quote available).
-//   * +100 and -100 are the pickem boundary. American odds skip
-//     directly from +101 to -101 across pickem, so both boundary
-//     values shift to -101 (treat as "slight favorite to home").
-//   * Lines strictly inside (-100, 100) exclusive of the boundary
-//     are invalid for American ML; warn and pass through so the
-//     anomaly is surfaced in logs rather than silently mutated.
-function shiftToScreenValue(ml) {
-  if (ml == null) return ml; // covers both null and undefined
-  if (ml > 100)   return ml - 1;   // e.g. +140 -> +139
-  if (ml < -100)  return ml - 1;   // e.g. -167 -> -168
-  if (ml === 100  || ml === -100) return -101; // cross pickem to fav side
-  console.warn('[shiftToScreenValue] unexpected ml ' + ml
-    + ' in (-100, 100) exclusive — passing through');
-  return ml;
-}
-
 function parseOddsAPIResponse(games, bookmakerKey, totalBookmakerKey) {
   const results = [];
   for (const g of games) {
@@ -474,15 +446,8 @@ function parseOddsAPIResponse(games, bookmakerKey, totalBookmakerKey) {
     results.push({
       game_id: (awayAbbr + '-' + homeAbbr).toLowerCase(),
       awayTeam: awayAbbr, homeTeam: homeAbbr,
-      // Kalshi-only post-process: 1-cent unfavorable shift to match
-      // Kalshi's screen quotes (see shiftToScreenValue above). DK
-      // and any other bookmaker pass through unchanged.
-      market_away_ml: bookmakerKey === 'kalshi'
-        ? shiftToScreenValue(awayOut?.price || null)
-        : (awayOut?.price || null),
-      market_home_ml: bookmakerKey === 'kalshi'
-        ? shiftToScreenValue(homeOut?.price || null)
-        : (homeOut?.price || null),
+      market_away_ml: awayOut?.price || null,
+      market_home_ml: homeOut?.price || null,
       market_total: overOut?.point || null,
       over_price: overOut?.price || -110,
       under_price: underOut?.price || -110,
