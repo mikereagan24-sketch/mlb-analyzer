@@ -663,7 +663,14 @@ async function fetchKalshiDirect(dateStr) {
       const noAsk  = m.no_ask;
       if (yesAsk != null) {
         const p = yesAsk / 100;
-        const ml = p >= 0.5 ? -Math.round(p/(1-p)*100) : Math.round((1-p)/p*100);
+        // The raw probability-to-American conversion produces a quote
+        // that's 1 cent more bettor-favorable than Kalshi's screen
+        // (same drift the OddsAPI Kalshi feed has). Shift to match the
+        // screen via the shared shiftToScreenValue helper so
+        // edge_pct downstream is computed against the actual posted
+        // line. See f7ea1a7 for the parseOddsAPIResponse twin of this.
+        const rawMl = p >= 0.5 ? -Math.round(p/(1-p)*100) : Math.round((1-p)/p*100);
+        const ml = shiftToScreenValue(rawMl);
         results[eventTicker].ml[ticker] = { p, ml, subtitle: m.subtitle };
       }
     }
