@@ -106,6 +106,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .bt-bucket-tbl tbody tr.bucket-threshold-row{background:var(--green-bg)}
 .bt-bucket-tbl tbody tr.bucket-threshold-row td:first-child{font-weight:600;color:var(--green)}
 .bt-bucket-tbl tbody tr.bucket-empty td{color:var(--text3)}
+/* Sub-threshold rows (and every Overs row) are shown but visually
+   dimmed: they're in the histogram for context but their bets don't
+   feed the section's actionable ROI in the header. Stacks with
+   .bucket-empty when both apply. */
+.bt-bucket-tbl tbody tr.bucket-row-excluded td{opacity:0.45}
 .rbox-label{font-size:9px;color:var(--text2);margin-bottom:2px}
 .rbox-val{font-size:16px;font-weight:500}
 .rbox-mkt{font-size:9px;color:var(--text2)}
@@ -2392,43 +2397,115 @@ function aggregateBuckets(signals, typeMatch, categoryMatch){
   return { buckets: buckets, totals: totals };
 }
 
+// Threshold-aware backtest sections (feat/backtest-threshold-aware-totals).
+// Section header ROI now reflects ONLY at-or-above-threshold bets — the
+// rows that would actually have fired in production. Sub-threshold rows
+// stay in the table for context (and get a dimmed visual treatment via
+// .bucket-row-excluded). Overs are excluded from actionable totals
+// entirely (no threshold is defined for them; the backtest showed no
+// edge band where overs paid out).
+//
+// Thresholds come from window._appSettings (ui_highlight_ml_fav_min_pp
+// etc., the same values the game-card highlight gate uses). Hardcoded
+// defaults are the fallback when _appSettings hasn't loaded yet.
+function _bktThresholds() {
+  var ap = window._appSettings || {};
+  return {
+    favPp:   Number(ap.ui_highlight_ml_fav_min_pp     || 0.02),
+    dogPp:   Number(ap.ui_highlight_ml_dog_min_pp     || 0.045),
+    underPp: Number(ap.ui_highlight_tot_under_min_pp  || 0.07),
+  };
+}
+
+// Sum bucket aggregates for indices >= thresholdBucketIndex. Used both
+// for the section header line AND for the overall ROI summary at the
+// top of the panel.
+function _sumBucketsAtOrAbove(buckets, fromIdx) {
+  var out = { plays:0, wins:0, losses:0, pushes:0, pnl:0, wagered:0 };
+  for (var i = fromIdx; i <= BUCKET_LAST; i++) {
+    var b = buckets[i];
+    if (!b) continue;
+    out.plays   += b.plays;
+    out.wins    += b.wins;
+    out.losses  += b.losses;
+    out.pushes  += b.pushes;
+    out.pnl     += b.pnl;
+    out.wagered += b.wagered;
+  }
+  return out;
+}
+
 function renderBucketSections(signals){
-  // Four sections in fixed order. thresholdBucket is the index of the
-  // row that gets the green-bg highlight (=ui_highlight_*_min_pp/0.5).
-  // Overs have no threshold-row highlight (ui_highlight_tot_overs_enabled
-  // defaults false — backtest showed no edge in overs).
+  var thr = _bktThresholds();
+  // Bucket index for "first bucket at-or-above threshold". The bucket
+  // labelled "2.0-2.5" starts at 2.0pp, so a threshold of exactly 2.0pp
+  // includes that bucket and everything above. Index = threshold * 200
+  // (since each bucket is 0.5pp wide and starts at index*0.5).
+  function ppToBucketIdx(pp) { return Math.round(pp * 100 / 0.5); }
   var sections = [
-    { key:'fav',   label:'Favs',   type:'ML',    cat:'fav',   thresholdBucket: 4 },  // 2.0/0.5 = 4 (row 2.0-2.5)
-    { key:'dog',   label:'Dogs',   type:'ML',    cat:'dog',   thresholdBucket: 9 },  // 4.5/0.5 = 9 (row 4.5-5.0)
-    { key:'over',  label:'Overs',  type:'Total', cat:'over',  thresholdBucket: null },
-    { key:'under', label:'Unders', type:'Total', cat:'under', thresholdBucket: 14 }, // 7.0/0.5 = 14 (row 7.0-7.5)
+    { key:'fav',   label:'Favs',   type:'ML',    cat:'fav',
+      thresholdBucket: ppToBucketIdx(thr.favPp),   thresholdPp: thr.favPp },
+    { key:'dog',   label:'Dogs',   type:'ML',    cat:'dog',
+      thresholdBucket: ppToBucketIdx(thr.dogPp),   thresholdPp: thr.dogPp },
+    { key:'over',  label:'Overs',  type:'Total', cat:'over',
+      thresholdBucket: null, thresholdPp: null },
+    { key:'under', label:'Unders', type:'Total', cat:'under',
+      thresholdBucket: ppToBucketIdx(thr.underPp), thresholdPp: thr.underPp },
   ];
   var html = '';
   for (var s = 0; s < sections.length; s++) {
     var sec = sections[s];
     var agg = aggregateBuckets(signals, sec.type, sec.cat);
-    var t = agg.totals;
-    var sectionRoi = t.wagered > 0 ? (t.pnl / t.wagered * 100) : null;
-    var roiClass = sectionRoi == null ? 'muted' : (sectionRoi >= 0 ? 'green' : 'red');
-    var roiText = sectionRoi == null ? '—' : ((sectionRoi >= 0 ? '+' : '') + sectionRoi.toFixed(2) + '%');
+    var fullTotals = agg.totals;
+    // Header. For Favs/Dogs/Unders the ROI is computed from the
+    // at-or-above-threshold sub-aggregate; the full total is shown in
+    // parens for context. For Overs there's no actionable threshold,
+    // so the header drops ROI entirely.
+    var headerHtml;
+    if (sec.thresholdBucket == null) {
+      headerHtml = sec.label + ' — '
+        + fullTotals.plays + ' bets · W-L-P '
+        + fullTotals.wins + '-' + fullTotals.losses + '-' + fullTotals.pushes
+        + ' · <span class="muted">no actionable threshold</span>';
+    } else {
+      var aboveT = _sumBucketsAtOrAbove(agg.buckets, sec.thresholdBucket);
+      var aboveRoi = aboveT.wagered > 0 ? (aboveT.pnl / aboveT.wagered * 100) : null;
+      var aboveRoiCls = aboveRoi == null ? 'muted' : (aboveRoi >= 0 ? 'green' : 'red');
+      var aboveRoiTxt = aboveRoi == null ? '—' : ((aboveRoi >= 0 ? '+' : '') + aboveRoi.toFixed(2) + '%');
+      // threshold settings are decimals (0.02 = 2pp); display in pp units.
+      var thresholdPpDisplay = sec.thresholdPp * 100;
+      var thresholdLabel = '≥' + thresholdPpDisplay.toFixed(2).replace(/0+$/, '').replace(/\.$/, '') + 'pp';
+      headerHtml = sec.label + ' (' + thresholdLabel + ') — '
+        + aboveT.plays + ' bets · W-L-P '
+        + aboveT.wins + '-' + aboveT.losses + '-' + aboveT.pushes
+        + ' · ROI <span class="' + aboveRoiCls + '">' + aboveRoiTxt + '</span>'
+        + ' <span class="muted" style="font-weight:normal">('
+        + fullTotals.plays + ' total bets shown below)</span>';
+    }
     html += '<div class="card bt-bucket-section">';
-    html += '<div class="slabel">' + sec.label + ' — '
-         + t.plays + ' bets · W-L-P ' + t.wins + '-' + t.losses + '-' + t.pushes
-         + ' · ROI <span class="' + roiClass + '">' + roiText + '</span></div>';
+    html += '<div class="slabel">' + headerHtml + '</div>';
     html += '<table class="bt-bucket-tbl"><thead><tr>'
          + '<th>PP Range</th><th>Bets</th><th>Wins</th><th>Losses</th><th>Pushes</th><th>ROI%</th>'
          + '</tr></thead><tbody>';
     for (var i = BUCKET_FIRST; i <= BUCKET_LAST; i++) {
       var b = agg.buckets[i];
-      var rowClass = '';
-      if (sec.thresholdBucket === i) rowClass = 'bucket-threshold-row';
-      else if (b.plays === 0) rowClass = 'bucket-empty';
+      // Class composition: threshold row gets green-bg highlight.
+      // Sub-threshold (or all rows in Overs) get the dimmed
+      // 'bucket-row-excluded' class. Empty buckets still get the
+      // existing text-muted treatment when no data fell in them.
+      var classes = [];
+      var isExcluded = sec.thresholdBucket == null /* Overs: all excluded */
+                    || i < sec.thresholdBucket;
+      if (sec.thresholdBucket === i) classes.push('bucket-threshold-row');
+      else if (isExcluded) classes.push('bucket-row-excluded');
+      if (b.plays === 0) classes.push('bucket-empty');
+      var rowClass = classes.length ? ' class="' + classes.join(' ') + '"' : '';
       var roi = b.wagered > 0 ? (b.pnl / b.wagered * 100) : null;
       var rCls = roi == null ? 'muted' : (roi >= 0 ? 'green' : 'red');
       var rTxt = roi == null ? '—' : ((roi >= 0 ? '+' : '') + roi.toFixed(2) + '%');
       var range = bucketRangeText(i);
       if (i === BUCKET_LAST) range += '+'; // last row absorbs 10.0+
-      html += '<tr' + (rowClass ? ' class="' + rowClass + '"' : '') + '>'
+      html += '<tr' + rowClass + '>'
            + '<td>' + range + 'pp</td>'
            + '<td>' + b.plays + '</td>'
            + '<td>' + b.wins  + '</td>'
@@ -2440,6 +2517,25 @@ function renderBucketSections(signals){
     html += '</tbody></table></div>';
   }
   document.getElementById('bt-bucket-sections').innerHTML = html;
+}
+
+// Predicate: does this signal meet its section's threshold? Used by
+// the overall-ROI summary at the top of the backtest tab to scope to
+// actionable bets. Overs are EXCLUDED entirely (no threshold defined).
+function signalMeetsBacktestThreshold(s, thr) {
+  if (!s) return false;
+  var e = Number(s.edge_pct);
+  if (!Number.isFinite(e)) return false;
+  if (s.signal_type === 'ML') {
+    if (s.category === 'fav') return e >= thr.favPp;
+    if (s.category === 'dog') return e >= thr.dogPp;
+    return false;
+  }
+  if (s.signal_type === 'Total') {
+    if (s.category === 'under') return e >= thr.underPp;
+    return false; // overs never contribute to overall ROI
+  }
+  return false;
 }
 
 async function loadBacktest(){
@@ -2463,9 +2559,15 @@ async function loadBacktest(){
     // Summary cards — computed from the filtered signals so combined mode
     // matches what the bucket sections show (the API-provided `overall`
     // would aggregate across all cohorts when apiCohort='all').
+    // Threshold-aware (feat/backtest-threshold-aware-totals): only count
+    // signals that meet their section's direction-specific minimum, and
+    // exclude Overs entirely. Sub-threshold + Overs rows still appear
+    // in the bucket tables for context.
+    const thr = _bktThresholds();
     let sumPnl = 0, sumWagered = 0, wins = 0, losses = 0, pushes = 0, plays = 0;
     for (const s of signals) {
       if (s.outcome !== 'win' && s.outcome !== 'loss' && s.outcome !== 'push') continue;
+      if (!signalMeetsBacktestThreshold(s, thr)) continue;
       plays++;
       if (s.outcome === 'win') wins++;
       else if (s.outcome === 'loss') losses++;
@@ -2475,10 +2577,18 @@ async function loadBacktest(){
     }
     const roi = sumWagered > 0 ? (sumPnl / sumWagered * 100) : 0;
     const winRate = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : null;
+    // Build a single-line scope label so the summary makes its filter
+    // obvious. The thresholds come from settings, so render them out
+    // explicitly rather than hardcoding 2pp/4.5pp/7pp in the header text.
+    // Threshold settings are decimals (0.02 = 2pp); display in pp units.
+    function _ppFmt(pp) { return (pp * 100).toFixed(2).replace(/0+$/, '').replace(/\.$/, '') + 'pp'; }
+    const scopeLabel = 'Favs ≥' + _ppFmt(thr.favPp)
+                     + ' + Dogs ≥' + _ppFmt(thr.dogPp)
+                     + ' + Unders ≥' + _ppFmt(thr.underPp);
     document.getElementById('bt-summary').innerHTML=
-      '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(sumPnl>=0?'green':'red')+'">'+(sumPnl>=0?'+':'')+'$'+sumPnl.toFixed(0)+'</div><div class="metric-sub">$100/play</div></div>'+
-      '<div class="metric-card"><div class="metric-label">ROI</div><div class="metric-val '+(roi>=0?'green':'red')+'">'+(roi>=0?'+':'')+roi.toFixed(2)+'%</div><div class="metric-sub">'+plays+' plays</div></div>'+
-      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+wins+'-'+losses+'-'+pushes+'</div><div class="metric-sub">'+(winRate!=null?winRate.toFixed(1)+'% win':'—')+'</div></div>'+
+      '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(sumPnl>=0?'green':'red')+'">'+(sumPnl>=0?'+':'')+'$'+sumPnl.toFixed(0)+'</div><div class="metric-sub">$100/play (actionable)</div></div>'+
+      '<div class="metric-card"><div class="metric-label">Overall ROI</div><div class="metric-val '+(roi>=0?'green':'red')+'">'+(roi>=0?'+':'')+roi.toFixed(2)+'%</div><div class="metric-sub">'+scopeLabel+'</div></div>'+
+      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+wins+'-'+losses+'-'+pushes+'</div><div class="metric-sub">'+plays+' actionable plays · '+(winRate!=null?winRate.toFixed(1)+'% win':'—')+'</div></div>'+
       '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+sumWagered.toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     renderRunlineCompanion(signals);
     renderSignalTracking(signals);
