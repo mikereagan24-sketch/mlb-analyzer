@@ -2675,9 +2675,22 @@ async function runOddsJob(dateStr) {
             if (!(C > 0.001 && C < 0.999)) return ml;
             const adj = C + kalshiTakerFeeRate(C);
             if (!(adj > 0.001 && adj < 0.999)) return ml;
-            return adj >= 0.5
-              ? -Math.round(100 * adj / (1 - adj))
-              :  Math.round(100 * (1 - adj) / adj);
+            // Compute American odds at 2-decimal precision before final
+            // rounding, then subtract 0.5 toward the bettor-unfavorable
+            // direction so the stored value never overstates the price
+            // available on Kalshi. Pre-change this rounded the raw float
+            // directly, which could land up to 0.5 cents in the bettor's
+            // favor; the half-cent subtraction guarantees the integer
+            // sits at or below what Kalshi would actually transact.
+            if (adj >= 0.5) {
+              const americanFloat = -(100 * adj / (1 - adj));
+              const twoDecimal = Math.round(americanFloat * 100) / 100;
+              return Math.round(twoDecimal - 0.5);
+            } else {
+              const americanFloat = 100 * (1 - adj) / adj;
+              const twoDecimal = Math.round(americanFloat * 100) / 100;
+              return Math.round(twoDecimal - 0.5);
+            }
           }
           const oddsById = new Map();
           for (const o of oddsRaw) oddsById.set(o.game_id, o);
