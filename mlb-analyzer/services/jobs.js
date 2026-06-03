@@ -2685,11 +2685,11 @@ async function runOddsJob(dateStr) {
             if (adj >= 0.5) {
               const americanFloat = -(100 * adj / (1 - adj));
               const twoDecimal = Math.round(americanFloat * 100) / 100;
-              return Math.round(twoDecimal - 0.5);
+              return Math.round(twoDecimal - 1.0);
             } else {
               const americanFloat = 100 * (1 - adj) / adj;
               const twoDecimal = Math.round(americanFloat * 100) / 100;
-              return Math.round(twoDecimal - 0.5);
+              return Math.round(twoDecimal - 1.0);
             }
           }
           const oddsById = new Map();
