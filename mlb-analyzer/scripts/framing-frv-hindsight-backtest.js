@@ -284,16 +284,21 @@ function sigKey(gameRow, sig) {
   const baseSettings = jobs.getSettings();
   const wobaIdx = jobs.getWobaIndex();
 
-  // Two scenarios. The brief: live production today has both knobs
-  // off. The hindsight variant turns both on simultaneously (and uses
-  // the default *_MUTE values that production would honor).
+  // Four scenarios. A is the production-current baseline; B is the
+  // existing combined-on variant; C and D isolate framing-only and
+  // FRV-only so the operator can see whether the lift observed under
+  // B is driven by one feature, the other, or both.
   const cfgA = Object.assign({}, baseSettings, {
-    CATCHER_FRAMING_ENABLED: false,
-    DEFENSE_FRV_ENABLED: false,
+    CATCHER_FRAMING_ENABLED: false, DEFENSE_FRV_ENABLED: false,
   });
   const cfgB = Object.assign({}, baseSettings, {
-    CATCHER_FRAMING_ENABLED: true,
-    DEFENSE_FRV_ENABLED: true,
+    CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: true,
+  });
+  const cfgC = Object.assign({}, baseSettings, {
+    CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: false, // framing only
+  });
+  const cfgD = Object.assign({}, baseSettings, {
+    CATCHER_FRAMING_ENABLED: false, DEFENSE_FRV_ENABLED: true,  // FRV only
   });
 
   // Aggregators per config.
@@ -308,77 +313,99 @@ function sigKey(gameRow, sig) {
   }
   const aggA = newAgg();
   const aggB = newAgg();
+  const aggC = newAgg();
+  const aggD = newAgg();
 
-  // Overlap + divergence tracking.
-  const sigsByGameA = new Map(); // gameKey -> Map<sigKey, { sig, graded }>
-  const sigsByGameB = new Map();
-  const edgeDeltas = []; // for overlapping signals
-  const divergent = { aOnly: [], bOnly: [] };
+  // Overlap + divergence tracking. Each non-A config gets its own
+  // edge-delta array (signals that fire in BOTH A and that config —
+  // used for the "mean edge vs A" row) and its own divergent-from-A
+  // bucket (signals that fire in the config but NOT in A).
+  const sigsByGame = { A: new Map(), B: new Map(), C: new Map(), D: new Map() };
+  const overlapVsA = { B: [], C: [], D: [] };
+  const divergentVsA = { bOnly: [], cOnly: [], dOnly: [] };
 
-  let gamesConsidered = 0, gamesScored = 0, suppressedA = 0, suppressedB = 0;
+  let gamesConsidered = 0, gamesScored = 0;
+  const suppressedCounts = { A: 0, B: 0, C: 0, D: 0 };
   for (const gameRow of games) {
     gamesConsidered++;
-    // Build the game ONCE — both configs see identical framing/FRV
-    // inputs, only the toggle differs.
+    // Build the game ONCE — all four configs see identical framing/FRV
+    // inputs, only the enabled toggles differ.
     const game = buildBacktestGame(gameRow, baseSettings);
 
-    const mrA = model.runModel(game, wobaIdx, cfgA, 'standard');
-    const mrB = model.runModel(game, wobaIdx, cfgB, 'standard');
-    if (mrA && mrA._suppressed) { suppressedA++; continue; }
-    if (mrB && mrB._suppressed) { suppressedB++; continue; }
-
-    const sigsA = model.getSignals(game, mrA, cfgA);
-    const sigsB = model.getSignals(game, mrB, cfgB);
+    const mrs = {
+      A: model.runModel(game, wobaIdx, cfgA, 'standard'),
+      B: model.runModel(game, wobaIdx, cfgB, 'standard'),
+      C: model.runModel(game, wobaIdx, cfgC, 'standard'),
+      D: model.runModel(game, wobaIdx, cfgD, 'standard'),
+    };
+    let anySuppressed = false;
+    for (const k of ['A','B','C','D']) {
+      if (mrs[k] && mrs[k]._suppressed) { suppressedCounts[k]++; anySuppressed = true; }
+    }
+    if (anySuppressed) continue;
     gamesScored++;
 
-    const localA = new Map();
-    const localB = new Map();
+    const cfgMap = { A: cfgA, B: cfgB, C: cfgC, D: cfgD };
+    const aggMap = { A: aggA, B: aggB, C: aggC, D: aggD };
+    const locals = { A: new Map(), B: new Map(), C: new Map(), D: new Map() };
 
-    for (const s of sigsA) {
-      const graded = model.calcPnl(s, gameRow.away_score, gameRow.home_score, gameRow.market_total);
-      if (graded.outcome === 'pending') continue;
-      accumulate(aggA, s, graded);
-      localA.set(sigKey(gameRow, s), { sig: s, graded });
-    }
-    for (const s of sigsB) {
-      const graded = model.calcPnl(s, gameRow.away_score, gameRow.home_score, gameRow.market_total);
-      if (graded.outcome === 'pending') continue;
-      accumulate(aggB, s, graded);
-      localB.set(sigKey(gameRow, s), { sig: s, graded });
-    }
-
-    // Overlap + divergence (this game).
-    for (const [k, v] of localA) {
-      if (localB.has(k)) {
-        const a = v.sig.edge;
-        const b = localB.get(k).sig.edge;
-        edgeDeltas.push({ key: k, edgeA: a, edgeB: b, delta: b - a });
-      } else {
-        divergent.aOnly.push({
-          key: k, type: v.sig.type, side: v.sig.side,
-          edge: v.sig.edge, outcome: v.graded.outcome, pnl: v.graded.pnl,
-        });
-      }
-    }
-    for (const [k, v] of localB) {
-      if (!localA.has(k)) {
-        divergent.bOnly.push({
-          key: k, type: v.sig.type, side: v.sig.side,
-          edge: v.sig.edge, outcome: v.graded.outcome, pnl: v.graded.pnl,
-        });
+    for (const k of ['A','B','C','D']) {
+      const sigs = model.getSignals(game, mrs[k], cfgMap[k]);
+      for (const s of sigs) {
+        const graded = model.calcPnl(s, gameRow.away_score, gameRow.home_score, gameRow.market_total);
+        if (graded.outcome === 'pending') continue;
+        accumulate(aggMap[k], s, graded);
+        locals[k].set(sigKey(gameRow, s), { sig: s, graded });
       }
     }
 
-    sigsByGameA.set(gameRow.game_date + '|' + gameRow.game_id, localA);
-    sigsByGameB.set(gameRow.game_date + '|' + gameRow.game_id, localB);
+    // Overlap + divergence vs A, computed per non-A config.
+    for (const other of ['B','C','D']) {
+      const localOther = locals[other];
+      for (const [k, v] of localOther) {
+        if (locals.A.has(k)) {
+          overlapVsA[other].push({
+            key: k, edgeA: locals.A.get(k).sig.edge, edgeOther: v.sig.edge,
+            delta: v.sig.edge - locals.A.get(k).sig.edge,
+          });
+        } else {
+          divergentVsA[other.toLowerCase() + 'Only'].push({
+            key: k, type: v.sig.type, side: v.sig.side,
+            edge: v.sig.edge, outcome: v.graded.outcome, pnl: v.graded.pnl,
+          });
+        }
+      }
+    }
+
+    for (const k of ['A','B','C','D']) {
+      sigsByGame[k].set(gameRow.game_date + '|' + gameRow.game_id, locals[k]);
+    }
   }
 
-  const meanEdgeA = edgeDeltas.length
-    ? edgeDeltas.reduce((s, d) => s + d.edgeA, 0) / edgeDeltas.length : null;
-  const meanEdgeB = edgeDeltas.length
-    ? edgeDeltas.reduce((s, d) => s + d.edgeB, 0) / edgeDeltas.length : null;
-  const meanEdgeDeltaPp = edgeDeltas.length
-    ? edgeDeltas.reduce((s, d) => s + (d.delta * 100), 0) / edgeDeltas.length : null;
+  // Per-config mean edge over A∩config overlap (used for the "Mean
+  // edge (vs A)" row in the summary table). Each value is the mean
+  // signed delta in pp; positive = config produced a stronger edge
+  // than A on the same signals.
+  function meanDeltaPp(arr) {
+    if (!arr.length) return null;
+    return arr.reduce((s, d) => s + d.delta * 100, 0) / arr.length;
+  }
+  function meanEdgePp(arr, side /* 'edgeA' | 'edgeOther' */) {
+    if (!arr.length) return null;
+    return arr.reduce((s, d) => s + d[side] * 100, 0) / arr.length;
+  }
+  const meanEdgeAvsB = meanEdgePp(overlapVsA.B, 'edgeA');
+  const meanEdge = {
+    A_in_B_overlap: meanEdgeAvsB,
+    B: meanEdgePp(overlapVsA.B, 'edgeOther'),
+    C: meanEdgePp(overlapVsA.C, 'edgeOther'),
+    D: meanEdgePp(overlapVsA.D, 'edgeOther'),
+    deltaVsA: {
+      B: meanDeltaPp(overlapVsA.B),
+      C: meanDeltaPp(overlapVsA.C),
+      D: meanDeltaPp(overlapVsA.D),
+    },
+  };
 
   // -------------------------------------------------------------- summary table
   function pad(s, n, right) {
@@ -397,50 +424,64 @@ function sigKey(gameRow, sig) {
     const d = rb - ra;
     return (d >= 0 ? '+' : '') + d.toFixed(2) + 'pp';
   }
-  const col = { label: 24, off: 14, on: 14, delta: 12 };
-  console.log(pad('', col.label) + pad('Off (A)', col.off) + pad('On (B)', col.on) + pad('Delta', col.delta));
-  console.log('-'.repeat(col.label + col.off + col.on + col.delta));
+  const col = { label: 22, val: 13 };
+  console.log(pad('', col.label)
+    + pad('Off (A)', col.val, true)
+    + pad('Framing (C)', col.val, true)
+    + pad('FRV (D)', col.val, true)
+    + pad('Both (B)', col.val, true));
+  console.log('-'.repeat(col.label + col.val * 4));
   console.log(pad('Signals fired:', col.label)
-    + pad(aggA.all.signals, col.off)
-    + pad(aggB.all.signals, col.on)
-    + pad(deltaCount(aggA.all.signals, aggB.all.signals), col.delta));
+    + pad(aggA.all.signals, col.val, true)
+    + pad(aggC.all.signals, col.val, true)
+    + pad(aggD.all.signals, col.val, true)
+    + pad(aggB.all.signals, col.val, true));
   console.log(pad('W-L-P:', col.label)
-    + pad(fmtWLP(aggA.all), col.off)
-    + pad(fmtWLP(aggB.all), col.on)
-    + pad('', col.delta));
+    + pad(fmtWLP(aggA.all), col.val, true)
+    + pad(fmtWLP(aggC.all), col.val, true)
+    + pad(fmtWLP(aggD.all), col.val, true)
+    + pad(fmtWLP(aggB.all), col.val, true));
   console.log(pad('ROI:', col.label)
-    + pad(fmtRoi(aggA.all), col.off)
-    + pad(fmtRoi(aggB.all), col.on)
-    + pad(deltaRoi(aggA.all, aggB.all), col.delta));
-  if (meanEdgeA != null) {
-    console.log(pad('Mean edge (overlap):', col.label)
-      + pad((meanEdgeA * 100).toFixed(2) + 'pp', col.off)
-      + pad((meanEdgeB * 100).toFixed(2) + 'pp', col.on)
-      + pad((meanEdgeDeltaPp >= 0 ? '+' : '') + meanEdgeDeltaPp.toFixed(2) + 'pp', col.delta));
-  } else {
-    console.log(pad('Mean edge (overlap):', col.label) + pad('— (no overlap)', col.off + col.on + col.delta));
-  }
+    + pad(fmtRoi(aggA.all), col.val, true)
+    + pad(fmtRoi(aggC.all), col.val, true)
+    + pad(fmtRoi(aggD.all), col.val, true)
+    + pad(fmtRoi(aggB.all), col.val, true));
+  // Mean edge (vs A). A column shows the mean edge of A∩B-overlap A
+  // signals for context (other overlap subsets land on slightly
+  // different A means depending on intersection — using one A column
+  // keeps the table readable). Each non-A column shows that config's
+  // mean edge on its OWN overlap with A.
+  function fmtEdgePp(x) { return x == null ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'pp'; }
+  console.log(pad('Mean edge (overlap):', col.label)
+    + pad(fmtEdgePp(meanEdge.A_in_B_overlap), col.val, true)
+    + pad(fmtEdgePp(meanEdge.C), col.val, true)
+    + pad(fmtEdgePp(meanEdge.D), col.val, true)
+    + pad(fmtEdgePp(meanEdge.B), col.val, true));
   console.log('');
-  console.log('Divergent signals (count): ' + (divergent.aOnly.length + divergent.bOnly.length));
-  console.log('  fired in A only: ' + divergent.aOnly.length);
-  console.log('  fired in B only: ' + divergent.bOnly.length);
+  console.log('Divergent from A (fired in alt config but NOT in A):');
+  console.log('  fired in C only: ' + divergentVsA.cOnly.length);
+  console.log('  fired in D only: ' + divergentVsA.dOnly.length);
+  console.log('  fired in B only: ' + divergentVsA.bOnly.length);
   console.log('');
   console.log('Per-cohort breakdown:');
   function cohortLine(label, key) {
-    const a = aggA[key], b = aggB[key];
-    return '  ' + pad(label, 14)
-      + pad('A ' + a.signals + ' bets, ' + fmtWLP(a) + ', ROI ' + fmtRoi(a), 38)
-      + pad('B ' + b.signals + ' bets, ' + fmtWLP(b) + ', ROI ' + fmtRoi(b), 38)
-      + 'Δ ' + deltaRoi(a, b);
+    const a = aggA[key], b = aggB[key], c = aggC[key], d = aggD[key];
+    return '  ' + pad(label, 12)
+      + pad('A ' + fmtRoi(a) + ' (' + a.signals + ')', 20)
+      + pad('C ' + fmtRoi(c) + ' (' + c.signals + ')', 20)
+      + pad('D ' + fmtRoi(d) + ' (' + d.signals + ')', 20)
+      + pad('B ' + fmtRoi(b) + ' (' + b.signals + ')', 20);
   }
   console.log(cohortLine('ML Favs:',   'ml_fav'));
   console.log(cohortLine('ML Dogs:',   'ml_dog'));
   console.log(cohortLine('Tot Overs:', 'tot_over'));
   console.log(cohortLine('Tot Unders:','tot_under'));
   console.log('');
+  const supTotal = suppressedCounts.A + suppressedCounts.B + suppressedCounts.C + suppressedCounts.D;
   console.log('Games considered: ' + gamesConsidered
     + ' | scored: ' + gamesScored
-    + (suppressedA || suppressedB ? ' | suppressed A=' + suppressedA + ' B=' + suppressedB : ''));
+    + (supTotal ? ' | suppressed (any): A=' + suppressedCounts.A + ' B=' + suppressedCounts.B
+                  + ' C=' + suppressedCounts.C + ' D=' + suppressedCounts.D : ''));
   console.log('');
   console.log(printedBanner);
 
@@ -450,34 +491,61 @@ function sigKey(gameRow, sig) {
     date_window: { from: ARGS.from, to: ARGS.to },
     games_considered: gamesConsidered,
     games_scored: gamesScored,
-    suppressed: { A: suppressedA, B: suppressedB },
+    suppressed: { A: suppressedCounts.A, B: suppressedCounts.B, C: suppressedCounts.C, D: suppressedCounts.D },
     configs: {
       A: { CATCHER_FRAMING_ENABLED: false, DEFENSE_FRV_ENABLED: false, label: 'production (current)' },
-      B: { CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: true,  label: 'dormant features active' },
+      B: { CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: true,  label: 'both on' },
+      C: { CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: false, label: 'framing only' },
+      D: { CATCHER_FRAMING_ENABLED: false, DEFENSE_FRV_ENABLED: true,  label: 'FRV only' },
     },
-    aggregates: {
-      A: { all: aggA.all, ml_fav: aggA.ml_fav, ml_dog: aggA.ml_dog, tot_over: aggA.tot_over, tot_under: aggA.tot_under,
-           roi_pct: { all: roiPct(aggA.all), ml_fav: roiPct(aggA.ml_fav), ml_dog: roiPct(aggA.ml_dog),
-                     tot_over: roiPct(aggA.tot_over), tot_under: roiPct(aggA.tot_under) } },
-      B: { all: aggB.all, ml_fav: aggB.ml_fav, ml_dog: aggB.ml_dog, tot_over: aggB.tot_over, tot_under: aggB.tot_under,
-           roi_pct: { all: roiPct(aggB.all), ml_fav: roiPct(aggB.ml_fav), ml_dog: roiPct(aggB.ml_dog),
-                     tot_over: roiPct(aggB.tot_over), tot_under: roiPct(aggB.tot_under) } },
-    },
-    overlap: {
-      count: edgeDeltas.length,
-      mean_edge_A_pp: meanEdgeA != null ? Number((meanEdgeA * 100).toFixed(4)) : null,
-      mean_edge_B_pp: meanEdgeB != null ? Number((meanEdgeB * 100).toFixed(4)) : null,
-      mean_edge_delta_pp: meanEdgeDeltaPp != null ? Number(meanEdgeDeltaPp.toFixed(4)) : null,
+    aggregates: (function aggReport() {
+      const out = {};
+      for (const [k, agg] of [['A', aggA], ['B', aggB], ['C', aggC], ['D', aggD]]) {
+        out[k] = {
+          all: agg.all, ml_fav: agg.ml_fav, ml_dog: agg.ml_dog,
+          tot_over: agg.tot_over, tot_under: agg.tot_under,
+          roi_pct: {
+            all:       roiPct(agg.all),
+            ml_fav:    roiPct(agg.ml_fav),
+            ml_dog:    roiPct(agg.ml_dog),
+            tot_over:  roiPct(agg.tot_over),
+            tot_under: roiPct(agg.tot_under),
+          },
+        };
+      }
+      return out;
+    })(),
+    overlap_vs_A: {
+      B: {
+        count: overlapVsA.B.length,
+        mean_edge_A_pp: meanEdge.A_in_B_overlap != null ? Number(meanEdge.A_in_B_overlap.toFixed(4)) : null,
+        mean_edge_other_pp: meanEdge.B != null ? Number(meanEdge.B.toFixed(4)) : null,
+        mean_edge_delta_pp: meanEdge.deltaVsA.B != null ? Number(meanEdge.deltaVsA.B.toFixed(4)) : null,
+      },
+      C: {
+        count: overlapVsA.C.length,
+        mean_edge_other_pp: meanEdge.C != null ? Number(meanEdge.C.toFixed(4)) : null,
+        mean_edge_delta_pp: meanEdge.deltaVsA.C != null ? Number(meanEdge.deltaVsA.C.toFixed(4)) : null,
+      },
+      D: {
+        count: overlapVsA.D.length,
+        mean_edge_other_pp: meanEdge.D != null ? Number(meanEdge.D.toFixed(4)) : null,
+        mean_edge_delta_pp: meanEdge.deltaVsA.D != null ? Number(meanEdge.deltaVsA.D.toFixed(4)) : null,
+      },
     },
     divergent_counts: {
-      a_only: divergent.aOnly.length,
-      b_only: divergent.bOnly.length,
+      // Signals that fired in the alt config but NOT in A — i.e. new
+      // bets the dormant features would have surfaced.
+      b_only: divergentVsA.bOnly.length,
+      c_only: divergentVsA.cOnly.length,
+      d_only: divergentVsA.dOnly.length,
     },
-    // Cap the detailed divergent list at 100 entries each side to keep
-    // the JSON manageable; the counts above are authoritative totals.
+    // Cap each list at 100 entries to keep the JSON manageable; counts
+    // above are authoritative totals.
     divergent_sample: {
-      a_only: divergent.aOnly.slice(0, 100),
-      b_only: divergent.bOnly.slice(0, 100),
+      b_only: divergentVsA.bOnly.slice(0, 100),
+      c_only: divergentVsA.cOnly.slice(0, 100),
+      d_only: divergentVsA.dOnly.slice(0, 100),
     },
   };
 
