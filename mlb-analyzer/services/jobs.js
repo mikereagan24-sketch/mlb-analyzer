@@ -3487,6 +3487,20 @@ async function runCatcherFramingJob(year) {
     });
     tx(rows);
     console.log('[framing] upserted ' + applied + '/' + rows.length + ' catchers');
+    // Daily snapshot. Mirrors the wOBA snapshot pattern at the bottom
+    // of routes/api.js ingestWobaCSV — fires right after the upsert so
+    // the row set we just landed is the row set archived under today's
+    // snapshot_date. Non-fatal: a snapshot failure must never block the
+    // live framing load. Date in PT per feat/framing-frv-daily-snapshots
+    // brief (note: woba_data_snapshot uses ET — the two are flagged as
+    // diverging, awaiting Mike's call on whether to unify).
+    try {
+      const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      q.snapshotCatcherFraming(snapDate, rows);
+      console.log('[framing-snapshot] captured ' + rows.length + ' rows for ' + snapDate);
+    } catch (e) {
+      console.warn('[framing-snapshot] capture failed (non-fatal): ' + e.message);
+    }
     return { success: true, fetched: rows.length, applied };
   } catch (e) {
     console.error('[framing] job failed: ' + e.message);
@@ -3544,6 +3558,32 @@ async function runFieldingFrvJob(opts) {
     });
     tx(rows);
     console.log('[defense] upserted ' + applied + ' non-catcher fielders (' + startY + '-' + endY + ')');
+    // Daily snapshot — fires after upsert with the same source row
+    // set. Each row carries season_start / season_end forward so the
+    // archived snapshot retains its trailing-window provenance. PK
+    // (snapshot_date, mlb_id, position) handles the multi-position
+    // case naturally. Non-fatal: a snapshot failure must never block
+    // the live FRV load. PT per the brief; flagged as diverging
+    // from wOBA's ET convention pending Mike's call.
+    try {
+      const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      // Project the upsert row shape onto what snapshotFieldingFrv
+      // expects (season_start / season_end overlaid from the job
+      // window, since the source rows may not carry them inline).
+      const snapRows = rows.map(r => ({
+        mlb_id: r.mlb_id,
+        name: r.name || null,
+        total_runs: r.total_runs,
+        outs_total: r.outs_total || 0,
+        position: r.position || null,
+        season_start: startY,
+        season_end: endY,
+      }));
+      q.snapshotFieldingFrv(snapDate, snapRows);
+      console.log('[frv-snapshot] captured ' + snapRows.length + ' rows for ' + snapDate);
+    } catch (e) {
+      console.warn('[frv-snapshot] capture failed (non-fatal): ' + e.message);
+    }
     return { success: true, applied, season_start: startY, season_end: endY };
   } catch (e) {
     console.error('[defense] job failed: ' + e.message);

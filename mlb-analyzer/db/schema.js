@@ -305,6 +305,25 @@ db.exec(`
     pitches INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- Daily snapshot of catcher_framing. catcher_framing itself is
+  -- upserted (last-write-wins) on each runCatcherFramingJob, destroying
+  -- the prior state — which means a backtest can only see TODAY's
+  -- rv_tot values, not the values that existed when a past game was
+  -- scored. This table archives each (mlb_id, snapshot_date) pair so
+  -- date-accurate backtests can ask "what did the framing index look
+  -- like on day X". Captured by runCatcherFramingJob after each
+  -- upsert. PK includes snapshot_date so a same-day re-refresh
+  -- overwrites (last write per day wins, matching the wOBA pattern).
+  -- See db/schema.js woba_data_snapshot for the canonical reference.
+  CREATE TABLE IF NOT EXISTS catcher_framing_snapshot (
+    snapshot_date TEXT NOT NULL,
+    mlb_id INTEGER NOT NULL,
+    name TEXT,
+    rv_tot REAL,
+    pitches INTEGER,
+    PRIMARY KEY (snapshot_date, mlb_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_framing_snap_date ON catcher_framing_snapshot(snapshot_date);
   -- Multi-year (2023-2025) framing baseline, fallback for catchers with
   -- little/no current-season sample. Pre-ABS values; the model applies the
   -- ABS scaling factor at use-time. season_start/end record the span pulled.
@@ -333,6 +352,26 @@ db.exec(`
     season_end INTEGER,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- Daily snapshot of fielding_frv (Build B defensive impact). Same
+  -- date-accurate-backtest rationale as catcher_framing_snapshot:
+  -- fielding_frv is upserted on every runFieldingFrvJob (daily 6AM PT
+  -- cron) so the live table only shows today's view. position is in
+  -- the PK because a single player may have rows for multiple
+  -- positions (e.g. utility infielders). season_start/season_end carry
+  -- the trailing-window provenance forward so a backtest can know
+  -- which seasons fed the snapshotted total_runs value.
+  CREATE TABLE IF NOT EXISTS fielding_frv_snapshot (
+    snapshot_date TEXT NOT NULL,
+    mlb_id INTEGER NOT NULL,
+    name TEXT,
+    total_runs REAL,
+    outs_total INTEGER,
+    position TEXT,
+    season_start TEXT,
+    season_end TEXT,
+    PRIMARY KEY (snapshot_date, mlb_id, position)
+  );
+  CREATE INDEX IF NOT EXISTS idx_frv_snap_date ON fielding_frv_snapshot(snapshot_date);
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1424,6 +1463,65 @@ q.getSnapshotDateAsOf = db.prepare(
 q.loadSnapshotRows = db.prepare(
   "SELECT data_key, player_name, woba, sample_size FROM woba_data_snapshot WHERE snapshot_date=?"
 );
+
+// ------------------------------------------------------------------
+// Daily catcher_framing snapshot helpers. Mirror the wOBA pattern:
+// DELETE the (snapshot_date) bucket first so a same-day re-run starts
+// clean — this matters when rows DROP from the source between runs
+// (a player removed from the leaderboard). Then INSERT OR REPLACE
+// every current row keyed by (snapshot_date, mlb_id).
+q._snapFramingClearDate = db.prepare(
+  "DELETE FROM catcher_framing_snapshot WHERE snapshot_date=?"
+);
+q._snapFramingInsert = db.prepare(
+  "INSERT OR REPLACE INTO catcher_framing_snapshot "
+  + "(snapshot_date, mlb_id, name, rv_tot, pitches) VALUES (?,?,?,?,?)"
+);
+// rows are catcher_framing rows ({mlb_id, name, rv_tot, pitches}).
+// Wrapped in a single transaction so the snapshot is all-or-nothing.
+q.snapshotCatcherFraming = (snapshotDate, rows) => {
+  const tx = db.transaction((d, rs) => {
+    q._snapFramingClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.mlb_id == null) continue;
+      q._snapFramingInsert.run(d, r.mlb_id, r.name || null,
+        r.rv_tot == null ? null : Number(r.rv_tot),
+        r.pitches == null ? null : Number(r.pitches));
+    }
+  });
+  tx(snapshotDate, rows);
+};
+
+// ------------------------------------------------------------------
+// Daily fielding_frv snapshot helpers. PK is (date, mlb_id, position)
+// because a multi-position player carries multiple source rows. Same
+// delete-then-insert idempotency model as the framing helper.
+q._snapFrvClearDate = db.prepare(
+  "DELETE FROM fielding_frv_snapshot WHERE snapshot_date=?"
+);
+q._snapFrvInsert = db.prepare(
+  "INSERT OR REPLACE INTO fielding_frv_snapshot "
+  + "(snapshot_date, mlb_id, name, total_runs, outs_total, position, season_start, season_end) "
+  + "VALUES (?,?,?,?,?,?,?,?)"
+);
+// rows are fielding_frv rows ({mlb_id, name, total_runs, outs_total,
+// position, season_start, season_end}). position is required for PK;
+// rows missing it are skipped (they couldn't satisfy the constraint).
+q.snapshotFieldingFrv = (snapshotDate, rows) => {
+  const tx = db.transaction((d, rs) => {
+    q._snapFrvClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.mlb_id == null || r.position == null) continue;
+      q._snapFrvInsert.run(d, r.mlb_id, r.name || null,
+        r.total_runs == null ? null : Number(r.total_runs),
+        r.outs_total == null ? null : Number(r.outs_total),
+        r.position,
+        r.season_start == null ? null : String(r.season_start),
+        r.season_end == null ? null : String(r.season_end));
+    }
+  });
+  tx(snapshotDate, rows);
+};
 
 
 // Initialize prepared statements that need new columns
