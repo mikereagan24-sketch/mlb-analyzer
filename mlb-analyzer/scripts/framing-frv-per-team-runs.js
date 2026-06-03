@@ -250,43 +250,80 @@ function sum(arr) {
   const wobaIdx = jobs.getWobaIndex();
   const cfgA = Object.assign({}, baseSettings, { CATCHER_FRAMING_ENABLED: false, DEFENSE_FRV_ENABLED: false });
   const cfgB = Object.assign({}, baseSettings, { CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: true  });
+  const cfgC = Object.assign({}, baseSettings, { CATCHER_FRAMING_ENABLED: true,  DEFENSE_FRV_ENABLED: false }); // framing-only
+  const cfgD = Object.assign({}, baseSettings, { CATCHER_FRAMING_ENABLED: false, DEFENSE_FRV_ENABLED: true  }); // FRV-only
 
-  // team -> [delta, delta, ...] of defensive impact (positive = team
-  // suppressed opposing offense by that many projected runs).
+  // team -> { combined: [], framing: [], frv: [] } per-game defensive
+  // impact arrays. Positive = team suppressed opposing offense by that
+  // many projected runs. Three dimensions:
+  //   combined = aRuns_A - aRuns_B  (both features on)
+  //   framing  = aRuns_A - aRuns_C  (framing only)
+  //   frv      = aRuns_A - aRuns_D  (FRV only)
+  // Without the max(0) clamp on aRuns these would be perfectly linear:
+  //   combined = framing + frv = (homeCF * MUTE) + (homeDef * MUTE).
+  // The clamp introduces a tiny non-linearity when aRunsRaw goes
+  // negative after subtraction (rare for typical 3-5 run estimates);
+  // the per-game sum check at the bottom reports the residual.
   const byTeam = new Map();
-  // Per-game raw records for downstream spot-checking.
   const perGameRecords = [];
   let gamesConsidered = 0, gamesScored = 0, suppressed = 0;
+  // Track combined - (framing + frv) per game for the sum-check log.
+  const sumCheckResiduals = [];
 
   for (const gameRow of games) {
     gamesConsidered++;
     const game = buildBacktestGame(gameRow, baseSettings);
     const mrA = model.runModel(game, wobaIdx, cfgA, 'standard');
     const mrB = model.runModel(game, wobaIdx, cfgB, 'standard');
-    if ((mrA && mrA._suppressed) || (mrB && mrB._suppressed)) { suppressed++; continue; }
-    if (mrA.aRuns == null || mrA.hRuns == null || mrB.aRuns == null || mrB.hRuns == null) continue;
+    const mrC = model.runModel(game, wobaIdx, cfgC, 'standard');
+    const mrD = model.runModel(game, wobaIdx, cfgD, 'standard');
+    if ((mrA && mrA._suppressed) || (mrB && mrB._suppressed)
+        || (mrC && mrC._suppressed) || (mrD && mrD._suppressed)) {
+      suppressed++; continue;
+    }
+    if (mrA.aRuns == null || mrA.hRuns == null
+        || mrB.aRuns == null || mrB.hRuns == null
+        || mrC.aRuns == null || mrC.hRuns == null
+        || mrD.aRuns == null || mrD.hRuns == null) continue;
     gamesScored++;
 
-    // delta_aRuns = aRuns_A - aRuns_B (positive → home team's defense
-    // suppressed away offense). delta_hRuns symmetric.
-    const deltaARuns = mrA.aRuns - mrB.aRuns;
-    const deltaHRuns = mrA.hRuns - mrB.hRuns;
+    // Home team's defense suppresses AWAY offense — aRuns deltas.
+    // Away team's defense suppresses HOME offense — hRuns deltas.
+    const homeCombined = mrA.aRuns - mrB.aRuns;
+    const homeFraming  = mrA.aRuns - mrC.aRuns;
+    const homeFrv      = mrA.aRuns - mrD.aRuns;
+    const awayCombined = mrA.hRuns - mrB.hRuns;
+    const awayFraming  = mrA.hRuns - mrC.hRuns;
+    const awayFrv      = mrA.hRuns - mrD.hRuns;
 
     const homeKey = game._homeTeamKey;
     const awayKey = game._awayTeamKey;
-    // Home team owns the away-offense delta (their framing/FRV
-    // suppressed the away team's offense). Symmetric.
-    if (!byTeam.has(homeKey)) byTeam.set(homeKey, []);
-    if (!byTeam.has(awayKey)) byTeam.set(awayKey, []);
-    byTeam.get(homeKey).push(deltaARuns);
-    byTeam.get(awayKey).push(deltaHRuns);
+    function bucketFor(team) {
+      if (!byTeam.has(team)) byTeam.set(team, { combined: [], framing: [], frv: [] });
+      return byTeam.get(team);
+    }
+    const hb = bucketFor(homeKey);
+    const ab = bucketFor(awayKey);
+    hb.combined.push(homeCombined); hb.framing.push(homeFraming); hb.frv.push(homeFrv);
+    ab.combined.push(awayCombined); ab.framing.push(awayFraming); ab.frv.push(awayFrv);
+
+    // Sum-check residual per game: how far off is the combined delta
+    // from the sum of the two single-feature deltas (per side averaged
+    // — they should be ~identical because the model is linear in runs
+    // except for the max(0) clamp).
+    sumCheckResiduals.push(homeCombined - (homeFraming + homeFrv));
+    sumCheckResiduals.push(awayCombined - (awayFraming + awayFrv));
 
     perGameRecords.push({
       game_date: gameRow.game_date,
       game_id: gameRow.game_id,
       home_team: homeKey, away_team: awayKey,
-      home_def_impact: deltaARuns, // home defense vs away offense
-      away_def_impact: deltaHRuns, // away defense vs home offense
+      home_def_impact: homeCombined,        // home defense vs away offense (combined)
+      away_def_impact: awayCombined,        // away defense vs home offense (combined)
+      home_framing_delta: homeFraming,
+      home_frv_delta:     homeFrv,
+      away_framing_delta: awayFraming,
+      away_frv_delta:     awayFrv,
       homeCatcherFramingRvPerGame: game.homeCatcherFramingRvPerGame,
       awayCatcherFramingRvPerGame: game.awayCatcherFramingRvPerGame,
       homeFieldingRunsPerGame: game.homeFieldingRunsPerGame,
@@ -297,17 +334,30 @@ function sum(arr) {
   // -------------------------------------------------------------- aggregate
   const rows = [];
   const insufficient = [];
-  for (const [team, deltas] of byTeam) {
+  for (const [team, buckets] of byTeam) {
     const rec = {
       team,
-      games: deltas.length,
-      mean: mean(deltas),
-      median: median(deltas),
-      stddev: stddev(deltas),
-      total: sum(deltas),
-      per_game_deltas: deltas,
+      games: buckets.combined.length,
+      // Combined dimension (existing, sort key).
+      mean:   mean(buckets.combined),
+      median: median(buckets.combined),
+      stddev: stddev(buckets.combined),
+      total:  sum(buckets.combined),
+      per_game_deltas: buckets.combined,
+      // Framing-only.
+      framing_mean:   mean(buckets.framing),
+      framing_median: median(buckets.framing),
+      framing_stddev: stddev(buckets.framing),
+      framing_sum:    sum(buckets.framing),
+      framing_per_game: buckets.framing,
+      // FRV-only.
+      frv_mean:   mean(buckets.frv),
+      frv_median: median(buckets.frv),
+      frv_stddev: stddev(buckets.frv),
+      frv_sum:    sum(buckets.frv),
+      frv_per_game: buckets.frv,
     };
-    if (deltas.length < ARGS.minGames) insufficient.push(rec);
+    if (rec.games < ARGS.minGames) insufficient.push(rec);
     else rows.push(rec);
   }
   rows.sort((a, b) => b.mean - a.mean);
@@ -325,23 +375,23 @@ function sum(arr) {
     return (x >= 0 ? '+' : '') + s;
   }
 
-  const cols = { team: 6, games: 7, mean: 14, median: 16, stddev: 10, total: 18 };
+  const cols = { team: 6, games: 7, framing: 14, frv: 12, combined: 16, total: 14 };
   console.log(
     pad('Team', cols.team)
     + pad('Games', cols.games, true)
-    + pad('Mean Δ runs', cols.mean, true)
-    + pad('Median Δ runs', cols.median, true)
-    + pad('Stddev', cols.stddev, true)
-    + pad('Total runs saved', cols.total, true)
+    + pad('Framing Mean', cols.framing, true)
+    + pad('FRV Mean', cols.frv, true)
+    + pad('Combined Mean', cols.combined, true)
+    + pad('Total', cols.total, true)
   );
-  console.log('-'.repeat(cols.team + cols.games + cols.mean + cols.median + cols.stddev + cols.total));
+  console.log('-'.repeat(cols.team + cols.games + cols.framing + cols.frv + cols.combined + cols.total));
   for (const r of rows) {
     console.log(
       pad(r.team, cols.team)
       + pad(String(r.games), cols.games, true)
-      + pad(fmtSigned(r.mean, 3), cols.mean, true)
-      + pad(fmtSigned(r.median, 3), cols.median, true)
-      + pad((r.stddev == null ? '—' : r.stddev.toFixed(3)), cols.stddev, true)
+      + pad(fmtSigned(r.framing_mean, 3), cols.framing, true)
+      + pad(fmtSigned(r.frv_mean, 3), cols.frv, true)
+      + pad(fmtSigned(r.mean, 3), cols.combined, true)
       + pad(fmtSigned(r.total, 2), cols.total, true)
     );
   }
@@ -352,19 +402,17 @@ function sum(arr) {
   console.log('');
 
   const topN = Math.min(5, rows.length);
-  console.log('Top ' + topN + ' most positive (good defense suppression):');
-  for (let i = 0; i < topN; i++) {
-    const r = rows[i];
-    console.log('  ' + r.team + '  mean ' + fmtSigned(r.mean, 3)
-      + ' runs/game over ' + r.games + ' games (total ' + fmtSigned(r.total, 2) + ')');
+  function topBottomLine(r) {
+    return '  ' + r.team + '  ' + fmtSigned(r.mean, 3)
+      + ' r/g (framing ' + fmtSigned(r.framing_mean, 3)
+      + ', FRV ' + fmtSigned(r.frv_mean, 3) + ')'
+      + ' — ' + r.games + ' games, total ' + fmtSigned(r.total, 2);
   }
+  console.log('Top ' + topN + ' most positive (good defense suppression):');
+  for (let i = 0; i < topN; i++) console.log(topBottomLine(rows[i]));
   console.log('');
   console.log('Bottom ' + topN + ' (worst defense, framing/FRV makes opp offense projection worse):');
-  for (let i = rows.length - 1; i >= Math.max(0, rows.length - topN); i--) {
-    const r = rows[i];
-    console.log('  ' + r.team + '  mean ' + fmtSigned(r.mean, 3)
-      + ' runs/game over ' + r.games + ' games (total ' + fmtSigned(r.total, 2) + ')');
-  }
+  for (let i = rows.length - 1; i >= Math.max(0, rows.length - topN); i--) console.log(topBottomLine(rows[i]));
 
   if (insufficient.length) {
     console.log('');
@@ -380,6 +428,17 @@ function sum(arr) {
     + (suppressed ? ' | suppressed: ' + suppressed : ''));
   console.log('Teams ranked: ' + rows.length
     + (insufficient.length ? ' | insufficient sample: ' + insufficient.length : ''));
+  // Per-game sum check: combined ≈ framing + frv. Residual is the
+  // Pythagorean / max(0)-clamp non-linearity. Should be near zero for
+  // typical run estimates; values > 0.001 mean games are clipping at
+  // the floor and the additivity assumption is breaking down.
+  if (sumCheckResiduals.length) {
+    const meanResid = mean(sumCheckResiduals);
+    const maxAbs = sumCheckResiduals.reduce((m, x) => Math.max(m, Math.abs(x)), 0);
+    console.log('Per-game sum check: mean(combined - (framing + frv)) = '
+      + meanResid.toExponential(2) + ' (max |residual| ' + maxAbs.toExponential(2)
+      + '; expected near zero)');
+  }
   console.log('');
   console.log(banner);
 
@@ -394,22 +453,49 @@ function sum(arr) {
       min_games: ARGS.minGames,
       teams_ranked: rows.length,
       teams_insufficient: insufficient.length,
-      // Sorted by mean desc; per_game_deltas array preserves order in
-      // which the team encountered each game so a downstream consumer
-      // can join back to perGameRecords if needed.
+      // Sorted by combined mean desc; per_game_deltas preserves
+      // encounter order so a downstream consumer can join back to
+      // perGameRecords if needed. Each row now exposes three
+      // dimensions of impact: combined (existing), framing-only,
+      // FRV-only — see the script's main loop for the cfg pairings.
       rows: rows.map(r => ({
         team: r.team,
         games: r.games,
+        // Combined (both features on).
         mean: Number(r.mean.toFixed(4)),
         median: Number(r.median.toFixed(4)),
         stddev: r.stddev == null ? null : Number(r.stddev.toFixed(4)),
         total: Number(r.total.toFixed(4)),
         per_game_deltas: r.per_game_deltas.map(d => Number(d.toFixed(4))),
+        // Framing-only.
+        framing_mean:   Number(r.framing_mean.toFixed(4)),
+        framing_median: Number(r.framing_median.toFixed(4)),
+        framing_stddev: r.framing_stddev == null ? null : Number(r.framing_stddev.toFixed(4)),
+        framing_sum:    Number(r.framing_sum.toFixed(4)),
+        framing_per_game: r.framing_per_game.map(d => Number(d.toFixed(4))),
+        // FRV-only.
+        frv_mean:   Number(r.frv_mean.toFixed(4)),
+        frv_median: Number(r.frv_median.toFixed(4)),
+        frv_stddev: r.frv_stddev == null ? null : Number(r.frv_stddev.toFixed(4)),
+        frv_sum:    Number(r.frv_sum.toFixed(4)),
+        frv_per_game: r.frv_per_game.map(d => Number(d.toFixed(4))),
       })),
       insufficient: insufficient.map(r => ({
         team: r.team, games: r.games,
         mean: Number(r.mean.toFixed(4)),
+        framing_mean: Number(r.framing_mean.toFixed(4)),
+        frv_mean:     Number(r.frv_mean.toFixed(4)),
       })),
+      sum_check: {
+        // mean(combined - (framing + frv)) across all per-game per-side
+        // residuals. Should sit near zero; non-trivial residuals indicate
+        // the max(0) aRuns clamp is firing for some games.
+        mean_residual: sumCheckResiduals.length ? Number(mean(sumCheckResiduals).toExponential(2)) : null,
+        max_abs_residual: sumCheckResiduals.length
+          ? Number(sumCheckResiduals.reduce((m, x) => Math.max(m, Math.abs(x)), 0).toExponential(2))
+          : null,
+        per_side_samples: sumCheckResiduals.length,
+      },
       per_game_records: perGameRecords,
     };
     fs.writeFileSync(ARGS.json, JSON.stringify(report, null, 2));
