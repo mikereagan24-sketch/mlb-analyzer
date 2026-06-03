@@ -37,14 +37,17 @@ const fs = require('fs');
 
 // ---------------------------------------------------------------- CLI args
 function parseArgs(argv) {
-  const out = { from: '2026-05-01', to: '2026-06-01', json: null };
+  const out = { from: '2026-05-01', to: '2026-06-01', json: null, muteSweep: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if ((a === '--from' || a === '-f') && argv[i+1]) { out.from = argv[++i]; continue; }
     if ((a === '--to'   || a === '-t') && argv[i+1]) { out.to   = argv[++i]; continue; }
     if (a === '--json' && argv[i+1]) { out.json = argv[++i]; continue; }
+    if (a === '--mute-sweep') { out.muteSweep = true; continue; }
     if (a === '--help' || a === '-h') {
-      console.log('Usage: node scripts/framing-frv-hindsight-backtest.js [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json out.json]');
+      console.log('Usage: node scripts/framing-frv-hindsight-backtest.js [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json out.json] [--mute-sweep]');
+      console.log('  --mute-sweep  Sweep CATCHER_FRAMING_MUTE 0.0..1.0 step 0.1 (11 configs, FRV always OFF).');
+      console.log('                Otherwise runs the default 4-config A/B/C/D comparison.');
       process.exit(0);
     }
   }
@@ -254,13 +257,199 @@ function sigKey(gameRow, sig) {
 }
 
 // ---------------------------------------------------------------- main
+// ---------------------------------------------------------------- mute-sweep mode
+// --mute-sweep: 11 configs across CATCHER_FRAMING_MUTE in 0.1 steps
+// (0.0..1.0). DEFENSE_FRV_ENABLED is forced off for every config so
+// the only thing that varies is the framing mute. MUTE=0.0 sets
+// CATCHER_FRAMING_ENABLED=false (clean baseline equivalent to A);
+// MUTE>0.0 sets ENABLED=true with the swept MUTE value.
+//
+// All other code paths (helpers, aggregators, JSON shape conventions,
+// hindsight-bias caveat) are reused. The default 4-config mode is
+// untouched — when --mute-sweep is NOT passed, control falls through
+// to the existing A/B/C/D path.
+function runMuteSweep(games, baseSettings, wobaIdx, banner) {
+  console.log('FRAMING MUTE SWEEP (FRV disabled across all configs)');
+  console.log('(' + ARGS.from + ' to ' + ARGS.to + ')');
+  console.log('');
+
+  const muteValues = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+  function newAgg() {
+    return {
+      all: emptyBucket(), ml_fav: emptyBucket(), ml_dog: emptyBucket(),
+      tot_over: emptyBucket(), tot_under: emptyBucket(),
+    };
+  }
+  // Build the 11 settings objects once.
+  const configs = muteValues.map(mute => {
+    const cfg = Object.assign({}, baseSettings, {
+      // MUTE=0.0 is the clean-off baseline — gate the feature entirely
+      // so the model never reads framing inputs (matches A in the
+      // 4-config mode). MUTE>0.0 keeps the feature on and just scales
+      // the contribution.
+      CATCHER_FRAMING_ENABLED: mute > 0,
+      CATCHER_FRAMING_MUTE: mute,
+      DEFENSE_FRV_ENABLED: false,
+    });
+    return { mute, cfg, agg: newAgg(), suppressed: 0 };
+  });
+
+  let gamesConsidered = 0, gamesScored = 0;
+  for (const gameRow of games) {
+    gamesConsidered++;
+    const game = buildBacktestGame(gameRow, baseSettings);
+
+    // Run each config once. If ANY config suppresses the game we skip
+    // it entirely (so the per-config aggregates are over the same
+    // game set and ROIs are apples-to-apples comparable).
+    const mrs = configs.map(c => model.runModel(game, wobaIdx, c.cfg, 'standard'));
+    let anySuppressed = false;
+    for (let i = 0; i < configs.length; i++) {
+      if (mrs[i] && mrs[i]._suppressed) { configs[i].suppressed++; anySuppressed = true; }
+    }
+    if (anySuppressed) continue;
+    gamesScored++;
+
+    for (let i = 0; i < configs.length; i++) {
+      const c = configs[i];
+      const sigs = model.getSignals(game, mrs[i], c.cfg);
+      for (const s of sigs) {
+        const graded = model.calcPnl(s, gameRow.away_score, gameRow.home_score, gameRow.market_total);
+        if (graded.outcome === 'pending') continue;
+        accumulate(c.agg, s, graded);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------- summary table
+  function pad(s, n, right) {
+    s = String(s);
+    if (s.length >= n) return s;
+    const fill = ' '.repeat(n - s.length);
+    return right ? fill + s : s + fill;
+  }
+  function fmtWLP(b) { return b.wins + '-' + b.losses + (b.pushes ? '-' + b.pushes : ''); }
+  function roiNum(b) { return b.wagered > 0 ? (100 * b.pnl / b.wagered) : null; }
+  function fmtRoi(b) {
+    const r = roiNum(b);
+    if (r == null) return '—';
+    return (r >= 0 ? '+' : '') + r.toFixed(2) + '%';
+  }
+  function fmtDeltaPp(curr, base) {
+    if (curr == null || base == null) return '—';
+    const d = curr - base;
+    return (d >= 0 ? '+' : '') + d.toFixed(2) + 'pp';
+  }
+
+  const baselineRoi = roiNum(configs[0].agg.all);
+  const col = { mute: 7, sig: 10, wl: 10, roi: 11, delta: 14 };
+  console.log(
+    pad('MUTE', col.mute)
+    + pad('Signals', col.sig, true)
+    + pad('W-L', col.wl, true)
+    + pad('ROI', col.roi, true)
+    + pad('Δ from 0.0', col.delta, true)
+  );
+  console.log('-'.repeat(col.mute + col.sig + col.wl + col.roi + col.delta));
+  for (const c of configs) {
+    console.log(
+      pad(c.mute.toFixed(1), col.mute)
+      + pad(String(c.agg.all.signals), col.sig, true)
+      + pad(fmtWLP(c.agg.all), col.wl, true)
+      + pad(fmtRoi(c.agg.all), col.roi, true)
+      + pad(c.mute === 0 ? '—' : fmtDeltaPp(roiNum(c.agg.all), baselineRoi), col.delta, true)
+    );
+  }
+
+  // Best MUTE — highest ROI among rows that actually had bets graded.
+  let best = null;
+  for (const c of configs) {
+    const r = roiNum(c.agg.all);
+    if (r == null) continue;
+    if (best == null || r > best.r) best = { mute: c.mute, r };
+  }
+  console.log('');
+  if (best) {
+    console.log('Best MUTE: ' + best.mute.toFixed(1)
+      + ' (ROI ' + (best.r >= 0 ? '+' : '') + best.r.toFixed(2) + '%)');
+  } else {
+    console.log('Best MUTE: — (no graded signals)');
+  }
+
+  // -------------------------------------------------------------- per-cohort
+  console.log('');
+  console.log('Per-cohort ROI by MUTE:');
+  const cohorts = [
+    { label: 'ML Favs',    key: 'ml_fav' },
+    { label: 'ML Dogs',    key: 'ml_dog' },
+    { label: 'Tot Overs',  key: 'tot_over' },
+    { label: 'Tot Unders', key: 'tot_under' },
+  ];
+  // Header row: MUTE values across the top.
+  const cohortCol = { label: 13, val: 9 };
+  let header = pad('', cohortCol.label);
+  for (const c of configs) header += pad(c.mute.toFixed(1), cohortCol.val, true);
+  console.log(header);
+  console.log('-'.repeat(cohortCol.label + cohortCol.val * configs.length));
+  for (const co of cohorts) {
+    let line = pad(co.label, cohortCol.label);
+    for (const c of configs) line += pad(fmtRoi(c.agg[co.key]), cohortCol.val, true);
+    console.log(line);
+  }
+  console.log('');
+  console.log('(Counts column omitted from cohort matrix to keep width readable; full');
+  console.log(' per-cohort signal counts available in JSON output.)');
+
+  const supTotal = configs.reduce((s, c) => s + c.suppressed, 0);
+  console.log('');
+  console.log('Games considered: ' + gamesConsidered
+    + ' | scored: ' + gamesScored
+    + (supTotal ? ' | suppressed (any config): '
+        + configs.filter(c => c.suppressed).map(c => c.mute.toFixed(1) + '=' + c.suppressed).join(' ') : ''));
+  console.log('');
+  console.log(banner);
+
+  // -------------------------------------------------------------- JSON
+  if (ARGS.json) {
+    const report = {
+      bias_warning: 'HINDSIGHT BIASED — DIRECTIONAL ONLY. catcher_framing values are current-state and applied retroactively. Forward-honest version awaits ~30d of snapshot accumulation.',
+      mode: 'mute-sweep',
+      date_window: { from: ARGS.from, to: ARGS.to },
+      games_considered: gamesConsidered,
+      games_scored: gamesScored,
+      defense_frv_enabled: false,
+      configs: configs.map(c => ({
+        mute: c.mute,
+        framing_enabled: c.mute > 0,
+        suppressed: c.suppressed,
+        all: c.agg.all,
+        ml_fav: c.agg.ml_fav,
+        ml_dog: c.agg.ml_dog,
+        tot_over: c.agg.tot_over,
+        tot_under: c.agg.tot_under,
+        roi_pct: {
+          all:       roiNum(c.agg.all),
+          ml_fav:    roiNum(c.agg.ml_fav),
+          ml_dog:    roiNum(c.agg.ml_dog),
+          tot_over:  roiNum(c.agg.tot_over),
+          tot_under: roiNum(c.agg.tot_under),
+        },
+      })),
+      best: best ? { mute: best.mute, roi_pct: best.r } : null,
+    };
+    fs.writeFileSync(ARGS.json, JSON.stringify(report, null, 2));
+    console.log('JSON report written to ' + ARGS.json);
+  }
+
+  try { db.close(); } catch (_) {}
+}
+
 (function main() {
   const printedBanner = '⚠  HINDSIGHT BIASED — DIRECTIONAL ONLY  ⚠';
 
   console.log('');
   console.log(printedBanner);
-  console.log('');
-  console.log('FRAMING/FRV HINDSIGHT BACKTEST (' + ARGS.from + ' to ' + ARGS.to + ')');
   console.log('');
 
   // Pull every graded game in the window. processGameSignals is the
@@ -283,6 +472,17 @@ function sigKey(gameRow, sig) {
 
   const baseSettings = jobs.getSettings();
   const wobaIdx = jobs.getWobaIndex();
+
+  // --mute-sweep takes over the whole run; default 4-config mode is
+  // unreachable on the same invocation. The two modes share the games
+  // load + baseSettings + wobaIdx setup above.
+  if (ARGS.muteSweep) {
+    runMuteSweep(games, baseSettings, wobaIdx, printedBanner);
+    return;
+  }
+
+  console.log('FRAMING/FRV HINDSIGHT BACKTEST (' + ARGS.from + ' to ' + ARGS.to + ')');
+  console.log('');
 
   // Four scenarios. A is the production-current baseline; B is the
   // existing combined-on variant; C and D isolate framing-only and
