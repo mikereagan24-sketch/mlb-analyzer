@@ -225,7 +225,14 @@ function ingestWobaCSV(key, csvText, filename) {
   // existed on day X". Non-fatal: a snapshot failure must never block
   // the live wOBA load.
   try {
-    const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // PT-anchored snapshot_date. Previously ET — changed 2026-06-01.
+    // Existing rows pre-cutover (snapshot_date 2026-05-20 to 2026-05-27)
+    // are ET-tagged; rows from this date forward are PT-tagged.
+    // Backtest queries spanning the cutover should be aware of the
+    // ~2-hour daily boundary shift. Aligns with the framing/FRV
+    // snapshot writers added in feat/framing-frv-daily-snapshots
+    // (e48a26d), which already use PT.
+    const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
     q.snapshotWobaKey(snapDate, key, expandedRows);
   } catch (e) {
     console.warn('[woba-snapshot] capture failed for ' + key + ' (non-fatal): ' + e.message);
