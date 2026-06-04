@@ -7,6 +7,7 @@ const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
+const empiricalSpreadEdge = require('./empirical-spread-edge');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
@@ -684,6 +685,39 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       if (ex.companion_spread_outcome != null && ex.companion_spread_outcome !== 'pending') continue;
       const r = calcRunlinePnl(ex.signal_side, ex.companion_spread_line, ex.companion_spread_price, gl.away_score, gl.home_score);
       if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, ex.id);
+    }
+    // Empirical-spread grading. Piggy-backs on the same "game is
+    // final" entry point as the bet_signals grading above so the
+    // empirical predictions land their outcomes the moment scores
+    // arrive. Independent table (empirical_spread_outcomes) — does
+    // NOT touch bet_signals. Each prediction grades independently:
+    //   margin = home_score - away_score
+    //   For spread_team = home: win iff margin >  spread_line
+    //   For spread_team = away: win iff -margin > spread_line
+    // pnl_per_100 = americanProfit(yes_ask_ml) on win, -100 on loss.
+    // Push isn't reachable since spread_lines are half-runs.
+    try {
+      const margin = gl.home_score - gl.away_score;
+      const empUngraded = db.prepare(
+          "SELECT game_date, game_id, spread_team, spread_line, yes_ask_ml, generated_at "
+        + "FROM empirical_spread_outcomes "
+        + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
+      ).all(gameRow.game_date, gameRow.game_id);
+      for (const e of empUngraded) {
+        let win;
+        if (e.spread_team === gl.home_team)      win = margin >  e.spread_line;
+        else if (e.spread_team === gl.away_team) win = -margin > e.spread_line;
+        else continue;
+        const outcome = win ? 'win' : 'loss';
+        const pnl = win ? empiricalSpreadEdge.americanProfit(e.yes_ask_ml) : -100;
+        q.updateEmpiricalSpreadOutcome.run(
+          margin, outcome, pnl,
+          e.game_date, e.game_id, e.spread_team, e.spread_line, e.generated_at
+        );
+      }
+    } catch (gerr) {
+      console.warn('[empirical-spreads] grading failed for ' + gameRow.game_id
+        + ' (non-fatal): ' + gerr.message);
     }
     return;
   }
@@ -2821,6 +2855,65 @@ async function runOddsJob(dateStr) {
       }
     } catch (e) {
       console.warn('[odds] Kalshi spreads ingest failed (non-fatal): ' + e.message);
+    }
+
+    // Empirical-spread signal generation. Runs immediately after the
+    // Kalshi spread ingest so the cell-distribution lookup sees the
+    // freshest spread prices. INGEST ONLY — writes to
+    // empirical_spread_signals (one row per game per job pass) and
+    // empirical_spread_outcomes (one row per prediction per job pass;
+    // graded later by processGameSignals when scores arrive). Does
+    // NOT touch bet_signals, model output, or any production signal
+    // table. Non-fatal: a failure here logs a warning and continues.
+    try {
+      const empOut = empiricalSpreadEdge.generateEmpiricalSpreadSignals(db, dateStr);
+      const empSignals = empOut.signals || [];
+      if (!empSignals.length) {
+        console.log('[empirical-spreads] no games with spread coverage for ' + dateStr);
+      } else {
+        // Per-pass timestamp. Stored once and reused for every row
+        // emitted in this pass so the (game_date, game_id, generated_at)
+        // PK groups all of one pass's rows together. Re-running the
+        // odds-job a second later creates a fresh generated_at — both
+        // rows persist for hindsight.
+        const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        let written = 0;
+        const writeTx = db.transaction((sigs) => {
+          for (const sig of sigs) {
+            const top = sig.predictions && sig.predictions.length ? sig.predictions[0] : null;
+            q.upsertEmpiricalSpreadSignal.run(
+              sig.game_date, sig.game_id, generatedAt,
+              sig.model_total, sig.home_win_prob,
+              sig.cell_label, sig.cell_sample_size,
+              JSON.stringify(sig.predictions),
+              top ? top.spread_team : null,
+              top ? top.spread_line : null,
+              top ? top.kalshi_yes_ask_ml : null,
+              top ? top.edge_pp : null,
+            );
+            for (const p of sig.predictions) {
+              // yes_ask_ml is NOT NULL on the outcomes table — skip the
+              // grading-target write if Kalshi didn't ship a usable
+              // American price (the signal row still captures the
+              // prediction in predictions_json).
+              if (p.kalshi_yes_ask_ml == null) continue;
+              q.upsertEmpiricalSpreadOutcome.run(
+                sig.game_date, sig.game_id, p.spread_team, p.spread_line,
+                Number(p.kalshi_yes_ask_ml),
+                p.edge_pp, sig.cell_sample_size, generatedAt,
+                null, null, null, null,    // actual_margin / outcome / pnl / graded_at
+              );
+            }
+            written++;
+          }
+        });
+        writeTx(empSignals);
+        console.log('[empirical-spreads] generated ' + written
+          + ' signal(s) at ' + generatedAt
+          + ' (cell sample base: ' + empOut.cellIndex.totalGraded + ' graded games)');
+      }
+    } catch (e) {
+      console.warn('[empirical-spreads] generation failed (non-fatal): ' + e.message);
     }
 
     // Kalshi-direct TOTALS override (gated). Mirrors the ML override above:

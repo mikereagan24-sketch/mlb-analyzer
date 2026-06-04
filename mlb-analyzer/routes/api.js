@@ -470,6 +470,15 @@ function _lineupSensitivity(g) {
   return { delta_total, delta_aml, delta_hml, status };
 }
 
+// Display thresholds for the empirical-spread section attached to
+// each game card. Both must clear for the section to appear: the
+// cell needs enough sample to be credible, AND the top edge needs
+// to be meaningfully above zero. Tunable here so future analysis
+// can adjust without code surgery downstream.
+const EMP_SPREAD_MIN_SAMPLE   = 50;
+const EMP_SPREAD_MIN_EDGE_PP  = 3.0;
+const EMP_SPREAD_TOP_N        = 3;
+
 router.get('/games/:date', (req, res) => {
   try {
     const { date } = req.params;
@@ -480,6 +489,46 @@ router.get('/games/:date', (req, res) => {
       if (!signalsByGame[s.game_id]) signalsByGame[s.game_id] = [];
       signalsByGame[s.game_id].push(s);
     });
+    // Latest empirical-spread signal per game for this date. Each
+    // odds-job pass stamps a fresh generated_at; the query picks
+    // the most recent row per game. Build a {game_id: payload} map
+    // so the per-game loop is O(1) per game.
+    const empByGame = {};
+    try {
+      const empRows = q.getLatestEmpiricalSpreadSignalsByDate.all(date);
+      for (const r of empRows) {
+        const preds = tryParse(r.predictions_json) || [];
+        // Display gate — only attach when BOTH thresholds clear.
+        // The brief leaves cell_sample_size >= 50 AND top_edge >= 3pp.
+        if (r.cell_sample_size == null || r.cell_sample_size < EMP_SPREAD_MIN_SAMPLE) continue;
+        if (r.top_edge_pp == null || r.top_edge_pp < EMP_SPREAD_MIN_EDGE_PP) continue;
+        // Top N predictions, already pre-sorted desc by edge_pp in
+        // predictions_json (computeGameEdges does the sort before
+        // the JSON serialize). Re-sorting defensively because the
+        // payload is opaque JSON across the API boundary.
+        const sorted = preds.slice().sort((a, b) =>
+          (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
+        empByGame[r.game_id] = {
+          cell_label: r.cell_label,
+          cell_sample_size: r.cell_sample_size,
+          generated_at: r.generated_at,
+          top_picks: sorted.slice(0, EMP_SPREAD_TOP_N).map(p => ({
+            spread_team:        p.spread_team,
+            spread_line:        p.spread_line,
+            yes_ask_ml:         p.kalshi_yes_ask_ml,
+            edge_pp:            p.edge_pp,
+            empirical_pct:      p.empirical_pct,
+            kalshi_implied_pct: p.implied_pct,
+          })),
+        };
+      }
+    } catch (e) {
+      // Empirical signals are a non-critical UI surface — log and
+      // continue so the slate render still ships if the
+      // empirical_spread_signals table is missing (e.g. fresh DB
+      // before the first odds-job run) or the helper isn't loaded.
+      console.warn('[api] empirical-spread attach failed: ' + e.message);
+    }
     const now = Date.now();
     const result = games.map(g => {
       const awayLU = tryParse(g.away_lineup_json);
@@ -490,7 +539,7 @@ router.get('/games/:date', (req, res) => {
       const oddsQuality = g.odds_locked_at
         ? 'locked'
         : _classifyAge(_ageMs(g.odds_quality_at, now));
-      return {
+      const out = {
         ...g,
         away_lineup: awayLU || [],
         home_lineup: homeLU || [],
@@ -502,6 +551,11 @@ router.get('/games/:date', (req, res) => {
         scores_quality: _classifyAge(_ageMs(g.scores_quality_at, now)),
         lineup_sensitivity: _lineupSensitivity(g),
       };
+      // Only attach when the thresholds passed above. Omitting the
+      // field entirely (rather than setting null) keeps the slate
+      // payload smaller and lets the UI test with `g.empirical_spreads`.
+      if (empByGame[g.game_id]) out.empirical_spreads = empByGame[g.game_id];
+      return out;
     });
     res.json(result);
   } catch (err) {
