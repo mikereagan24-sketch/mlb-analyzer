@@ -169,6 +169,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .roof-closed{background:#fdecea;color:#c0392b;border-color:#f5b7b1}
 .roof-est{opacity:0.75;font-style:italic}
 .roof-badge .roof-icon{font-size:13px}
+.emp-spread{margin-top:6px;padding:6px 8px;border-radius:5px;background:rgba(168,85,247,.07);border:1px dashed rgba(168,85,247,.45);font-size:11px;line-height:1.4}
+.emp-spread-title{font-size:9px;font-weight:700;letter-spacing:.6px;color:#a855f7;text-transform:uppercase}
+.emp-spread-cell{color:var(--text3);font-size:10px;margin-left:6px}
+.emp-spread-pick{display:flex;justify-content:space-between;gap:8px;padding:2px 0;font-size:11px}
+.emp-spread-pick-bet{color:var(--text);font-weight:500}
+.emp-spread-pick-edge{color:#a855f7;font-weight:600;font-variant-numeric:tabular-nums}
 .logbet-btn{font-size:10px;padding:3px 8px;border:1px solid var(--border2);border-radius:4px;cursor:pointer;background:var(--bg2);color:var(--text);margin-top:6px}
 .logbet-btn:hover{background:var(--border)}
 .mb-edge-preview{font-size:11px;color:var(--text2);margin-top:8px;padding:8px;background:var(--bg2);border-radius:6px;display:none}
@@ -1201,6 +1207,23 @@ function renderGameGrid(games,date){
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">▶ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
       '</div>'+
+      // Empirical-spread section. Only present in the API payload
+      // when the slate route's display gate cleared (cell sample
+      // >= 50 AND top edge >= 3pp), so absence here = below
+      // threshold or no data. Visual treatment is purple + dashed
+      // border to mark this as the experimental empirical track,
+      // distinct from the ML-signal pills above.
+      ((g.empirical_spreads && g.empirical_spreads.top_picks && g.empirical_spreads.top_picks.length) ? (function(){
+        var es=g.empirical_spreads;
+        var rows=es.top_picks.map(function(p){
+          var ask=(p.yes_ask_ml!=null && p.yes_ask_ml>0?'+':'')+(p.yes_ask_ml==null?'n/a':p.yes_ask_ml);
+          var edge=(p.edge_pp>=0?'+':'')+(p.edge_pp==null?'n/a':p.edge_pp.toFixed(1))+'pp';
+          var bet=p.spread_team+' -'+(p.spread_line==null?'?':p.spread_line.toFixed(1))+' '+ask;
+          return '<div class="emp-spread-pick"><span class="emp-spread-pick-bet">'+bet+'</span><span class="emp-spread-pick-edge">'+edge+'</span></div>';
+        }).join('');
+        var cell=es.cell_label?(' '+es.cell_label+' (n='+es.cell_sample_size+')'):'';
+        return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+'</span></div>'+rows+'</div>';
+      })() : '')+
       '<div class="gresult '+(!g.is_postponed&&g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
       (!g.is_postponed&&g.model_away_ml?renderGameResult(g):'')+
       '</div></div>';

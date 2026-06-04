@@ -422,6 +422,56 @@ db.exec(`
     PRIMARY KEY (snapshot_date, game_date, game_id, spread_team, spread_line)
   );
   CREATE INDEX IF NOT EXISTS idx_spread_snap_date ON kalshi_spread_markets_snapshot (snapshot_date);
+  -- Empirical spread signals. One row per (game_date, game_id,
+  -- generated_at) — each odds-job run captures a fresh snapshot of
+  -- the empirical edge analysis defined in services/empirical-
+  -- spread-edge.js (top picks against the historical same-cell
+  -- margin distribution). predictions_json carries up to 6 rows
+  -- (3 spread_line rungs × 2 sides) as a JSON array of
+  -- {spread_team, spread_line, kalshi_yes_ask_ml, implied_pct,
+  --  empirical_pct, edge_pp}. top_edge_* are denormalized for cheap
+  -- ORDER BY / threshold queries on the slate page.
+  CREATE TABLE IF NOT EXISTS empirical_spread_signals (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    model_total REAL,
+    model_no_vig_home_prob REAL,
+    cell_label TEXT,
+    cell_sample_size INTEGER,
+    predictions_json TEXT,
+    top_edge_team TEXT,
+    top_edge_line REAL,
+    top_edge_yes_ask_ml INTEGER,
+    top_edge_pp REAL,
+    PRIMARY KEY (game_date, game_id, generated_at)
+  );
+  CREATE INDEX IF NOT EXISTS idx_emp_spread_date ON empirical_spread_signals (game_date);
+  CREATE INDEX IF NOT EXISTS idx_emp_spread_edge ON empirical_spread_signals (top_edge_pp DESC);
+  -- Per-prediction outcome table for forward backtesting. One row
+  -- per (game_date, game_id, spread_team, spread_line, generated_at)
+  -- — captured at signal-emit time with NULL outcome/pnl; updated
+  -- when the game grades. pnl_per_100 is the dollar profit/loss on
+  -- a $100 stake at the original yes_ask_ml: +americanProfit on win,
+  -- -100 on loss, 0 on push. This is the source of truth for the
+  -- empirical-signal hindsight ROI.
+  CREATE TABLE IF NOT EXISTS empirical_spread_outcomes (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    spread_team TEXT NOT NULL,
+    spread_line REAL NOT NULL,
+    yes_ask_ml INTEGER NOT NULL,
+    edge_pp REAL NOT NULL,
+    cell_sample_size INTEGER NOT NULL,
+    generated_at TEXT NOT NULL,
+    actual_margin INTEGER,
+    outcome TEXT,
+    pnl_per_100 REAL,
+    graded_at TEXT,
+    PRIMARY KEY (game_date, game_id, spread_team, spread_line, generated_at)
+  );
+  CREATE INDEX IF NOT EXISTS idx_emp_outcome_date ON empirical_spread_outcomes (game_date);
+  CREATE INDEX IF NOT EXISTS idx_emp_outcome_ungraded ON empirical_spread_outcomes (game_date) WHERE outcome IS NULL;
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1609,6 +1659,59 @@ q.snapshotKalshiSpreads = (snapshotDate, rows) => {
   });
   tx(snapshotDate, rows);
 };
+
+// ------------------------------------------------------------------
+// Empirical-spread signal helpers. Two parallel writes per game per
+// odds-job: one row in empirical_spread_signals (the snapshot of the
+// model context + the JSON pick list) and one row PER prediction in
+// empirical_spread_outcomes (so each spread line is independently
+// gradable). PK on (game_date, game_id, generated_at) means a re-run
+// with the same datetime('now') would collide — runOddsJob naturally
+// avoids this because each call gets a fresh second-resolution
+// timestamp, but the INSERT OR REPLACE here keeps re-runs safe.
+q.upsertEmpiricalSpreadSignal = db.prepare(
+    "INSERT OR REPLACE INTO empirical_spread_signals "
+  + "(game_date, game_id, generated_at, model_total, model_no_vig_home_prob, "
+  + " cell_label, cell_sample_size, predictions_json, top_edge_team, "
+  + " top_edge_line, top_edge_yes_ask_ml, top_edge_pp) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.upsertEmpiricalSpreadOutcome = db.prepare(
+    "INSERT OR REPLACE INTO empirical_spread_outcomes "
+  + "(game_date, game_id, spread_team, spread_line, yes_ask_ml, edge_pp, "
+  + " cell_sample_size, generated_at, actual_margin, outcome, pnl_per_100, graded_at) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+// Pending-grade pull. Only rows whose game is final (away/home_score
+// non-null) AND whose outcome is still NULL come back. Joins game_log
+// so the caller has the margin in hand without a second lookup.
+q.getUngradedEmpiricalSpreads = db.prepare(
+    "SELECT e.game_date, e.game_id, e.spread_team, e.spread_line, "
+  + "       e.yes_ask_ml, e.generated_at, "
+  + "       g.away_team, g.home_team, g.away_score, g.home_score "
+  + "FROM empirical_spread_outcomes e "
+  + "JOIN game_log g ON g.game_date = e.game_date AND g.game_id = e.game_id "
+  + "WHERE e.outcome IS NULL "
+  + "  AND g.away_score IS NOT NULL AND g.home_score IS NOT NULL "
+  + "ORDER BY e.game_date, e.game_id"
+);
+q.updateEmpiricalSpreadOutcome = db.prepare(
+    "UPDATE empirical_spread_outcomes "
+  + "SET actual_margin=?, outcome=?, pnl_per_100=?, graded_at=datetime('now') "
+  + "WHERE game_date=? AND game_id=? AND spread_team=? AND spread_line=? "
+  + "  AND generated_at=?"
+);
+// Latest signal per game for a date — backs the slate API. We use a
+// subquery on MAX(generated_at) so re-running the odds-job naturally
+// supersedes the previous row without delete-then-insert churn.
+q.getLatestEmpiricalSpreadSignalsByDate = db.prepare(
+    "SELECT s.* FROM empirical_spread_signals s "
+  + "WHERE s.game_date = ? AND s.generated_at = ("
+  + "  SELECT MAX(s2.generated_at) FROM empirical_spread_signals s2 "
+  + "  WHERE s2.game_date = s.game_date AND s2.game_id = s.game_id"
+  + ") "
+  + "ORDER BY s.game_id"
+);
 
 
 // Initialize prepared statements that need new columns
