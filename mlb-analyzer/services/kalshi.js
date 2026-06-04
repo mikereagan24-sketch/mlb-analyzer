@@ -118,15 +118,17 @@ function splitTeamBlob(blob) {
 // before this is trusted. A late ET game could roll a UTC day, and if
 // game_log's game_date is stored in UTC for some games we could see drift.
 function parseEventTicker(eventTicker) {
-  // Accepts either series prefix:
+  // Accepts any of these series prefixes:
   //   KXMLBGAME-{YYMONDD}{HHMM}{AWAY}{HOME}[-{TEAM}]    (moneylines)
-  //   KXMLBTOTAL-{YYMONDD}{HHMM}{AWAY}{HOME}[-{N}]       (totals strike rungs)
-  // Inside the prefix the format is identical, so one parser serves both.
-  // The market-level ticker has a trailing segment (-{TEAM} for ML or -{N}
-  // for totals); the event_ticker returned by /markets typically omits it.
-  // We strip the trailing segment regardless of which series it belongs to.
+  //   KXMLBTOTAL-{YYMONDD}{HHMM}{AWAY}{HOME}[-{N}]      (totals strike rungs)
+  //   KXMLBSPREAD-{YYMONDD}{HHMM}{AWAY}{HOME}[-{TEAM}{N}] (spread ladder)
+  // Inside the prefix the format is identical, so one parser serves all.
+  // The market-level ticker has a trailing segment (-{TEAM} for ML,
+  // -{N} for totals, -{TEAM}{N} for spreads); the event_ticker
+  // returned by /markets typically omits it. We strip the trailing
+  // segment regardless of which series it belongs to.
   if (!eventTicker) return null;
-  const prefixMatch = eventTicker.match(/^(KXMLBGAME|KXMLBTOTAL)-/);
+  const prefixMatch = eventTicker.match(/^(KXMLBGAME|KXMLBTOTAL|KXMLBSPREAD)-/);
   if (!prefixMatch) return null;
   const body = eventTicker.slice(prefixMatch[0].length);
   // If a trailing -{TEAM} (ML) or -{N} (totals) segment is present, drop it.
@@ -713,9 +715,146 @@ async function getKalshiMlbTotals(date, opts) {
   return results;
 }
 
+// Extract spread_team + suffix N from a KXMLBSPREAD market ticker.
+// Spread tickers tail with "{TEAM}{N}" (e.g. "LAA2" for "LAA wins
+// by more than 1.5 runs"; "COL10" for "COL wins by more than 9.5
+// runs"). sideOfMarket above can't handle this because it would
+// run "LAA2" through normalizeAbbr and emit literally "LAA2".
+//
+// Returns { team, suffixN } or null on malformed input. Caller uses
+// market.floor_strike for the actual spread line — suffixN is kept
+// only for debugging / cross-checks (suffixN should equal
+// floor_strike + 0.5 in practice).
+function parseSpreadSide(marketTicker) {
+  if (!marketTicker) return null;
+  const parts = marketTicker.split('-');
+  if (parts.length < 3) return null;
+  const tail = parts[parts.length - 1];
+  const m = tail.match(/^([A-Z]+?)(\d+)$/);
+  if (!m) return null;
+  return { team: normalizeAbbr(m[1]), suffixN: parseInt(m[2], 10) };
+}
+
+// Public entrypoint for the Kalshi MLB spread ladder. Returns one
+// row per spread market (NOT one per game) — each Kalshi event has
+// ~10-12 spread markets (1.5 through 9.5 in 1-run steps, two sides
+// per game). Each row carries spread_team (the side favored at this
+// rung), spread_line (the half-run line), and the raw Kalshi prices
+// + probToAmerican-converted asks. Caller is responsible for fee +
+// shift adjustment on yes_ask_ml / no_ask_ml (jobs.js mirrors the
+// ML path here).
+//
+// opts.includeLive (default false): include in-progress games. Pre-
+//   game gating mirrors getKalshiMlbLines / getKalshiMlbTotals.
+// opts.bufferMin (default GAME_START_BUFFER_MIN): pre-start safety.
+async function getKalshiMlbSpreads(date, opts) {
+  if (!date) throw new Error('getKalshiMlbSpreads: date (YYYY-MM-DD) required');
+  const includeLive = !!(opts && opts.includeLive);
+  const bufferMin = (opts && opts.bufferMin != null)
+    ? Number(opts.bufferMin) : GAME_START_BUFFER_MIN;
+
+  const nowIso = new Date().toISOString();
+  const nowEtMin = etMinutesNow();
+  const raw = await fetchAllMarkets('KXMLBSPREAD');
+
+  // Compute per-event start time / is_live ONCE (cached by
+  // event_ticker) so each market for that event reuses it without
+  // re-parsing or re-comparing wall-clock.
+  const eventMeta = new Map();
+  function getEventMeta(parsed, eventTicker) {
+    if (eventMeta.has(eventTicker)) return eventMeta.get(eventTicker);
+    const startMin = etMinutesFromTicker(parsed);
+    const isLive = startMin != null && (startMin - bufferMin) <= nowEtMin;
+    const meta = {
+      game_date: parsed.game_date,
+      away_team: parsed.away_team,
+      home_team: parsed.home_team,
+      game_number: parsed.game_number,
+      game_id: buildGameId(parsed.away_team, parsed.home_team, parsed.game_number),
+      start_et: parsed.hhmm,
+      is_live: isLive,
+    };
+    eventMeta.set(eventTicker, meta);
+    return meta;
+  }
+
+  const results = [];
+  for (const m of raw) {
+    // Same active + unsettled filters as the ML / totals paths.
+    if (m.status !== 'active') continue;
+    if (m.close_time && m.close_time <= nowIso) continue;
+
+    const eventTicker = m.event_ticker;
+    if (!eventTicker) continue;
+    const parsed = parseEventTicker(eventTicker);
+    if (!parsed) continue;
+    if (parsed.game_date !== date) continue;
+
+    // floor_strike comes through as a number from Kalshi (same as
+    // totals). spread_line is just floor_strike — the YES side wins
+    // when the team wins by MORE than floor_strike runs, which is
+    // equivalent to taking that team at -floor_strike on a runline.
+    const strike = Number(m.floor_strike);
+    if (!Number.isFinite(strike)) continue;
+
+    const side = parseSpreadSide(m.ticker);
+    if (!side || !side.team) continue;
+
+    const yesAsk = parseFloat(m.yes_ask_dollars);
+    const yesBid = parseFloat(m.yes_bid_dollars);
+    const noAsk  = parseFloat(m.no_ask_dollars);
+    const noBid  = parseFloat(m.no_bid_dollars);
+    // Skip markets with no usable yes_ask — bid-only or pure-no-side
+    // entries can't produce a meaningful spread line for analysis.
+    if (!Number.isFinite(yesAsk)) continue;
+
+    const volumeRaw = parseFloat(m.volume_24h_fp);
+    const volume = Number.isFinite(volumeRaw) ? volumeRaw : 0;
+    if (volume < MIN_VOLUME) continue;
+
+    const meta = getEventMeta(parsed, eventTicker);
+    if (!includeLive && meta.is_live) continue;
+    // Spread team must match one of the event's two teams. A Kalshi
+    // abbr we haven't mapped yet would slip through normalizeAbbr
+    // unchanged and produce a spread_team that doesn't join to
+    // game_log; drop it instead of writing a foot-gun row.
+    if (side.team !== meta.away_team && side.team !== meta.home_team) continue;
+
+    results.push({
+      game_date: meta.game_date,
+      game_id: meta.game_id,
+      spread_team: side.team,
+      spread_line: strike,
+      yes_ask_dollars: yesAsk,
+      yes_bid_dollars: Number.isFinite(yesBid) ? yesBid : null,
+      no_ask_dollars:  Number.isFinite(noAsk)  ? noAsk  : null,
+      no_bid_dollars:  Number.isFinite(noBid)  ? noBid  : null,
+      // Raw American conversions. Caller (jobs.js runOddsJob spread
+      // ingest block) applies feeAdjustAmerican — mirrors the ML
+      // path's handoff.
+      yes_ask_ml: probToAmerican(yesAsk),
+      no_ask_ml:  Number.isFinite(noAsk) ? probToAmerican(noAsk) : null,
+      volume_24h: volume,
+      event_ticker: eventTicker,
+      ticker: m.ticker,
+      // Carry the suffix for debug parity with the brief's named
+      // tickers (e.g. LAA2 → spread_line 1.5, suffixN 2). Consumers
+      // should prefer spread_line; suffixN is observational.
+      _suffix_n: side.suffixN,
+      // is_live + start_et exposed for live-game filtering by the
+      // caller if needed.
+      is_live: meta.is_live,
+      start_et: meta.start_et,
+    });
+  }
+
+  return results;
+}
+
 module.exports = {
   getKalshiMlbLines,
   getKalshiMlbTotals,
+  getKalshiMlbSpreads,
   // Taker-fee helpers. kalshiTakerFee returns the dollars Kalshi will
   // actually debit (ceil-to-cent total); kalshiTakerFeeRate returns the
   // smooth per-contract rate for edge math.

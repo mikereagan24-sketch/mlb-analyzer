@@ -6,7 +6,7 @@ const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScore
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
-const { getKalshiMlbLines, getKalshiMlbTotals, kalshiTakerFeeRate } = require('./kalshi');
+const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
@@ -2738,6 +2738,89 @@ async function runOddsJob(dateStr) {
       } catch (e) {
         console.warn('[odds] Kalshi-direct override failed (non-fatal, falling through): ' + e.message);
       }
+    }
+
+    // Kalshi-direct SPREADS ingest. Independent of the ML / Totals
+    // overrides above — runs every odds-job regardless of the
+    // KALSHI_DIRECT_PRIMARY_ENABLED / KALSHI_DIRECT_TOTALS_ENABLED
+    // flags. INGEST ONLY: rows land in kalshi_spread_markets and a
+    // PT-anchored snapshot mirror; nothing in the model consumes
+    // them. Pulling the full Kalshi spread ladder per game (~10-12
+    // markets per event) is forward prep for value analysis once
+    // the model supports margin distributions. Non-fatal: a Kalshi
+    // hiccup must not abort the rest of runOddsJob.
+    try {
+      const kalshiSpreads = await getKalshiMlbSpreads(dateStr);
+      if (!kalshiSpreads.length) {
+        console.log('[odds] Kalshi spreads: no pre-game markets returned for ' + dateStr);
+      } else {
+        // Fee + shift adjustment for Kalshi spread asks. Identical
+        // math to the ML override's feeAdjustAmerican (~line 2669):
+        // convert American → implied prob, add Kalshi's per-contract
+        // taker fee, convert back to American at 2-decimal precision,
+        // subtract 1.0 (bettor-unfavorable shift to match screen),
+        // round to integer. Duplicated rather than shared so the
+        // spread block stays self-contained.
+        function feeAdjustAmericanSpread(ml) {
+          if (typeof ml !== 'number' || !Number.isFinite(ml)) return ml;
+          const C = ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100);
+          if (!(C > 0.001 && C < 0.999)) return ml;
+          const adj = C + kalshiTakerFeeRate(C);
+          if (!(adj > 0.001 && adj < 0.999)) return ml;
+          if (adj >= 0.5) {
+            const americanFloat = -(100 * adj / (1 - adj));
+            const twoDecimal = Math.round(americanFloat * 100) / 100;
+            return Math.round(twoDecimal - 1.0);
+          } else {
+            const americanFloat = 100 * (1 - adj) / adj;
+            const twoDecimal = Math.round(americanFloat * 100) / 100;
+            return Math.round(twoDecimal - 1.0);
+          }
+        }
+        const upsertSpread = db.prepare(
+          "INSERT OR REPLACE INTO kalshi_spread_markets "
+          + "(game_date, game_id, spread_team, spread_line, "
+          + " yes_ask_dollars, yes_bid_dollars, no_ask_dollars, no_bid_dollars, "
+          + " yes_ask_ml, no_ask_ml, volume_24h, event_ticker, ticker, updated_at) "
+          + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))"
+        );
+        // Project each spread market through fee+shift on the
+        // American asks. The snapshot mirror uses the same projection
+        // (so snapshot rows match live rows column-for-column).
+        const projectedRows = kalshiSpreads.map(s => Object.assign({}, s, {
+          yes_ask_ml: feeAdjustAmericanSpread(s.yes_ask_ml),
+          no_ask_ml:  s.no_ask_ml == null ? null : feeAdjustAmericanSpread(s.no_ask_ml),
+        }));
+        let spreadsInserted = 0;
+        const insertTx = db.transaction((rows) => {
+          for (const s of rows) {
+            upsertSpread.run(
+              s.game_date, s.game_id, s.spread_team, Number(s.spread_line),
+              s.yes_ask_dollars, s.yes_bid_dollars, s.no_ask_dollars, s.no_bid_dollars,
+              s.yes_ask_ml, s.no_ask_ml, s.volume_24h, s.event_ticker, s.ticker
+            );
+            spreadsInserted++;
+          }
+        });
+        insertTx(projectedRows);
+        console.log('[odds] Kalshi-direct spreads: ' + spreadsInserted
+          + ' market(s) upserted across ' + new Set(projectedRows.map(s => s.game_id)).size + ' game(s)');
+
+        // PT-anchored snapshot — matches the wOBA / framing / FRV
+        // snapshot timezone convention (America/Los_Angeles since
+        // commit 5452e09). Non-fatal: snapshot failure must not
+        // block the live spread upsert above.
+        try {
+          const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+          q.snapshotKalshiSpreads(snapDate, projectedRows);
+          console.log('[odds-snapshot] Kalshi spreads: captured ' + projectedRows.length
+            + ' rows for ' + snapDate);
+        } catch (e) {
+          console.warn('[odds-snapshot] Kalshi spreads snapshot failed (non-fatal): ' + e.message);
+        }
+      }
+    } catch (e) {
+      console.warn('[odds] Kalshi spreads ingest failed (non-fatal): ' + e.message);
     }
 
     // Kalshi-direct TOTALS override (gated). Mirrors the ML override above:

@@ -372,6 +372,56 @@ db.exec(`
     PRIMARY KEY (snapshot_date, mlb_id, position)
   );
   CREATE INDEX IF NOT EXISTS idx_frv_snap_date ON fielding_frv_snapshot(snapshot_date);
+  -- Kalshi MLB spread ladder (KXMLBSPREAD series). One row per
+  -- (game_date, game_id, spread_team, spread_line) — each Kalshi
+  -- game exposes ~10-12 spread markets (1.5 through 9.5 in 1-run
+  -- steps, two sides per game). Stored for forward analysis of
+  -- which spread line offers the best value per signal. INGEST
+  -- ONLY for now — not consumed by the model or signal generation.
+  -- yes_ask_dollars / yes_bid_dollars are the raw Kalshi prices
+  -- ($0..$1 implied prob); yes_ask_ml is yes_ask_dollars converted
+  -- to American odds and run through services/jobs.js's
+  -- feeAdjustAmerican (same fee + 1-cent screen-shift the ML path
+  -- uses) before storage. no_ask_ml mirrors the no side. spread_team
+  -- is the team this spread is FOR (the side that wins if YES).
+  CREATE TABLE IF NOT EXISTS kalshi_spread_markets (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    spread_team TEXT NOT NULL,
+    spread_line REAL NOT NULL,
+    yes_ask_dollars REAL,
+    yes_bid_dollars REAL,
+    no_ask_dollars REAL,
+    no_bid_dollars REAL,
+    yes_ask_ml INTEGER,
+    no_ask_ml INTEGER,
+    volume_24h REAL,
+    event_ticker TEXT,
+    ticker TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (game_date, game_id, spread_team, spread_line)
+  );
+  CREATE INDEX IF NOT EXISTS idx_spread_game ON kalshi_spread_markets (game_date, game_id);
+  -- Daily snapshot of kalshi_spread_markets — same date-accurate-
+  -- backtest rationale as the framing/FRV snapshots. snapshot_date
+  -- is PT-anchored (America/Los_Angeles) to align with the other
+  -- snapshot writers (wOBA, framing, FRV).
+  CREATE TABLE IF NOT EXISTS kalshi_spread_markets_snapshot (
+    snapshot_date TEXT NOT NULL,
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    spread_team TEXT NOT NULL,
+    spread_line REAL NOT NULL,
+    yes_ask_dollars REAL,
+    yes_bid_dollars REAL,
+    no_ask_dollars REAL,
+    no_bid_dollars REAL,
+    yes_ask_ml INTEGER,
+    no_ask_ml INTEGER,
+    volume_24h REAL,
+    PRIMARY KEY (snapshot_date, game_date, game_id, spread_team, spread_line)
+  );
+  CREATE INDEX IF NOT EXISTS idx_spread_snap_date ON kalshi_spread_markets_snapshot (snapshot_date);
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1518,6 +1568,43 @@ q.snapshotFieldingFrv = (snapshotDate, rows) => {
         r.position,
         r.season_start == null ? null : String(r.season_start),
         r.season_end == null ? null : String(r.season_end));
+    }
+  });
+  tx(snapshotDate, rows);
+};
+
+// ------------------------------------------------------------------
+// Daily kalshi_spread_markets snapshot. Same delete-then-insert
+// pattern as the framing/FRV helpers. Rows are upserted spread-
+// market objects ({game_date, game_id, spread_team, spread_line,
+// yes_ask_dollars, yes_bid_dollars, no_ask_dollars, no_bid_dollars,
+// yes_ask_ml, no_ask_ml, volume_24h}). Rows missing any PK component
+// (game_date, game_id, spread_team, spread_line) are skipped.
+q._snapKalshiSpreadsClearDate = db.prepare(
+  "DELETE FROM kalshi_spread_markets_snapshot WHERE snapshot_date=?"
+);
+q._snapKalshiSpreadsInsert = db.prepare(
+  "INSERT OR REPLACE INTO kalshi_spread_markets_snapshot "
+  + "(snapshot_date, game_date, game_id, spread_team, spread_line, "
+  + " yes_ask_dollars, yes_bid_dollars, no_ask_dollars, no_bid_dollars, "
+  + " yes_ask_ml, no_ask_ml, volume_24h) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotKalshiSpreads = (snapshotDate, rows) => {
+  const tx = db.transaction((d, rs) => {
+    q._snapKalshiSpreadsClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.game_date == null || r.game_id == null
+          || r.spread_team == null || r.spread_line == null) continue;
+      q._snapKalshiSpreadsInsert.run(d,
+        r.game_date, r.game_id, r.spread_team, Number(r.spread_line),
+        r.yes_ask_dollars == null ? null : Number(r.yes_ask_dollars),
+        r.yes_bid_dollars == null ? null : Number(r.yes_bid_dollars),
+        r.no_ask_dollars  == null ? null : Number(r.no_ask_dollars),
+        r.no_bid_dollars  == null ? null : Number(r.no_bid_dollars),
+        r.yes_ask_ml == null ? null : Number(r.yes_ask_ml),
+        r.no_ask_ml  == null ? null : Number(r.no_ask_ml),
+        r.volume_24h == null ? null : Number(r.volume_24h));
     }
   });
   tx(snapshotDate, rows);
