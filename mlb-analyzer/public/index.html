@@ -175,6 +175,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .emp-spread-pick{display:flex;justify-content:space-between;gap:8px;padding:2px 0;font-size:11px}
 .emp-spread-pick-bet{color:var(--text);font-weight:500}
 .emp-spread-pick-edge{color:#a855f7;font-weight:600;font-variant-numeric:tabular-nums}
+/* Paired market: both lay and take cleared the API gate. The dotted
+   border-left visually groups the two legs of the same line as one
+   market. */
+.emp-spread-pair{border-left:2px dotted rgba(168,85,247,.5);padding-left:6px;margin-left:2px}
+/* take leg distinct from lay: a subtle weight bump on the +runline
+   side so users can scan side-of-market at a glance without needing
+   to read the +/- prefix. */
+.emp-spread-pick-take .emp-spread-pick-bet{font-weight:600;color:#7c3aed}
 .logbet-btn{font-size:10px;padding:3px 8px;border:1px solid var(--border2);border-radius:4px;cursor:pointer;background:var(--bg2);color:var(--text);margin-top:6px}
 .logbet-btn:hover{background:var(--border)}
 .mb-edge-preview{font-size:11px;color:var(--text2);margin-top:8px;padding:8px;background:var(--bg2);border-radius:6px;display:none}
@@ -1215,11 +1223,32 @@ function renderGameGrid(games,date){
       // distinct from the ML-signal pills above.
       ((g.empirical_spreads && g.empirical_spreads.top_picks && g.empirical_spreads.top_picks.length) ? (function(){
         var es=g.empirical_spreads;
-        var rows=es.top_picks.map(function(p){
+        // Group picks by pair_id so a lay and its take that BOTH
+        // clear the API gate render side-by-side as one market with
+        // two legs. Single-leg picks render as their own group.
+        // Picks without a pair_id (back-compat for pre-take rows
+        // still in the DB) each get their own group keyed by the
+        // pick itself.
+        var groups=[]; var groupIdx={};
+        es.top_picks.forEach(function(p,i){
+          var key=p.pair_id || ('solo-'+i);
+          if(groupIdx[key]==null){ groupIdx[key]=groups.length; groups.push([]); }
+          groups[groupIdx[key]].push(p);
+        });
+        function pickRow(p){
           var ask=(p.yes_ask_ml!=null && p.yes_ask_ml>0?'+':'')+(p.yes_ask_ml==null?'n/a':p.yes_ask_ml);
           var edge=(p.edge_pp>=0?'+':'')+(p.edge_pp==null?'n/a':p.edge_pp.toFixed(1))+'pp';
-          var bet=p.spread_team+' -'+(p.spread_line==null?'?':p.spread_line.toFixed(1))+' '+ask;
-          return '<div class="emp-spread-pick"><span class="emp-spread-pick-bet">'+bet+'</span><span class="emp-spread-pick-edge">'+edge+'</span></div>';
+          // take = '+L' (opp +runline), lay = '-L' (favorite lays).
+          var sign=(p.side==='take')?'+':'-';
+          var bet=p.spread_team+' '+sign+(p.spread_line==null?'?':p.spread_line.toFixed(1))+' '+ask;
+          var sideCls=(p.side==='take')?' emp-spread-pick-take':'';
+          return '<div class="emp-spread-pick'+sideCls+'"><span class="emp-spread-pick-bet">'+bet+'</span><span class="emp-spread-pick-edge">'+edge+'</span></div>';
+        }
+        var rows=groups.map(function(g){
+          if(g.length===1) return pickRow(g[0]);
+          // Paired market — both legs cleared the gate. Wrap so the
+          // visual grouping reads as one row spanning the market.
+          return '<div class="emp-spread-pair">'+g.map(pickRow).join('')+'</div>';
         }).join('');
         var cell=es.cell_label?(' '+es.cell_label+' (n='+es.cell_sample_size+')'):'';
         return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+'</span></div>'+rows+'</div>';

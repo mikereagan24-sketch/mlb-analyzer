@@ -110,53 +110,96 @@ function buildCellIndex(db) {
   return { cells, totalGraded: rows.length, skipped };
 }
 
-// Tail probabilities. Strict > L because Kalshi spread lines are
-// half-runs and integer margins clear or miss cleanly.
-function pMarginGreater(margins, L) {
+// Tail-hit floor below which a prediction is flagged low_sample.
+// Deep-favorite take rows (e.g. opp +3.5 at no_ask -966) can produce
+// empirical probabilities like 90%+ off a tail of only 5-10 games
+// out of 60 — looks like edge, actually noise at terrible prices.
+// The flag is observational: API gates exclude flagged picks, UI
+// can de-emphasize, but rows are still stored for hindsight.
+const SUPPRESS_TAIL_HIT_FLOOR = 15;
+
+// Tail probability + count. Strict > L because Kalshi spread lines
+// are half-runs and integer margins clear or miss cleanly. Returns
+// {p, hit, n} so callers can compute both the empirical fraction and
+// the absolute support behind it. n null/empty → returns null.
+function tailGreater(margins, L) {
   if (!margins || !margins.length) return null;
   let hit = 0;
   for (let i = 0; i < margins.length; i++) if (margins[i] > L) hit++;
-  return hit / margins.length;
+  return { p: hit / margins.length, hit, n: margins.length };
 }
-function pMarginLess(margins, L) {
+function tailLess(margins, L) {
   if (!margins || !margins.length) return null;
   let hit = 0;
   for (let i = 0; i < margins.length; i++) if (margins[i] < -L) hit++;
-  return hit / margins.length;
+  return { p: hit / margins.length, hit, n: margins.length };
 }
 
 // ------------------------------------------------------------ per-game analysis
-// computeGameEdges — runs the full pipeline for ONE game:
-//   1. Compute no-vig home win prob from the game's model line.
-//   2. Bucket into one of 6 cells.
-//   3. For each spread row in `spreadRows` (already filtered to the
-//      SHOW_LINES rungs upstream), compute implied + empirical +
-//      edge.
-//   4. Return a sorted-by-edge-desc prediction list plus context.
+// computeGameEdges — runs the full pipeline for ONE game and emits
+// BOTH legs (lay and take) of every spread row as separate
+// predictions.
+//
+// Background (verified against the live Kalshi API for 7,647
+// KXMLBSPREAD markets, including the user's 6/3 COLLAA event):
+// Kalshi does NOT publish a separate +runline market. Each
+// kalshi_spread_markets row is the favorite-lays direction for
+// `spread_team`, and the +runline price for the OPPOSING team at
+// the same line is the same row's no_ask_dollars / no_ask_ml.
+// So this function turns each input row into two predictions:
+//
+//   - lay  ('spread_team' -L) at yes_ask_ml, empirical = P(margin
+//     clears +L for spread_team) computed from the cell tail.
+//   - take ('opposite_team' +L) at THIS ROW'S no_ask_ml — the real
+//     Kalshi-posted +runline price, NOT a synthesized (1 - yes_ask).
+//     take_empirical = 1 - lay_empirical (exact complement —
+//     no separate tail scan).
+//
+// The two are linked by pair_id ('game_id|line|sortedTeams') so
+// downstream can treat them as one market with two legs (UI
+// grouping, hindsight pairing).
+//
+// SUPPRESS-EXTREMES GUARD: each side's hit count (absolute number
+// of cell games supporting the empirical) is computed. If either
+// the side's own hit count OR the complementary side's hit count
+// drops below SUPPRESS_TAIL_HIT_FLOOR, that prediction's
+// low_sample flag is set. The flag is observational — rows are
+// still emitted (and persisted) so we can audit later, but the
+// API and UI gates use it to exclude noisy deep-tail picks.
 //
 // Inputs:
 //   game        — {away_team, home_team, model_home_ml, model_away_ml,
 //                  model_total}
 //   spreadRows  — array of {spread_team, spread_line, yes_ask_dollars,
-//                  yes_ask_ml} for the SHOW_LINES rungs (caller filters
-//                  the SQL with `spread_line IN (1.5, 2.5, 3.5)`).
-//   cellIndex   — output of buildCellIndex; provides the cell margin
-//                  distribution.
+//                  yes_ask_ml, no_ask_dollars, no_ask_ml} for the
+//                  SHOW_LINES rungs (caller's SQL filters
+//                  `spread_line IN (1.5, 2.5, 3.5)`).
+//   cellIndex   — output of buildCellIndex.
 //
-// Returns null when the model line is incomplete (so callers can
-// skip cleanly); otherwise:
+// Returns null when the model line is incomplete; otherwise:
 //   {
 //     home_win_prob, model_total, cell_label, cell_sample_size,
 //     predictions: [
-//       { spread_team, spread_line, kalshi_yes_ask_ml, implied_pct,
-//         empirical_pct, edge_pp }
+//       { spread_team, spread_line, side,            // 'lay' | 'take'
+//         pair_id,
+//         price_ml,                                  // the side's actual
+//                                                    // stored price
+//         implied_pct, empirical_pct, edge_pp,
+//         tail_hit,                                  // absolute hit count
+//         low_sample,                                // bool
+//         // back-compat / display:
+//         kalshi_yes_ask_ml                          // ROW's yes_ask_ml
+//                                                    // (same for both legs
+//                                                    // of a pair) — kept
+//                                                    // so existing
+//                                                    // top_edge_yes_ask_ml
+//                                                    // queries don't break
+//       }
 //     ]
 //   }
 //
-// implied_pct, empirical_pct, edge_pp are all expressed as percentage-
-// point values (e.g. 41.8 means 41.8%, NOT 0.418). edge_pp = empirical
-// - implied. This keeps the persisted JSON and downstream UI display
-// in the same units the brief specifies.
+// implied_pct, empirical_pct, edge_pp are percentage points (e.g.
+// 41.8 means 41.8%, NOT 0.418).
 function computeGameEdges(game, spreadRows, cellIndex) {
   if (!game) return null;
   const wp = noVigHomeProb(game.model_home_ml, game.model_away_ml);
@@ -168,38 +211,105 @@ function computeGameEdges(game, spreadRows, cellIndex) {
 
   const predictions = [];
   for (const s of (spreadRows || [])) {
-    // Implied prob: prefer yes_ask_dollars (Kalshi's raw 0..1 price)
-    // when available; fall back to converting yes_ask_ml. Both come
-    // from the same source post fee+shift but the dollars form is the
-    // canonical one Kalshi prices in.
-    let implied;
+    // ---- side, opposite-team attribution
+    let oppositeTeam;
+    if (s.spread_team === game.home_team) oppositeTeam = game.away_team;
+    else if (s.spread_team === game.away_team) oppositeTeam = game.home_team;
+    else continue; // defensive — should never happen post-ingest
+
+    // ---- lay implied prob (favorite -L)
+    let layImplied;
     if (typeof s.yes_ask_dollars === 'number' && Number.isFinite(s.yes_ask_dollars)) {
-      implied = s.yes_ask_dollars;
+      layImplied = s.yes_ask_dollars;
     } else {
-      implied = americanToProb(s.yes_ask_ml);
+      layImplied = americanToProb(s.yes_ask_ml);
     }
-    if (implied == null) continue;
+    if (layImplied == null) continue;
 
-    let empirical = null;
+    // ---- take implied prob (opposite team +L). MUST come from the
+    // row's actual no_ask — Kalshi's posted +runline price. NOT
+    // (1 - yes_ask): that would erase the bid/ask spread + fees.
+    let takeImplied;
+    if (typeof s.no_ask_dollars === 'number' && Number.isFinite(s.no_ask_dollars)) {
+      takeImplied = s.no_ask_dollars;
+    } else {
+      takeImplied = americanToProb(s.no_ask_ml);
+    }
+    // If Kalshi didn't ship a usable no_ask for this rung, the take
+    // leg is unpriced — emit only the lay leg.
+
+    // ---- lay empirical via the cell tail
+    let layTail;
     if (s.spread_team === game.home_team) {
-      empirical = pMarginGreater(margins, s.spread_line);
-    } else if (s.spread_team === game.away_team) {
-      empirical = pMarginLess(margins, s.spread_line);
+      layTail = tailGreater(margins, s.spread_line);
     } else {
-      // Defensive — getKalshiMlbSpreads already drops rows whose
-      // team doesn't match either side, but belt-and-suspenders.
-      continue;
+      layTail = tailLess(margins, s.spread_line);
     }
-    if (empirical == null) continue;
+    if (layTail == null) continue;
+    const layEmpirical = layTail.p;
+    const layHit       = layTail.hit;
+    // Complementary tail count: cell games NOT in the lay's tail are
+    // the take's tail (exact complement, no double-counting because
+    // half-run lines have no push case).
+    const takeHit      = layTail.n - layTail.hit;
+    const takeEmpirical = 1 - layEmpirical;
 
+    // ---- low_sample: if EITHER tail's hit count is below the floor,
+    // BOTH legs are flagged. Reason: the two are mirror images; a
+    // weak underlying tail makes both empiricals shaky, just in
+    // opposite directions. Treating them symmetrically also keeps
+    // the paired-outcome inversion intact downstream.
+    const lowSample = (layHit < SUPPRESS_TAIL_HIT_FLOOR)
+                   || (takeHit < SUPPRESS_TAIL_HIT_FLOOR);
+
+    // ---- pair_id — identifies the Kalshi market this row IS,
+    // not the unordered team pair. Each Kalshi row IS a market
+    // (YES = spread_team -L, NO = opposite_team +L); the two
+    // legs share this row, so pair_id keys on the row's YES-side
+    // team. The OTHER row at the same line (where the opposite
+    // team is the YES side) is a DIFFERENT Kalshi market and
+    // gets its own pair_id. Without this, both rows at a line
+    // would collide and the lay/take grouping would be 4 legs
+    // per key instead of 2.
+    const pairId = game.game_id + '|' + Number(s.spread_line).toFixed(1) + '|' + s.spread_team;
+
+    // ---- LAY prediction
     predictions.push({
-      spread_team: s.spread_team,
-      spread_line: Number(s.spread_line),
-      kalshi_yes_ask_ml: s.yes_ask_ml == null ? null : Number(s.yes_ask_ml),
-      implied_pct: implied * 100,
-      empirical_pct: empirical * 100,
-      edge_pp: (empirical - implied) * 100,
+      spread_team:        s.spread_team,
+      spread_line:        Number(s.spread_line),
+      side:               'lay',
+      pair_id:            pairId,
+      price_ml:           s.yes_ask_ml == null ? null : Number(s.yes_ask_ml),
+      implied_pct:        layImplied * 100,
+      empirical_pct:      layEmpirical * 100,
+      edge_pp:            (layEmpirical - layImplied) * 100,
+      tail_hit:           layHit,
+      low_sample:         lowSample,
+      // Kept for back-compat: existing schema column
+      // top_edge_yes_ask_ml + slate render still want the row's
+      // yes_ask. For the lay leg this IS the side's price.
+      kalshi_yes_ask_ml:  s.yes_ask_ml == null ? null : Number(s.yes_ask_ml),
     });
+
+    // ---- TAKE prediction (skip if no_ask unpriced)
+    if (takeImplied != null) {
+      predictions.push({
+        spread_team:        oppositeTeam,
+        spread_line:        Number(s.spread_line),
+        side:               'take',
+        pair_id:            pairId,
+        price_ml:           s.no_ask_ml == null ? null : Number(s.no_ask_ml),
+        implied_pct:        takeImplied * 100,
+        empirical_pct:      takeEmpirical * 100,
+        edge_pp:            (takeEmpirical - takeImplied) * 100,
+        tail_hit:           takeHit,
+        low_sample:         lowSample,
+        // For the take leg, kalshi_yes_ask_ml is the ROW's yes_ask
+        // (NOT this leg's price) — preserves back-compat with the
+        // pre-take schema column. Side's actual price is price_ml.
+        kalshi_yes_ask_ml:  s.yes_ask_ml == null ? null : Number(s.yes_ask_ml),
+      });
+    }
   }
   predictions.sort((a, b) => b.edge_pp - a.edge_pp);
   return {
@@ -239,7 +349,8 @@ function generateEmpiricalSpreadSignals(db, date) {
   ).all(date);
 
   const getSpreads = db.prepare(
-      "SELECT spread_team, spread_line, yes_ask_dollars, yes_ask_ml "
+      "SELECT spread_team, spread_line, yes_ask_dollars, yes_ask_ml, "
+    + "       no_ask_dollars, no_ask_ml "
     + "FROM kalshi_spread_markets "
     + "WHERE game_date = ? AND game_id = ? "
     + "  AND spread_line IN (1.5, 2.5, 3.5) "
@@ -271,6 +382,7 @@ module.exports = {
   TOTAL_THRESHOLD,
   SHOW_LINES,
   ALL_CELLS,
+  SUPPRESS_TAIL_HIT_FLOOR,
   // Math
   americanToProb,
   americanProfit,

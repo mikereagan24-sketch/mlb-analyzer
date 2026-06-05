@@ -690,29 +690,49 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // final" entry point as the bet_signals grading above so the
     // empirical predictions land their outcomes the moment scores
     // arrive. Independent table (empirical_spread_outcomes) — does
-    // NOT touch bet_signals. Each prediction grades independently:
+    // NOT touch bet_signals. Each prediction grades independently
+    // using the 4-way side × team-attribution truth table:
+    //
     //   margin = home_score - away_score
-    //   For spread_team = home: win iff margin >  spread_line
-    //   For spread_team = away: win iff -margin > spread_line
-    // pnl_per_100 = americanProfit(yes_ask_ml) on win, -100 on loss.
-    // Push isn't reachable since spread_lines are half-runs.
+    //   lay,  team=home: win iff margin >  spread_line   (home wins by > L)
+    //   lay,  team=away: win iff -margin >  spread_line  (away wins by > L)
+    //   take, team=home: win iff margin > -spread_line   (home wins or loses by < L)
+    //   take, team=away: win iff margin <  spread_line   (away wins or loses by < L)
+    //
+    // pnl_per_100 = americanProfit(stored price_ml) on win, -100 on
+    // loss. The stored yes_ask_ml column is THIS SIDE's price-at-
+    // signal-time (lay→original yes_ask, take→original no_ask). The
+    // grader reads it as-is — never re-derives from current spread
+    // tables, so the price-freeze is preserved across reruns.
+    //
+    // Push isn't reachable since Kalshi lines are half-runs and MLB
+    // margins are integers. A lay and its paired take will ALWAYS
+    // grade to opposite outcomes — validated downstream.
     try {
       const margin = gl.home_score - gl.away_score;
       const empUngraded = db.prepare(
-          "SELECT game_date, game_id, spread_team, spread_line, yes_ask_ml, generated_at "
+          "SELECT game_date, game_id, spread_team, spread_line, side, "
+        + "       yes_ask_ml, generated_at "
         + "FROM empirical_spread_outcomes "
         + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
       ).all(gameRow.game_date, gameRow.game_id);
       for (const e of empUngraded) {
-        let win;
-        if (e.spread_team === gl.home_team)      win = margin >  e.spread_line;
-        else if (e.spread_team === gl.away_team) win = -margin > e.spread_line;
-        else continue;
+        const side = e.side || 'lay';   // null-safe for the migrated rows
+        const L = e.spread_line;
+        let win = null;
+        if (side === 'lay') {
+          if (e.spread_team === gl.home_team)      win = margin >  L;
+          else if (e.spread_team === gl.away_team) win = -margin > L;
+        } else if (side === 'take') {
+          if (e.spread_team === gl.home_team)      win = margin >  -L;
+          else if (e.spread_team === gl.away_team) win = margin <  L;
+        }
+        if (win == null) continue;
         const outcome = win ? 'win' : 'loss';
         const pnl = win ? empiricalSpreadEdge.americanProfit(e.yes_ask_ml) : -100;
         q.updateEmpiricalSpreadOutcome.run(
           margin, outcome, pnl,
-          e.game_date, e.game_id, e.spread_team, e.spread_line, e.generated_at
+          e.game_date, e.game_id, e.spread_team, e.spread_line, side, e.generated_at
         );
       }
     } catch (gerr) {
@@ -2878,9 +2898,18 @@ async function runOddsJob(dateStr) {
         // rows persist for hindsight.
         const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
         let written = 0;
+        // Top-edge denormalization for the signals row: ignore
+        // low_sample predictions so deep-tail noise doesn't anchor
+        // the signal's top_edge_* columns. Falls back to the unfiltered
+        // top if every prediction is flagged.
+        function pickTopForSignal(preds) {
+          if (!preds || !preds.length) return null;
+          const eligible = preds.filter(p => !p.low_sample);
+          return (eligible.length ? eligible : preds)[0];
+        }
         const writeTx = db.transaction((sigs) => {
           for (const sig of sigs) {
-            const top = sig.predictions && sig.predictions.length ? sig.predictions[0] : null;
+            const top = pickTopForSignal(sig.predictions);
             q.upsertEmpiricalSpreadSignal.run(
               sig.game_date, sig.game_id, generatedAt,
               sig.model_total, sig.home_win_prob,
@@ -2888,18 +2917,28 @@ async function runOddsJob(dateStr) {
               JSON.stringify(sig.predictions),
               top ? top.spread_team : null,
               top ? top.spread_line : null,
+              // top_edge_yes_ask_ml: prior schema column. For lay legs
+              // this is the side's price; for take legs it's the
+              // row's yes_ask (the lay-side price). Engine already
+              // populates kalshi_yes_ask_ml uniformly for both legs
+              // to preserve back-compat with this column's meaning.
               top ? top.kalshi_yes_ask_ml : null,
               top ? top.edge_pp : null,
             );
             for (const p of sig.predictions) {
-              // yes_ask_ml is NOT NULL on the outcomes table — skip the
-              // grading-target write if Kalshi didn't ship a usable
-              // American price (the signal row still captures the
-              // prediction in predictions_json).
-              if (p.kalshi_yes_ask_ml == null) continue;
+              // yes_ask_ml is NOT NULL on the outcomes table — skip
+              // the grading-target write if this side has no usable
+              // price. (Engine: lay's price_ml is the row yes_ask_ml,
+              // take's price_ml is the row no_ask_ml.)
+              if (p.price_ml == null) continue;
               q.upsertEmpiricalSpreadOutcome.run(
                 sig.game_date, sig.game_id, p.spread_team, p.spread_line,
-                Number(p.kalshi_yes_ask_ml),
+                p.side, p.pair_id,
+                // Column kept as yes_ask_ml for back-compat, but
+                // semantically holds THIS SIDE's price-at-signal-time.
+                // Grading reads it back as the stake price — never
+                // re-derives from current spread tables.
+                Number(p.price_ml),
                 p.edge_pp, sig.cell_sample_size, generatedAt,
                 null, null, null, null,    // actual_margin / outcome / pnl / graded_at
               );

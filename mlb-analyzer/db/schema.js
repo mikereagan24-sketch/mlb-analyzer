@@ -460,6 +460,20 @@ db.exec(`
     game_id TEXT NOT NULL,
     spread_team TEXT NOT NULL,
     spread_line REAL NOT NULL,
+    -- 'lay' = favorite -L (YES side of the Kalshi market);
+    -- 'take' = opposite team +L, priced from the SAME row's no_ask
+    -- (the real Kalshi-posted +runline price, not (1 - yes_ask)).
+    -- Each spread market emits both legs as separate rows so each
+    -- side grades independently and the price-freeze is preserved
+    -- per side.
+    side TEXT NOT NULL DEFAULT 'lay',
+    -- Stable across runs: game_id|line|sortedTeams. Same value on
+    -- both legs of a market so downstream can group them.
+    pair_id TEXT,
+    -- yes_ask_ml = THIS SIDE's price (lay -> Kalshi yes_ask;
+    -- take -> Kalshi no_ask). Column name kept for back-compat
+    -- with the pre-take schema; semantically it is the side's
+    -- frozen price-at-signal-time.
     yes_ask_ml INTEGER NOT NULL,
     edge_pp REAL NOT NULL,
     cell_sample_size INTEGER NOT NULL,
@@ -468,10 +482,13 @@ db.exec(`
     outcome TEXT,
     pnl_per_100 REAL,
     graded_at TEXT,
-    PRIMARY KEY (game_date, game_id, spread_team, spread_line, generated_at)
+    PRIMARY KEY (game_date, game_id, spread_team, spread_line, side, generated_at)
   );
   CREATE INDEX IF NOT EXISTS idx_emp_outcome_date ON empirical_spread_outcomes (game_date);
   CREATE INDEX IF NOT EXISTS idx_emp_outcome_ungraded ON empirical_spread_outcomes (game_date) WHERE outcome IS NULL;
+  -- idx_emp_outcome_pair lives in the ALTER block below — on an
+  -- existing deploy the table doesn't have pair_id yet at this
+  -- point, so creating the index here would fail.
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1030,6 +1047,66 @@ try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_locked_at TEXT"); } catch(
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_line INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN clv REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN under_price INTEGER"); } catch(e) {}
+
+// empirical_spread_outcomes — feat/empirical-spread-plus-run upgrade.
+// Existing deploys created the table under the prior commit's schema
+// without `side` / `pair_id` and with a PK that didn't include side.
+// SQLite can't ALTER a PRIMARY KEY in-place, so this block detects an
+// old shape (column `side` missing) and does a one-time rename →
+// recreate → copy. New deploys hit the CREATE TABLE IF NOT EXISTS
+// above directly and skip this block entirely.
+//
+// Old rows materialize as side='lay' (the only kind the prior code
+// produced) with pair_id=NULL. Backfilling pair_id retroactively
+// would require re-joining game_log + kalshi_spread_markets per row;
+// not worth it because pair_id is only consumed by NEW signal
+// generation downstream — the historical rows that were already
+// graded don't need pairing.
+try {
+  const cols = db.prepare("PRAGMA table_info(empirical_spread_outcomes)").all();
+  const hasSide = cols.some(c => c.name === 'side');
+  if (cols.length && !hasSide) {
+    db.exec(`
+      ALTER TABLE empirical_spread_outcomes RENAME TO empirical_spread_outcomes_old;
+      CREATE TABLE empirical_spread_outcomes (
+        game_date TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        spread_team TEXT NOT NULL,
+        spread_line REAL NOT NULL,
+        side TEXT NOT NULL DEFAULT 'lay',
+        pair_id TEXT,
+        yes_ask_ml INTEGER NOT NULL,
+        edge_pp REAL NOT NULL,
+        cell_sample_size INTEGER NOT NULL,
+        generated_at TEXT NOT NULL,
+        actual_margin INTEGER,
+        outcome TEXT,
+        pnl_per_100 REAL,
+        graded_at TEXT,
+        PRIMARY KEY (game_date, game_id, spread_team, spread_line, side, generated_at)
+      );
+      INSERT INTO empirical_spread_outcomes
+        (game_date, game_id, spread_team, spread_line, side, pair_id,
+         yes_ask_ml, edge_pp, cell_sample_size, generated_at,
+         actual_margin, outcome, pnl_per_100, graded_at)
+      SELECT
+         game_date, game_id, spread_team, spread_line, 'lay', NULL,
+         yes_ask_ml, edge_pp, cell_sample_size, generated_at,
+         actual_margin, outcome, pnl_per_100, graded_at
+        FROM empirical_spread_outcomes_old;
+      DROP TABLE empirical_spread_outcomes_old;
+      CREATE INDEX IF NOT EXISTS idx_emp_outcome_date     ON empirical_spread_outcomes (game_date);
+      CREATE INDEX IF NOT EXISTS idx_emp_outcome_ungraded ON empirical_spread_outcomes (game_date) WHERE outcome IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_emp_outcome_pair     ON empirical_spread_outcomes (pair_id);
+    `);
+    console.log('[schema] migrated empirical_spread_outcomes to side/pair_id PK shape');
+  }
+} catch(e) { console.error('[schema] empirical_spread_outcomes migration failed:', e.message); }
+
+// pair_id index. Created here (after the migration block) so it works
+// uniformly on fresh deploys (table created with pair_id by the main
+// CREATE TABLE block) AND on upgraded deploys (table migrated above).
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_emp_outcome_pair ON empirical_spread_outcomes (pair_id)"); } catch(e) {}
 
 // One-shot CLV backfill: every CLV value written before
 // fix/clv-formula-correct used the buggy American-cents formula. Some are
@@ -1678,16 +1755,19 @@ q.upsertEmpiricalSpreadSignal = db.prepare(
 );
 q.upsertEmpiricalSpreadOutcome = db.prepare(
     "INSERT OR REPLACE INTO empirical_spread_outcomes "
-  + "(game_date, game_id, spread_team, spread_line, yes_ask_ml, edge_pp, "
-  + " cell_sample_size, generated_at, actual_margin, outcome, pnl_per_100, graded_at) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+  + "(game_date, game_id, spread_team, spread_line, side, pair_id, "
+  + " yes_ask_ml, edge_pp, cell_sample_size, generated_at, "
+  + " actual_margin, outcome, pnl_per_100, graded_at) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 // Pending-grade pull. Only rows whose game is final (away/home_score
 // non-null) AND whose outcome is still NULL come back. Joins game_log
-// so the caller has the margin in hand without a second lookup.
+// so the caller has the margin in hand without a second lookup. Now
+// returns side so the grading caller can apply the lay-vs-take win
+// formula (see services/jobs.js processGameSignals).
 q.getUngradedEmpiricalSpreads = db.prepare(
     "SELECT e.game_date, e.game_id, e.spread_team, e.spread_line, "
-  + "       e.yes_ask_ml, e.generated_at, "
+  + "       e.side, e.yes_ask_ml, e.generated_at, "
   + "       g.away_team, g.home_team, g.away_score, g.home_score "
   + "FROM empirical_spread_outcomes e "
   + "JOIN game_log g ON g.game_date = e.game_date AND g.game_id = e.game_id "
@@ -1699,7 +1779,7 @@ q.updateEmpiricalSpreadOutcome = db.prepare(
     "UPDATE empirical_spread_outcomes "
   + "SET actual_margin=?, outcome=?, pnl_per_100=?, graded_at=datetime('now') "
   + "WHERE game_date=? AND game_id=? AND spread_team=? AND spread_line=? "
-  + "  AND generated_at=?"
+  + "  AND side=? AND generated_at=?"
 );
 // Latest signal per game for a date — backs the slate API. We use a
 // subquery on MAX(generated_at) so re-running the odds-job naturally

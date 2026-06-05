@@ -501,21 +501,37 @@ router.get('/games/:date', (req, res) => {
         // Display gate — only attach when BOTH thresholds clear.
         // The brief leaves cell_sample_size >= 50 AND top_edge >= 3pp.
         if (r.cell_sample_size == null || r.cell_sample_size < EMP_SPREAD_MIN_SAMPLE) continue;
-        if (r.top_edge_pp == null || r.top_edge_pp < EMP_SPREAD_MIN_EDGE_PP) continue;
-        // Top N predictions, already pre-sorted desc by edge_pp in
-        // predictions_json (computeGameEdges does the sort before
-        // the JSON serialize). Re-sorting defensively because the
-        // payload is opaque JSON across the API boundary.
-        const sorted = preds.slice().sort((a, b) =>
-          (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
+        // Per-prediction gate: minimum edge AND low_sample suppression.
+        // The cell-level gate (>= EMP_SPREAD_MIN_SAMPLE) still applies
+        // game-wide; this filter strips individual deep-tail picks
+        // (e.g. opp +3.5 at no_ask -966 where the underlying tail has
+        // < SUPPRESS_TAIL_HIT_FLOOR hits in the cell).
+        const eligible = (preds || []).filter(p =>
+          !p.low_sample
+          && p.edge_pp != null
+          && p.edge_pp >= EMP_SPREAD_MIN_EDGE_PP
+        );
+        if (!eligible.length) continue;
+        // Sort desc by edge_pp. computeGameEdges already does this
+        // before serializing; re-sort defensively across the JSON
+        // boundary.
+        eligible.sort((a, b) => (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
         empByGame[r.game_id] = {
           cell_label: r.cell_label,
           cell_sample_size: r.cell_sample_size,
           generated_at: r.generated_at,
-          top_picks: sorted.slice(0, EMP_SPREAD_TOP_N).map(p => ({
+          top_picks: eligible.slice(0, EMP_SPREAD_TOP_N).map(p => ({
             spread_team:        p.spread_team,
             spread_line:        p.spread_line,
-            yes_ask_ml:         p.kalshi_yes_ask_ml,
+            // Side label drives the UI +/- prefix.
+            side:               p.side || 'lay',
+            // pair_id groups lay + take of the same market for UI.
+            pair_id:            p.pair_id || null,
+            // Side's actual price (lay→yes_ask_ml, take→no_ask_ml).
+            // price_ml is the new engine output; fall back to
+            // kalshi_yes_ask_ml for back-compat with pre-take
+            // signal rows still in the DB.
+            yes_ask_ml:         (p.price_ml != null ? p.price_ml : p.kalshi_yes_ask_ml),
             edge_pp:            p.edge_pp,
             empirical_pct:      p.empirical_pct,
             kalshi_implied_pct: p.implied_pct,
