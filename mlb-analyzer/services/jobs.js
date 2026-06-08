@@ -710,14 +710,19 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // grade to opposite outcomes — validated downstream.
     try {
       const margin = gl.home_score - gl.away_score;
+      // Pull ALL ungraded outcome rows for this game across BOTH
+      // capture_tracks. capture_track now lives in the UPDATE key
+      // so a morning lock and a gametime snapshot for the same
+      // spread grade independently against their own frozen prices.
       const empUngraded = db.prepare(
           "SELECT game_date, game_id, spread_team, spread_line, side, "
-        + "       yes_ask_ml, generated_at "
+        + "       capture_track, yes_ask_ml, generated_at "
         + "FROM empirical_spread_outcomes "
         + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
       ).all(gameRow.game_date, gameRow.game_id);
       for (const e of empUngraded) {
-        const side = e.side || 'lay';   // null-safe for the migrated rows
+        const side = e.side || 'lay';   // null-safe for any pre-migration rows
+        const track = e.capture_track || 'gametime';
         const L = e.spread_line;
         let win = null;
         if (side === 'lay') {
@@ -732,7 +737,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         const pnl = win ? empiricalSpreadEdge.americanProfit(e.yes_ask_ml) : -100;
         q.updateEmpiricalSpreadOutcome.run(
           margin, outcome, pnl,
-          e.game_date, e.game_id, e.spread_team, e.spread_line, side, e.generated_at
+          e.game_date, e.game_id, e.spread_team, e.spread_line,
+          side, track, e.generated_at
         );
       }
     } catch (gerr) {
@@ -2349,6 +2355,25 @@ function startCronJobs() {
     } catch(e) { console.error('[cron-refresh] rerun loop failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
+  // --- 7:30AM PT morning empirical-spread capture for D+1 ---
+  // Fresh projected-lineup capture, parallel ROI track to the existing
+  // gametime track. User bets D+1 games 7-10am PT, game-by-game as
+  // lines firm; this captures the FIRST-eligible empirical signal per
+  // game so the realized CLV vs gametime can be measured later.
+  //
+  // The chain inside runMorningCaptureJob is lineups → weather → odds
+  // → morning-capture, all targeting tomorrowStr(). Each step is
+  // non-fatal individually; the morning capture proper still runs even
+  // if (e.g.) weather hiccups. Idempotent: re-invoking the same day
+  // leaves morning_capture_state.opened_at unchanged and the existing
+  // locked rows untouched.
+  cron.schedule('30 7 * * *', async () => {
+    const d = tomorrowStr();
+    console.log('[cron] 7:30AM PT morning empirical-spread capture for ' + d);
+    try { await runMorningCaptureJob(d); }
+    catch (e) { console.error('[cron-morning-capture] failed:', e && e.message); }
+  }, { timezone: 'America/Los_Angeles' });
+
   // --- 8PM PT tomorrow-slate prefetch ---
   // Pulls odds, weather, and lineups (if available) for tomorrow's date so the
   // UI has fresh data the moment the user switches to tomorrow. Tomorrow's
@@ -2392,7 +2417,7 @@ function startCronJobs() {
     }
   }, { timezone: 'America/Los_Angeles' });
 
-  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P, scores 4A, roster 6A, morning refresh 7A, tomorrow-slate prefetch 8P + refresh 11P');
+  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P, scores 4A, roster 6A, morning refresh 7A, morning empirical-spread capture 7:30A, tomorrow-slate prefetch 8P + refresh 11P');
 }
 
 function gameHasStarted(gameRow, gameDate) {
@@ -2882,72 +2907,24 @@ async function runOddsJob(dateStr) {
     // freshest spread prices. INGEST ONLY — writes to
     // empirical_spread_signals (one row per game per job pass) and
     // empirical_spread_outcomes (one row per prediction per job pass;
-    // graded later by processGameSignals when scores arrive). Does
-    // NOT touch bet_signals, model output, or any production signal
-    // table. Non-fatal: a failure here logs a warning and continues.
+    // graded later by processGameSignals when scores arrive). Always
+    // writes capture_track='gametime' — the morning track is handled
+    // by runMorningCaptureJob() further down. Does NOT touch
+    // bet_signals, model output, or any production signal table.
+    // Non-fatal: a failure here logs a warning and continues.
     try {
       const empOut = empiricalSpreadEdge.generateEmpiricalSpreadSignals(db, dateStr);
       const empSignals = empOut.signals || [];
       if (!empSignals.length) {
         console.log('[empirical-spreads] no games with spread coverage for ' + dateStr);
       } else {
-        // Per-pass timestamp. Stored once and reused for every row
-        // emitted in this pass so the (game_date, game_id, generated_at)
-        // PK groups all of one pass's rows together. Re-running the
-        // odds-job a second later creates a fresh generated_at — both
-        // rows persist for hindsight.
+        // Per-pass timestamp. Stored once so all rows in this pass
+        // share the same generated_at and group cleanly in the PK.
         const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
-        let written = 0;
-        // Top-edge denormalization for the signals row: ignore
-        // low_sample predictions so deep-tail noise doesn't anchor
-        // the signal's top_edge_* columns. Falls back to the unfiltered
-        // top if every prediction is flagged.
-        function pickTopForSignal(preds) {
-          if (!preds || !preds.length) return null;
-          const eligible = preds.filter(p => !p.low_sample);
-          return (eligible.length ? eligible : preds)[0];
-        }
-        const writeTx = db.transaction((sigs) => {
-          for (const sig of sigs) {
-            const top = pickTopForSignal(sig.predictions);
-            q.upsertEmpiricalSpreadSignal.run(
-              sig.game_date, sig.game_id, generatedAt,
-              sig.model_total, sig.home_win_prob,
-              sig.cell_label, sig.cell_sample_size,
-              JSON.stringify(sig.predictions),
-              top ? top.spread_team : null,
-              top ? top.spread_line : null,
-              // top_edge_yes_ask_ml: prior schema column. For lay legs
-              // this is the side's price; for take legs it's the
-              // row's yes_ask (the lay-side price). Engine already
-              // populates kalshi_yes_ask_ml uniformly for both legs
-              // to preserve back-compat with this column's meaning.
-              top ? top.kalshi_yes_ask_ml : null,
-              top ? top.edge_pp : null,
-            );
-            for (const p of sig.predictions) {
-              // yes_ask_ml is NOT NULL on the outcomes table — skip
-              // the grading-target write if this side has no usable
-              // price. (Engine: lay's price_ml is the row yes_ask_ml,
-              // take's price_ml is the row no_ask_ml.)
-              if (p.price_ml == null) continue;
-              q.upsertEmpiricalSpreadOutcome.run(
-                sig.game_date, sig.game_id, p.spread_team, p.spread_line,
-                p.side, p.pair_id,
-                // Column kept as yes_ask_ml for back-compat, but
-                // semantically holds THIS SIDE's price-at-signal-time.
-                // Grading reads it back as the stake price — never
-                // re-derives from current spread tables.
-                Number(p.price_ml),
-                p.edge_pp, sig.cell_sample_size, generatedAt,
-                null, null, null, null,    // actual_margin / outcome / pnl / graded_at
-              );
-            }
-            written++;
-          }
-        });
-        writeTx(empSignals);
-        console.log('[empirical-spreads] generated ' + written
+        const persisted = empiricalSpreadEdge.persistEmpiricalSpreadSignals(
+          db, q, empSignals, 'gametime', generatedAt
+        );
+        console.log('[empirical-spreads] gametime: ' + persisted.written
           + ' signal(s) at ' + generatedAt
           + ' (cell sample base: ' + empOut.cellIndex.totalGraded + ' graded games)');
       }
@@ -3102,6 +3079,86 @@ async function runOddsJob(dateStr) {
     console.error('[odds-job]', err.message);
     q.logCron.run('odds', dateStr, 'error', err.message, 0);
     return { success: false, error: err.message };
+  }
+}
+
+// Morning empirical-spread capture for D+1.
+//
+// Sequence for a target date D+1 (= the slate being captured):
+//   1. ensure the morning_capture_state lock-window row exists
+//      (records opened_at; INSERT OR IGNORE so re-invocations don't
+//      shift the window).
+//   2. runLineupJob(D+1) -> runWeatherJob(D+1) -> runOddsJob(D+1).
+//      This sequence mirrors the 8PM tomorrow-slate prefetch and
+//      is what makes the morning capture FRESH (against current
+//      projected lineups + current odds) rather than against the
+//      stale 11pm prior-evening snapshot. runOddsJob also writes
+//      capture_track='gametime' as a side effect (its existing
+//      block); that's harmless — gametime is supposed to update
+//      every refresh, and we want the morning lock to capture the
+//      EXACT same prices runOddsJob just observed.
+//   3. generateMorningCapture — engine returns only games NOT
+//      already morning-locked; persists them with
+//      capture_track='morning'. First-eligible wins; subsequent
+//      calls leave already-locked games untouched.
+//
+// Non-fatal at each step. Returns a status object so the manual
+// endpoint can surface what happened.
+async function runMorningCaptureJob(dateStr) {
+  if (!dateStr) dateStr = tomorrowStr();
+  const summary = {
+    success: false,
+    date: dateStr,
+    opened_at: null,
+    refresh: { lineups: null, weather: null, odds: null },
+    morning: { written: 0, outcomeRows: 0, skipped: 0 },
+  };
+  try {
+    // (1) Lock-window state. Set opened_at to the current
+    // ISO-second timestamp. INSERT OR IGNORE so a second invocation
+    // on the same date leaves the original opened_at intact.
+    const openedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    q.upsertMorningCaptureState.run(dateStr, openedAt);
+    const state = q.getMorningCaptureState.get(dateStr);
+    summary.opened_at = state ? state.opened_at : openedAt;
+
+    // (2) Sequential refresh chain. Each step is independently
+    // try/caught — a Kalshi hiccup must not stop the lineup pull
+    // from running, etc.
+    try {
+      const r = await runLineupJob(dateStr);
+      summary.refresh.lineups = r && r.gamesUpdated != null ? r.gamesUpdated : (r || null);
+    } catch (e) { console.error('[morning-capture] lineups failed:', e && e.message); }
+    try {
+      const r = await runWeatherJob(dateStr);
+      summary.refresh.weather = r && r.updated != null ? r.updated : (r || null);
+    } catch (e) { console.error('[morning-capture] weather failed:', e && e.message); }
+    try {
+      const r = await runOddsJob(dateStr);
+      summary.refresh.odds = r && r.updated != null ? r.updated : (r || null);
+    } catch (e) { console.error('[morning-capture] odds failed:', e && e.message); }
+
+    // (3) Morning capture proper. Engine drops games already
+    // locked; what remains lands with capture_track='morning' and
+    // the per-pass generatedAt timestamp.
+    const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const result = empiricalSpreadEdge.generateMorningCapture(db, q, dateStr, generatedAt);
+    summary.morning.written     = result.persisted.written;
+    summary.morning.outcomeRows = result.persisted.outcomeRows;
+    summary.morning.skipped     = result.skipped.length;
+    console.log('[morning-capture] ' + dateStr + ': ' + summary.morning.written
+      + ' newly-locked game(s), ' + summary.morning.skipped + ' already-locked, '
+      + summary.morning.outcomeRows + ' outcome rows at ' + generatedAt);
+    q.logCron.run('morning-capture', dateStr, 'success',
+      summary.morning.written + ' locked, ' + summary.morning.skipped + ' skipped',
+      summary.morning.written);
+    summary.success = true;
+    return summary;
+  } catch (err) {
+    console.error('[morning-capture]', err.message);
+    try { q.logCron.run('morning-capture', dateStr, 'error', err.message, 0); } catch (_) {}
+    summary.error = err.message;
+    return summary;
   }
 }
 
@@ -3970,4 +4027,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs };
