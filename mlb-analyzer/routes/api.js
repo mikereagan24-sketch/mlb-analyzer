@@ -48,7 +48,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob } = require('../services/jobs');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -1344,6 +1344,22 @@ router.post('/jobs/odds', async (req, res) => {
   const { date } = req.body;
   const result = await runOddsJob(date || null);
   res.json(result);
+});
+
+// Morning empirical-spread capture (feat/empirical-spread-projected-track).
+// Manual trigger for the 7:30am PT chain. The user bets D+1 games 7-10am PT,
+// game-by-game as lines firm; pressing this in between fresh-odds refreshes
+// catches games that just became eligible (total now posted). First-eligible
+// lock semantics live inside runMorningCaptureJob — re-invoking on the same
+// date never overwrites already-locked rows.
+router.post('/jobs/morning-capture', async (req, res) => {
+  const { date } = req.body;
+  try {
+    const result = await runMorningCaptureJob(date || null);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ----------------------------------------------------------------------

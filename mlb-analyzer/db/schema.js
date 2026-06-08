@@ -435,6 +435,13 @@ db.exec(`
     game_date TEXT NOT NULL,
     game_id TEXT NOT NULL,
     generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- 'gametime' = same-day refresh / odds-job pass (default — the
+    -- current track that ships every runOddsJob). 'morning' = the
+    -- D+1 first-eligible projected-lineup capture written by the
+    -- 7:30am cron / POST /api/jobs/morning-capture. The delta
+    -- between the two tracks per (game_date, game_id) is the
+    -- user's realized CLV.
+    capture_track TEXT NOT NULL DEFAULT 'gametime',
     model_total REAL,
     model_no_vig_home_prob REAL,
     cell_label TEXT,
@@ -444,7 +451,7 @@ db.exec(`
     top_edge_line REAL,
     top_edge_yes_ask_ml INTEGER,
     top_edge_pp REAL,
-    PRIMARY KEY (game_date, game_id, generated_at)
+    PRIMARY KEY (game_date, game_id, capture_track, generated_at)
   );
   CREATE INDEX IF NOT EXISTS idx_emp_spread_date ON empirical_spread_signals (game_date);
   CREATE INDEX IF NOT EXISTS idx_emp_spread_edge ON empirical_spread_signals (top_edge_pp DESC);
@@ -467,7 +474,13 @@ db.exec(`
     -- side grades independently and the price-freeze is preserved
     -- per side.
     side TEXT NOT NULL DEFAULT 'lay',
-    -- Stable across runs: game_id|line|sortedTeams. Same value on
+    -- See empirical_spread_signals.capture_track. Morning rows are
+    -- the first-eligible D+1 lock; gametime rows are the existing
+    -- live odds-job track. Both grade against the same final
+    -- margin but each row carries its OWN frozen price, so the
+    -- ROI delta per game = morning_pnl − gametime_pnl.
+    capture_track TEXT NOT NULL DEFAULT 'gametime',
+    -- Stable across runs: game_id|line|spread_team. Same value on
     -- both legs of a market so downstream can group them.
     pair_id TEXT,
     -- yes_ask_ml = THIS SIDE's price (lay -> Kalshi yes_ask;
@@ -482,13 +495,23 @@ db.exec(`
     outcome TEXT,
     pnl_per_100 REAL,
     graded_at TEXT,
-    PRIMARY KEY (game_date, game_id, spread_team, spread_line, side, generated_at)
+    PRIMARY KEY (game_date, game_id, spread_team, spread_line, side, capture_track, generated_at)
   );
   CREATE INDEX IF NOT EXISTS idx_emp_outcome_date ON empirical_spread_outcomes (game_date);
   CREATE INDEX IF NOT EXISTS idx_emp_outcome_ungraded ON empirical_spread_outcomes (game_date) WHERE outcome IS NULL;
   -- idx_emp_outcome_pair lives in the ALTER block below — on an
   -- existing deploy the table doesn't have pair_id yet at this
   -- point, so creating the index here would fail.
+  -- Morning-capture lock-window state. One row per D+1 date; opened_at
+  -- is the timestamp of the first morning-capture invocation that day.
+  -- Acts as a guard so the 11pm overnight prefetch can never write a
+  -- capture_track='morning' row — only the two morning entry points
+  -- (7:30am cron + POST /api/jobs/morning-capture) do, and they upsert
+  -- this state row before invoking the capture.
+  CREATE TABLE IF NOT EXISTS morning_capture_state (
+    game_date TEXT PRIMARY KEY,
+    opened_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -1107,6 +1130,110 @@ try {
 // uniformly on fresh deploys (table created with pair_id by the main
 // CREATE TABLE block) AND on upgraded deploys (table migrated above).
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_emp_outcome_pair ON empirical_spread_outcomes (pair_id)"); } catch(e) {}
+
+// empirical_spread_signals + empirical_spread_outcomes —
+// feat/empirical-spread-projected-track upgrade. Adds capture_track
+// to both tables and extends each PK to include it, so a 'morning'
+// and 'gametime' row for the same game/line/side coexist without
+// collision. Existing rows default to 'gametime'.
+//
+// Same rename → recreate → copy pattern as the side/pair_id
+// migration above (SQLite can't ALTER a PK). Fresh deploys skip
+// both blocks since the CREATE TABLE statements at the top of the
+// file already include capture_track.
+try {
+  const sigCols = db.prepare("PRAGMA table_info(empirical_spread_signals)").all();
+  const sigHas = sigCols.some(c => c.name === 'capture_track');
+  if (sigCols.length && !sigHas) {
+    db.exec(`
+      ALTER TABLE empirical_spread_signals RENAME TO empirical_spread_signals_old;
+      CREATE TABLE empirical_spread_signals (
+        game_date TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        capture_track TEXT NOT NULL DEFAULT 'gametime',
+        model_total REAL,
+        model_no_vig_home_prob REAL,
+        cell_label TEXT,
+        cell_sample_size INTEGER,
+        predictions_json TEXT,
+        top_edge_team TEXT,
+        top_edge_line REAL,
+        top_edge_yes_ask_ml INTEGER,
+        top_edge_pp REAL,
+        PRIMARY KEY (game_date, game_id, capture_track, generated_at)
+      );
+      INSERT INTO empirical_spread_signals
+        (game_date, game_id, generated_at, capture_track,
+         model_total, model_no_vig_home_prob, cell_label, cell_sample_size,
+         predictions_json, top_edge_team, top_edge_line,
+         top_edge_yes_ask_ml, top_edge_pp)
+      SELECT
+         game_date, game_id, generated_at, 'gametime',
+         model_total, model_no_vig_home_prob, cell_label, cell_sample_size,
+         predictions_json, top_edge_team, top_edge_line,
+         top_edge_yes_ask_ml, top_edge_pp
+        FROM empirical_spread_signals_old;
+      DROP TABLE empirical_spread_signals_old;
+      CREATE INDEX IF NOT EXISTS idx_emp_spread_date ON empirical_spread_signals (game_date);
+      CREATE INDEX IF NOT EXISTS idx_emp_spread_edge ON empirical_spread_signals (top_edge_pp DESC);
+    `);
+    console.log('[schema] migrated empirical_spread_signals to capture_track PK shape');
+  }
+} catch(e) { console.error('[schema] empirical_spread_signals capture_track migration failed:', e.message); }
+
+try {
+  const outCols = db.prepare("PRAGMA table_info(empirical_spread_outcomes)").all();
+  const outHas = outCols.some(c => c.name === 'capture_track');
+  if (outCols.length && !outHas) {
+    db.exec(`
+      ALTER TABLE empirical_spread_outcomes RENAME TO empirical_spread_outcomes_old2;
+      CREATE TABLE empirical_spread_outcomes (
+        game_date TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        spread_team TEXT NOT NULL,
+        spread_line REAL NOT NULL,
+        side TEXT NOT NULL DEFAULT 'lay',
+        capture_track TEXT NOT NULL DEFAULT 'gametime',
+        pair_id TEXT,
+        yes_ask_ml INTEGER NOT NULL,
+        edge_pp REAL NOT NULL,
+        cell_sample_size INTEGER NOT NULL,
+        generated_at TEXT NOT NULL,
+        actual_margin INTEGER,
+        outcome TEXT,
+        pnl_per_100 REAL,
+        graded_at TEXT,
+        PRIMARY KEY (game_date, game_id, spread_team, spread_line, side, capture_track, generated_at)
+      );
+      INSERT INTO empirical_spread_outcomes
+        (game_date, game_id, spread_team, spread_line, side, capture_track,
+         pair_id, yes_ask_ml, edge_pp, cell_sample_size, generated_at,
+         actual_margin, outcome, pnl_per_100, graded_at)
+      SELECT
+         game_date, game_id, spread_team, spread_line, side, 'gametime',
+         pair_id, yes_ask_ml, edge_pp, cell_sample_size, generated_at,
+         actual_margin, outcome, pnl_per_100, graded_at
+        FROM empirical_spread_outcomes_old2;
+      DROP TABLE empirical_spread_outcomes_old2;
+      CREATE INDEX IF NOT EXISTS idx_emp_outcome_date     ON empirical_spread_outcomes (game_date);
+      CREATE INDEX IF NOT EXISTS idx_emp_outcome_ungraded ON empirical_spread_outcomes (game_date) WHERE outcome IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_emp_outcome_pair     ON empirical_spread_outcomes (pair_id);
+    `);
+    console.log('[schema] migrated empirical_spread_outcomes to capture_track PK shape');
+  }
+} catch(e) { console.error('[schema] empirical_spread_outcomes capture_track migration failed:', e.message); }
+
+// morning_capture_state. Idempotent for fresh deploys via the main
+// CREATE TABLE block; an explicit ensure here is harmless and keeps
+// the table guaranteed-present even if an old migration ever truncated
+// the main block on partial upgrade.
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS morning_capture_state (
+    game_date TEXT PRIMARY KEY,
+    opened_at TEXT NOT NULL
+  )`);
+} catch(e) {}
 
 // One-shot CLV backfill: every CLV value written before
 // fix/clv-formula-correct used the buggy American-cents formula. Some are
@@ -1748,26 +1875,28 @@ q.snapshotKalshiSpreads = (snapshotDate, rows) => {
 // timestamp, but the INSERT OR REPLACE here keeps re-runs safe.
 q.upsertEmpiricalSpreadSignal = db.prepare(
     "INSERT OR REPLACE INTO empirical_spread_signals "
-  + "(game_date, game_id, generated_at, model_total, model_no_vig_home_prob, "
+  + "(game_date, game_id, generated_at, capture_track, "
+  + " model_total, model_no_vig_home_prob, "
   + " cell_label, cell_sample_size, predictions_json, top_edge_team, "
   + " top_edge_line, top_edge_yes_ask_ml, top_edge_pp) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 q.upsertEmpiricalSpreadOutcome = db.prepare(
     "INSERT OR REPLACE INTO empirical_spread_outcomes "
-  + "(game_date, game_id, spread_team, spread_line, side, pair_id, "
+  + "(game_date, game_id, spread_team, spread_line, side, capture_track, pair_id, "
   + " yes_ask_ml, edge_pp, cell_sample_size, generated_at, "
   + " actual_margin, outcome, pnl_per_100, graded_at) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 // Pending-grade pull. Only rows whose game is final (away/home_score
 // non-null) AND whose outcome is still NULL come back. Joins game_log
-// so the caller has the margin in hand without a second lookup. Now
-// returns side so the grading caller can apply the lay-vs-take win
-// formula (see services/jobs.js processGameSignals).
+// so the caller has the margin in hand without a second lookup. Returns
+// side AND capture_track so the grading caller can key the UPDATE to
+// the exact row — a morning lock and a gametime snapshot for the same
+// spread coexist and grade independently against their own frozen prices.
 q.getUngradedEmpiricalSpreads = db.prepare(
     "SELECT e.game_date, e.game_id, e.spread_team, e.spread_line, "
-  + "       e.side, e.yes_ask_ml, e.generated_at, "
+  + "       e.side, e.capture_track, e.yes_ask_ml, e.generated_at, "
   + "       g.away_team, g.home_team, g.away_score, g.home_score "
   + "FROM empirical_spread_outcomes e "
   + "JOIN game_log g ON g.game_date = e.game_date AND g.game_id = e.game_id "
@@ -1779,18 +1908,38 @@ q.updateEmpiricalSpreadOutcome = db.prepare(
     "UPDATE empirical_spread_outcomes "
   + "SET actual_margin=?, outcome=?, pnl_per_100=?, graded_at=datetime('now') "
   + "WHERE game_date=? AND game_id=? AND spread_team=? AND spread_line=? "
-  + "  AND side=? AND generated_at=?"
+  + "  AND side=? AND capture_track=? AND generated_at=?"
 );
-// Latest signal per game for a date — backs the slate API. We use a
-// subquery on MAX(generated_at) so re-running the odds-job naturally
-// supersedes the previous row without delete-then-insert churn.
+// Latest signal per game for a date — backs the slate API. Filtered to
+// capture_track='gametime' so the slate keeps showing the CURRENT live
+// line. Morning rows are for ROI tracking only; the slate UI must not
+// display them as the "live" recommendation since by mid-afternoon
+// the morning prices are typically stale.
 q.getLatestEmpiricalSpreadSignalsByDate = db.prepare(
     "SELECT s.* FROM empirical_spread_signals s "
-  + "WHERE s.game_date = ? AND s.generated_at = ("
+  + "WHERE s.game_date = ? AND s.capture_track = 'gametime' "
+  + "  AND s.generated_at = ("
   + "  SELECT MAX(s2.generated_at) FROM empirical_spread_signals s2 "
-  + "  WHERE s2.game_date = s.game_date AND s2.game_id = s.game_id"
+  + "  WHERE s2.game_date = s.game_date AND s2.game_id = s.game_id "
+  + "    AND s2.capture_track = 'gametime'"
   + ") "
   + "ORDER BY s.game_id"
+);
+// Morning-capture lock helpers. existsMorningSignalsForGame answers
+// "has the first-eligible lock already fired for this (date, game_id)?"
+// — true means the morning capture path MUST skip this game.
+// upsertMorningCaptureState is the lock-window marker; it's
+// INSERT-OR-IGNORE so multiple morning-cron / endpoint calls in a
+// single day leave opened_at unchanged.
+q.existsMorningSignalForGame = db.prepare(
+    "SELECT 1 FROM empirical_spread_signals "
+  + "WHERE game_date=? AND game_id=? AND capture_track='morning' LIMIT 1"
+);
+q.upsertMorningCaptureState = db.prepare(
+    "INSERT OR IGNORE INTO morning_capture_state (game_date, opened_at) VALUES (?, ?)"
+);
+q.getMorningCaptureState = db.prepare(
+    "SELECT * FROM morning_capture_state WHERE game_date=?"
 );
 
 

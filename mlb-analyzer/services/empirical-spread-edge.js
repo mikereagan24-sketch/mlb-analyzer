@@ -374,6 +374,119 @@ function generateEmpiricalSpreadSignals(db, date) {
   return { signals: out, cellIndex };
 }
 
+// ------------------------------------------------------------ persistence
+// Shared write-out helper. Both the gametime track (runOddsJob's
+// existing block) and the morning track (the new 7:30am cron + manual
+// endpoint) use this to land signals + outcomes in their respective
+// tables — captureTrack is the only meaningful difference between them.
+// generatedAt is supplied by the caller so all rows in one pass share
+// the same timestamp.
+//
+// pickTopForSignal: the top_edge_* denormalized columns on
+// empirical_spread_signals should ignore low_sample predictions so
+// deep-tail noise doesn't anchor the per-game headline edge. Falls
+// back to the unfiltered top only if every prediction is flagged.
+function pickTopForSignal(preds) {
+  if (!preds || !preds.length) return null;
+  const eligible = preds.filter(p => !p.low_sample);
+  return (eligible.length ? eligible : preds)[0];
+}
+
+function persistEmpiricalSpreadSignals(db, q, signals, captureTrack, generatedAt) {
+  if (!signals || !signals.length) return { written: 0, outcomeRows: 0 };
+  let written = 0;
+  let outcomeRows = 0;
+  const writeTx = db.transaction((sigs) => {
+    for (const sig of sigs) {
+      const top = pickTopForSignal(sig.predictions);
+      q.upsertEmpiricalSpreadSignal.run(
+        sig.game_date, sig.game_id, generatedAt, captureTrack,
+        sig.model_total, sig.home_win_prob,
+        sig.cell_label, sig.cell_sample_size,
+        JSON.stringify(sig.predictions),
+        top ? top.spread_team : null,
+        top ? top.spread_line : null,
+        top ? top.kalshi_yes_ask_ml : null,
+        top ? top.edge_pp : null,
+      );
+      for (const p of sig.predictions) {
+        if (p.price_ml == null) continue;
+        q.upsertEmpiricalSpreadOutcome.run(
+          sig.game_date, sig.game_id, p.spread_team, p.spread_line,
+          p.side, captureTrack, p.pair_id,
+          Number(p.price_ml), p.edge_pp, sig.cell_sample_size, generatedAt,
+          null, null, null, null,
+        );
+        outcomeRows++;
+      }
+      written++;
+    }
+  });
+  writeTx(signals);
+  return { written, outcomeRows };
+}
+
+// ------------------------------------------------------------ morning capture
+// First-eligible lock for the 'morning' track. Wraps
+// generateEmpiricalSpreadSignals so the engine math + filters stay
+// identical to gametime, then drops any game that ALREADY has a
+// morning signal row for `date`. The first morning capture that
+// finds a game eligible writes the lock; every subsequent call
+// skips that game even if prices have moved.
+//
+// generatedAt is passed in so callers can stamp all rows from one
+// invocation with the same timestamp (matches the existing pattern
+// in runOddsJob's gametime block).
+//
+// State row: callers must upsertMorningCaptureState BEFORE calling
+// this function. The state row is the fence that prevents any
+// non-morning-entrypoint code path from writing a 'morning' row —
+// only the 7:30am cron and POST /api/jobs/morning-capture do that
+// upsert, so the morning track stays a true projected-lineup
+// capture and never accidentally absorbs an overnight 11pm prefetch.
+//
+// Returns { signals, cellIndex, skipped, persisted } where:
+//   signals    = the eligible signals NEWLY captured this run
+//                (same shape as generateEmpiricalSpreadSignals)
+//   skipped    = list of {game_id, reason} for games that the
+//                engine found eligible but the morning lock SKIPPED
+//                (reason='already_locked')
+//   persisted  = { written, outcomeRows } from
+//                persistEmpiricalSpreadSignals
+function generateMorningCapture(db, q, date, generatedAt) {
+  if (!date) throw new Error('generateMorningCapture: date required');
+  if (!q || typeof q.existsMorningSignalForGame !== 'object') {
+    throw new Error('generateMorningCapture: q.existsMorningSignalForGame missing — schema not migrated');
+  }
+  if (!generatedAt) {
+    generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  }
+
+  // Reuse the full eligibility + edge pipeline. Any game lacking a
+  // complete model line or spread coverage is already filtered out
+  // here, so a partial-data game (e.g. ML posted but no total yet)
+  // is naturally invisible and will only become eligible on a later
+  // call once the missing field lands.
+  const { signals: candidates, cellIndex } =
+    generateEmpiricalSpreadSignals(db, date);
+
+  const skipped = [];
+  const fresh = [];
+  for (const sig of candidates) {
+    const existing = q.existsMorningSignalForGame.get(sig.game_date, sig.game_id);
+    if (existing) {
+      // Lock has already fired for this game on this date. Drop
+      // it from the persist set — first morning row stands.
+      skipped.push({ game_id: sig.game_id, reason: 'already_locked' });
+      continue;
+    }
+    fresh.push(sig);
+  }
+
+  const persisted = persistEmpiricalSpreadSignals(db, q, fresh, 'morning', generatedAt);
+  return { signals: fresh, cellIndex, skipped, persisted };
+}
+
 module.exports = {
   // Constants — exposed so callers (CLI, jobs) read the same source
   // of truth without duplicating the bucket boundaries.
@@ -392,4 +505,7 @@ module.exports = {
   buildCellIndex,
   computeGameEdges,
   generateEmpiricalSpreadSignals,
+  // Persistence + morning capture
+  persistEmpiricalSpreadSignals,
+  generateMorningCapture,
 };
