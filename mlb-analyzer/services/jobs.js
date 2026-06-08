@@ -30,6 +30,23 @@ function tomorrowStr() {
   d.setDate(d.getDate() + 1);
   return d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 }
+// PT-anchored "YYYY-MM-DD HH:MM:SS" timestamp. Used by the empirical-
+// spread / morning-capture writers so generated_at / opened_at /
+// graded_at columns match the rest of the project's PT convention
+// (snapshot tables, todayStr/tomorrowStr above) rather than the UTC
+// that SQLite's datetime('now') and JS toISOString() default to.
+//
+// 'sv-SE' is the trick: that locale formats as YYYY-MM-DD HH:MM:SS
+// natively, identical on-disk shape to what we wrote before — only the
+// wall-clock anchor changes.
+//
+// [tz cutover: 2026-06-08] — Rows written before this fix are UTC.
+// Rows written after are PT. The two coexist; PK-component
+// generated_at values are NOT rewritten. The eventual ROI / window
+// readout must apply the offset for rows with game_date <= cutover.
+function nowPtIso() {
+  return new Date().toLocaleString('sv-SE', { timeZone: 'America/Los_Angeles' });
+}
 
 const { getDefaults: _settingsDefaults } = require('./settings-schema');
 
@@ -720,6 +737,10 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         + "FROM empirical_spread_outcomes "
         + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
       ).all(gameRow.game_date, gameRow.game_id);
+      // PT-anchored graded_at — used for every UPDATE in this pass.
+      // Bind param replaces the prior datetime('now') (UTC).
+      // [tz cutover: 2026-06-08]
+      const gradedAt = nowPtIso();
       for (const e of empUngraded) {
         const side = e.side || 'lay';   // null-safe for any pre-migration rows
         const track = e.capture_track || 'gametime';
@@ -736,7 +757,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         const outcome = win ? 'win' : 'loss';
         const pnl = win ? empiricalSpreadEdge.americanProfit(e.yes_ask_ml) : -100;
         q.updateEmpiricalSpreadOutcome.run(
-          margin, outcome, pnl,
+          margin, outcome, pnl, gradedAt,
           e.game_date, e.game_id, e.spread_team, e.spread_line,
           side, track, e.generated_at
         );
@@ -2920,7 +2941,9 @@ async function runOddsJob(dateStr) {
       } else {
         // Per-pass timestamp. Stored once so all rows in this pass
         // share the same generated_at and group cleanly in the PK.
-        const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        // PT-anchored via nowPtIso() — matches the snapshot tables'
+        // PT convention. [tz cutover: 2026-06-08]
+        const generatedAt = nowPtIso();
         const persisted = empiricalSpreadEdge.persistEmpiricalSpreadSignals(
           db, q, empSignals, 'gametime', generatedAt
         );
@@ -3115,9 +3138,10 @@ async function runMorningCaptureJob(dateStr) {
   };
   try {
     // (1) Lock-window state. Set opened_at to the current
-    // ISO-second timestamp. INSERT OR IGNORE so a second invocation
+    // PT-anchored timestamp. INSERT OR IGNORE so a second invocation
     // on the same date leaves the original opened_at intact.
-    const openedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    // [tz cutover: 2026-06-08] — opened_at was UTC before this fix.
+    const openedAt = nowPtIso();
     q.upsertMorningCaptureState.run(dateStr, openedAt);
     const state = q.getMorningCaptureState.get(dateStr);
     summary.opened_at = state ? state.opened_at : openedAt;
@@ -3140,8 +3164,9 @@ async function runMorningCaptureJob(dateStr) {
 
     // (3) Morning capture proper. Engine drops games already
     // locked; what remains lands with capture_track='morning' and
-    // the per-pass generatedAt timestamp.
-    const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    // the per-pass generatedAt timestamp. PT-anchored.
+    // [tz cutover: 2026-06-08]
+    const generatedAt = nowPtIso();
     const result = empiricalSpreadEdge.generateMorningCapture(db, q, dateStr, generatedAt);
     summary.morning.written     = result.persisted.written;
     summary.morning.outcomeRows = result.persisted.outcomeRows;

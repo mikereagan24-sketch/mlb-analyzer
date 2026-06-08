@@ -431,6 +431,14 @@ db.exec(`
   -- {spread_team, spread_line, kalshi_yes_ask_ml, implied_pct,
   --  empirical_pct, edge_pp}. top_edge_* are denormalized for cheap
   -- ORDER BY / threshold queries on the slate page.
+  --
+  -- [tz cutover: 2026-06-08]
+  -- generated_at was UTC before fix/morning-capture-tz-anchor and is
+  -- PT after. Existing UTC rows are NOT rewritten (PK component).
+  -- The DEFAULT (datetime('now')) below is UTC — kept as a fallback
+  -- only; the writer always supplies an explicit PT value via
+  -- services/jobs.js nowPtIso(). The eventual ROI window readout
+  -- must interpret rows with game_date <= 2026-06-08 as UTC.
   CREATE TABLE IF NOT EXISTS empirical_spread_signals (
     game_date TEXT NOT NULL,
     game_id TEXT NOT NULL,
@@ -462,6 +470,14 @@ db.exec(`
   -- a $100 stake at the original yes_ask_ml: +americanProfit on win,
   -- -100 on loss, 0 on push. This is the source of truth for the
   -- empirical-signal hindsight ROI.
+  --
+  -- [tz cutover: 2026-06-08]
+  -- generated_at and graded_at were UTC before fix/morning-capture-
+  -- tz-anchor and are PT after. graded_at switched from
+  -- datetime('now') (UTC) to a bind parameter (PT). Existing UTC
+  -- generated_at values are NOT rewritten (PK component); existing
+  -- UTC graded_at values are left as-is. ROI window readout must
+  -- interpret rows with game_date <= 2026-06-08 as UTC.
   CREATE TABLE IF NOT EXISTS empirical_spread_outcomes (
     game_date TEXT NOT NULL,
     game_id TEXT NOT NULL,
@@ -508,6 +524,12 @@ db.exec(`
   -- capture_track='morning' row — only the two morning entry points
   -- (7:30am cron + POST /api/jobs/morning-capture) do, and they upsert
   -- this state row before invoking the capture.
+  --
+  -- [tz cutover: 2026-06-08]
+  -- opened_at was UTC before fix/morning-capture-tz-anchor and is PT
+  -- after. The single 2026-06-08 row was DELETE'd as part of that
+  -- fix (so the next morning-capture invocation re-sets it PT-clean
+  -- via INSERT OR IGNORE).
   CREATE TABLE IF NOT EXISTS morning_capture_state (
     game_date TEXT PRIMARY KEY,
     opened_at TEXT NOT NULL
@@ -1235,6 +1257,61 @@ try {
   )`);
 } catch(e) {}
 
+// One-shot TZ-cutover cleanup for fix/morning-capture-tz-anchor.
+//
+// Before this fix, morning_capture_state.opened_at and
+// empirical_spread_signals/_outcomes.generated_at were stored as UTC
+// via new Date().toISOString().slice(...) instead of PT. After the
+// fix, all new writes are PT-anchored via services/jobs.js nowPtIso().
+//
+// Two pieces of cleanup must run exactly once after this fix lands:
+//
+//   1. DELETE morning_capture_state for 2026-06-08. The single row
+//      was UTC-stamped (~21:02 instead of 14:02 PT). Removing it lets
+//      the next morning-capture invocation re-set opened_at PT-clean
+//      via its existing INSERT OR IGNORE.
+//
+//   2. DELETE today's (2026-06-08) capture_track='gametime' rows from
+//      both empirical tables. Today's UTC-stamped gametime rows for
+//      game_date='2026-06-08' have generated_at strings like
+//      "2026-06-08 18:00:XX" (= 11AM PT). The slate's
+//      MAX(generated_at) comparator would let those UTC strings OUT-
+//      SORT post-fix PT writes at 3PM/5PM PT ("2026-06-08 15:00:XX"
+//      and "2026-06-08 17:00:XX"), so the slate would freeze on the
+//      11AM PT capture for the rest of today's slate window. Dropping
+//      them lets the 3PM/5PM PT-stamped gametime rows surface cleanly.
+//
+// Morning rows for 2026-06-09 (the locked first-eligible from the
+// 14:02 PT manual trigger today) are PRESERVED — they have correct
+// prices, the lock semantics are unaffected by the timestamp format
+// (existsMorningSignalForGame ignores generated_at), and rewriting
+// PK-component generated_at values is the precise risk we're avoiding.
+//
+// Idempotent via the app_settings flag. The condition checks for the
+// table existing first so a fresh deploy that's never seen the old
+// schema doesn't trip on the morning_capture_state lookup.
+try {
+  const flag = db.prepare("SELECT value FROM app_settings WHERE key='tz_cutover_2026_06_08'").get();
+  if (!flag) {
+    let deletedState = 0, deletedSig = 0, deletedOut = 0;
+    try {
+      deletedState = db.prepare("DELETE FROM morning_capture_state WHERE game_date='2026-06-08'").run().changes;
+    } catch(e) { console.warn('[migration] tz cutover state DELETE skipped:', e.message); }
+    try {
+      deletedSig = db.prepare("DELETE FROM empirical_spread_signals WHERE game_date='2026-06-08' AND capture_track='gametime'").run().changes;
+    } catch(e) { console.warn('[migration] tz cutover signals DELETE skipped:', e.message); }
+    try {
+      deletedOut = db.prepare("DELETE FROM empirical_spread_outcomes WHERE game_date='2026-06-08' AND capture_track='gametime'").run().changes;
+    } catch(e) { console.warn('[migration] tz cutover outcomes DELETE skipped:', e.message); }
+    db.prepare("INSERT INTO app_settings (key, value) VALUES ('tz_cutover_2026_06_08', datetime('now'))").run();
+    console.log('[migration] tz cutover cleanup: morning_state=' + deletedState
+      + ', gametime sigs=' + deletedSig + ', gametime outcomes=' + deletedOut
+      + ' (game_date=2026-06-08); morning rows preserved');
+  }
+} catch (e) {
+  console.warn('[migration] tz cutover cleanup failed (non-fatal): ' + e.message);
+}
+
 // One-shot CLV backfill: every CLV value written before
 // fix/clv-formula-correct used the buggy American-cents formula. Some are
 // double-wrong (cross-sign cases where lock and close had opposite signs),
@@ -1904,9 +1981,14 @@ q.getUngradedEmpiricalSpreads = db.prepare(
   + "  AND g.away_score IS NOT NULL AND g.home_score IS NOT NULL "
   + "ORDER BY e.game_date, e.game_id"
 );
+// graded_at takes a bind parameter (was datetime('now') = UTC) so the
+// caller can supply a PT-anchored timestamp via services/jobs.js
+// nowPtIso(). Matches the same PT convention used by generated_at
+// going forward. [tz cutover: 2026-06-08] — rows graded before this
+// fix carry UTC graded_at; rows graded after carry PT.
 q.updateEmpiricalSpreadOutcome = db.prepare(
     "UPDATE empirical_spread_outcomes "
-  + "SET actual_margin=?, outcome=?, pnl_per_100=?, graded_at=datetime('now') "
+  + "SET actual_margin=?, outcome=?, pnl_per_100=?, graded_at=? "
   + "WHERE game_date=? AND game_id=? AND spread_team=? AND spread_line=? "
   + "  AND side=? AND capture_track=? AND generated_at=?"
 );
