@@ -459,7 +459,13 @@ function generateMorningCapture(db, q, date, generatedAt) {
     throw new Error('generateMorningCapture: q.existsMorningSignalForGame missing — schema not migrated');
   }
   if (!generatedAt) {
-    generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    // PT-anchored fallback — matches services/jobs.js nowPtIso() so
+    // the engine's own fallback doesn't slip a UTC stamp in when
+    // callers omit generatedAt. 'sv-SE' formats as "YYYY-MM-DD
+    // HH:MM:SS" natively. Duplicated rather than importing from
+    // jobs.js to avoid a service-layer circular dep.
+    // [tz cutover: 2026-06-08] — see schema.js for the cutover boundary.
+    generatedAt = new Date().toLocaleString('sv-SE', { timeZone: 'America/Los_Angeles' });
   }
 
   // Reuse the full eligibility + edge pipeline. Any game lacking a
