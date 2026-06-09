@@ -28,7 +28,54 @@ const {
 // perBatterEW — in production they're constrained near 1 via the
 // settings-schema invariants, but the sweep deliberately allows
 // out-of-schema values to probe the model's behavior at extremes).
-const SWEEP_PARAMS = ['W_PROJ_W_ACT', 'SP_BULLPEN_MIX', 'BAT_HAND_SP', 'BAT_HAND_RELIEF'];
+//
+// RUN_MULT and TOT_SLOPE were added in feat/totals-sweep. They are
+// the two knobs most directly governing totals-pick edge:
+//   - RUN_MULT (default 48) sets the magnitude of estTot via
+//     (team_woba - WOBA_BASELINE) * RUN_MULT * park_factor. Scaling
+//     all totals up/down by the same factor moves where the model
+//     sits relative to market lines.
+//   - TOT_SLOPE (default 0.08) converts (estTot - market_total) into
+//     over probability via 0.5 + runDiff * TOT_SLOPE. It's the
+//     edge-to-confidence dial. Orthogonal to RUN_MULT: RUN_MULT
+//     changes WHERE estTot lands; TOT_SLOPE changes how aggressively
+//     a given gap above/below market produces over/under signals.
+//
+// DELIBERATELY EXCLUDED, with reasons:
+//   - WOBA_BASELINE: near-collinear with RUN_MULT — both shift overall
+//     run level. Sweeping both lets the engine trade them off arbitrarily
+//     on a thin sample (the ~225-game snapshot corpus). Hold fixed and
+//     sweep only RUN_MULT.
+//   - WIND_SCALE: isolatable per-game by wind-direction bucket. Belongs
+//     in the residual-diagnostic regression (a different tool), NOT this
+//     ROI sweep. Adding it here just adds a noise dimension that the
+//     thin sample can't constrain.
+//   - HFA_BOOST / PYTH_EXP / FAV_ADJ / DOG_ADJ: ML-only knobs, do not
+//     affect estTot. Out of scope for a totals sweep.
+//   - BAT_DFLT_* / PIT_DFLT_* / UNKNOWN_PITCHER_WOBA / BULLPEN_AVG:
+//     fallback defaults; sweeping them would just trade noise for noise
+//     since they only fire on missing-data games.
+const SWEEP_PARAMS = [
+  'W_PROJ_W_ACT', 'SP_BULLPEN_MIX', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
+  'RUN_MULT', 'TOT_SLOPE',
+];
+
+// Per-parameter sweep ranges for univariate mode. The blend params
+// (W_PROJ_W_ACT, SP_BULLPEN_MIX, BAT_HAND_SP, BAT_HAND_RELIEF) use the
+// original 0.1..0.9 step-0.1 grid. RUN_MULT and TOT_SLOPE get
+// dedicated grids centered on their production defaults, with step
+// sizes that are large enough to be distinguishable in ROI given the
+// thin snapshot corpus but small enough that the optimum doesn't fall
+// in a gap.
+const BLEND_GRID    = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+const RUN_MULT_GRID = [40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60];
+const TOT_SLOPE_GRID = [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14];
+
+function gridFor(param) {
+  if (param === 'RUN_MULT')  return RUN_MULT_GRID;
+  if (param === 'TOT_SLOPE') return TOT_SLOPE_GRID;
+  return BLEND_GRID;
+}
 
 function applySweepOverrides(baseSettings, overrides) {
   const s = Object.assign({}, baseSettings);
@@ -42,6 +89,8 @@ function applySweepOverrides(baseSettings, overrides) {
   }
   if ('BAT_HAND_SP' in overrides) s.SP_WEIGHT     = overrides.BAT_HAND_SP;
   if ('BAT_HAND_RELIEF' in overrides) s.RELIEF_WEIGHT = overrides.BAT_HAND_RELIEF;
+  if ('RUN_MULT'  in overrides) s.RUN_MULT  = overrides.RUN_MULT;
+  if ('TOT_SLOPE' in overrides) s.TOT_SLOPE = overrides.TOT_SLOPE;
   return s;
 }
 
@@ -85,29 +134,38 @@ function rollUpRoi(byCategory) {
   return byCategory;
 }
 
+// Capture a sweep's "all params at base" reference point so consumer
+// reporting can show what each combo's effective full settings are.
+function baseEffectiveSettings(baseSettings) {
+  return {
+    W_PROJ_W_ACT:    Number(baseSettings.W_PROJ),
+    SP_BULLPEN_MIX:  Number(baseSettings.SP_PIT_WEIGHT),
+    BAT_HAND_SP:     Number(baseSettings.SP_WEIGHT),
+    BAT_HAND_RELIEF: Number(baseSettings.RELIEF_WEIGHT),
+    RUN_MULT:        Number(baseSettings.RUN_MULT  != null ? baseSettings.RUN_MULT  : 48),
+    TOT_SLOPE:       Number(baseSettings.TOT_SLOPE != null ? baseSettings.TOT_SLOPE : 0.08),
+  };
+}
+
 // Build the full settings combinations for a sweep mode.
-//   univariate: for each of the 4 params, sweep 0.1..0.9 step 0.1 with
-//               all other params at their production base.
-//   joint:      cartesian product of 5 settings per param across all
-//               four params (5^4 = 625).
+//   univariate: for each sweepable param, sweep its dedicated grid
+//               with all other params at production base. RUN_MULT
+//               and TOT_SLOPE each get their own 11-value grid; the
+//               4 blend params share the original 0.1..0.9 grid.
+//   joint:      cartesian product of 5 settings per param across the
+//               ORIGINAL FOUR blend params (5^4 = 625). RUN_MULT and
+//               TOT_SLOPE are EXCLUDED from joint mode by design —
+//               sweeping them simultaneously with the blend params on
+//               the thin snapshot corpus (~225 games) would overfit.
+//               Run them in univariate mode instead.
 function buildCombinations(mode, baseSettings) {
   const combos = [];
   if (mode === 'univariate') {
-    const settings = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
     for (const param of SWEEP_PARAMS) {
-      for (const v of settings) {
-        // Record full effective values for ALL 4 params, with the swept
-        // param at v and the others at their base — makes the response
-        // self-describing without needing the caller to reconstruct.
-        const o = {
-          W_PROJ_W_ACT:    Number(baseSettings.W_PROJ),
-          SP_BULLPEN_MIX:  Number(baseSettings.SP_PIT_WEIGHT),
-          BAT_HAND_SP:     Number(baseSettings.SP_WEIGHT),
-          BAT_HAND_RELIEF: Number(baseSettings.RELIEF_WEIGHT),
-        };
+      const grid = gridFor(param);
+      for (const v of grid) {
+        const o = baseEffectiveSettings(baseSettings);
         o[param] = v;
-        // The swept-only override is what we actually apply to settings —
-        // the others are reported but their base values flow through.
         combos.push({ sweptParam: param, settings: o, override: { [param]: v } });
       }
     }
@@ -117,8 +175,16 @@ function buildCombinations(mode, baseSettings) {
     for (const b of settings)
     for (const c of settings)
     for (const d of settings) {
-      const o = { W_PROJ_W_ACT: a, SP_BULLPEN_MIX: b, BAT_HAND_SP: c, BAT_HAND_RELIEF: d };
-      combos.push({ sweptParam: null, settings: o, override: o });
+      const o = baseEffectiveSettings(baseSettings);
+      o.W_PROJ_W_ACT    = a;
+      o.SP_BULLPEN_MIX  = b;
+      o.BAT_HAND_SP     = c;
+      o.BAT_HAND_RELIEF = d;
+      combos.push({
+        sweptParam: null,
+        settings: o,
+        override: { W_PROJ_W_ACT: a, SP_BULLPEN_MIX: b, BAT_HAND_SP: c, BAT_HAND_RELIEF: d },
+      });
     }
   } else {
     throw new Error('unknown sweep mode: ' + mode);
@@ -175,28 +241,119 @@ function safeJson(s) {
   try { return JSON.parse(s) || []; } catch (e) { return []; }
 }
 
+// Score ONE settings object against the supplied games. Returns a
+// fresh byCategory aggregate (favs/dogs/overs/unders). Pure read —
+// runModel doesn't mutate its inputs and getSignals/calcPnl are
+// stateless. Used by both the combo loop AND the baseline / top-K
+// re-score steps.
+function scoreGames(settings, games) {
+  const byCat = emptyByCategory();
+  for (const sg of games) {
+    const mr = runModel(sg.game, sg.wobaIdx, settings, 'opener_aware');
+    if (mr && mr._suppressed) continue;
+    const sigs = getSignals(sg.game, mr, settings);
+    for (const s of sigs) {
+      const r = calcPnl(s, sg.game.away_score, sg.game.home_score, sg.game.market_total);
+      if (r.outcome === 'pending') continue;
+      const cat = categoryFor(s);
+      const bucket = byCat[cat];
+      bucket.bets++;
+      if (r.outcome === 'win')  bucket.wins++;
+      if (r.outcome === 'loss') bucket.losses++;
+      if (r.outcome === 'push') bucket.pushes++;
+      const pnl = Number(r.pnl) || 0;
+      bucket.pnl += pnl;
+      if (r.outcome !== 'push') bucket.wagered += wageredFor(s);
+    }
+  }
+  rollUpRoi(byCat);
+  return byCat;
+}
+
+// Partition a date-sorted scoreableGames list into train (earlier
+// fraction) and test (later) by DATE — never by game count within a
+// date. A whole day's slate goes to one side or the other, so the
+// same model-day behavior cannot leak between train and test.
+// Returns { trainGames, testGames, splitDate } where splitDate is the
+// LATEST date assigned to train (test begins the next day).
+function splitTrainTest(scoreableGames, trainFraction) {
+  if (!scoreableGames.length) return { trainGames: [], testGames: [], splitDate: null };
+  // Build the date -> count map in chronological order.
+  const dateCounts = new Map();
+  for (const sg of scoreableGames) {
+    dateCounts.set(sg.snapshotDate, (dateCounts.get(sg.snapshotDate) || 0) + 1);
+  }
+  const sortedDates = [...dateCounts.keys()].sort();
+  const targetTrainN = scoreableGames.length * trainFraction;
+  let running = 0;
+  let splitDate = sortedDates[0];
+  for (const d of sortedDates) {
+    if (running + dateCounts.get(d) > targetTrainN && running > 0) break;
+    running += dateCounts.get(d);
+    splitDate = d;
+  }
+  const trainGames = [];
+  const testGames  = [];
+  for (const sg of scoreableGames) {
+    if (sg.snapshotDate <= splitDate) trainGames.push(sg);
+    else                              testGames.push(sg);
+  }
+  return { trainGames, testGames, splitDate };
+}
+
+// Compute the optimize-target ROI for a byCategory aggregate. For
+// 'totals' the metric is combined overs+unders ROI; for 'ml' it's
+// favs+dogs; for 'all' it's the union of all four buckets.
+function targetMetric(byCat, optimizeFor) {
+  const buckets = optimizeFor === 'totals' ? ['overs', 'unders']
+                : optimizeFor === 'ml'     ? ['favs', 'dogs']
+                : ['favs', 'dogs', 'overs', 'unders'];
+  let pnl = 0, wagered = 0, bets = 0;
+  for (const k of buckets) {
+    const b = byCat[k];
+    pnl += b.pnl;
+    wagered += b.wagered;
+    bets += b.bets;
+  }
+  return {
+    bets,
+    pnl: Math.round(pnl * 100) / 100,
+    wagered: Math.round(wagered * 100) / 100,
+    roi_pct: wagered > 0 ? Math.round((pnl / wagered) * 10000) / 100 : null,
+  };
+}
+
 // Main entry. Caller provides db handle, base getSettings() output, a
-// {from, to} date window, and a mode. Returns the full response shape
-// described in the brief.
+// {from, to} date window, a mode, and tuning opts:
+//   opts.optimizeFor      'totals' | 'ml' | 'all'   (default 'all')
+//   opts.minTotalsSample  Number                     (default 30)
+//   opts.trainFraction    0 < x < 1                  (default 0.7)
+//   opts.topN             Number                     (default 10) —
+//                         how many top-ranked combos to re-score on TEST.
 async function runParameterSweep(db, baseSettings, opts) {
   const start = Date.now();
   const mode = opts.mode;
   const fromDate = opts.from;
   const toDate   = opts.to;
+  const optimizeFor    = (opts.optimizeFor || 'all').toLowerCase();
+  const minTotalsSample = (opts.minTotalsSample != null) ? Number(opts.minTotalsSample) : 30;
+  const trainFraction  = (opts.trainFraction != null)  ? Number(opts.trainFraction)  : 0.7;
+  const topN           = (opts.topN != null)           ? Number(opts.topN)           : 10;
   if (!mode || (mode !== 'univariate' && mode !== 'joint')) {
     throw new Error('mode must be "univariate" or "joint"');
   }
   if (!fromDate || !toDate) throw new Error('from + to dates required');
+  if (!['totals', 'ml', 'all'].includes(optimizeFor)) {
+    throw new Error('optimizeFor must be one of "totals", "ml", "all"');
+  }
+  if (!(trainFraction > 0 && trainFraction < 1)) {
+    throw new Error('trainFraction must be strictly between 0 and 1');
+  }
 
-  // Stage 1: load every game in the window once. Discard games whose
-  // model_total is null (the model has never produced output for them —
-  // typically pre-2026-04-09 or future games).
+  // Stage 1: load + snapshot + pre-screen (unchanged).
   const games = loadGames(db, fromDate, toDate);
   console.log('[sweep] loaded ' + games.length + ' games in window ' + fromDate + '..' + toDate);
 
-  // Stage 2: build wOBA snapshot cache keyed by snapshot_date. One scan
-  // per distinct date in the window — typically ~10 dates for a 2-week
-  // window, ~30 for a month.
   const wobaCache = new Map();
   const seenDates = new Set();
   for (const g of games) seenDates.add(g.game_date);
@@ -205,9 +362,6 @@ async function runParameterSweep(db, baseSettings, opts) {
     const idx = loadWobaSnapshot(db, date);
     if (idx) wobaCache.set(date, idx);
   }
-  // Pre-screen games once with base settings to weed out _suppressed ones
-  // (partial lineups, missing SP info). The same wrapped game object is
-  // reused across combos — runModel doesn't mutate its inputs.
   const scoreableGames = [];
   for (const g of games) {
     const wobaIdx = wobaCache.get(g.game_date);
@@ -218,51 +372,37 @@ async function runParameterSweep(db, baseSettings, opts) {
   console.log('[sweep] ' + scoreableGames.length + ' scoreable games (' + gamesNoSnapshot + ' missing snapshot, '
     + (games.length - scoreableGames.length - gamesNoSnapshot) + ' suppressed)');
 
-  // Stage 3: build sp-start index once (snapshot-of-now; this is
-  // parameter-independent and the model only reads it for IP forecasts
-  // which don't affect the parameters we're sweeping).
+  // Stage 1b: train/test split. Done in-engine so callers can't
+  // accidentally fit on test data. trainFraction default 0.7 lines up
+  // with the brief; whole-date partitioning avoids same-day signal
+  // leak between train and test.
+  const { trainGames, testGames, splitDate } = splitTrainTest(scoreableGames, trainFraction);
+  console.log('[sweep] train/test split: ' + trainGames.length + ' train (≤ ' + splitDate
+    + '), ' + testGames.length + ' test (> ' + splitDate + ')');
+
+  // Stage 2: build sp-start index once (parameter-independent).
   let spStartIndex;
   try { spStartIndex = buildSpStartIndex(db, baseSettings); }
   catch (e) { spStartIndex = null; }
 
   const combos = buildCombinations(mode, baseSettings);
-  console.log('[sweep] mode=' + mode + ' combinations=' + combos.length);
+  console.log('[sweep] mode=' + mode + ' combinations=' + combos.length
+    + ' optimizeFor=' + optimizeFor);
 
-  // Stage 4: inner loop. For each combination, walk scoreableGames,
-  // re-run runModel under the overridden settings, derive signals via
-  // getSignals (uses the SAME pp-edge math the production write path
-  // uses; settings.SIGNAL_EMIT_FLOOR_PP defaults to 0.01 = 1pp), grade
-  // each signal via calcPnl against the game's actual scores, and
-  // bucket into favs/dogs/overs/unders.
+  // Stage 3: inner loop. Each combo's metrics on TRAIN only — the
+  // expensive part. Test-set scoring is deferred to the top-K +
+  // baseline stage below so a 4400-combo joint sweep doesn't pay for
+  // 4400 test re-scores too.
   const results = [];
   let cIdx = 0;
   for (const combo of combos) {
     const settings = applySweepOverrides(baseSettings, combo.override);
-    const byCat = emptyByCategory();
-    for (const sg of scoreableGames) {
-      const mr = runModel(sg.game, sg.wobaIdx, settings, 'opener_aware');
-      if (mr && mr._suppressed) continue;
-      const sigs = getSignals(sg.game, mr, settings);
-      for (const s of sigs) {
-        // Only count signals with a real outcome — calcPnl returns
-        // 'pending' when the game isn't scored yet. The sweep window
-        // is historical so most games are scored, but a forward-edge
-        // pending tail is harmless.
-        const r = calcPnl(s, sg.game.away_score, sg.game.home_score, sg.game.market_total);
-        if (r.outcome === 'pending') continue;
-        const cat = categoryFor(s);
-        const bucket = byCat[cat];
-        bucket.bets++;
-        if (r.outcome === 'win')  bucket.wins++;
-        if (r.outcome === 'loss') bucket.losses++;
-        if (r.outcome === 'push') bucket.pushes++;
-        const pnl = Number(r.pnl) || 0;
-        bucket.pnl += pnl;
-        if (r.outcome !== 'push') bucket.wagered += wageredFor(s);
-      }
-    }
-    rollUpRoi(byCat);
-    results.push({ settings: combo.settings, swept_param: combo.sweptParam, by_category: byCat });
+    const trainByCat = scoreGames(settings, trainGames);
+    results.push({
+      settings: combo.settings,
+      swept_param: combo.sweptParam,
+      train: { by_category: trainByCat },
+    });
     cIdx++;
     if (cIdx % 100 === 0) {
       console.log('[sweep] progress: ' + cIdx + '/' + combos.length
@@ -270,22 +410,72 @@ async function runParameterSweep(db, baseSettings, opts) {
     }
   }
 
+  // Stage 4: rank by train target metric. Combos whose TARGET-bucket
+  // sample size is below minTotalsSample (or minMlSample for ml mode)
+  // get a low_sample flag and sort LAST so a 4-bet hot streak doesn't
+  // float to the top of the rankings.
+  for (const r of results) {
+    r.train_target = targetMetric(r.train.by_category, optimizeFor);
+    r.low_sample = (r.train_target.bets < minTotalsSample);
+  }
+  results.sort((a, b) => {
+    if (a.low_sample !== b.low_sample) return a.low_sample ? 1 : -1;
+    const aR = a.train_target.roi_pct == null ? -Infinity : a.train_target.roi_pct;
+    const bR = b.train_target.roi_pct == null ? -Infinity : b.train_target.roi_pct;
+    return bR - aR;
+  });
+
+  // Stage 5: re-score top-K combos on TEST. Plus baseline (current
+  // production settings) on train AND test for the compare-to-not-
+  // changing reference point. Baseline is the same regardless of
+  // mode — what's currently in app_settings.
+  const baselineByCatTrain = scoreGames(baseSettings, trainGames);
+  const baselineByCatTest  = scoreGames(baseSettings, testGames);
+  const baseline = {
+    settings: baseEffectiveSettings(baseSettings),
+    train: {
+      by_category: baselineByCatTrain,
+      target: targetMetric(baselineByCatTrain, optimizeFor),
+    },
+    test: {
+      by_category: baselineByCatTest,
+      target: targetMetric(baselineByCatTest, optimizeFor),
+    },
+  };
+
+  for (let i = 0; i < Math.min(topN, results.length); i++) {
+    const r = results[i];
+    const settings = applySweepOverrides(baseSettings, deriveOverrideFromCombo(r));
+    const testByCat = scoreGames(settings, testGames);
+    r.test = {
+      by_category: testByCat,
+      target: targetMetric(testByCat, optimizeFor),
+    };
+  }
+
   const elapsedMs = Date.now() - start;
   const notes = [];
   if (mode === 'joint' && elapsedMs > 5 * 60 * 1000) {
     notes.push('joint mode took ' + (elapsedMs / 1000).toFixed(1) + 's — exceeds the 5-minute soft target; consider optimizing the inner loop or reducing settings count');
   }
+  if (testGames.length < minTotalsSample * 2) {
+    notes.push('test-set has only ' + testGames.length + ' games — test-set ROI for any bucket will be thin; treat top-K test numbers as directional only until the snapshot corpus grows');
+  }
   return {
     mode,
+    optimize_for: optimizeFor,
+    min_totals_sample: minTotalsSample,
+    train_fraction: trainFraction,
     date_window: { from: fromDate, to: toDate },
-    base_settings_snapshot: {
-      W_PROJ:             Number(baseSettings.W_PROJ),
-      W_ACT:              Number(baseSettings.W_ACT),
-      SP_PIT_WEIGHT:      Number(baseSettings.SP_PIT_WEIGHT),
-      RELIEF_PIT_WEIGHT:  Number(baseSettings.RELIEF_PIT_WEIGHT),
-      SP_WEIGHT:          Number(baseSettings.SP_WEIGHT),
-      RELIEF_WEIGHT:      Number(baseSettings.RELIEF_WEIGHT),
+    train_test_split: {
+      split_date: splitDate,
+      train_window: { from: fromDate, to: splitDate },
+      test_window:  { from: splitDate, to: toDate },   // 'from' here is the LAST train date; actual test starts the next day
+      train_games: trainGames.length,
+      test_games:  testGames.length,
     },
+    base_settings_snapshot: baseEffectiveSettings(baseSettings),
+    baseline,
     games_considered: games.length,
     games_no_snapshot: gamesNoSnapshot,
     games_scored: scoreableGames.length,
@@ -295,9 +485,30 @@ async function runParameterSweep(db, baseSettings, opts) {
   };
 }
 
+// Recover the override object from a stored result row. The original
+// combo's `override` is dropped after stage 3; reconstruct from the
+// `settings` block + the swept_param flag (univariate) or all four
+// blend params (joint).
+function deriveOverrideFromCombo(r) {
+  if (r.swept_param) {
+    return { [r.swept_param]: r.settings[r.swept_param] };
+  }
+  // joint: blends-only
+  return {
+    W_PROJ_W_ACT:    r.settings.W_PROJ_W_ACT,
+    SP_BULLPEN_MIX:  r.settings.SP_BULLPEN_MIX,
+    BAT_HAND_SP:     r.settings.BAT_HAND_SP,
+    BAT_HAND_RELIEF: r.settings.BAT_HAND_RELIEF,
+  };
+}
+
 module.exports = {
   runParameterSweep,
   applySweepOverrides,
   buildCombinations,
   SWEEP_PARAMS,
+  // exposed for the route + tests
+  splitTrainTest,
+  targetMetric,
+  scoreGames,
 };
