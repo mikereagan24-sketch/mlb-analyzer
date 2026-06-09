@@ -29,7 +29,14 @@ const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
 // in services/scraper.js PARK_FACTORS — necessary because the home team
 // for a Mexico City series is still ARI but Chase Field's 1.10 factor
 // understates run scoring at altitude.
-const VENUE_OVERRIDES = {
+//
+// Renamed from VENUE_OVERRIDES to VENUE_ID_OVERRIDES in
+// feat/venue-overrides so it doesn't clash with the team-and-date-
+// range VENUE_OVERRIDES in services/scraper.js. Both layers are
+// applied at the runModel read site below; venue_id wins when both
+// match because it's the most specific signal (statsapi-tagged
+// non-default venue).
+const VENUE_ID_OVERRIDES = {
   // Estadio Alfredo Harp Helú — Mexico City series. ~7800 ft elevation.
   // Coors (~5200 ft) plays to ~1.10 park factor; scaling by elevation
   // (each ~1000 ft ≈ +2% factor) puts Mexico City around 1.20.
@@ -37,6 +44,7 @@ const VENUE_OVERRIDES = {
 };
 
 const { normName, fuzzyLookup } = require('../utils/names');
+const { pickVenueOverride } = require('./scraper');
 
 function buildWobaIndex(rows) {
   const idx = {};
@@ -631,12 +639,32 @@ function runModel(game, wobaIdx, settings, mode) {
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
-  // Venue override (Mexico City, future special-event venues) wins over
-  // the home-team default park factor. game.park_factor was set from the
-  // home team's PARK_FACTORS entry — for a Mexico City series the home
-  // team is ARI (1.10) but the actual venue plays much hotter.
-  const venueOverride = game.venue_id != null ? VENUE_OVERRIDES[game.venue_id] : null;
-  const pf = venueOverride ? venueOverride.parkFactor : (game.park_factor || 1.0);
+  // Park factor resolution chain (most-specific first):
+  //   1. VENUE_ID_OVERRIDES[game.venue_id] — statsapi-tagged special
+  //      venue (e.g. Mexico City). game.venue_id captured at schedule
+  //      bootstrap. Wins over everything because statsapi has
+  //      affirmatively identified a non-default venue for the game.
+  //   2. VENUE_OVERRIDES (team + date range, services/scraper.js) —
+  //      catches alternate-site runs that don't get a distinct
+  //      venue_id (e.g. ATH at Las Vegas Ballpark, 2026-06-08..14).
+  //      Re-checked here as well as at the scraper write site so
+  //      already-persisted game rows that predate the override entry
+  //      still resolve correctly without needing a re-write.
+  //   3. game.park_factor — the home-team default written by the
+  //      scraper (already includes the team's PARK_FACTORS entry,
+  //      or the date-scoped override if the writer applied it).
+  //   4. 1.0 — defensive fallback if game.park_factor is null.
+  // Weather (temp_run_adj + wind_factor) is layered ADDITIVELY on
+  // top of (aRuns + hRuns) further down; this override changes only
+  // the multiplicative pf input, no double-counting risk.
+  const venueIdOverride = game.venue_id != null ? VENUE_ID_OVERRIDES[game.venue_id] : null;
+  const teamDateOverride = !venueIdOverride
+    ? pickVenueOverride(game.home_team, game.game_date)
+    : null;
+  let pf;
+  if (venueIdOverride)        pf = venueIdOverride.parkFactor;
+  else if (teamDateOverride)  pf = teamDateOverride.pf;
+  else                        pf = (game.park_factor || 1.0);
   const aRunsRaw = Math.max(0,(aTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
   const hRunsRaw = Math.max(0,(hTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
   // Catcher framing adjustment. A good framing catcher steals strikes,

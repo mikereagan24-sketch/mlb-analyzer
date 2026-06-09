@@ -20,6 +20,81 @@ const BREF_TEAM_MAP = {
   'San Francisco Giants':'SF',
 };
 
+// VENUE_OVERRIDES — date-scoped park-factor overrides keyed by HOME TEAM
+// abbrev. Each team maps to an ARRAY of override entries, so multiple
+// one-off windows for the same team (e.g. an alternate site this June
+// AND a different alternate site next August) can coexist without one
+// stomping the other. Each entry:
+//   { start: 'YYYY-MM-DD',  // inclusive
+//     end:   'YYYY-MM-DD',  // inclusive
+//     pf:    Number,        // override park factor (multiplier on team wOBA)
+//     venue: String,        // human-readable venue, for logs / audits
+//     note:  String }       // why this override exists, sourcing
+//
+// Game-date is a PT-anchored 'YYYY-MM-DD' string (todayStr() convention
+// at the writer; game_log.game_date at the reader), so string
+// comparison `start <= game_date <= end` works directly without any
+// Date object roundtrip — no timezone hazards.
+//
+// This complements the venue_id-keyed override in services/model.js
+// (VENUE_ID_OVERRIDES) which handles special venues statsapi tags with
+// a distinct venue.id (e.g. Mexico City). When both apply to the same
+// game, the venue_id override wins (most specific signal).
+const VENUE_OVERRIDES = {
+  // ATH June 2026 Las Vegas series. Sutter Health Park (Sacramento) is
+  // the team's normal 2025+ alternate site at 1.19 (see PARK_FACTORS
+  // comment in parseLineupsHtml); for these six games they play at
+  // the brand-new Las Vegas Ballpark in Summerlin instead.
+  //
+  // 1.31 is a STRUCTURAL estimate, not from MLB game history:
+  //   - ~2,000 ft elevation (2nd-highest active MLB-played park, after
+  //     Coors at ~5,200 ft). Altitude carry adds ~0.04-0.06 to a PF
+  //     baseline of 1.10-1.15 for the dimensions alone.
+  //   - 340 ft foul lines (notably short — shorter than Coors at 347).
+  //     Short foul lines are a structural HR feature independent of
+  //     weather and atmospheric conditions.
+  //   - 415 ft to dead center (modest, not extreme).
+  //   - PCL data at the park (when it hosted the Las Vegas Aviators)
+  //     consistently produced AAA's hottest run environment.
+  // Weather (temp_run_adj + wind_factor) STACKS on top — 100°F June
+  // daily highs and the typical out-to-center evening wind are
+  // captured separately via Open-Meteo and the existing weather
+  // adjustment pipeline. This override is structural only.
+  // Trivially tunable: if forward results across the six games show
+  // over/under-projection vs the empirical sample, adjust pf here.
+  ATH: [{ start: '2026-06-08', end: '2026-06-14',
+          pf: 1.31, venue: 'Las Vegas Ballpark',
+          note: '2,000 ft elevation + 340 ft foul lines (structural)' }],
+};
+
+// pickVenueOverride — returns the entry whose [start, end] inclusive
+// range contains gameDate, or null. Used by the model.js read site so
+// callers retain the option to fall back to game.park_factor when no
+// override applies (game.park_factor is the home-team default already
+// baked in at write time). Multiple entries per team are scanned in
+// order; first match wins.
+function pickVenueOverride(team, gameDate) {
+  if (!team || !gameDate) return null;
+  const entries = VENUE_OVERRIDES[team];
+  if (!entries) return null;
+  for (const e of entries) {
+    if (e.start <= gameDate && gameDate <= e.end) return e;
+  }
+  return null;
+}
+
+// resolveParkFactor — full resolution chain for the scraper-write
+// path. Checks the date-scoped override first; if no entry matches,
+// returns the home-team default from PARK_FACTORS (or 1.0 if the
+// team is unknown). The model.js read path doesn't call this — it
+// uses pickVenueOverride directly so it can fall through to the
+// persisted game.park_factor column as the final fallback.
+function resolveParkFactor(team, gameDate, parkFactorsMap) {
+  const hit = pickVenueOverride(team, gameDate);
+  if (hit) return hit.pf;
+  return (parkFactorsMap && parkFactorsMap[team]) || 1.0;
+}
+
 function htmlToText(html) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -324,7 +399,11 @@ function parseLineupsHtml(html, dateStr) {
       away_bulk_announced: awaySide.bulk,
       home_bulk_announced: homeSide.bulk,
       market_total: null,
-      park_factor: PARK_FACTORS[homeTeam] || 1.0,
+      // resolveParkFactor checks VENUE_OVERRIDES (team + date range)
+      // first; falls back to PARK_FACTORS[homeTeam] || 1.0. dateStr
+      // is the parseLineupsHtml date arg in scope here. See
+      // VENUE_OVERRIDES at module top for the full mechanism.
+      park_factor: resolveParkFactor(homeTeam, dateStr, PARK_FACTORS),
       away_lineup: parsePlayers('is-visit'),
       home_lineup: parsePlayers('is-home'),
     });
@@ -1150,4 +1229,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId };
+module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor };
