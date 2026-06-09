@@ -1280,10 +1280,41 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     if (b.from > b.to) {
       return res.status(400).json({ error: 'from must be <= to' });
     }
+    // feat/totals-sweep additions:
+    //   optimizeFor: 'totals' | 'ml' | 'all' (default 'all'). Picks which
+    //     buckets the engine ranks combos by — combined overs+unders for
+    //     'totals', favs+dogs for 'ml', or all four for 'all'.
+    //   minTotalsSample: minimum bets-in-target-bucket below which a combo
+    //     is flagged low_sample and sorted last (default 30).
+    //   trainFraction: 0 < x < 1 (default 0.7). Train/test split is
+    //     enforced inside the engine; results carry train + test side by
+    //     side so a combo that wins train but loses test is visible.
+    //   topN: number of top-ranked combos to re-score on the TEST set
+    //     (default 10).
+    const optimizeFor = (b.optimizeFor || 'all').toLowerCase();
+    if (!['totals', 'ml', 'all'].includes(optimizeFor)) {
+      return res.status(400).json({ error: 'optimizeFor must be "totals", "ml", or "all"' });
+    }
+    const minTotalsSample = (b.minTotalsSample != null) ? Number(b.minTotalsSample) : 30;
+    if (!Number.isFinite(minTotalsSample) || minTotalsSample < 0) {
+      return res.status(400).json({ error: 'minTotalsSample must be a non-negative number' });
+    }
+    const trainFraction = (b.trainFraction != null) ? Number(b.trainFraction) : 0.7;
+    if (!(trainFraction > 0 && trainFraction < 1)) {
+      return res.status(400).json({ error: 'trainFraction must be strictly between 0 and 1' });
+    }
+    const topN = (b.topN != null) ? Number(b.topN) : 10;
+    if (!Number.isFinite(topN) || topN < 1) {
+      return res.status(400).json({ error: 'topN must be a positive integer' });
+    }
+
     const { runParameterSweep } = require('../services/parameter-sweep');
     const { getSettings } = require('../services/jobs');
     const baseSettings = getSettings();
-    const out = await runParameterSweep(db, baseSettings, { mode, from: b.from, to: b.to });
+    const out = await runParameterSweep(db, baseSettings, {
+      mode, from: b.from, to: b.to,
+      optimizeFor, minTotalsSample, trainFraction, topN,
+    });
     res.json(out);
   } catch (e) {
     console.error('[parameter-sweep] error:', e);
