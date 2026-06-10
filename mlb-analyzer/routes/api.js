@@ -1272,6 +1272,13 @@ router.get('/lineup-override/:game_date', (req, res) => {
 // block the response). When done, the background closure UPDATEs the
 // row with results_json + status='done'; if it throws, status='error'
 // with the message. GET endpoints below read the row.
+function humanizeSec(s) {
+  if (!Number.isFinite(s) || s <= 0) return 'unknown';
+  if (s < 90)        return s + 's';
+  if (s < 3600)      return (s / 60).toFixed(1) + 'm';
+  return (s / 3600).toFixed(1) + 'h';
+}
+
 router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
   try {
     const b = req.body || {};
@@ -1315,6 +1322,28 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
       return res.status(400).json({ error: 'topN must be a positive integer' });
     }
 
+    // In-flight dedupe. Render's single instance can't run two sweeps
+    // concurrently — the event loop saturates and concurrent runs
+    // produce HTTP 000 polls (the symptom that triggered the
+    // fix/sweep-runaway-loop investigation). Boot-time orphan cleanup
+    // in server.js clears any rows left 'running' by a previous crash,
+    // so anything reported here is a genuine live run.
+    const inFlight = q.getRunningParameterSweepRuns.all();
+    if (inFlight.length) {
+      const cur = inFlight[0];
+      let curParams = null;
+      try { curParams = JSON.parse(cur.params_json); } catch (e) { /* best-effort */ }
+      return res.status(409).json({
+        error: 'a parameter-sweep run is already in flight; only one sweep at a time',
+        in_flight: {
+          run_id: cur.run_id,
+          started_at: cur.started_at,
+          params: curParams,
+        },
+        hint: 'poll GET /api/admin/parameter-sweep/' + cur.run_id + ' until status="done", then retry',
+      });
+    }
+
     // ---- async dispatch
     const runId = crypto.randomUUID();
     const params = {
@@ -1322,6 +1351,13 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
       optimizeFor, minTotalsSample, minMlSample, trainFraction, topN,
     };
     const startedAt = nowPtIso();
+    // Up-front runtime estimate so the operator knows whether to expect
+    // ~20m (univariate) or ~3.5h (joint × full window) before they
+    // start polling. Calibrated against the actual run_id 0bb9be83
+    // window timings — see services/parameter-sweep.js
+    // estimateRuntimeSec for the per-call constants.
+    const { estimateRuntimeSec } = require('../services/parameter-sweep');
+    const expectedRuntimeSec = estimateRuntimeSec(mode, b.from, b.to, topN);
     q.insertParameterSweepRun.run(runId, JSON.stringify(params), startedAt);
 
     // setImmediate so the response goes out BEFORE the sweep starts
@@ -1360,7 +1396,14 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
         });
     });
 
-    res.json({ run_id: runId, status: 'running', started_at: startedAt, params });
+    res.json({
+      run_id: runId,
+      status: 'running',
+      started_at: startedAt,
+      params,
+      expected_runtime_sec: expectedRuntimeSec,
+      expected_runtime_human: humanizeSec(expectedRuntimeSec),
+    });
   } catch (e) {
     console.error('[parameter-sweep] dispatch error:', e);
     res.status(500).json({ error: e.message });
