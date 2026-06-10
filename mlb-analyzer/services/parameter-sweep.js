@@ -22,12 +22,12 @@ const {
 } = require('./model');
 
 // Mapping from sweep parameter -> setting keys that should be flipped.
-// W_PROJ_W_ACT and SP_BULLPEN_MIX are complementary pairs (the second
-// half is 1 - sweep_value). BAT_HAND_SP and BAT_HAND_RELIEF are
-// independent scalars (the model passes them as separate args to
-// perBatterEW — in production they're constrained near 1 via the
-// settings-schema invariants, but the sweep deliberately allows
-// out-of-schema values to probe the model's behavior at extremes).
+// W_PROJ_W_ACT is a complementary pair (W_PROJ + W_ACT sum to 1).
+// BAT_HAND_SP and BAT_HAND_RELIEF are independent scalars (the model
+// passes them as separate args to perBatterEW — in production they're
+// constrained near 1 via the settings-schema invariants, but the sweep
+// deliberately allows out-of-schema values to probe the model's
+// behavior at extremes).
 //
 // RUN_MULT and TOT_SLOPE were added in feat/totals-sweep. They are
 // the two knobs most directly governing totals-pick edge:
@@ -42,6 +42,23 @@ const {
 //     a given gap above/below market produces over/under signals.
 //
 // DELIBERATELY EXCLUDED, with reasons:
+//   - SP_BULLPEN_MIX (formerly mapped to SP_PIT_WEIGHT /
+//     RELIEF_PIT_WEIGHT): vestigial on the snapshot corpus.
+//     model.js:632-633 uses computeSpPitWeightFromForecast(...) ??
+//     SP_PIT_WEIGHT — i.e., SP_PIT_WEIGHT is only consulted when the
+//     per-side F4 forecast IP is null. For non-opener standard-path
+//     games with both forecasts populated (the dominant case post
+//     2026-05-20), SP_PIT_WEIGHT is bypassed entirely. Opener-flagged
+//     games never read it either (the openerOpts branch in
+//     perBatterEW uses openerOpts.perPositionWeights). Empirically
+//     produces byte-identical sweep results across 0.1..0.9. A
+//     2026-05-20..06-04 sanity count found 10 standard-path games
+//     with at least one null SP forecast — those would in theory
+//     respond, but in practice their aggregate ROI delta fell below
+//     0.01% rounding. Removed from the sweep on
+//     chore/sweep-drop-sp-bullpen-mix; SP_PIT_WEIGHT /
+//     RELIEF_PIT_WEIGHT remain real app_settings for any historical
+//     game without a forecast.
 //   - WOBA_BASELINE: near-collinear with RUN_MULT — both shift overall
 //     run level. Sweeping both lets the engine trade them off arbitrarily
 //     on a thin sample (the ~225-game snapshot corpus). Hold fixed and
@@ -56,17 +73,16 @@ const {
 //     fallback defaults; sweeping them would just trade noise for noise
 //     since they only fire on missing-data games.
 const SWEEP_PARAMS = [
-  'W_PROJ_W_ACT', 'SP_BULLPEN_MIX', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
+  'W_PROJ_W_ACT', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
   'RUN_MULT', 'TOT_SLOPE',
 ];
 
 // Per-parameter sweep ranges for univariate mode. The blend params
-// (W_PROJ_W_ACT, SP_BULLPEN_MIX, BAT_HAND_SP, BAT_HAND_RELIEF) use the
-// original 0.1..0.9 step-0.1 grid. RUN_MULT and TOT_SLOPE get
-// dedicated grids centered on their production defaults, with step
-// sizes that are large enough to be distinguishable in ROI given the
-// thin snapshot corpus but small enough that the optimum doesn't fall
-// in a gap.
+// (W_PROJ_W_ACT, BAT_HAND_SP, BAT_HAND_RELIEF) use the original
+// 0.1..0.9 step-0.1 grid. RUN_MULT and TOT_SLOPE get dedicated grids
+// centered on their production defaults, with step sizes that are
+// large enough to be distinguishable in ROI given the thin snapshot
+// corpus but small enough that the optimum doesn't fall in a gap.
 const BLEND_GRID    = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
 const RUN_MULT_GRID = [40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60];
 const TOT_SLOPE_GRID = [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14];
@@ -82,10 +98,6 @@ function applySweepOverrides(baseSettings, overrides) {
   if ('W_PROJ_W_ACT' in overrides) {
     s.W_PROJ = overrides.W_PROJ_W_ACT;
     s.W_ACT  = 1 - overrides.W_PROJ_W_ACT;
-  }
-  if ('SP_BULLPEN_MIX' in overrides) {
-    s.SP_PIT_WEIGHT     = overrides.SP_BULLPEN_MIX;
-    s.RELIEF_PIT_WEIGHT = 1 - overrides.SP_BULLPEN_MIX;
   }
   if ('BAT_HAND_SP' in overrides) s.SP_WEIGHT     = overrides.BAT_HAND_SP;
   if ('BAT_HAND_RELIEF' in overrides) s.RELIEF_WEIGHT = overrides.BAT_HAND_RELIEF;
@@ -139,7 +151,6 @@ function rollUpRoi(byCategory) {
 function baseEffectiveSettings(baseSettings) {
   return {
     W_PROJ_W_ACT:    Number(baseSettings.W_PROJ),
-    SP_BULLPEN_MIX:  Number(baseSettings.SP_PIT_WEIGHT),
     BAT_HAND_SP:     Number(baseSettings.SP_WEIGHT),
     BAT_HAND_RELIEF: Number(baseSettings.RELIEF_WEIGHT),
     RUN_MULT:        Number(baseSettings.RUN_MULT  != null ? baseSettings.RUN_MULT  : 48),
@@ -151,13 +162,17 @@ function baseEffectiveSettings(baseSettings) {
 //   univariate: for each sweepable param, sweep its dedicated grid
 //               with all other params at production base. RUN_MULT
 //               and TOT_SLOPE each get their own 11-value grid; the
-//               4 blend params share the original 0.1..0.9 grid.
+//               3 blend params share the original 0.1..0.9 grid.
+//               Total: 3×9 + 11 + 11 = 49 combos.
 //   joint:      cartesian product of 5 settings per param across the
-//               ORIGINAL FOUR blend params (5^4 = 625). RUN_MULT and
+//               THREE blend params (5^3 = 125). RUN_MULT and
 //               TOT_SLOPE are EXCLUDED from joint mode by design —
 //               sweeping them simultaneously with the blend params on
 //               the thin snapshot corpus (~225 games) would overfit.
-//               Run them in univariate mode instead.
+//               Run them in univariate mode instead. Was 5^4=625
+//               pre-chore/sweep-drop-sp-bullpen-mix; SP_BULLPEN_MIX
+//               was vestigial on the forecast-driven path so dropping
+//               it took joint to 125 (~3.5h → ~42m).
 function buildCombinations(mode, baseSettings) {
   const combos = [];
   if (mode === 'univariate') {
@@ -172,18 +187,16 @@ function buildCombinations(mode, baseSettings) {
   } else if (mode === 'joint') {
     const settings = [0.1, 0.3, 0.5, 0.7, 0.9];
     for (const a of settings)
-    for (const b of settings)
     for (const c of settings)
     for (const d of settings) {
       const o = baseEffectiveSettings(baseSettings);
       o.W_PROJ_W_ACT    = a;
-      o.SP_BULLPEN_MIX  = b;
       o.BAT_HAND_SP     = c;
       o.BAT_HAND_RELIEF = d;
       combos.push({
         sweptParam: null,
         settings: o,
-        override: { W_PROJ_W_ACT: a, SP_BULLPEN_MIX: b, BAT_HAND_SP: c, BAT_HAND_RELIEF: d },
+        override: { W_PROJ_W_ACT: a, BAT_HAND_SP: c, BAT_HAND_RELIEF: d },
       });
     }
   } else {
@@ -193,16 +206,17 @@ function buildCombinations(mode, baseSettings) {
 }
 
 // Estimated runtime of a sweep run, returned to the POST caller so the
-// UI can show "expect ~20 min" vs "expect ~3 hours" up front instead
+// UI can show "expect ~17 min" vs "expect ~42 min" up front instead
 // of the user discovering it via polling. Calibrated against the
-// observed run_id 0bb9be83-window timings:
-//   - Univariate (58 combos) × 16-day window (~225 games) ran in ~20m.
-//   - Joint (625 combos) would scale to ~3.5h on the same window.
+// observed run_id 0bb9be83-window timings, then rescaled post
+// chore/sweep-drop-sp-bullpen-mix:
+//   - Univariate: was 58 combos pre-drop (~20m); now 49 (~17m).
+//   - Joint: was 5^4=625 pre-drop (~3.5h); now 5^3=125 (~42m).
 // Per (combo × game) cost ≈ 0.09s on Render's standard instance; the
 // constant is an empirical floor and may drift as the model gains
 // features — refresh after any runModel cost change.
 function estimateRuntimeSec(mode, fromDate, toDate, topN) {
-  const combos    = mode === 'univariate' ? 58 : (mode === 'joint' ? 625 : 0);
+  const combos    = mode === 'univariate' ? 49 : (mode === 'joint' ? 125 : 0);
   const days      = Math.max(1, daysBetween(fromDate, toDate) + 1);
   const games     = days * 14.5;             // ~14.5 MLB games/day avg
   const PER_CALL_SEC = 0.09;
@@ -312,8 +326,8 @@ function safeJson(s) {
 function scoreGames(settings, games) {
   const byCat = emptyByCategory();
   for (const sg of games) {
-    // quiet=true: see note in preScreenGame. Without this, a 58-combo
-    // univariate sweep emits ~58 × 30-40 ≈ 2000+ identical opener-model
+    // quiet=true: see note in preScreenGame. Without this, a 49-combo
+    // univariate sweep emits ~49 × 30-40 ≈ 1700+ identical opener-model
     // log lines, which was the visible 'runaway loop' symptom in run_id
     // 0bb9be83 (investigation: fix/sweep-runaway-loop).
     const mr = runModel(sg.game, sg.wobaIdx, settings, 'opener_aware', true);
@@ -499,13 +513,13 @@ async function runParameterSweep(db, baseSettings, opts) {
 
   // Stage 3: inner loop. Each combo's metrics on TRAIN only — the
   // expensive part. Test-set scoring is deferred to the top-K +
-  // baseline stage below so a 4400-combo joint sweep doesn't pay for
-  // 4400 test re-scores too.
+  // baseline stage below so the joint sweep doesn't pay for N test
+  // re-scores too.
   const results = [];
   let cIdx = 0;
-  // Progress cadence: ceil(N/20) prints ~5% of the way through, scaled
-  // by combo count. Univariate (58 combos) → every 3 combos; joint
-  // (625) → every 32. The previous every-100 threshold never fired on
+  // Progress cadence: floor(N/20) prints ~5% of the way through, scaled
+  // by combo count. Univariate (49 combos) → every 2 combos; joint
+  // (125) → every 6. The previous every-100 threshold never fired on
   // univariate, which made the sweep look frozen and was the root of
   // the fix/sweep-runaway-loop false alarm.
   const progressEvery = Math.max(1, Math.floor(combos.length / 20));
@@ -532,7 +546,7 @@ async function runParameterSweep(db, baseSettings, opts) {
     // HTTP response actually gets written to the client and any other
     // small requests (GET /admin/parameter-sweep/:run_id polls) can
     // be served while this sweep runs. The yield is ~0ms when nothing
-    // else is queued; cost across 58 combos ~= negligible.
+    // else is queued; cost across 49/125 combos ~= negligible.
     await new Promise((r) => setImmediate(r));
   }
 
@@ -632,7 +646,7 @@ async function runParameterSweep(db, baseSettings, opts) {
 
 // Recover the override object from a stored result row. The original
 // combo's `override` is dropped after stage 3; reconstruct from the
-// `settings` block + the swept_param flag (univariate) or all four
+// `settings` block + the swept_param flag (univariate) or all three
 // blend params (joint).
 function deriveOverrideFromCombo(r) {
   if (r.swept_param) {
@@ -641,7 +655,6 @@ function deriveOverrideFromCombo(r) {
   // joint: blends-only
   return {
     W_PROJ_W_ACT:    r.settings.W_PROJ_W_ACT,
-    SP_BULLPEN_MIX:  r.settings.SP_BULLPEN_MIX,
     BAT_HAND_SP:     r.settings.BAT_HAND_SP,
     BAT_HAND_RELIEF: r.settings.BAT_HAND_RELIEF,
   };
