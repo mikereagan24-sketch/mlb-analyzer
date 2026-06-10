@@ -1447,6 +1447,39 @@ router.get('/admin/parameter-sweep/:run_id', requireAdminToken, (req, res) => {
   }
 });
 
+// Aggregate-only view of the most recent sweep run. Registered BEFORE
+// the :run_id/summary route so 'latest' isn't captured as a run_id
+// param — Express matches in registration order.
+router.get('/admin/parameter-sweep/latest/summary', requireAdminToken, (req, res) => {
+  try {
+    const row = q.getLatestParameterSweepRun.get();
+    if (!row) return res.status(404).json({ error: 'no parameter-sweep runs yet' });
+    res.json(summarizeSweepRunRow(row));
+  } catch (e) {
+    console.error('[parameter-sweep] latest summary error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Aggregate-only view of a completed sweep run. The full results blob
+// from the highlight-thresholds branch includes per-signal arrays
+// (game_id × category × edge_pp × outcome × pnl × highlighted per
+// combo + baseline + top-K) which bloats responses to ~2-5 MB — too
+// large to curl + read from a terminal without a local JSON slicer.
+// This endpoint strips every .signals array server-side and returns
+// just the aggregates the operator actually reads to evaluate a run.
+// The full body remains available at /:run_id for post-hoc re-filter.
+router.get('/admin/parameter-sweep/:run_id/summary', requireAdminToken, (req, res) => {
+  try {
+    const row = q.getParameterSweepRun.get(req.params.run_id);
+    if (!row) return res.status(404).json({ error: 'run_id not found' });
+    res.json(summarizeSweepRunRow(row));
+  } catch (e) {
+    console.error('[parameter-sweep] summary read error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Parse stored JSON columns so the client doesn't have to JSON.parse
 // twice. params_json is always present; results_json is null while
 // running and after error, populated when done.
@@ -1459,6 +1492,119 @@ function hydrateSweepRunRow(row) {
     params:      row.params_json ? tryParse(row.params_json) : null,
     results:     row.results_json ? tryParse(row.results_json) : null,
     error:       row.error || null,
+  };
+}
+
+// Aggregate-only projection of a sweep row. Drops per-signal arrays
+// (~2-5 MB) and emits ~5-10 KB of the numbers the operator actually
+// reads. For running/error rows we return as much of the envelope as
+// we have so the client gets a useful answer either way.
+function summarizeSweepRunRow(row) {
+  const params  = row.params_json  ? tryParse(row.params_json)  : null;
+  const results = row.results_json ? tryParse(row.results_json) : null;
+  const envelope = {
+    run_id:      row.run_id,
+    status:      row.status,
+    started_at:  row.started_at,
+    finished_at: row.finished_at,
+    params,
+    error:       row.error || null,
+  };
+  if (!results) return envelope;
+
+  // Stamp the run-level shape options so the client can interpret the
+  // numbers without re-fetching params or guessing.
+  envelope.optimize_for           = results.optimize_for;
+  envelope.bet_selection          = results.bet_selection;
+  envelope.target_buckets         = results.target_buckets;
+  envelope.ui_highlight_thresholds = results.ui_highlight_thresholds;
+  envelope.min_totals_sample      = results.min_totals_sample;
+  envelope.min_ml_sample          = results.min_ml_sample;
+  envelope.train_fraction         = results.train_fraction;
+  envelope.date_window            = results.date_window;
+  envelope.train_test_split       = results.train_test_split;
+  envelope.games_considered       = results.games_considered;
+  envelope.games_scored           = results.games_scored;
+  envelope.games_no_snapshot      = results.games_no_snapshot;
+  envelope.base_settings_snapshot = results.base_settings_snapshot;
+  envelope.elapsed_ms             = results.elapsed_ms;
+  envelope.notes                  = results.notes;
+
+  // Baseline: keep both emit + highlight targets on both train+test,
+  // each enriched with wins/losses summed across the target buckets
+  // (target_emit / target_highlight returned by runParameterSweep
+  // carry bets/pnl/wagered/roi_pct only — wins/losses live on the
+  // per-category buckets at by_category_{emit,highlight}.{bucket}).
+  if (results.baseline) {
+    envelope.baseline = {
+      settings: results.baseline.settings,
+      train: summarizeTrainOrTestBlock(results.baseline.train),
+      test:  summarizeTrainOrTestBlock(results.baseline.test),
+    };
+  }
+
+  // Top 10 ranked combos. Whatever drove ranking (bet_selection)
+  // already determined the order in results.results. We don't re-sort.
+  const topN = Array.isArray(results.results) ? results.results.slice(0, 10) : [];
+  envelope.top = topN.map((r, i) => {
+    const swept = r.swept_param || null;
+    const sweptValue = swept ? r.settings?.[swept] : null;
+    return {
+      rank:        i + 1,
+      swept_param: swept,
+      swept_value: sweptValue,
+      settings:    r.settings,
+      low_sample:  !!r.low_sample,
+      train: {
+        target_emit:      summarizeTargetWithWL(r.train_target_emit,      r.train?.by_category_emit),
+        target_highlight: summarizeTargetWithWL(r.train_target_highlight, r.train?.by_category_highlight),
+      },
+      test: r.test ? {
+        target_emit:      summarizeTargetWithWL(r.test.target_emit,      r.test.by_category_emit),
+        target_highlight: summarizeTargetWithWL(r.test.target_highlight, r.test.by_category_highlight),
+      } : null,
+    };
+  });
+
+  return envelope;
+}
+
+// Compact projection of one train|test block from baseline or a
+// ranked combo's test rescore. Includes target_emit + target_highlight
+// each with bets/wins/losses/roi_pct (wins+losses summed across the
+// target buckets via summarizeTargetWithWL).
+function summarizeTrainOrTestBlock(block) {
+  if (!block) return null;
+  return {
+    target_emit:      summarizeTargetWithWL(block.target_emit,      block.by_category_emit),
+    target_highlight: summarizeTargetWithWL(block.target_highlight, block.by_category_highlight),
+  };
+}
+
+// {bets, wins, losses, roi_pct} for a target metric. target.buckets
+// (set in services/parameter-sweep.js targetMetric) lists which
+// category keys contributed — sum wins/losses from those buckets so
+// the summary line gives a record without the caller needing the full
+// by_category aggregate.
+function summarizeTargetWithWL(target, byCategory) {
+  if (!target) return null;
+  let wins = 0, losses = 0;
+  const buckets = target.buckets || [];
+  if (byCategory) {
+    for (const b of buckets) {
+      const c = byCategory[b];
+      if (!c) continue;
+      wins   += Number(c.wins   || 0);
+      losses += Number(c.losses || 0);
+    }
+  }
+  return {
+    bets:    target.bets,
+    wins,
+    losses,
+    roi_pct: target.roi_pct,
+    pnl:     target.pnl,
+    wagered: target.wagered,
   };
 }
 
