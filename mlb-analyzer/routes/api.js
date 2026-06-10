@@ -48,7 +48,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso } = require('../services/jobs');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -1264,6 +1264,14 @@ router.get('/lineup-override/:game_date', (req, res) => {
 //
 // Joint mode is heavy: 625 combinations x ~120 games x runModel cost
 // may take minutes. Run from a host that can hold the connection.
+// Asynchronous parameter sweep (feat/totals-sweep-async). The sweep is
+// CPU-heavy — full-window runs are 6+ minutes on prod data, which
+// blows Render's request timeout. POST validates + inserts a
+// 'running' row + returns the run_id immediately. The actual sweep
+// runs in the background (kicked off via setImmediate so it doesn't
+// block the response). When done, the background closure UPDATEs the
+// row with results_json + status='done'; if it throws, status='error'
+// with the message. GET endpoints below read the row.
 router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
   try {
     const b = req.body || {};
@@ -1280,17 +1288,11 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     if (b.from > b.to) {
       return res.status(400).json({ error: 'from must be <= to' });
     }
-    // feat/totals-sweep additions:
-    //   optimizeFor: 'totals' | 'ml' | 'all' (default 'all'). Picks which
-    //     buckets the engine ranks combos by — combined overs+unders for
-    //     'totals', favs+dogs for 'ml', or all four for 'all'.
-    //   minTotalsSample: minimum bets-in-target-bucket below which a combo
-    //     is flagged low_sample and sorted last (default 30).
-    //   trainFraction: 0 < x < 1 (default 0.7). Train/test split is
-    //     enforced inside the engine; results carry train + test side by
-    //     side so a combo that wins train but loses test is visible.
-    //   topN: number of top-ranked combos to re-score on the TEST set
-    //     (default 10).
+    // Tuning opts (feat/totals-sweep):
+    //   optimizeFor: 'totals' | 'ml' | 'all' (default 'all').
+    //   minTotalsSample: combo flagged low_sample below this (default 30).
+    //   trainFraction: 0 < x < 1 (default 0.7); whole-day partition.
+    //   topN: top-K combos to re-score on TEST (default 10).
     const optimizeFor = (b.optimizeFor || 'all').toLowerCase();
     if (!['totals', 'ml', 'all'].includes(optimizeFor)) {
       return res.status(400).json({ error: 'optimizeFor must be "totals", "ml", or "all"' });
@@ -1308,19 +1310,98 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
       return res.status(400).json({ error: 'topN must be a positive integer' });
     }
 
-    const { runParameterSweep } = require('../services/parameter-sweep');
-    const { getSettings } = require('../services/jobs');
-    const baseSettings = getSettings();
-    const out = await runParameterSweep(db, baseSettings, {
+    // ---- async dispatch
+    const runId = crypto.randomUUID();
+    const params = {
       mode, from: b.from, to: b.to,
       optimizeFor, minTotalsSample, trainFraction, topN,
+    };
+    const startedAt = nowPtIso();
+    q.insertParameterSweepRun.run(runId, JSON.stringify(params), startedAt);
+
+    // setImmediate so the response goes out BEFORE the sweep starts
+    // chewing the event loop. The sweep itself is synchronous JS once
+    // it begins — even a properly-awaited async call would block
+    // because runModel/scoreGames don't yield. Splitting the work over
+    // event-loop ticks would require a deeper refactor of the inner
+    // loop; for now, "first sweep wins the event loop until it's
+    // done" is acceptable since this is an admin-only endpoint.
+    setImmediate(() => {
+      const { runParameterSweep } = require('../services/parameter-sweep');
+      Promise.resolve()
+        .then(() => {
+          const baseSettings = getSettings();
+          return runParameterSweep(db, baseSettings, params);
+        })
+        .then((out) => {
+          try {
+            q.updateParameterSweepRunDone.run(JSON.stringify(out), nowPtIso(), runId);
+            console.log('[parameter-sweep] done run_id=' + runId + ' elapsed=' + (out.elapsed_ms || 'n/a') + 'ms');
+          } catch (writeErr) {
+            // Almost certainly a SQLITE_TOOBIG on results_json; record
+            // as error so the GET handler surfaces something instead
+            // of leaving the row stuck on 'running'.
+            console.error('[parameter-sweep] post-success write failed run_id=' + runId, writeErr);
+            try { q.updateParameterSweepRunError.run('post-success write failed: ' + writeErr.message, nowPtIso(), runId); } catch (_) {}
+          }
+        })
+        .catch((err) => {
+          console.error('[parameter-sweep] error run_id=' + runId, err);
+          try {
+            q.updateParameterSweepRunError.run(err.message || String(err), nowPtIso(), runId);
+          } catch (writeErr) {
+            console.error('[parameter-sweep] error-write failed run_id=' + runId, writeErr);
+          }
+        });
     });
-    res.json(out);
+
+    res.json({ run_id: runId, status: 'running', started_at: startedAt, params });
   } catch (e) {
-    console.error('[parameter-sweep] error:', e);
+    console.error('[parameter-sweep] dispatch error:', e);
     res.status(500).json({ error: e.message });
   }
 });
+
+// Read a sweep run by id. While status='running', results_json is
+// NULL; the client polls. When 'done', results_json is the full
+// sweep response from runParameterSweep. When 'error', error is the
+// message.
+router.get('/admin/parameter-sweep/latest', requireAdminToken, (req, res) => {
+  try {
+    const row = q.getLatestParameterSweepRun.get();
+    if (!row) return res.status(404).json({ error: 'no parameter-sweep runs yet' });
+    res.json(hydrateSweepRunRow(row));
+  } catch (e) {
+    console.error('[parameter-sweep] latest read error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/admin/parameter-sweep/:run_id', requireAdminToken, (req, res) => {
+  try {
+    const row = q.getParameterSweepRun.get(req.params.run_id);
+    if (!row) return res.status(404).json({ error: 'run_id not found' });
+    res.json(hydrateSweepRunRow(row));
+  } catch (e) {
+    console.error('[parameter-sweep] read error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Parse stored JSON columns so the client doesn't have to JSON.parse
+// twice. params_json is always present; results_json is null while
+// running and after error, populated when done.
+function hydrateSweepRunRow(row) {
+  return {
+    run_id:      row.run_id,
+    status:      row.status,
+    started_at:  row.started_at,
+    finished_at: row.finished_at,
+    params:      row.params_json ? tryParse(row.params_json) : null,
+    results:     row.results_json ? tryParse(row.results_json) : null,
+    error:       row.error || null,
+  };
+}
 
 // Manual detection trigger — runs detectOpeners standalone for a date.
 // Useful after editing an opener_override row, or for backfilling
