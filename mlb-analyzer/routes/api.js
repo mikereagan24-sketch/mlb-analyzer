@@ -1454,7 +1454,9 @@ router.get('/admin/parameter-sweep/latest/summary', requireAdminToken, (req, res
   try {
     const row = q.getLatestParameterSweepRun.get();
     if (!row) return res.status(404).json({ error: 'no parameter-sweep runs yet' });
-    res.json(summarizeSweepRunRow(row));
+    const paramFilter = validateParamFilter(req.query.param);
+    if (paramFilter && paramFilter.error) return res.status(400).json(paramFilter.error);
+    res.json(summarizeSweepRunRow(row, paramFilter ? paramFilter.name : null));
   } catch (e) {
     console.error('[parameter-sweep] latest summary error:', e);
     res.status(500).json({ error: e.message });
@@ -1469,16 +1471,49 @@ router.get('/admin/parameter-sweep/latest/summary', requireAdminToken, (req, res
 // This endpoint strips every .signals array server-side and returns
 // just the aggregates the operator actually reads to evaluate a run.
 // The full body remains available at /:run_id for post-hoc re-filter.
+//
+// Optional ?param=<NAME> query: when present, the response replaces
+// the global top-10 with a 'param_curve' field containing EVERY combo
+// whose swept_param matches NAME, sorted by swept_value ascending.
+// Lets you read a single-param sweep (e.g. W_PIT_W_BAT 0.1..0.9) as
+// a curve without re-ranking. Joint-mode runs have no swept_param so
+// the curve will be empty for any NAME.
 router.get('/admin/parameter-sweep/:run_id/summary', requireAdminToken, (req, res) => {
   try {
     const row = q.getParameterSweepRun.get(req.params.run_id);
     if (!row) return res.status(404).json({ error: 'run_id not found' });
-    res.json(summarizeSweepRunRow(row));
+    const paramFilter = validateParamFilter(req.query.param);
+    if (paramFilter && paramFilter.error) return res.status(400).json(paramFilter.error);
+    res.json(summarizeSweepRunRow(row, paramFilter ? paramFilter.name : null));
   } catch (e) {
     console.error('[parameter-sweep] summary read error:', e);
     res.status(500).json({ error: e.message });
   }
 });
+
+// Validate the ?param= query against the live SWEEP_PARAMS list.
+// Returns null when no filter requested, {name} when valid, or
+// {error: {error, hint}} for the caller to 400. Imported lazily so
+// the route module doesn't fail to load if services/parameter-sweep
+// ever rotates its exports.
+function validateParamFilter(raw) {
+  if (raw == null || raw === '') return null;
+  const name = String(raw).toUpperCase();
+  let validNames;
+  try {
+    const { SWEEP_PARAMS } = require('../services/parameter-sweep');
+    validNames = Array.isArray(SWEEP_PARAMS) ? SWEEP_PARAMS : [];
+  } catch (e) {
+    validNames = [];
+  }
+  if (!validNames.includes(name)) {
+    return { error: {
+      error: 'unknown param',
+      hint:  'param must be one of ' + validNames.join(', '),
+    } };
+  }
+  return { name };
+}
 
 // Parse stored JSON columns so the client doesn't have to JSON.parse
 // twice. params_json is always present; results_json is null while
@@ -1499,7 +1534,12 @@ function hydrateSweepRunRow(row) {
 // (~2-5 MB) and emits ~5-10 KB of the numbers the operator actually
 // reads. For running/error rows we return as much of the envelope as
 // we have so the client gets a useful answer either way.
-function summarizeSweepRunRow(row) {
+//
+// paramFilter (optional): when set to a SWEEP_PARAMS name, swaps the
+// top-10 ranked combos for a param_curve — every combo whose
+// swept_param matches, sorted by swept_value ascending — so the
+// caller can read a single-param sweep as a curve.
+function summarizeSweepRunRow(row, paramFilter) {
   const params  = row.params_json  ? tryParse(row.params_json)  : null;
   const results = row.results_json ? tryParse(row.results_json) : null;
   const envelope = {
@@ -1543,9 +1583,46 @@ function summarizeSweepRunRow(row) {
     };
   }
 
-  // Top 10 ranked combos. Whatever drove ranking (bet_selection)
-  // already determined the order in results.results. We don't re-sort.
-  const topN = Array.isArray(results.results) ? results.results.slice(0, 10) : [];
+  const allCombos = Array.isArray(results.results) ? results.results : [];
+
+  if (paramFilter) {
+    // Single-param curve: every combo whose swept_param matches, sorted
+    // by swept_value ascending so the response reads top-to-bottom as
+    // the parameter increases. Joint-mode runs have swept_param=null
+    // throughout so the curve will be empty — caller can tell the run
+    // wasn't univariate.
+    const curve = allCombos
+      .filter((r) => r.swept_param === paramFilter)
+      .map((r) => ({
+        swept_param: r.swept_param,
+        swept_value: r.settings?.[r.swept_param],
+        settings:    r.settings,
+        low_sample:  !!r.low_sample,
+        train: {
+          target_emit:      summarizeTargetWithWL(r.train_target_emit,      r.train?.by_category_emit),
+          target_highlight: summarizeTargetWithWL(r.train_target_highlight, r.train?.by_category_highlight),
+        },
+        test: r.test ? {
+          target_emit:      summarizeTargetWithWL(r.test.target_emit,      r.test.by_category_emit),
+          target_highlight: summarizeTargetWithWL(r.test.target_highlight, r.test.by_category_highlight),
+        } : null,
+      }))
+      .sort((a, b) => {
+        const av = Number(a.swept_value);
+        const bv = Number(b.swept_value);
+        return av - bv;
+      });
+    envelope.param_curve = {
+      param:  paramFilter,
+      points: curve.length,
+      values: curve,
+    };
+    return envelope;
+  }
+
+  // Default: top 10 ranked combos. Whatever drove ranking
+  // (bet_selection) already determined the order in results.results.
+  const topN = allCombos.slice(0, 10);
   envelope.top = topN.map((r, i) => {
     const swept = r.swept_param || null;
     const sweptValue = swept ? r.settings?.[swept] : null;
