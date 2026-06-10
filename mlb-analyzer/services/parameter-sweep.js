@@ -301,13 +301,25 @@ function splitTrainTest(scoreableGames, trainFraction) {
   return { trainGames, testGames, splitDate };
 }
 
+// Buckets that constitute the optimize-target for each mode. The
+// ranking pipeline reads from these directly so it is impossible for
+// a non-target bucket's ROI to leak into the sort. The 'all' mode is
+// the union of every bucket — intentionally distinct from 'totals'
+// and 'ml' so a totals optimization run never sees favs/dogs ROI
+// influence rank order.
+function targetBucketsFor(optimizeFor) {
+  if (optimizeFor === 'totals') return ['overs', 'unders'];
+  if (optimizeFor === 'ml')     return ['favs', 'dogs'];
+  return ['favs', 'dogs', 'overs', 'unders'];
+}
+
 // Compute the optimize-target ROI for a byCategory aggregate. For
 // 'totals' the metric is combined overs+unders ROI; for 'ml' it's
-// favs+dogs; for 'all' it's the union of all four buckets.
+// favs+dogs; for 'all' it's the union of all four buckets. The
+// returned object is the SOLE input to ranking — sort code MUST NOT
+// read roi_pct off byCat[<bucket>] or compute its own union.
 function targetMetric(byCat, optimizeFor) {
-  const buckets = optimizeFor === 'totals' ? ['overs', 'unders']
-                : optimizeFor === 'ml'     ? ['favs', 'dogs']
-                : ['favs', 'dogs', 'overs', 'unders'];
+  const buckets = targetBucketsFor(optimizeFor);
   let pnl = 0, wagered = 0, bets = 0;
   for (const k of buckets) {
     const b = byCat[k];
@@ -320,13 +332,34 @@ function targetMetric(byCat, optimizeFor) {
     pnl: Math.round(pnl * 100) / 100,
     wagered: Math.round(wagered * 100) / 100,
     roi_pct: wagered > 0 ? Math.round((pnl / wagered) * 10000) / 100 : null,
+    buckets,
   };
+}
+
+// Sample-size check on the RANKED target's bucket count. Returns true
+// when the target-bucket sample is too thin to trust the ROI signal.
+// For 'totals' we threshold on overs+unders count, for 'ml' on
+// favs+dogs count, for 'all' both bucket-pairs must individually clear
+// their threshold — otherwise a 5-favs-bets hot streak in an 'all'
+// run could float to the top off a +28% ML-side ROI just because the
+// thin sample happened to combine favorably with mediocre totals ROI.
+function isLowSample(byCat, optimizeFor, minTotalsSample, minMlSample) {
+  const totalsBets = byCat.overs.bets + byCat.unders.bets;
+  const mlBets     = byCat.favs.bets  + byCat.dogs.bets;
+  if (optimizeFor === 'totals') return totalsBets < minTotalsSample;
+  if (optimizeFor === 'ml')     return mlBets     < minMlSample;
+  return (totalsBets < minTotalsSample) || (mlBets < minMlSample);
 }
 
 // Main entry. Caller provides db handle, base getSettings() output, a
 // {from, to} date window, a mode, and tuning opts:
 //   opts.optimizeFor      'totals' | 'ml' | 'all'   (default 'all')
-//   opts.minTotalsSample  Number                     (default 30)
+//   opts.minTotalsSample  Number                     (default 30) —
+//                         threshold on overs+unders bet count.
+//   opts.minMlSample      Number                     (default 30) —
+//                         threshold on favs+dogs bet count. Parallel
+//                         to minTotalsSample; the one that applies is
+//                         determined by optimizeFor (both for 'all').
 //   opts.trainFraction    0 < x < 1                  (default 0.7)
 //   opts.topN             Number                     (default 10) —
 //                         how many top-ranked combos to re-score on TEST.
@@ -337,6 +370,7 @@ async function runParameterSweep(db, baseSettings, opts) {
   const toDate   = opts.to;
   const optimizeFor    = (opts.optimizeFor || 'all').toLowerCase();
   const minTotalsSample = (opts.minTotalsSample != null) ? Number(opts.minTotalsSample) : 30;
+  const minMlSample     = (opts.minMlSample     != null) ? Number(opts.minMlSample)     : 30;
   const trainFraction  = (opts.trainFraction != null)  ? Number(opts.trainFraction)  : 0.7;
   const topN           = (opts.topN != null)           ? Number(opts.topN)           : 10;
   if (!mode || (mode !== 'univariate' && mode !== 'joint')) {
@@ -423,19 +457,29 @@ async function runParameterSweep(db, baseSettings, opts) {
     await new Promise((r) => setImmediate(r));
   }
 
-  // Stage 4: rank by train target metric. Combos whose TARGET-bucket
-  // sample size is below minTotalsSample (or minMlSample for ml mode)
-  // get a low_sample flag and sort LAST so a 4-bet hot streak doesn't
-  // float to the top of the rankings.
+  // Stage 4: rank STRICTLY by the train target metric — the combined
+  // ROI of the optimize-target buckets ONLY. For optimizeFor='totals'
+  // that is overs+unders; for 'ml' it is favs+dogs; for 'all' it is
+  // the union of all four. No other bucket's ROI may influence rank.
+  //
+  // Sample-size gating is target-aware too: a combo whose target-bucket
+  // bet count is under threshold (minTotalsSample for totals,
+  // minMlSample for ml, both required for 'all') gets low_sample=true
+  // and sorts to the bottom regardless of how favourable its ROI looks.
+  // This prevents a 5-favs/+28% combo from outranking a 90-bet combo
+  // near breakeven in an ML run, and equivalently for totals.
   for (const r of results) {
     r.train_target = targetMetric(r.train.by_category, optimizeFor);
-    r.low_sample = (r.train_target.bets < minTotalsSample);
+    r.low_sample   = isLowSample(r.train.by_category, optimizeFor, minTotalsSample, minMlSample);
   }
   results.sort((a, b) => {
     if (a.low_sample !== b.low_sample) return a.low_sample ? 1 : -1;
     const aR = a.train_target.roi_pct == null ? -Infinity : a.train_target.roi_pct;
     const bR = b.train_target.roi_pct == null ? -Infinity : b.train_target.roi_pct;
-    return bR - aR;
+    if (bR !== aR) return bR - aR;
+    // Tie-break: prefer the larger target sample so equal-ROI ties
+    // resolve toward the more statistically grounded combo.
+    return b.train_target.bets - a.train_target.bets;
   });
 
   // Stage 5: re-score top-K combos on TEST. Plus baseline (current
@@ -472,13 +516,21 @@ async function runParameterSweep(db, baseSettings, opts) {
   if (mode === 'joint' && elapsedMs > 5 * 60 * 1000) {
     notes.push('joint mode took ' + (elapsedMs / 1000).toFixed(1) + 's — exceeds the 5-minute soft target; consider optimizing the inner loop or reducing settings count');
   }
-  if (testGames.length < minTotalsSample * 2) {
-    notes.push('test-set has only ' + testGames.length + ' games — test-set ROI for any bucket will be thin; treat top-K test numbers as directional only until the snapshot corpus grows');
+  // Test-set sufficiency note keyed off the threshold that actually
+  // governs ranking — minTotalsSample for totals, minMlSample for ml,
+  // the larger of the two for 'all' (since both must clear).
+  const targetMinSample = optimizeFor === 'totals' ? minTotalsSample
+                        : optimizeFor === 'ml'     ? minMlSample
+                        : Math.max(minTotalsSample, minMlSample);
+  if (testGames.length < targetMinSample * 2) {
+    notes.push('test-set has only ' + testGames.length + ' games — test-set ROI for the target bucket will be thin; treat top-K test numbers as directional only until the snapshot corpus grows');
   }
   return {
     mode,
     optimize_for: optimizeFor,
+    target_buckets: targetBucketsFor(optimizeFor),
     min_totals_sample: minTotalsSample,
+    min_ml_sample: minMlSample,
     train_fraction: trainFraction,
     date_window: { from: fromDate, to: toDate },
     train_test_split: {
@@ -524,5 +576,7 @@ module.exports = {
   // exposed for the route + tests
   splitTrainTest,
   targetMetric,
+  targetBucketsFor,
+  isLowSample,
   scoreGames,
 };

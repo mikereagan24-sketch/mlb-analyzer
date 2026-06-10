@@ -1290,7 +1290,8 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     }
     // Tuning opts (feat/totals-sweep):
     //   optimizeFor: 'totals' | 'ml' | 'all' (default 'all').
-    //   minTotalsSample: combo flagged low_sample below this (default 30).
+    //   minTotalsSample: low_sample threshold on overs+unders count (default 30).
+    //   minMlSample: low_sample threshold on favs+dogs count (default 30).
     //   trainFraction: 0 < x < 1 (default 0.7); whole-day partition.
     //   topN: top-K combos to re-score on TEST (default 10).
     const optimizeFor = (b.optimizeFor || 'all').toLowerCase();
@@ -1300,6 +1301,10 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     const minTotalsSample = (b.minTotalsSample != null) ? Number(b.minTotalsSample) : 30;
     if (!Number.isFinite(minTotalsSample) || minTotalsSample < 0) {
       return res.status(400).json({ error: 'minTotalsSample must be a non-negative number' });
+    }
+    const minMlSample = (b.minMlSample != null) ? Number(b.minMlSample) : 30;
+    if (!Number.isFinite(minMlSample) || minMlSample < 0) {
+      return res.status(400).json({ error: 'minMlSample must be a non-negative number' });
     }
     const trainFraction = (b.trainFraction != null) ? Number(b.trainFraction) : 0.7;
     if (!(trainFraction > 0 && trainFraction < 1)) {
@@ -1314,7 +1319,7 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     const runId = crypto.randomUUID();
     const params = {
       mode, from: b.from, to: b.to,
-      optimizeFor, minTotalsSample, trainFraction, topN,
+      optimizeFor, minTotalsSample, minMlSample, trainFraction, topN,
     };
     const startedAt = nowPtIso();
     q.insertParameterSweepRun.run(runId, JSON.stringify(params), startedAt);
