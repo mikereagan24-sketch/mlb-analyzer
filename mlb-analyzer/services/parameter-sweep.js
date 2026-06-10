@@ -22,7 +22,19 @@ const {
 } = require('./model');
 
 // Mapping from sweep parameter -> setting keys that should be flipped.
-// W_PROJ_W_ACT is a complementary pair (W_PROJ + W_ACT sum to 1).
+// W_PROJ_W_ACT and W_PIT_W_BAT are complementary pairs (the second
+// half is 1 - sweep_value).
+//   - W_PIT_W_BAT controls the headline pitcher-vs-hitter blend at
+//     perBatterEW (services/model.js:195): every per-batter expected
+//     wOBA is pitW * W_PIT + batW * W_BAT. Reaches BOTH the opener-aware
+//     and standard branches — no forecast bypass, unlike the now-removed
+//     SP_BULLPEN_MIX. Production runs at W_PIT=0.40 / W_BAT=0.60,
+//     departed from the 0.5/0.5 seeded default. That setting was picked
+//     by the offline grid-search in scripts/optimize-params.js (commit
+//     3397c3b, April 2026) where w_bat=0.60 won the top-20 ROI ranking;
+//     value lives in app_settings (no migration touched it). Adding it
+//     to the in-server sweep so it can be retuned against the current
+//     snapshot corpus alongside the other blend params.
 // BAT_HAND_SP and BAT_HAND_RELIEF are independent scalars (the model
 // passes them as separate args to perBatterEW — in production they're
 // constrained near 1 via the settings-schema invariants, but the sweep
@@ -73,16 +85,17 @@ const {
 //     fallback defaults; sweeping them would just trade noise for noise
 //     since they only fire on missing-data games.
 const SWEEP_PARAMS = [
-  'W_PROJ_W_ACT', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
+  'W_PROJ_W_ACT', 'W_PIT_W_BAT', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
   'RUN_MULT', 'TOT_SLOPE',
 ];
 
 // Per-parameter sweep ranges for univariate mode. The blend params
-// (W_PROJ_W_ACT, BAT_HAND_SP, BAT_HAND_RELIEF) use the original
-// 0.1..0.9 step-0.1 grid. RUN_MULT and TOT_SLOPE get dedicated grids
-// centered on their production defaults, with step sizes that are
-// large enough to be distinguishable in ROI given the thin snapshot
-// corpus but small enough that the optimum doesn't fall in a gap.
+// (W_PROJ_W_ACT, W_PIT_W_BAT, BAT_HAND_SP, BAT_HAND_RELIEF) use the
+// original 0.1..0.9 step-0.1 grid. RUN_MULT and TOT_SLOPE get
+// dedicated grids centered on their production defaults, with step
+// sizes that are large enough to be distinguishable in ROI given the
+// thin snapshot corpus but small enough that the optimum doesn't fall
+// in a gap.
 const BLEND_GRID    = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
 const RUN_MULT_GRID = [40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60];
 const TOT_SLOPE_GRID = [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14];
@@ -98,6 +111,10 @@ function applySweepOverrides(baseSettings, overrides) {
   if ('W_PROJ_W_ACT' in overrides) {
     s.W_PROJ = overrides.W_PROJ_W_ACT;
     s.W_ACT  = 1 - overrides.W_PROJ_W_ACT;
+  }
+  if ('W_PIT_W_BAT' in overrides) {
+    s.W_PIT = overrides.W_PIT_W_BAT;
+    s.W_BAT = 1 - overrides.W_PIT_W_BAT;
   }
   if ('BAT_HAND_SP' in overrides) s.SP_WEIGHT     = overrides.BAT_HAND_SP;
   if ('BAT_HAND_RELIEF' in overrides) s.RELIEF_WEIGHT = overrides.BAT_HAND_RELIEF;
@@ -151,6 +168,7 @@ function rollUpRoi(byCategory) {
 function baseEffectiveSettings(baseSettings) {
   return {
     W_PROJ_W_ACT:    Number(baseSettings.W_PROJ),
+    W_PIT_W_BAT:     Number(baseSettings.W_PIT),
     BAT_HAND_SP:     Number(baseSettings.SP_WEIGHT),
     BAT_HAND_RELIEF: Number(baseSettings.RELIEF_WEIGHT),
     RUN_MULT:        Number(baseSettings.RUN_MULT  != null ? baseSettings.RUN_MULT  : 48),
@@ -162,17 +180,19 @@ function baseEffectiveSettings(baseSettings) {
 //   univariate: for each sweepable param, sweep its dedicated grid
 //               with all other params at production base. RUN_MULT
 //               and TOT_SLOPE each get their own 11-value grid; the
-//               3 blend params share the original 0.1..0.9 grid.
-//               Total: 3×9 + 11 + 11 = 49 combos.
+//               4 blend params share the original 0.1..0.9 grid.
+//               Total: 4×9 + 11 + 11 = 58 combos.
 //   joint:      cartesian product of 5 settings per param across the
-//               THREE blend params (5^3 = 125). RUN_MULT and
-//               TOT_SLOPE are EXCLUDED from joint mode by design —
-//               sweeping them simultaneously with the blend params on
-//               the thin snapshot corpus (~225 games) would overfit.
-//               Run them in univariate mode instead. Was 5^4=625
-//               pre-chore/sweep-drop-sp-bullpen-mix; SP_BULLPEN_MIX
-//               was vestigial on the forecast-driven path so dropping
-//               it took joint to 125 (~3.5h → ~42m).
+//               THREE blend params (5^3 = 125). RUN_MULT, TOT_SLOPE,
+//               and W_PIT_W_BAT are EXCLUDED from joint mode by design
+//               — adding any of them simultaneously with the existing
+//               blend params on the thin snapshot corpus (~225 games)
+//               would overfit. W_PIT_W_BAT in particular is the
+//               headline pitcher/hitter blend and warrants a clean
+//               univariate read first. Run all four in univariate mode.
+//               Joint was 5^4=625 pre-chore/sweep-drop-sp-bullpen-mix;
+//               SP_BULLPEN_MIX was vestigial on the forecast-driven
+//               path so dropping it took joint to 125 (~3.5h → ~42m).
 function buildCombinations(mode, baseSettings) {
   const combos = [];
   if (mode === 'univariate') {
@@ -206,17 +226,21 @@ function buildCombinations(mode, baseSettings) {
 }
 
 // Estimated runtime of a sweep run, returned to the POST caller so the
-// UI can show "expect ~17 min" vs "expect ~42 min" up front instead
+// UI can show "expect ~20 min" vs "expect ~42 min" up front instead
 // of the user discovering it via polling. Calibrated against the
-// observed run_id 0bb9be83-window timings, then rescaled post
-// chore/sweep-drop-sp-bullpen-mix:
-//   - Univariate: was 58 combos pre-drop (~20m); now 49 (~17m).
+// observed run_id 0bb9be83-window timings, then rescaled across
+// chore/sweep-drop-sp-bullpen-mix + feat/sweep-add-w-pit-w-bat:
+//   - Univariate: 58 originally (~20m) → 49 after SP_BULLPEN_MIX
+//     drop (~17m) → 58 again after adding W_PIT_W_BAT (~20m). Net
+//     wash on runtime, but coverage now includes the headline
+//     pitcher/hitter blend.
 //   - Joint: was 5^4=625 pre-drop (~3.5h); now 5^3=125 (~42m).
+//     W_PIT_W_BAT intentionally left out of joint (univariate only).
 // Per (combo × game) cost ≈ 0.09s on Render's standard instance; the
 // constant is an empirical floor and may drift as the model gains
 // features — refresh after any runModel cost change.
 function estimateRuntimeSec(mode, fromDate, toDate, topN) {
-  const combos    = mode === 'univariate' ? 49 : (mode === 'joint' ? 125 : 0);
+  const combos    = mode === 'univariate' ? 58 : (mode === 'joint' ? 125 : 0);
   const days      = Math.max(1, daysBetween(fromDate, toDate) + 1);
   const games     = days * 14.5;             // ~14.5 MLB games/day avg
   const PER_CALL_SEC = 0.09;
@@ -326,8 +350,8 @@ function safeJson(s) {
 function scoreGames(settings, games) {
   const byCat = emptyByCategory();
   for (const sg of games) {
-    // quiet=true: see note in preScreenGame. Without this, a 49-combo
-    // univariate sweep emits ~49 × 30-40 ≈ 1700+ identical opener-model
+    // quiet=true: see note in preScreenGame. Without this, a 58-combo
+    // univariate sweep emits ~58 × 30-40 ≈ 2000+ identical opener-model
     // log lines, which was the visible 'runaway loop' symptom in run_id
     // 0bb9be83 (investigation: fix/sweep-runaway-loop).
     const mr = runModel(sg.game, sg.wobaIdx, settings, 'opener_aware', true);
@@ -518,7 +542,7 @@ async function runParameterSweep(db, baseSettings, opts) {
   const results = [];
   let cIdx = 0;
   // Progress cadence: floor(N/20) prints ~5% of the way through, scaled
-  // by combo count. Univariate (49 combos) → every 2 combos; joint
+  // by combo count. Univariate (58 combos) → every 2 combos; joint
   // (125) → every 6. The previous every-100 threshold never fired on
   // univariate, which made the sweep look frozen and was the root of
   // the fix/sweep-runaway-loop false alarm.
@@ -546,7 +570,7 @@ async function runParameterSweep(db, baseSettings, opts) {
     // HTTP response actually gets written to the client and any other
     // small requests (GET /admin/parameter-sweep/:run_id polls) can
     // be served while this sweep runs. The yield is ~0ms when nothing
-    // else is queued; cost across 49/125 combos ~= negligible.
+    // else is queued; cost across 58/125 combos ~= negligible.
     await new Promise((r) => setImmediate(r));
   }
 
