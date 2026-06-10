@@ -1301,6 +1301,12 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     //   minMlSample: low_sample threshold on favs+dogs count (default 30).
     //   trainFraction: 0 < x < 1 (default 0.7); whole-day partition.
     //   topN: top-K combos to re-score on TEST (default 10).
+    //   betSelection: 'emit_floor' | 'ui_highlight' (default 'emit_floor').
+    //     Which aggregate drives ranking. Both are always computed and
+    //     reported side-by-side per combo (target_emit + target_highlight).
+    //     emit_floor matches prior sweep behavior (every signal >=
+    //     SIGNAL_EMIT_FLOOR_PP); ui_highlight ranks by ROI over the
+    //     subset the user actually bets (UI-highlighted picks only).
     const optimizeFor = (b.optimizeFor || 'all').toLowerCase();
     if (!['totals', 'ml', 'all'].includes(optimizeFor)) {
       return res.status(400).json({ error: 'optimizeFor must be "totals", "ml", or "all"' });
@@ -1320,6 +1326,10 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     const topN = (b.topN != null) ? Number(b.topN) : 10;
     if (!Number.isFinite(topN) || topN < 1) {
       return res.status(400).json({ error: 'topN must be a positive integer' });
+    }
+    const betSelection = (b.betSelection || 'emit_floor').toLowerCase();
+    if (!['emit_floor', 'ui_highlight'].includes(betSelection)) {
+      return res.status(400).json({ error: 'betSelection must be "emit_floor" or "ui_highlight"' });
     }
 
     // In-flight dedupe. Render's single instance can't run two sweeps
@@ -1349,6 +1359,7 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     const params = {
       mode, from: b.from, to: b.to,
       optimizeFor, minTotalsSample, minMlSample, trainFraction, topN,
+      betSelection,
     };
     const startedAt = nowPtIso();
     // Up-front runtime estimate so the operator knows whether to expect
