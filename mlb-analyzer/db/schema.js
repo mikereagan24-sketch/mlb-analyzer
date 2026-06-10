@@ -1618,6 +1618,19 @@ q.getParameterSweepRun = db.prepare(
 q.getLatestParameterSweepRun = db.prepare(
   "SELECT * FROM parameter_sweep_runs ORDER BY started_at DESC LIMIT 1"
 );
+// In-flight dedupe + boot-time orphan cleanup. Only one sweep can run
+// at a time on Render's single instance (event-loop contention pegs
+// concurrent runs and was the likely cause of the HTTP 000 polls in
+// fix/sweep-runaway-loop). At process boot, any row still marked
+// 'running' is by definition an orphan from a prior crash/restart, so
+// we mark it 'error' with an abandonment message before serving any
+// /admin/parameter-sweep traffic.
+q.getRunningParameterSweepRuns = db.prepare(
+  "SELECT run_id, params_json, started_at FROM parameter_sweep_runs WHERE status='running'"
+);
+q.markParameterSweepRunAbandoned = db.prepare(
+  "UPDATE parameter_sweep_runs SET status='error', error=?, finished_at=? WHERE run_id=? AND status='running'"
+);
 
 q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,role,hand,position,updated_at)
   VALUES (?,?,?,?,?,?,datetime('now'))

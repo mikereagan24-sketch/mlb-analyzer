@@ -14,9 +14,22 @@ const { startCronJobs, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, ru
 // Synchronous + sequenced before app.listen so any /api request
 // served after listen() sees fully-normalized rows. Aborts the boot
 // on failure rather than coming up half-migrated.
-const { db } = require('./db/schema');
+const { db, q } = require('./db/schema');
 const { applyPendingMigrations } = require('./services/migrations');
 applyPendingMigrations(db);
+
+// Orphan parameter_sweep_runs cleanup. Any row still 'running' at boot
+// is by definition orphaned (the in-process closure that would have
+// transitioned it to 'done'/'error' is gone with the prior process).
+// Mark them error so /admin/parameter-sweep/latest stops surfacing
+// them and the POST-handler in-flight dedupe clears. Logs each
+// orphan's params_json so the operator can see what was killed.
+// Runs synchronously before listen() so /admin/parameter-sweep routes
+// served immediately after boot see a clean table.
+const { cleanupOrphanedSweepRuns } = require('./services/parameter-sweep');
+const { nowPtIso } = require('./services/jobs');
+try { cleanupOrphanedSweepRuns(q, nowPtIso); }
+catch (e) { console.warn('[sweep-cleanup] boot cleanup failed:', e && e.message); }
 
 const app = express();
 const PORT = process.env.PORT || 3000;

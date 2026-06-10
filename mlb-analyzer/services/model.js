@@ -249,7 +249,7 @@ function impliedP(ml) {
  * @property {number|null} hML — model home American ML
  * @property {string} [_suppressed] — present iff model invalid; values: 'incomplete_lineup'
  */
-function runModel(game, wobaIdx, settings, mode) {
+function runModel(game, wobaIdx, settings, mode, quiet) {
   // mode === 'opener_aware' enables the 3-way pitching split for any side
   // with is_opener_game_<side>=1 AND bulk_guy_<side> set. Sides without
   // opener data keep the standard 2-way split inside the same call. Any
@@ -257,7 +257,18 @@ function runModel(game, wobaIdx, settings, mode) {
   // Caller (processGameSignals) computes BOTH and persists each pair so
   // the use_opener_logic flag can swap which one feeds getSignals
   // without re-running the model.
+  //
+  // quiet (default false) suppresses per-game opener-model diagnostic
+  // logs. Production callers (cron jobs.js, on-demand /api/* scoring)
+  // leave it false so the logs surface in the Render console. The
+  // parameter sweep passes true so a 58×225 (univariate) or 625×225
+  // (joint) run doesn't emit ~30-40 lines per combo of opener-model
+  // diagnostic output — the lines are invariant under the swept
+  // params (none of them touch computeOpenerPitWeightFromForecast),
+  // so the volume is pure noise and was the root of the
+  // fix/sweep-runaway-loop false alarm.
   if (mode == null) mode = 'standard';
+  if (quiet == null) quiet = false;
   // Empty/incomplete lineups → suppress. Model run estimates require a
   // full 9-batter lineup to integrate over PA_WEIGHTS; with 0 or partial
   // lineups, the per-batter EW loop produces 0 contributions, aWp/hWp
@@ -478,7 +489,7 @@ function runModel(game, wobaIdx, settings, mode) {
     if (!sideSp) {
       openerVsL = bullpenVsL;
       openerVsR = bullpenVsR;
-      console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+      if (!quiet) console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
         + ': SP-null → opener slot sourced from bullpen pool'
         + ' (vsL=' + bullpenVsL.toFixed(3) + ', vsR=' + bullpenVsR.toFixed(3) + ')');
     }
@@ -505,7 +516,7 @@ function runModel(game, wobaIdx, settings, mode) {
       }
       realizedOpener /= paSum;
       realizedBullpen /= paSum;
-      console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+      if (!quiet) console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
         + ': bullpen_game mode (no bulk, target_op=' + targetOpenerWeight.toFixed(3)
         + ' realized op=' + realizedOpener.toFixed(3) + '/bp=' + realizedBullpen.toFixed(3) + ')');
       return {
@@ -531,7 +542,7 @@ function runModel(game, wobaIdx, settings, mode) {
     let bulkVsL = bulkW.vsLHB;
     let bulkVsR = bulkW.vsRHB;
     if (bulkW.source === 'fallback') {
-      console.warn('[opener-model] ' + (game.game_id || '?') + '/' + side
+      if (!quiet) console.warn('[opener-model] ' + (game.game_id || '?') + '/' + side
         + ': bulk-guy ' + bulkSp + ' not in wOBA index — using UNKNOWN_PITCHER_WOBA=' + UNK_PIT_WOBA);
       bulkVsL = UNK_PIT_WOBA;
       bulkVsR = UNK_PIT_WOBA;
@@ -566,7 +577,7 @@ function runModel(game, wobaIdx, settings, mode) {
     realizedOpener  /= paSum;
     realizedBulk    /= paSum;
     realizedBullpen /= paSum;
-    console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+    if (!quiet) console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
       + ': targets op=' + targetOpenerWeight.toFixed(3) + '/bk=' + targetBulkWeight.toFixed(3)
       + ' realized op=' + realizedOpener.toFixed(3) + '/bk=' + realizedBulk.toFixed(3) + '/bp=' + realizedBullpen.toFixed(3)
       + ' (pos1 op=' + s0.opener.toFixed(3) + '/bk=' + s0.bulk.toFixed(3) + '/bp=' + s0.bullpen.toFixed(3)

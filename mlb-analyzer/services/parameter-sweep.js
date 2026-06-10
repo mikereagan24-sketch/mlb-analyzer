@@ -192,6 +192,65 @@ function buildCombinations(mode, baseSettings) {
   return combos;
 }
 
+// Estimated runtime of a sweep run, returned to the POST caller so the
+// UI can show "expect ~20 min" vs "expect ~3 hours" up front instead
+// of the user discovering it via polling. Calibrated against the
+// observed run_id 0bb9be83-window timings:
+//   - Univariate (58 combos) × 16-day window (~225 games) ran in ~20m.
+//   - Joint (625 combos) would scale to ~3.5h on the same window.
+// Per (combo × game) cost ≈ 0.09s on Render's standard instance; the
+// constant is an empirical floor and may drift as the model gains
+// features — refresh after any runModel cost change.
+function estimateRuntimeSec(mode, fromDate, toDate, topN) {
+  const combos    = mode === 'univariate' ? 58 : (mode === 'joint' ? 625 : 0);
+  const days      = Math.max(1, daysBetween(fromDate, toDate) + 1);
+  const games     = days * 14.5;             // ~14.5 MLB games/day avg
+  const PER_CALL_SEC = 0.09;
+  const trainShare = 0.7;
+  const testShare  = 0.3;
+  const comboWork    = combos * games * trainShare * PER_CALL_SEC;
+  const baselineWork = games * PER_CALL_SEC;                          // train + test combined ≈ full
+  const topKWork     = (topN || 10) * games * testShare * PER_CALL_SEC;
+  return Math.round(comboWork + baselineWork + topKWork + 5);         // +5s setup (loadGames, snapshots)
+}
+
+function daysBetween(from, to) {
+  const dFrom = new Date(from + 'T00:00:00Z');
+  const dTo   = new Date(to   + 'T00:00:00Z');
+  return Math.round((dTo - dFrom) / (24 * 3600 * 1000));
+}
+
+// Boot-time cleanup of orphaned 'running' rows in parameter_sweep_runs.
+// Any row still 'running' at process start has lost its in-process
+// async closure (the only thing that would ever transition it to
+// 'done' or 'error') — the previous process died mid-sweep. Mark them
+// 'error' with an abandonment message so /admin/parameter-sweep/latest
+// stops hanging on them and the in-flight dedupe gate in the POST
+// handler clears for the next legitimate run. Logs params_json for
+// each orphan so the operator can tell which params were in-flight
+// (e.g. whether the killed ML run was univariate ~20m or joint ~3.5h).
+function cleanupOrphanedSweepRuns(q, nowPtIso) {
+  const orphans = q.getRunningParameterSweepRuns.all();
+  if (!orphans.length) {
+    console.log('[sweep-cleanup] no orphaned running rows at boot');
+    return { abandoned: 0, runs: [] };
+  }
+  const finishedAt = nowPtIso();
+  const errMsg = 'abandoned: process restarted while sweep was in flight';
+  const runs = [];
+  for (const row of orphans) {
+    let params = null;
+    try { params = JSON.parse(row.params_json); } catch (e) { /* best-effort */ }
+    console.warn('[sweep-cleanup] abandoning run_id=' + row.run_id
+      + ' started_at=' + row.started_at
+      + ' params=' + (params ? JSON.stringify(params) : row.params_json));
+    q.markParameterSweepRunAbandoned.run(errMsg, finishedAt, row.run_id);
+    runs.push({ run_id: row.run_id, started_at: row.started_at, params });
+  }
+  console.warn('[sweep-cleanup] marked ' + orphans.length + ' orphan(s) as error');
+  return { abandoned: orphans.length, runs };
+}
+
 // Load all snapshot rows for a single date into a buildWobaIndex-shaped
 // object. Returns null if the date has no snapshot rows. Cached by the
 // caller — DO NOT call this in the inner combination loop.
@@ -229,7 +288,11 @@ function preScreenGame(game, wobaIdx, baseSettings) {
     const awayLineup = game.away_lineup_json ? safeJson(game.away_lineup_json) : [];
     const homeLineup = game.home_lineup_json ? safeJson(game.home_lineup_json) : [];
     const wrapped = Object.assign({}, game, { awayLineup, homeLineup });
-    const mr = runModel(wrapped, wobaIdx, baseSettings, 'opener_aware');
+    // quiet=true: the opener-model log lines are invariant under the
+    // swept params (computeOpenerPitWeightFromForecast reads only
+    // OPENER_WEIGHT_* settings, none of which are in SWEEP_PARAMS), so
+    // they'd just spam ~30-40 noise lines per combo × N combos.
+    const mr = runModel(wrapped, wobaIdx, baseSettings, 'opener_aware', true);
     if (mr && mr._suppressed) return null;
     return wrapped; // re-use the wrapped object across combos
   } catch (e) {
@@ -249,7 +312,11 @@ function safeJson(s) {
 function scoreGames(settings, games) {
   const byCat = emptyByCategory();
   for (const sg of games) {
-    const mr = runModel(sg.game, sg.wobaIdx, settings, 'opener_aware');
+    // quiet=true: see note in preScreenGame. Without this, a 58-combo
+    // univariate sweep emits ~58 × 30-40 ≈ 2000+ identical opener-model
+    // log lines, which was the visible 'runaway loop' symptom in run_id
+    // 0bb9be83 (investigation: fix/sweep-runaway-loop).
+    const mr = runModel(sg.game, sg.wobaIdx, settings, 'opener_aware', true);
     if (mr && mr._suppressed) continue;
     const sigs = getSignals(sg.game, mr, settings);
     for (const s of sigs) {
@@ -436,6 +503,12 @@ async function runParameterSweep(db, baseSettings, opts) {
   // 4400 test re-scores too.
   const results = [];
   let cIdx = 0;
+  // Progress cadence: ceil(N/20) prints ~5% of the way through, scaled
+  // by combo count. Univariate (58 combos) → every 3 combos; joint
+  // (625) → every 32. The previous every-100 threshold never fired on
+  // univariate, which made the sweep look frozen and was the root of
+  // the fix/sweep-runaway-loop false alarm.
+  const progressEvery = Math.max(1, Math.floor(combos.length / 20));
   for (const combo of combos) {
     const settings = applySweepOverrides(baseSettings, combo.override);
     const trainByCat = scoreGames(settings, trainGames);
@@ -445,9 +518,15 @@ async function runParameterSweep(db, baseSettings, opts) {
       train: { by_category: trainByCat },
     });
     cIdx++;
-    if (cIdx % 100 === 0) {
+    if (cIdx % progressEvery === 0 || cIdx === combos.length) {
+      const elapsedS  = (Date.now() - start) / 1000;
+      const perCombo  = elapsedS / cIdx;
+      const remaining = combos.length - cIdx;
+      const etaS      = perCombo * remaining;
       console.log('[sweep] progress: ' + cIdx + '/' + combos.length
-        + ' (' + Math.round(cIdx / combos.length * 100) + '%) — elapsed ' + ((Date.now() - start) / 1000).toFixed(1) + 's');
+        + ' (' + Math.round(cIdx / combos.length * 100) + '%) — elapsed '
+        + elapsedS.toFixed(1) + 's, ETA ' + etaS.toFixed(0) + 's ('
+        + (etaS / 60).toFixed(1) + 'm) at ' + perCombo.toFixed(2) + 's/combo');
     }
     // Yield to the event loop every combo so the async POST handler's
     // HTTP response actually gets written to the client and any other
@@ -579,4 +658,6 @@ module.exports = {
   targetBucketsFor,
   isLowSample,
   scoreGames,
+  estimateRuntimeSec,
+  cleanupOrphanedSweepRuns,
 };
