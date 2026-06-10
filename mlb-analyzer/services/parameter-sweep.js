@@ -350,6 +350,13 @@ async function runParameterSweep(db, baseSettings, opts) {
     throw new Error('trainFraction must be strictly between 0 and 1');
   }
 
+  // Yield once at the very top — under feat/totals-sweep-async this
+  // function is called from a setImmediate inside the POST handler, so
+  // the HTTP response is queued in the socket buffer but not flushed
+  // until the event loop next idles. An immediate await lets Node
+  // process the pending write before we monopolize the loop.
+  await new Promise((r) => setImmediate(r));
+
   // Stage 1: load + snapshot + pre-screen (unchanged).
   const games = loadGames(db, fromDate, toDate);
   console.log('[sweep] loaded ' + games.length + ' games in window ' + fromDate + '..' + toDate);
@@ -408,6 +415,12 @@ async function runParameterSweep(db, baseSettings, opts) {
       console.log('[sweep] progress: ' + cIdx + '/' + combos.length
         + ' (' + Math.round(cIdx / combos.length * 100) + '%) — elapsed ' + ((Date.now() - start) / 1000).toFixed(1) + 's');
     }
+    // Yield to the event loop every combo so the async POST handler's
+    // HTTP response actually gets written to the client and any other
+    // small requests (GET /admin/parameter-sweep/:run_id polls) can
+    // be served while this sweep runs. The yield is ~0ms when nothing
+    // else is queued; cost across 58 combos ~= negligible.
+    await new Promise((r) => setImmediate(r));
   }
 
   // Stage 4: rank by train target metric. Combos whose TARGET-bucket
@@ -451,6 +464,7 @@ async function runParameterSweep(db, baseSettings, opts) {
       by_category: testByCat,
       target: targetMetric(testByCat, optimizeFor),
     };
+    await new Promise((rr) => setImmediate(rr));
   }
 
   const elapsedMs = Date.now() - start;

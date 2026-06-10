@@ -220,6 +220,24 @@ db.exec(`
     games_updated INTEGER DEFAULT 0,
     ran_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- Parameter-sweep run log. POST /api/admin/parameter-sweep is
+  -- async — it inserts a row here with status='running' and returns
+  -- the run_id immediately. The sweep continues in the background;
+  -- when it finishes the row is UPDATEd with results_json + status=
+  -- 'done', or with error + status='error' if it threw. GET handlers
+  -- read this table to surface status + results once complete.
+  -- started_at / finished_at are PT (services/jobs.js nowPtIso),
+  -- matching the morning-capture / empirical-spread convention.
+  CREATE TABLE IF NOT EXISTS parameter_sweep_runs (
+    run_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,            -- 'running' | 'done' | 'error'
+    params_json TEXT NOT NULL,       -- request body that started this run
+    results_json TEXT,               -- full sweep response, NULL until done
+    error TEXT,                      -- error message when status='error'
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_psr_started_at ON parameter_sweep_runs (started_at DESC);
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1578,6 +1596,29 @@ const q = {
   updateWindData: null, // initialized lazily after migrations
   getAllSettings: db.prepare(`SELECT key, value FROM app_settings`),
 };
+// Parameter-sweep run helpers (feat/totals-sweep-async). POST handler
+// inserts a 'running' row, the background closure transitions it to
+// 'done' (with results_json) or 'error' (with error column). All
+// timestamps are PT via services/jobs.js nowPtIso() — matches the
+// morning-capture / empirical-spread convention from
+// fix/morning-capture-tz-anchor.
+q.insertParameterSweepRun = db.prepare(
+  "INSERT INTO parameter_sweep_runs (run_id, status, params_json, started_at) "
+  + "VALUES (?, 'running', ?, ?)"
+);
+q.updateParameterSweepRunDone = db.prepare(
+  "UPDATE parameter_sweep_runs SET status='done', results_json=?, finished_at=? WHERE run_id=?"
+);
+q.updateParameterSweepRunError = db.prepare(
+  "UPDATE parameter_sweep_runs SET status='error', error=?, finished_at=? WHERE run_id=?"
+);
+q.getParameterSweepRun = db.prepare(
+  "SELECT * FROM parameter_sweep_runs WHERE run_id=?"
+);
+q.getLatestParameterSweepRun = db.prepare(
+  "SELECT * FROM parameter_sweep_runs ORDER BY started_at DESC LIMIT 1"
+);
+
 q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,role,hand,position,updated_at)
   VALUES (?,?,?,?,?,?,datetime('now'))
   ON CONFLICT(team,player_name) DO UPDATE SET
