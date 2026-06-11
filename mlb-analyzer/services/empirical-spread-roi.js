@@ -70,26 +70,93 @@ const { impliedP } = require('./model');
 // matters operationally, and this list is short enough to encode.
 const STALE_PF_DATES_FOR_ATH = new Set(['2026-06-08', '2026-06-09']);
 
-// CLV reason codes — set on plays whose closing price could not be
-// resolved. Distinct values so an operator scanning the report can
-// tell why an individual play has clv: null without reverse-
-// engineering the joins.
-const CLV_NO_CLOSING_SNAPSHOT = 'no_kalshi_snapshot_for_game_date';
-const CLV_SIDE_PRICE_NULL     = 'snapshot_row_present_but_side_price_null';
+// CLV reason codes. Distinct values so an operator scanning the
+// report can tell where each play's close came from (or why it's
+// null) without reverse-engineering the joins.
+//
+// CLV close-price priority (set per fix/empirical-spread-clv-from-
+// gametime-sibling — replaces the prior snapshot-equals-game-date
+// scheme which missed every morning play because snapshots are day-
+// ahead, not same-day):
+//
+//   1. GAMETIME SIBLING — for a morning play, the gametime-track row
+//      for the SAME (game_date, game_id, spread_team, spread_line,
+//      side). Latest generated_at if multiple batches. This row's
+//      yes_ask_ml IS the close price for THIS side: gametime
+//      captures fire as close as the odds-job pass before first
+//      pitch, and the writer freezes both lay and take legs per
+//      market (the 360 → 180 batch-dedup → pair-collapse funnel
+//      proves both legs are present pre-collapse). clv_reason stays
+//      null on this path — this is the canonical close.
+//
+//   2. DAY-AHEAD SNAPSHOT FALLBACK — only used when no gametime
+//      sibling exists (e.g., a play that morning-triggered but the
+//      empirical engine no longer found edge at gametime, so no
+//      gametime row was written). Falls back to the latest
+//      kalshi_spread_markets_snapshot row with snapshot_date <=
+//      game_date. clv_reason = 'close_from_dayahead_snapshot' so the
+//      stale source is visible — a same-evening snapshot of D-1's
+//      capture can mark a morning play with clv ≈ 0 by
+//      construction, so the flag matters.
+//
+//   3. NULL — neither source has a price. clv_reason carries the
+//      specific failure.
+//
+// SIGN CONVENTION:
+//   clv_pp = (close_implied - my_implied) * 100
+//   Positive = beat the close (my purchase price had LOWER implied
+//              prob than the close, i.e., the market moved toward
+//              my position).
+//   Negative = lost vs close (paid MORE implied than close — market
+//              moved away from my position).
+//   Worked example, ARI -1.5 lay 6/9: my +158 (38.76% implied),
+//   close +198 (33.56% implied) → clv_pp = (33.56 - 38.76) = -5.20.
+//   NEGATIVE because the lay-side bettor paid 38.76 cents of
+//   implied prob on a market that closed at 33.56 — line widened
+//   AGAINST the lay position.
+const CLV_NO_CLOSE             = 'no_close_price_available';
+const CLV_SNAPSHOT_PRICE_NULL  = 'dayahead_snapshot_present_but_side_price_null';
+const CLV_FROM_DAYAHEAD_SNAP   = 'close_from_dayahead_snapshot';
+// Kept exported for back-compat with the prior diagnostic field
+// names — the new pipeline never sets these but consumers may.
+const CLV_NO_CLOSING_SNAPSHOT  = 'no_kalshi_snapshot_for_game_date';
+const CLV_SIDE_PRICE_NULL      = 'snapshot_row_present_but_side_price_null';
 
 // ------------------------------------------------------------ SQL
 // Pull all graded outcomes in the window, left-joined to game_log
 // (home_team / away_team for the stale_park_factor flag) and to the
-// closing snapshot (yes_ask_ml + no_ask_ml at snapshot_date =
-// game_date). pair_id IS NULL rows are excluded — those are
-// pre-feat/empirical-spread-plus-run legacy rows whose pair grouping
-// is unrecoverable (see schema.js:1123-1125: backfilling pair_id was
-// deemed not worth it because pair_id is only consumed by new code).
+// LATEST pre-game-day kalshi_spread_markets_snapshot row as a
+// fallback close source (the gametime-sibling close source is built
+// in JS — see buildReadout below). pair_id IS NULL rows are excluded —
+// those are pre-feat/empirical-spread-plus-run legacy rows whose pair
+// grouping is unrecoverable (schema.js:1123-1125: backfilling pair_id
+// was deemed not worth it because pair_id is only consumed by new
+// code).
+//
+// Snapshot join: the writer (q.snapshotKalshiSpreads) clears
+// snapshot_date before re-inserting, so each snapshot_date has at
+// most one row per market. To pick the LATEST pre-game-day snapshot,
+// the join needs ks.snapshot_date <= e.game_date AND no later
+// snapshot exists. The NOT EXISTS subquery picks the maximum
+// snapshot_date <= game_date per market — cheap because the snapshot
+// table is indexed on snapshot_date and the per-market cardinality
+// is small (a few snapshots per market at most before game day).
+//
+// Why <= rather than =: snapshots are written PT-daily; for a game
+// on date D, the relevant odds-job passes happen at 8AM/11AM/3PM/5PM
+// PT — but each PT day overwrites the prior. The most recent
+// snapshot for a market on date D is typically the latest pass on
+// D-1 evening (8PM/11PM cron) because by 8AM PT on D the odds-job
+// hasn't fired yet; the morning-capture cron runs at 7:30AM. The
+// equality predicate from the prior version missed every play
+// because the snapshot_date for D's games was usually D-1, not D.
+// The fallback is intentionally STALE for plays that lack a gametime
+// sibling, and enrichPlay flags those with
+// CLV_FROM_DAYAHEAD_SNAP — see the constant block above for the
+// reason hierarchy.
 //
 // We intentionally do NOT dedup or collapse in SQL — those passes
-// happen below in JS so each rule is independently verifiable. The
-// window function alternatives nest awkwardly with the EXISTS check
-// for still_a_play_at_close.
+// happen below in JS so each rule is independently verifiable.
 function fetchGradedRows(db, fromDate, toDate) {
   return db.prepare(`
     SELECT
@@ -98,17 +165,27 @@ function fetchGradedRows(db, fromDate, toDate) {
       e.cell_sample_size, e.generated_at, e.actual_margin, e.outcome,
       e.pnl_per_100, e.graded_at,
       g.home_team, g.away_team,
-      ks.yes_ask_ml AS close_yes_ask_ml,
-      ks.no_ask_ml  AS close_no_ask_ml
+      ks.yes_ask_ml   AS snap_yes_ask_ml,
+      ks.no_ask_ml    AS snap_no_ask_ml,
+      ks.snapshot_date AS snap_snapshot_date
     FROM empirical_spread_outcomes e
     LEFT JOIN game_log g
       ON g.game_date = e.game_date AND g.game_id = e.game_id
     LEFT JOIN kalshi_spread_markets_snapshot ks
-      ON ks.snapshot_date = e.game_date
-     AND ks.game_date     = e.game_date
+      ON ks.game_date     = e.game_date
      AND ks.game_id       = e.game_id
      AND ks.spread_team   = e.spread_team
      AND ks.spread_line   = e.spread_line
+     AND ks.snapshot_date <= e.game_date
+     AND NOT EXISTS (
+       SELECT 1 FROM kalshi_spread_markets_snapshot ks2
+       WHERE ks2.game_date    = ks.game_date
+         AND ks2.game_id      = ks.game_id
+         AND ks2.spread_team  = ks.spread_team
+         AND ks2.spread_line  = ks.spread_line
+         AND ks2.snapshot_date <= e.game_date
+         AND ks2.snapshot_date  > ks.snapshot_date
+     )
     WHERE e.outcome IS NOT NULL
       AND e.pair_id IS NOT NULL
       AND (? IS NULL OR e.game_date >= ?)
@@ -134,6 +211,23 @@ function buildReadout(db, fromDate, toDate, includeDetail) {
     if (seen.has(k)) continue;
     seen.add(k);
     deduped.push(r);
+  }
+
+  // ---- Gametime sibling map for CLV close-price lookup.
+  // Built BEFORE pair-collapse from the deduped set so a morning
+  // play can find its SAME-SIDE gametime row even when that row
+  // would have been pair-collapsed away (e.g., gametime's signaled
+  // side is the opposite leg). The empirical-spread writer emits
+  // BOTH lay and take rows per market regardless of which has
+  // positive edge — both legs carry their own frozen yes_ask_ml,
+  // which IS the same-side close price for the morning row's CLV.
+  // Key: (game_date, game_id, spread_team, spread_line, side).
+  // capture_track is implicit (filtered to 'gametime' here).
+  const gametimeSiblingByKey = new Map();
+  for (const r of deduped) {
+    if (r.capture_track !== 'gametime') continue;
+    const k = [r.game_date, r.game_id, r.spread_team, r.spread_line, r.side].join('|');
+    gametimeSiblingByKey.set(k, r);
   }
 
   // ---- Rule 2: pair-collapse. Per
@@ -165,7 +259,7 @@ function buildReadout(db, fromDate, toDate, includeDetail) {
     }
   }
 
-  const enriched = plays.map((p) => enrichPlay(p, gametimeKeys));
+  const enriched = plays.map((p) => enrichPlay(p, gametimeKeys, gametimeSiblingByKey));
 
   // ---- Aggregation
   const morningPlays  = enriched.filter((p) => p.capture_track === 'morning');
@@ -216,21 +310,59 @@ function buildReadout(db, fromDate, toDate, includeDetail) {
 }
 
 // ------------------------------------------------------------ per-play
-function enrichPlay(p, gametimeKeys) {
-  const closeImpl = closeImpliedFor(p);
-  const myImpl    = impliedP(p.yes_ask_ml);
-  let clv_pp = null;
+//
+// Close-price priority (see constant block at top of file for full
+// rationale + sign convention):
+//   1. Gametime sibling row's yes_ask_ml for the same side.
+//      Canonical close. clv_reason null.
+//   2. kalshi_spread_markets_snapshot row (latest snapshot_date <=
+//      game_date) — side-appropriate column. Stale by construction
+//      (typically D-1 evening for D's games). clv_reason =
+//      CLV_FROM_DAYAHEAD_SNAP so operator can filter.
+//   3. Neither — clv_reason carries the specific failure code.
+//
+// CLV is only computed for MORNING plays — gametime plays' "close"
+// is their own price (nothing later to compare against).
+function enrichPlay(p, gametimeKeys, gametimeSiblingByKey) {
+  const myImpl = impliedP(p.yes_ask_ml);
+
+  let close_price_ml  = null;
+  let close_source    = null;
+  let close_snap_date = null;
+  let clv_pp     = null;
   let clv_reason = null;
-  if (closeImpl == null) {
-    // Distinguish "no snapshot row at all" from "row exists but the
-    // side-specific price column is null" — operator can act on one
-    // (re-snapshot the date) but not the other (Kalshi never posted
-    // that side's price).
-    clv_reason = (p.close_yes_ask_ml == null && p.close_no_ask_ml == null)
-      ? CLV_NO_CLOSING_SNAPSHOT
-      : CLV_SIDE_PRICE_NULL;
-  } else if (Number.isFinite(myImpl)) {
-    clv_pp = round2((closeImpl - myImpl) * 100);
+
+  if (p.capture_track === 'morning') {
+    const sibKey = [p.game_date, p.game_id, p.spread_team, p.spread_line, p.side].join('|');
+    const sib = gametimeSiblingByKey ? gametimeSiblingByKey.get(sibKey) : null;
+    if (sib && sib.yes_ask_ml != null) {
+      close_price_ml = sib.yes_ask_ml;
+      close_source   = 'gametime_sibling';
+    } else {
+      // Side-appropriate fallback from the day-ahead snapshot
+      // joined in fetchGradedRows.
+      const snapPrice = p.side === 'lay'  ? p.snap_yes_ask_ml
+                      : p.side === 'take' ? p.snap_no_ask_ml
+                      : null;
+      if (snapPrice != null) {
+        close_price_ml  = snapPrice;
+        close_source    = 'dayahead_snapshot';
+        close_snap_date = p.snap_snapshot_date || null;
+        clv_reason      = CLV_FROM_DAYAHEAD_SNAP;
+      } else if (p.snap_yes_ask_ml == null && p.snap_no_ask_ml == null) {
+        clv_reason = CLV_NO_CLOSE;
+      } else {
+        clv_reason = CLV_SNAPSHOT_PRICE_NULL;
+      }
+    }
+    if (close_price_ml != null && Number.isFinite(myImpl)) {
+      const closeImpl = impliedP(close_price_ml);
+      if (Number.isFinite(closeImpl)) {
+        // SIGN CONVENTION: positive = beat the close (my implied
+        // prob LOWER than close → market moved toward my position).
+        clv_pp = round2((closeImpl - myImpl) * 100);
+      }
+    }
   }
 
   const still = p.capture_track === 'morning'
@@ -261,31 +393,16 @@ function enrichPlay(p, gametimeKeys) {
     actual_margin:           p.actual_margin,
     outcome:                 p.outcome,
     pnl_per_100:             p.pnl_per_100,
-    close_price_ml:          closePriceFor(p),
-    close_implied_pct:       closeImpl == null ? null : round2(closeImpl * 100),
+    close_price_ml,
+    close_source,
+    close_snap_date,
+    close_implied_pct,
     my_implied_pct:          Number.isFinite(myImpl) ? round2(myImpl * 100) : null,
     clv_pp,
     clv_reason,
     still_a_play_at_close:   still,
     flags,
   };
-}
-
-// Side-aware closing price selection. The Kalshi snapshot row carries
-// BOTH yes_ask_ml (the lay-side price) and no_ask_ml (the take-side
-// price) for the same (game_id, spread_team, spread_line). Our 'lay'
-// row's price was yes_ask; our 'take' row's price was no_ask. Pick
-// matching side.
-function closePriceFor(p) {
-  if (p.side === 'lay')  return p.close_yes_ask_ml == null ? null : p.close_yes_ask_ml;
-  if (p.side === 'take') return p.close_no_ask_ml  == null ? null : p.close_no_ask_ml;
-  return null;
-}
-function closeImpliedFor(p) {
-  const ml = closePriceFor(p);
-  if (ml == null) return null;
-  const ip = impliedP(ml);
-  return Number.isFinite(ip) ? ip : null;
 }
 
 // ------------------------------------------------------------ aggregates
@@ -326,13 +443,21 @@ function aggregateTrack(plays, withClv) {
 function summarizeClv(morningPlays) {
   const withClv = [];
   let missing = 0;
+  let nFromGametime = 0;
+  let nFromSnapshot = 0;
   for (const p of morningPlays) {
+    if (p.close_source === 'gametime_sibling') nFromGametime++;
+    if (p.close_source === 'dayahead_snapshot') nFromSnapshot++;
     if (p.clv_pp == null) { missing++; continue; }
     withClv.push(p.clv_pp);
   }
   if (!withClv.length) {
-    return { avg_pp: null, median_pp: null, pct_positive: null,
-             n_with_close: 0, n_missing_close: missing };
+    return {
+      avg_pp: null, median_pp: null, pct_positive: null,
+      n_with_close: 0, n_missing_close: missing,
+      n_close_from_gametime_sibling: nFromGametime,
+      n_close_from_dayahead_snapshot: nFromSnapshot,
+    };
   }
   const sorted = withClv.slice().sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -346,6 +471,8 @@ function summarizeClv(morningPlays) {
     pct_positive:     round2((positive / withClv.length) * 100),
     n_with_close:     withClv.length,
     n_missing_close:  missing,
+    n_close_from_gametime_sibling:  nFromGametime,
+    n_close_from_dayahead_snapshot: nFromSnapshot,
   };
 }
 
@@ -391,6 +518,8 @@ function formatPlayForDetail(p) {
     track:                  p.capture_track,
     morning_or_gametime_price_ml: p.yes_ask_ml,
     close_price_ml:         p.close_price_ml,
+    close_source:           p.close_source,           // 'gametime_sibling' | 'dayahead_snapshot' | null
+    close_snap_date:        p.close_snap_date,        // populated only for 'dayahead_snapshot'
     my_implied_pct:         p.my_implied_pct,
     close_implied_pct:      p.close_implied_pct,
     clv_pp:                 p.clv_pp,
@@ -697,6 +826,10 @@ module.exports = {
   summarizeClv,
   toPtForLegacyUtc,
   STALE_PF_DATES_FOR_ATH,
+  // CLV reason codes — new pipeline values first, legacy second.
+  CLV_FROM_DAYAHEAD_SNAP,
+  CLV_NO_CLOSE,
+  CLV_SNAPSHOT_PRICE_NULL,
   CLV_NO_CLOSING_SNAPSHOT,
   CLV_SIDE_PRICE_NULL,
 };
