@@ -1756,6 +1756,44 @@ router.post('/jobs/morning-capture', async (req, res) => {
   }
 });
 
+// Empirical-spread ROI + CLV readout.
+// GET /api/admin/empirical-spread/roi-readout?from=YYYY-MM-DD&to=YYYY-MM-DD&detail=true
+//
+// Reports per-track ROI (morning vs gametime) and per-morning-play
+// CLV against the kalshi_spread_markets_snapshot row at
+// snapshot_date = game_date. Default omits the per-play array (only
+// aggregates) so the response stays small enough to curl + read
+// without a local jq. ?detail=true adds plays[] for spot-checking.
+//
+// The three collapse rules are applied in services/empirical-spread-
+// roi.js — batch-dedup by latest generated_at per
+// (game, market, side, track); pair-collapse to the signaled
+// (highest-edge) side per pair_id; track-separation so morning and
+// gametime stay in their own columns and CLV is the implied-prob
+// delta between them. See the long header comment in that service
+// for the asymmetry that motivates sourcing close prices from the
+// kalshi snapshot rather than the gametime signal track (otherwise
+// plays that no longer signal at gametime are dropped — those are
+// the highest-CLV plays).
+router.get('/admin/empirical-spread/roi-readout', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from || null;
+    const to   = req.query.to   || null;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (from != null && !dateRe.test(from)) return res.status(400).json({ error: 'from must be YYYY-MM-DD' });
+    if (to   != null && !dateRe.test(to))   return res.status(400).json({ error: 'to must be YYYY-MM-DD' });
+    if (from && to && from > to)            return res.status(400).json({ error: 'from must be <= to' });
+    const detail = req.query.detail === 'true' || req.query.detail === '1';
+
+    const { buildReadout } = require('../services/empirical-spread-roi');
+    const out = buildReadout(db, from, to, detail);
+    res.json(out);
+  } catch (e) {
+    console.error('[empirical-spread-roi] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ----------------------------------------------------------------------
 // Snapshot listing + replay endpoints. See services/snapshot.js for the
 // capture pipeline. Snapshots persist only within a single Render uptime
