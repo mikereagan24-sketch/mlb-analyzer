@@ -776,6 +776,18 @@ function buildClvLookupDiagnostic(db, plays) {
 }
 
 // ------------------------------------------------------------ cron diag
+//
+// NOTE on cron_log.ran_at: this column is UTC, NOT PT — it uses the
+// schema-level DEFAULT (datetime('now')) at db/schema.js:221, which
+// SQLite resolves to UTC. The rest of the codebase migrated to PT
+// timestamps via nowPtIso() under fix/morning-capture-tz-anchor
+// (services/jobs.js:47), but cron_log.ran_at was left UTC by
+// pre-existing convention — not worth a schema migration because the
+// column is observability-only (never read by user-facing aggregates,
+// just shown in this diagnostic). When eyeballing these rows against
+// Render log lines (which are also UTC), the timestamps align. When
+// comparing against PT-anchored generated_at on
+// empirical_spread_signals etc., add 7 hours mentally (PDT in June).
 function buildCronDiagnostic(db) {
   const diag = {};
   diag.morning_capture_cron_log = db.prepare(
