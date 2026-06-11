@@ -31,6 +31,33 @@ const { nowPtIso } = require('./services/jobs');
 try { cleanupOrphanedSweepRuns(q, nowPtIso); }
 catch (e) { console.warn('[sweep-cleanup] boot cleanup failed:', e && e.message); }
 
+// Empirical-spread ROI readout boot smoke. Exercises the full
+// buildReadout pipeline once on a 30-day window so a ReferenceError
+// or similar JS-level failure surfaces in the deploy log instead of
+// 500-ing on the operator's first curl. Picked up after a missing-
+// variable bug in the FIX 1 enrichPlay rewrite (commit 17232dd)
+// shipped to prod and broke every readout call until the hotfix.
+// Synchronous + boot-blocking guard logs but does NOT abort listen()
+// — the readout being broken shouldn't keep the rest of the app
+// from serving its routes; the log line + an externally-monitored
+// boot grep are enough to catch the regression.
+try {
+  const { buildReadout } = require('./services/empirical-spread-roi');
+  const _now = new Date();
+  const _ago = new Date(_now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const _fmt = (d) => d.toISOString().slice(0, 10);
+  const _res = buildReadout(db, _fmt(_ago), _fmt(_now), false);
+  // Tiny sanity — should always return a window envelope. If we got
+  // here without throwing, the JS-level smoke passed even if the
+  // window had zero rows.
+  console.log('[boot-smoke] empirical-spread roi-readout: ok'
+    + ' (morning bets=' + (_res && _res.morning && _res.morning.bets)
+    + ', gametime bets=' + (_res && _res.gametime && _res.gametime.bets) + ')');
+} catch (e) {
+  console.error('[boot-smoke] empirical-spread roi-readout FAILED:',
+    e && (e.stack || e.message));
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
