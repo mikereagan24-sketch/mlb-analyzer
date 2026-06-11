@@ -1784,6 +1784,16 @@ router.get('/admin/empirical-spread/roi-readout', requireAdminToken, (req, res) 
     if (to   != null && !dateRe.test(to))   return res.status(400).json({ error: 'to must be YYYY-MM-DD' });
     if (from && to && from > to)            return res.status(400).json({ error: 'from must be <= to' });
     const detail = req.query.detail === 'true' || req.query.detail === '1';
+    const debug  = req.query.debug  === 'true' || req.query.debug  === '1';
+
+    // ?debug=true returns a 5-stage row-count funnel instead of the
+    // aggregate report. Lets the caller see where rows drop out of the
+    // pipeline. First stage at which count goes to zero is the bug.
+    // Does NOT touch the main readout code path — purely diagnostic.
+    if (debug) {
+      const { buildDebugFunnel } = require('../services/empirical-spread-roi');
+      return res.json(buildDebugFunnel(db, from, to));
+    }
 
     const { buildReadout } = require('../services/empirical-spread-roi');
     const out = buildReadout(db, from, to, detail);

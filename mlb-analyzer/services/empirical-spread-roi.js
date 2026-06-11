@@ -408,8 +408,137 @@ function formatPlayForDetail(p) {
   };
 }
 
+// ------------------------------------------------------------ debug funnel
+// Diagnostic counter that runs each pipeline filter as its own COUNT
+// and reports the survivor row counts stage by stage. The FIRST stage
+// at which the count drops to zero pinpoints the bug. Triggered by
+// ?debug=true on the route — no behavior change for production calls.
+//
+// Stage order mirrors buildReadout, so reading the debug output
+// top-to-bottom corresponds to the same filters in the same order:
+//   1. Total rows in empirical_spread_outcomes, grouped by capture_track.
+//      Confirms the table is populated and shows both tracks' raw volume.
+//   2. Rows with a graded outcome (outcome IS NOT NULL), by track. Plus
+//      the DISTINCT outcome values present across the whole table, so
+//      the aggregator's vocabulary check ('win'/'loss'/'push') can be
+//      compared against reality.
+//   2b. Layer the pair_id IS NOT NULL filter on top of 2. This isolates
+//       the effect of the pair_id filter — legacy migration rows have
+//       pair_id=NULL by design (schema.js:1156 explicitly sets NULL on
+//       backfill), so a big drop between 2 and 2b means historical
+//       rows are being filtered out by that clause.
+//   3. After the date-window filter applies. Plus up to 3 sample
+//      generated_at strings from each side of the 2026-06-08 cutover
+//      so format/tz handling can be eyeballed.
+//   4. After in-JS batch-dedup (latest generated_at per
+//      game/market/side/track).
+//   5. After in-JS pair-collapse (highest edge_pp per
+//      game/pair_id/track).
+function buildDebugFunnel(db, fromDate, toDate) {
+  const out = { window: { from: fromDate || null, to: toDate || null } };
+
+  // Stage 1: total rows by capture_track. Unfiltered.
+  out.stage_1_total_by_track = db.prepare(
+    "SELECT capture_track, COUNT(*) AS n "
+    + "FROM empirical_spread_outcomes "
+    + "GROUP BY capture_track"
+  ).all();
+
+  // Stage 2: graded by track + distinct outcome vocabulary.
+  out.stage_2_graded_by_track = db.prepare(
+    "SELECT capture_track, COUNT(*) AS n "
+    + "FROM empirical_spread_outcomes "
+    + "WHERE outcome IS NOT NULL "
+    + "GROUP BY capture_track"
+  ).all();
+  out.stage_2_distinct_outcome_values = db.prepare(
+    "SELECT DISTINCT outcome FROM empirical_spread_outcomes"
+  ).all().map((r) => r.outcome);
+
+  // Stage 2b: graded AND pair_id IS NOT NULL (current code's filter).
+  // Compare against stage_2 to see if the pair_id clause is dropping
+  // legacy migration rows (schema.js:1156: pair_id=NULL on backfill).
+  out.stage_2b_graded_and_paired_by_track = db.prepare(
+    "SELECT capture_track, COUNT(*) AS n "
+    + "FROM empirical_spread_outcomes "
+    + "WHERE outcome IS NOT NULL AND pair_id IS NOT NULL "
+    + "GROUP BY capture_track"
+  ).all();
+
+  // Stage 3: date-window survivors. Mirrors the WHERE clauses in
+  // fetchGradedRows so any window-related bug surfaces here.
+  out.stage_3_after_window_by_track = db.prepare(
+    "SELECT capture_track, COUNT(*) AS n "
+    + "FROM empirical_spread_outcomes "
+    + "WHERE outcome IS NOT NULL AND pair_id IS NOT NULL "
+    + "  AND (? IS NULL OR game_date >= ?) "
+    + "  AND (? IS NULL OR game_date <= ?) "
+    + "GROUP BY capture_track"
+  ).all(fromDate || null, fromDate || null, toDate || null, toDate || null);
+
+  // Sample generated_at strings on each side of the tz cutover so the
+  // operator can see whether pre-cutover strings look like UTC stamps
+  // (likely "YYYY-MM-DDTHH:MM:SS.sssZ" or "YYYY-MM-DD HH:MM:SS") vs
+  // post-cutover PT.
+  out.stage_3_sample_generated_at_pre_cutover = db.prepare(
+    "SELECT game_date, capture_track, generated_at "
+    + "FROM empirical_spread_outcomes "
+    + "WHERE game_date <= '2026-06-08' "
+    + "ORDER BY game_date DESC, generated_at DESC "
+    + "LIMIT 3"
+  ).all();
+  out.stage_3_sample_generated_at_post_cutover = db.prepare(
+    "SELECT game_date, capture_track, generated_at "
+    + "FROM empirical_spread_outcomes "
+    + "WHERE game_date > '2026-06-08' "
+    + "ORDER BY game_date ASC, generated_at ASC "
+    + "LIMIT 3"
+  ).all();
+
+  // Stages 4-5: run the actual in-JS pipeline and count survivors.
+  // Uses the same fetchGradedRows + dedup + pair-collapse code paths
+  // as buildReadout so any divergence has to be in those passes.
+  const rows = fetchGradedRows(db, fromDate, toDate);
+  out.stage_3_after_fetch_total = rows.length;
+
+  const seen = new Set();
+  const deduped = [];
+  for (const r of rows) {
+    const k = [r.game_date, r.game_id, r.spread_team, r.spread_line,
+               r.side, r.capture_track].join('|');
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push(r);
+  }
+  out.stage_4_after_batch_dedup_by_track = countByTrack(deduped);
+
+  const bestPerPair = new Map();
+  for (const r of deduped) {
+    const k = [r.game_date, r.game_id, r.pair_id, r.capture_track].join('|');
+    const cur = bestPerPair.get(k);
+    if (!cur
+        || r.edge_pp > cur.edge_pp
+        || (r.edge_pp === cur.edge_pp && r.side === 'lay' && cur.side !== 'lay')) {
+      bestPerPair.set(k, r);
+    }
+  }
+  const plays = Array.from(bestPerPair.values());
+  out.stage_5_after_pair_collapse_by_track = countByTrack(plays);
+
+  return out;
+}
+
+function countByTrack(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    map.set(r.capture_track, (map.get(r.capture_track) || 0) + 1);
+  }
+  return Array.from(map, ([capture_track, n]) => ({ capture_track, n }));
+}
+
 module.exports = {
   buildReadout,
+  buildDebugFunnel,
   // Exposed for tests / hand-verification scripts.
   fetchGradedRows,
   aggregateTrack,
