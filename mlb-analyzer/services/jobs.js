@@ -2645,8 +2645,22 @@ function processOddsArray(dateStr, oddsRaw, settings) {
   return { updated, source: odds.length ? (odds[0].source || 'odds') : 'no source' };
 }
 
-async function runOddsJob(dateStr) {
+// opts.skipChainedMorningCapture (default false): when set, runOddsJob
+// does NOT chain a runMorningCaptureJob call onto its completion. Set
+// to true by runMorningCaptureJob's own internal chain so the
+// odds-job-finishes → morning-capture path doesn't recurse forever.
+// All other callers (the 8/11/3/5 PT cron schedules, the 8PM/11PM
+// tomorrow-slate prefetches, the morning refresh, and manual rerun
+// endpoints) leave it false so a successful odds-job run triggers a
+// morning-capture attempt against the same date. First-eligible lock
+// inside generateMorningCapture means already-locked games skip;
+// newly-eligible games lock at the first odds-job pass after Kalshi
+// posts their D+1 spread markets (typically 14:30-21:30 UTC on D-1
+// per the eligibility funnel finding, so the 3PM PT and 5PM PT odds
+// passes are the practical lock points).
+async function runOddsJob(dateStr, opts) {
   dateStr = dateStr || todayStr();
+  opts = opts || {};
   try {
     const settings = getSettings();
 
@@ -3070,6 +3084,34 @@ async function runOddsJob(dateStr) {
     const updated = result.updated;
     const sourceLabel = result.source;
     q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + sourceLabel, updated);
+
+    // Chained morning-capture attempt. Kalshi posts D+1 spread
+    // markets mid-afternoon on D-1 (~14:30-21:30 UTC, observed),
+    // so the 7:30AM PT D+1 cron is structurally too early — it
+    // ALWAYS finds zero spread-eligible games. Hooking morning
+    // capture onto every successful odds-job pass makes it
+    // first-eligible-lock at the first odds run AFTER Kalshi
+    // posts a given game's market. The 7:30AM cron stays as-is
+    // (it opens the lock window and is a harmless extra attempt).
+    //
+    // Idempotent: generateMorningCapture's existsMorningSignalForGame
+    // check skips already-locked games. Recursion-safe: this only
+    // fires when opts.skipChainedMorningCapture is falsy, and the
+    // runMorningCaptureJob's own internal runOddsJob call sets it
+    // true (see further down this file). Try/catch'd so a capture
+    // failure can never undo a successful odds-job run.
+    if (!opts.skipChainedMorningCapture) {
+      try {
+        const cap = await runMorningCaptureJob(dateStr);
+        const locked = (cap && cap.morning && cap.morning.written) || 0;
+        console.log('[morning-capture] chained: ' + locked + ' locked'
+          + ' for ' + dateStr + ' (' + sourceLabel + ' odds-job)');
+      } catch (e) {
+        console.warn('[morning-capture] chained call failed for ' + dateStr
+          + ' (non-fatal): ' + (e && e.message));
+      }
+    }
+
     return { success: true, updated, date: dateStr };
   } catch(err) {
     console.error('[odds-job]', err.message);
@@ -3131,7 +3173,12 @@ async function runMorningCaptureJob(dateStr) {
       summary.refresh.weather = r && r.updated != null ? r.updated : (r || null);
     } catch (e) { console.error('[morning-capture] weather failed:', e && e.message); }
     try {
-      const r = await runOddsJob(dateStr);
+      // skipChainedMorningCapture: prevent recursion. runOddsJob
+      // chains a runMorningCaptureJob call onto its tail on every
+      // other invocation; we're already INSIDE runMorningCaptureJob
+      // here, so suppress the chain or runMorningCaptureJob would
+      // re-enter via runOddsJob's tail and loop indefinitely.
+      const r = await runOddsJob(dateStr, { skipChainedMorningCapture: true });
       summary.refresh.odds = r && r.updated != null ? r.updated : (r || null);
     } catch (e) { console.error('[morning-capture] odds failed:', e && e.message); }
 
