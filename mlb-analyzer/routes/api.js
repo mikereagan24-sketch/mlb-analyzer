@@ -1804,6 +1804,103 @@ router.get('/admin/empirical-spread/roi-readout', requireAdminToken, (req, res) 
   }
 });
 
+// Empirical-spread regrade backfill.
+// POST /api/admin/empirical-spread/regrade
+//   body: { from?: YYYY-MM-DD, to?: YYYY-MM-DD, dryRun?: boolean }
+//
+// Per fix/empirical-spread-grading-wiring: the grader was historically
+// only invoked inside processGameSignals's game-final branch, which no
+// cron path entered. runScoreJob now grades empirical rows directly,
+// but historical games (everything before that wiring deployed) need a
+// one-time catch-up. This endpoint walks game_log for rows with both
+// scores set and runs gradeEmpiricalSpreadOutcomesForGame per game.
+//
+// Idempotent on the grader side (only rows with outcome IS NULL are
+// touched), so re-running is safe. dryRun=true returns the per-game
+// graded counts without writing — useful to size a backfill before
+// committing to the SQL writes on prod.
+router.post('/admin/empirical-spread/regrade', requireAdminToken, (req, res) => {
+  try {
+    const b = req.body || {};
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    const from = b.from || null;
+    const to   = b.to   || null;
+    if (from != null && !dateRe.test(from)) return res.status(400).json({ error: 'from must be YYYY-MM-DD' });
+    if (to   != null && !dateRe.test(to))   return res.status(400).json({ error: 'to must be YYYY-MM-DD' });
+    if (from && to && from > to)            return res.status(400).json({ error: 'from must be <= to' });
+    const dryRun = b.dryRun === true || b.dryRun === 'true';
+
+    // Pull the distinct games with scores set in the window. We could
+    // iterate q.getUngradedEmpiricalSpreads directly but that returns
+    // one row per ungraded outcome — grouping by game first means one
+    // grade call per game, which is what the function expects.
+    const games = db.prepare(
+      "SELECT DISTINCT g.game_date, g.game_id, g.home_team, g.away_team, "
+      + "                g.home_score, g.away_score "
+      + "FROM game_log g "
+      + "JOIN empirical_spread_outcomes e "
+      + "  ON e.game_date = g.game_date AND e.game_id = g.game_id "
+      + "WHERE e.outcome IS NULL "
+      + "  AND g.home_score IS NOT NULL AND g.away_score IS NOT NULL "
+      + "  AND (? IS NULL OR g.game_date >= ?) "
+      + "  AND (? IS NULL OR g.game_date <= ?) "
+      + "ORDER BY g.game_date, g.game_id"
+    ).all(from, from, to, to);
+
+    const { gradeEmpiricalSpreadOutcomesForGame } = require('../services/empirical-spread-edge');
+    const { nowPtIso } = require('../services/jobs');
+    const gradedAt = nowPtIso();
+
+    const perGame = [];
+    let totalGraded  = 0;
+    let totalSkipped = 0;
+    const totalByTrack = {};
+    for (const g of games) {
+      // dryRun: count rows that WOULD grade without writing. We
+      // reproduce the grader's SELECT but don't run the UPDATE — the
+      // grader function itself is the write side, so we shadow it
+      // here instead of adding a no-op flag to the engine (keeps the
+      // hot path simple).
+      if (dryRun) {
+        const n = db.prepare(
+          "SELECT COUNT(*) AS n FROM empirical_spread_outcomes "
+          + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
+        ).get(g.game_date, g.game_id).n;
+        perGame.push({ game_date: g.game_date, game_id: g.game_id, would_grade: n });
+        totalGraded += n;
+        continue;
+      }
+      try {
+        const r = gradeEmpiricalSpreadOutcomesForGame(db, q, g, gradedAt);
+        perGame.push({
+          game_date: g.game_date, game_id: g.game_id,
+          graded: r.graded, skipped: r.skipped, by_track: r.byTrack,
+        });
+        totalGraded  += r.graded;
+        totalSkipped += r.skipped;
+        for (const k of Object.keys(r.byTrack)) {
+          totalByTrack[k] = (totalByTrack[k] || 0) + r.byTrack[k];
+        }
+      } catch (e) {
+        perGame.push({ game_date: g.game_date, game_id: g.game_id, error: e.message });
+      }
+    }
+
+    res.json({
+      window: { from, to },
+      dry_run: dryRun,
+      games_processed: games.length,
+      total_graded:  totalGraded,
+      total_skipped: totalSkipped,
+      total_by_track: totalByTrack,
+      per_game: perGame,
+    });
+  } catch (e) {
+    console.error('[empirical-spread regrade] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ----------------------------------------------------------------------
 // Snapshot listing + replay endpoints. See services/snapshot.js for the
 // capture pipeline. Snapshots persist only within a single Render uptime

@@ -704,64 +704,16 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, ex.id);
     }
     // Empirical-spread grading. Piggy-backs on the same "game is
-    // final" entry point as the bet_signals grading above so the
-    // empirical predictions land their outcomes the moment scores
-    // arrive. Independent table (empirical_spread_outcomes) — does
-    // NOT touch bet_signals. Each prediction grades independently
-    // using the 4-way side × team-attribution truth table:
-    //
-    //   margin = home_score - away_score
-    //   lay,  team=home: win iff margin >  spread_line   (home wins by > L)
-    //   lay,  team=away: win iff -margin >  spread_line  (away wins by > L)
-    //   take, team=home: win iff margin > -spread_line   (home wins or loses by < L)
-    //   take, team=away: win iff margin <  spread_line   (away wins or loses by < L)
-    //
-    // pnl_per_100 = americanProfit(stored price_ml) on win, -100 on
-    // loss. The stored yes_ask_ml column is THIS SIDE's price-at-
-    // signal-time (lay→original yes_ask, take→original no_ask). The
-    // grader reads it as-is — never re-derives from current spread
-    // tables, so the price-freeze is preserved across reruns.
-    //
-    // Push isn't reachable since Kalshi lines are half-runs and MLB
-    // margins are integers. A lay and its paired take will ALWAYS
-    // grade to opposite outcomes — validated downstream.
+    // final" entry point as the bet_signals grading above. Extracted
+    // to empiricalSpreadEdge.gradeEmpiricalSpreadOutcomesForGame so
+    // the same function is shared with runScoreJob (the 4AM PT score
+    // cron that lands when games go final — the path that ACTUALLY
+    // fires under cron) and the backfill admin endpoint. See the
+    // header comment on that function for the truth table, the
+    // dual-track guarantee (SELECT does not filter by capture_track),
+    // and the price-freeze rationale.
     try {
-      const margin = gl.home_score - gl.away_score;
-      // Pull ALL ungraded outcome rows for this game across BOTH
-      // capture_tracks. capture_track now lives in the UPDATE key
-      // so a morning lock and a gametime snapshot for the same
-      // spread grade independently against their own frozen prices.
-      const empUngraded = db.prepare(
-          "SELECT game_date, game_id, spread_team, spread_line, side, "
-        + "       capture_track, yes_ask_ml, generated_at "
-        + "FROM empirical_spread_outcomes "
-        + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
-      ).all(gameRow.game_date, gameRow.game_id);
-      // PT-anchored graded_at — used for every UPDATE in this pass.
-      // Bind param replaces the prior datetime('now') (UTC).
-      // [tz cutover: 2026-06-08]
-      const gradedAt = nowPtIso();
-      for (const e of empUngraded) {
-        const side = e.side || 'lay';   // null-safe for any pre-migration rows
-        const track = e.capture_track || 'gametime';
-        const L = e.spread_line;
-        let win = null;
-        if (side === 'lay') {
-          if (e.spread_team === gl.home_team)      win = margin >  L;
-          else if (e.spread_team === gl.away_team) win = -margin > L;
-        } else if (side === 'take') {
-          if (e.spread_team === gl.home_team)      win = margin >  -L;
-          else if (e.spread_team === gl.away_team) win = margin <  L;
-        }
-        if (win == null) continue;
-        const outcome = win ? 'win' : 'loss';
-        const pnl = win ? empiricalSpreadEdge.americanProfit(e.yes_ask_ml) : -100;
-        q.updateEmpiricalSpreadOutcome.run(
-          margin, outcome, pnl, gradedAt,
-          e.game_date, e.game_id, e.spread_team, e.spread_line,
-          side, track, e.generated_at
-        );
-      }
+      empiricalSpreadEdge.gradeEmpiricalSpreadOutcomesForGame(db, q, gl, nowPtIso());
     } catch (gerr) {
       console.warn('[empirical-spreads] grading failed for ' + gameRow.game_id
         + ' (non-fatal): ' + gerr.message);
@@ -2067,6 +2019,27 @@ async function runScoreJob(dateStr) {
           if (sig.companion_spread_outcome != null && sig.companion_spread_outcome !== 'pending') continue;
           const r = calcRunlinePnl(sig.signal_side, sig.companion_spread_line, sig.companion_spread_price, _ay, _hy);
           if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, sig.id);
+        }
+        // Empirical-spread grading. Before fix/empirical-spread-grading
+        // -wiring this never fired from cron: the grader lived only
+        // inside processGameSignals's game-final branch, which no cron
+        // path invokes after scores land. runScoreJob is the cron that
+        // owns the moment scores land — so it now grades the empirical
+        // rows directly, same idempotent function as processGameSignals
+        // and the backfill endpoint use. Wrapped in its own try/catch
+        // so an empirical-side failure can't undo the bet_signals
+        // grading the score job already completed for this game.
+        try {
+          const gradedAt = nowPtIso();
+          const r = empiricalSpreadEdge.gradeEmpiricalSpreadOutcomesForGame(db, q, gameRow, gradedAt);
+          if (r.graded > 0) {
+            console.log('[score-job] empirical-spreads graded ' + r.graded
+              + ' row(s) for ' + gameId
+              + ' (by track: ' + JSON.stringify(r.byTrack) + ')');
+          }
+        } catch (e) {
+          console.warn('[score-job] empirical-spreads grading failed for '
+            + gameId + ' (non-fatal): ' + e.message);
         }
         gamesUpdated++;
       }
