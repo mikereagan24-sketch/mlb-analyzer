@@ -3135,6 +3135,49 @@ async function runMorningCaptureJob(dateStr) {
       summary.refresh.odds = r && r.updated != null ? r.updated : (r || null);
     } catch (e) { console.error('[morning-capture] odds failed:', e && e.message); }
 
+    // (2b) Explicit model-line rescore for every D+1 game.
+    //
+    // runOddsJob normally invokes processGameSignals per game (which
+    // writes model_home_ml / model_away_ml / model_total onto
+    // game_log) inside processOddsArray — but only for games whose
+    // oddsRaw rows came back from Unabated/OddsAPI. At 7:30AM PT on
+    // day D for D+1, those upstreams typically don't have D+1 markets
+    // posted yet (Kalshi posts D+1 spreads around 14:48 PT on D), so
+    // oddsRaw is empty, processGameSignals never fires per game, and
+    // model_* on game_log stay NULL. generateMorningCapture's
+    // eligibility query (empirical-spread-edge.js:339-348) then drops
+    // every D+1 game because model_home_ml IS NULL — empty capture,
+    // not the bug the rest of the chain looked like it should have
+    // fixed.
+    //
+    // Force model lines onto every D+1 game in game_log regardless
+    // of upstream odds coverage. processGameSignals is the same
+    // function the rest of the codebase uses for this purpose; we
+    // simply call it directly here per game so the morning capture
+    // never depends on an Unabated/OddsAPI hit. No new ingest path —
+    // we reuse the existing one, satisfying the "do not write a
+    // parallel ingest" constraint.
+    let rescored = 0;
+    try {
+      const games = q.getGamesByDate.all(dateStr);
+      const wobaIdx = getWobaIndex();
+      const settings = getSettings();
+      for (const g of games) {
+        try {
+          processGameSignals(g, wobaIdx, settings);
+          rescored++;
+        } catch (e) {
+          console.warn('[morning-capture] model rescore failed for ' + g.game_id
+            + ' (non-fatal): ' + (e && e.message));
+        }
+      }
+      console.log('[morning-capture] model rescored ' + rescored + '/' + games.length
+        + ' D+1 game(s) for ' + dateStr);
+    } catch (e) {
+      console.error('[morning-capture] model rescore loop failed:', e && e.message);
+    }
+    summary.refresh.model_rescored = rescored;
+
     // (3) Morning capture proper. Engine drops games already
     // locked; what remains lands with capture_track='morning' and
     // the per-pass generatedAt timestamp. PT-anchored.
