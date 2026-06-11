@@ -1804,6 +1804,148 @@ router.get('/admin/empirical-spread/roi-readout', requireAdminToken, (req, res) 
   }
 });
 
+// Morning-capture eligibility funnel (read-only diagnostic).
+// GET /api/admin/morning-capture/eligibility-funnel?date=YYYY-MM-DD
+//
+// Counts rows that survive each stage of generateMorningCapture's
+// eligibility filter for a given date. Lets the operator pinpoint
+// which gate drops the candidates to zero when a morning capture
+// returns morning.written=0 despite the chain succeeding.
+//
+// Stage order mirrors empirical-spread-edge.js:
+//   1. Total game_log rows for the date.
+//   2. Rows with all three model_* columns non-null (model line
+//      computed — what fix/morning-capture-ingest-and-model-lines
+//      stage 2b ensures).
+//   3. Rows whose game has ANY kalshi_spread_markets coverage
+//      (the EXISTS clause in generateEmpiricalSpreadSignals's pull
+//      at services/empirical-spread-edge.js:431-432).
+//   4. Rows whose game has a kalshi_spread_markets row at one of the
+//      whitelisted spread lines (1.5, 2.5, 3.5) — generateEmpirical
+//      SpreadSignals only emits signals for those lines, so a game
+//      with ONLY 0.5 or 4.5 coverage drops in the per-game spread
+//      pull at empirical-spread-edge.js:440-441 even though it
+//      passed stage 3.
+//   5. morning_capture_state lock — if a row exists for the date,
+//      the engine SKIPS games already locked. Reported as a count
+//      of already-locked games for the date.
+//
+// Also samples up to 10 raw kalshi_spread_markets rows for the date
+// so the operator can see what's in the table (market lines, ML
+// values, team formatting) when stage 3/4 indicates missing data.
+router.get('/admin/morning-capture/eligibility-funnel', requireAdminToken, (req, res) => {
+  try {
+    const date = req.query.date;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    }
+    const out = { date };
+
+    // Stage 1: every game_log row for the date.
+    out.stage_1_game_log_total = db.prepare(
+      "SELECT COUNT(*) AS n FROM game_log WHERE game_date = ?"
+    ).get(date).n;
+
+    // Stage 2: model line computed.
+    out.stage_2_model_lines_populated = db.prepare(
+      "SELECT COUNT(*) AS n FROM game_log "
+      + "WHERE game_date = ? "
+      + "  AND model_home_ml IS NOT NULL "
+      + "  AND model_away_ml IS NOT NULL "
+      + "  AND model_total   IS NOT NULL"
+    ).get(date).n;
+
+    // Stage 3: ANY kalshi_spread_markets coverage. EXACT clause from
+    // empirical-spread-edge.js's eligibility query — same predicate so
+    // count drift between this and the engine is impossible.
+    out.stage_3_kalshi_spread_any_coverage = db.prepare(
+      "SELECT COUNT(*) AS n FROM game_log g "
+      + "WHERE g.game_date = ? "
+      + "  AND g.model_home_ml IS NOT NULL "
+      + "  AND g.model_away_ml IS NOT NULL "
+      + "  AND g.model_total   IS NOT NULL "
+      + "  AND EXISTS (SELECT 1 FROM kalshi_spread_markets k "
+      + "              WHERE k.game_date = g.game_date AND k.game_id = g.game_id)"
+    ).get(date).n;
+
+    // Stage 4: kalshi_spread_markets coverage at the whitelisted
+    // lines (1.5, 2.5, 3.5) the engine actually consumes. A game
+    // with only 0.5 / 4.5 / etc. would pass stage 3 but get a
+    // 0-length spread pull at empirical-spread-edge.js:447 and be
+    // continued past.
+    out.stage_4_kalshi_spread_whitelisted_lines = db.prepare(
+      "SELECT COUNT(*) AS n FROM game_log g "
+      + "WHERE g.game_date = ? "
+      + "  AND g.model_home_ml IS NOT NULL "
+      + "  AND g.model_away_ml IS NOT NULL "
+      + "  AND g.model_total   IS NOT NULL "
+      + "  AND EXISTS (SELECT 1 FROM kalshi_spread_markets k "
+      + "              WHERE k.game_date = g.game_date AND k.game_id = g.game_id "
+      + "                AND k.spread_line IN (1.5, 2.5, 3.5))"
+    ).get(date).n;
+
+    // Stage 5: morning_capture_state lock + already-locked games count.
+    // morning_capture_state is one row per game_date — its presence
+    // doesn't drop candidates by itself; it just records when the
+    // first morning capture for that date opened. What actually
+    // skips a game is q.existsMorningSignalForGame (per-game lock).
+    const stateRow = db.prepare(
+      "SELECT game_date, opened_at FROM morning_capture_state WHERE game_date = ?"
+    ).get(date);
+    out.stage_5_morning_capture_state = stateRow || null;
+    out.stage_5_already_locked_games_count = db.prepare(
+      "SELECT COUNT(DISTINCT game_id) AS n FROM empirical_spread_signals "
+      + "WHERE game_date = ? AND capture_track = 'morning'"
+    ).get(date).n;
+
+    // Raw kalshi_spread_markets sample for the date — surface up to
+    // 10 rows so the operator can eyeball line / team / ML values
+    // when stages 3/4 read zero. Also surface counts by spread_line
+    // so the operator can see which lines were ingested.
+    out.kalshi_spread_markets_total_rows_for_date = db.prepare(
+      "SELECT COUNT(*) AS n FROM kalshi_spread_markets WHERE game_date = ?"
+    ).get(date).n;
+    out.kalshi_spread_markets_by_line = db.prepare(
+      "SELECT spread_line, COUNT(*) AS n FROM kalshi_spread_markets "
+      + "WHERE game_date = ? GROUP BY spread_line ORDER BY spread_line"
+    ).all(date);
+    out.kalshi_spread_markets_sample = db.prepare(
+      "SELECT game_id, spread_team, spread_line, yes_ask_ml, no_ask_ml, "
+      + "       updated_at "
+      + "FROM kalshi_spread_markets "
+      + "WHERE game_date = ? "
+      + "ORDER BY game_id, spread_team, spread_line LIMIT 10"
+    ).all(date);
+
+    // Same shape as the readout's debug funnel diagnostics — call
+    // out which gate is the failure when one of the counts is zero.
+    let interpretation;
+    if (out.stage_1_game_log_total === 0) {
+      interpretation = 'no game_log rows for date — schedule not bootstrapped';
+    } else if (out.stage_2_model_lines_populated === 0) {
+      interpretation = 'model lines empty — morning-capture chain (2b) did not rescore';
+    } else if (out.stage_3_kalshi_spread_any_coverage === 0) {
+      interpretation = 'kalshi_spread_markets has zero rows for ' + date
+        + ' — runOddsJob\'s spread ingest at services/jobs.js:2826 either was never '
+        + 'invoked, threw, or getKalshiMlbSpreads returned empty (Kalshi may not have '
+        + 'posted markets for this date yet — they typically appear ~14:48 PT on D-1)';
+    } else if (out.stage_4_kalshi_spread_whitelisted_lines === 0) {
+      interpretation = 'kalshi_spread_markets has rows but none at lines 1.5 / 2.5 / 3.5 '
+        + '— check kalshi_spread_markets_by_line to see what was ingested';
+    } else {
+      interpretation = 'eligibility funnel clean — '
+        + (out.stage_4_kalshi_spread_whitelisted_lines
+            - out.stage_5_already_locked_games_count)
+        + ' game(s) should pass to capture';
+    }
+    out.interpretation = interpretation;
+    res.json(out);
+  } catch (e) {
+    console.error('[morning-capture eligibility-funnel] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Empirical-spread regrade backfill.
 // POST /api/admin/empirical-spread/regrade
 //   body: { from?: YYYY-MM-DD, to?: YYYY-MM-DD, dryRun?: boolean }
