@@ -71,6 +71,91 @@ function americanProfit(ml) {
   return ml > 0 ? ml : (100 * 100) / Math.abs(ml);
 }
 
+// ----------------------------------------------------------------------
+// gradeEmpiricalSpreadOutcomesForGame
+// ----------------------------------------------------------------------
+// Grades every ungraded empirical_spread_outcomes row for a single
+// completed game. Idempotent — re-running on a game with no ungraded
+// rows is a 0-row no-op. Extracted from the original inline block
+// inside services/jobs.js processGameSignals so it can be called from
+// runScoreJob (the cron path that lands when games go final), the
+// regrade backfill admin endpoint, and any manual rerun without
+// duplicating the truth table.
+//
+// CRITICAL — DO NOT FILTER BY capture_track IN THE SELECT.
+// A single completed game grades BOTH its gametime rows AND its
+// morning rows in one pass. capture_track is a PK component
+// downstream (so a gametime + morning row for the same
+// game/spread/side coexist) but the GRADING math is identical for
+// both — the only difference between tracks is the frozen yes_ask_ml
+// on each row, and that's what each row carries to the math itself.
+// Filtering by capture_track here would silently leave the morning
+// (or gametime) leg ungraded, exactly the kind of half-graded state
+// the fix/empirical-spread-grading-wiring branch exists to prevent.
+//
+// Truth table (matches the original inline block — unchanged):
+//   margin = home_score - away_score   (positive = home won by N)
+//   lay,  team=home: win iff margin >  spread_line
+//   lay,  team=away: win iff -margin >  spread_line
+//   take, team=home: win iff margin > -spread_line
+//   take, team=away: win iff margin <  spread_line
+//
+// pnl_per_100 = americanProfit(yes_ask_ml) on win, -100 on loss.
+// yes_ask_ml is THIS SIDE's frozen price (lay → original yes_ask,
+// take → original no_ask — see persistEmpiricalSpreadSignals at the
+// top of this file). Push is unreachable: Kalshi spread lines are
+// half-runs and MLB margins are integers, so margin = spread_line is
+// arithmetically impossible.
+//
+// Returns { graded, skipped, byTrack } so the caller (runScoreJob,
+// backfill endpoint) can log meaningful per-game numbers and the
+// summary surfaces both tracks separately — the validation
+// invariant the brief calls out.
+function gradeEmpiricalSpreadOutcomesForGame(db, q, gameRow, gradedAt) {
+  if (!gameRow || gameRow.away_score == null || gameRow.home_score == null) {
+    return { graded: 0, skipped: 0, byTrack: {} };
+  }
+  const margin = gameRow.home_score - gameRow.away_score;
+  // NO capture_track filter — both tracks must come back.
+  const ungraded = db.prepare(
+      "SELECT game_date, game_id, spread_team, spread_line, side, "
+    + "       capture_track, yes_ask_ml, generated_at "
+    + "FROM empirical_spread_outcomes "
+    + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
+  ).all(gameRow.game_date, gameRow.game_id);
+
+  let graded = 0;
+  let skipped = 0;
+  const byTrack = {};
+  for (const e of ungraded) {
+    const side  = e.side          || 'lay';      // null-safe for pre-migration rows
+    const track = e.capture_track || 'gametime'; // null-safe ditto
+    const L = e.spread_line;
+    let win = null;
+    if (side === 'lay') {
+      if (e.spread_team === gameRow.home_team)      win = margin >  L;
+      else if (e.spread_team === gameRow.away_team) win = -margin > L;
+    } else if (side === 'take') {
+      if (e.spread_team === gameRow.home_team)      win = margin >  -L;
+      else if (e.spread_team === gameRow.away_team) win = margin <  L;
+    }
+    // win === null means spread_team didn't match either side — a
+    // genuine data integrity issue (shouldn't happen but the guard
+    // is cheap). Skip rather than corrupt the row.
+    if (win == null) { skipped++; continue; }
+    const outcome = win ? 'win' : 'loss';
+    const pnl = win ? americanProfit(e.yes_ask_ml) : -100;
+    q.updateEmpiricalSpreadOutcome.run(
+      margin, outcome, pnl, gradedAt,
+      e.game_date, e.game_id, e.spread_team, e.spread_line,
+      side, track, e.generated_at
+    );
+    graded++;
+    byTrack[track] = (byTrack[track] || 0) + 1;
+  }
+  return { graded, skipped, byTrack };
+}
+
 // Cell key. Human-readable so logs and the slate UI can show it as-is.
 function cellKey(homeWinProb, modelTotal) {
   let wp;
@@ -505,6 +590,8 @@ module.exports = {
   // Math
   americanToProb,
   americanProfit,
+  // Grading
+  gradeEmpiricalSpreadOutcomesForGame,
   noVigHomeProb,
   cellKey,
   // Pipeline
