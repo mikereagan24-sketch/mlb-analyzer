@@ -524,11 +524,22 @@ function persistEmpiricalSpreadSignals(db, q, signals, captureTrack, generatedAt
 // in runOddsJob's gametime block).
 //
 // State row: callers must upsertMorningCaptureState BEFORE calling
-// this function. The state row is the fence that prevents any
-// non-morning-entrypoint code path from writing a 'morning' row —
-// only the 7:30am cron and POST /api/jobs/morning-capture do that
-// upsert, so the morning track stays a true projected-lineup
-// capture and never accidentally absorbs an overnight 11pm prefetch.
+// this function. The state row records WHEN the lock window opened;
+// the actual "don't re-write" enforcement is
+// q.existsMorningSignalForGame's per-game lookup below, which makes
+// re-invocations idempotent regardless of which entry point fired.
+//
+// Entry points that may upsert state + invoke this function:
+//   * 7:30AM PT cron — opens the lock window early. Structurally
+//     too early for Kalshi spread posting (~14:30-21:30 UTC on
+//     D-1), so usually finds zero eligible games — harmless extra
+//     attempt that just sets opened_at.
+//   * runOddsJob completion tail — every successful odds-job pass
+//     chains a runMorningCaptureJob call for the same date. This
+//     is the entry point that ACTUALLY locks the first-eligible
+//     game on each date as Kalshi posts the markets in the
+//     afternoon.
+//   * POST /api/jobs/morning-capture — manual operator trigger.
 //
 // Returns { signals, cellIndex, skipped, persisted } where:
 //   signals    = the eligible signals NEWLY captured this run

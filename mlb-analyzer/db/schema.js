@@ -538,10 +538,25 @@ db.exec(`
   -- point, so creating the index here would fail.
   -- Morning-capture lock-window state. One row per D+1 date; opened_at
   -- is the timestamp of the first morning-capture invocation that day.
-  -- Acts as a guard so the 11pm overnight prefetch can never write a
-  -- capture_track='morning' row — only the two morning entry points
-  -- (7:30am cron + POST /api/jobs/morning-capture) do, and they upsert
-  -- this state row before invoking the capture.
+  -- Records when the lock window opened — the actual
+  -- "don't-re-write" guard is q.existsMorningSignalForGame inside
+  -- generateMorningCapture, which checks per-game presence in
+  -- empirical_spread_signals (capture_track='morning'). State row
+  -- presence is observability, not enforcement.
+  --
+  -- Entry points that may upsert this row + invoke
+  -- generateMorningCapture (all idempotent via existsMorningSignalForGame):
+  --   * 7:30AM PT cron (services/jobs.js startCronJobs) — opens the
+  --     lock window early. Structurally too early for Kalshi spread
+  --     posting (~14:30-21:30 UTC on D-1), so usually finds zero
+  --     eligible games at 7:30AM — kept as a harmless extra attempt
+  --     and to set opened_at to a true PT-morning timestamp.
+  --   * runOddsJob completion tail (services/jobs.js) — every
+  --     successful odds-job pass chains a runMorningCaptureJob call
+  --     for the same date, so games lock at the first odds run AFTER
+  --     Kalshi posts their spread market. Recursion-guarded via
+  --     opts.skipChainedMorningCapture on the inner runOddsJob.
+  --   * POST /api/jobs/morning-capture — manual operator trigger.
   --
   -- [tz cutover: 2026-06-08]
   -- opened_at was UTC before fix/morning-capture-tz-anchor and is PT
