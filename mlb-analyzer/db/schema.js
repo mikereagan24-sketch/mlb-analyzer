@@ -567,6 +567,68 @@ db.exec(`
     game_date TEXT PRIMARY KEY,
     opened_at TEXT NOT NULL
   );
+  -- empirical_market_captures — feat/morning-capture-ml-totals.
+  -- Two-track (morning/gametime) freeze of moneyline and totals
+  -- markets, mirroring the empirical_spread_outcomes pattern for
+  -- spread markets but with a separate table because:
+  --   - Spread rows are intrinsically per-side (lay/take with shared
+  --     pair_id); pair-collapse picks the signaled side. ML and
+  --     totals have no analogous pair — both sides are sides of one
+  --     market, not separate Kalshi events. Forcing into the spread
+  --     schema would mean inventing fake pair_ids and synthetic
+  --     sides.
+  --   - One row per market with both sides' prices satisfies the
+  --     brief's "do not create two summable rows" constraint
+  --     intrinsically.
+  --   - PK shape (game_date, game_id, market_type, capture_track,
+  --     generated_at) is the same skeleton as the spread table so
+  --     the grader UPDATE key + regrade backfill remain consistent
+  --     across market types.
+  --
+  -- Prices are stored in the SAME convention as game_log's market_*_ml
+  -- columns: fee-adjusted via feeAdjustAmerican (Kalshi-direct path,
+  -- jobs.js feeAdjustAmerican; totals via feeAdjustAmericanFromC) +
+  -- the bettor-unfavorable 1-cent shift. Readout consumes them as
+  -- stored — no re-derive, no re-shift.
+  --
+  -- signaled_side identifies the side the model emitted at capture
+  -- time (the side the user would bet). Grading writes outcome +
+  -- pnl_per_100 ONLY for that side; the unsignaled side stays NULL.
+  -- The readout aggregates over signaled_side, so an ML market never
+  -- contributes two summable plays.
+  CREATE TABLE IF NOT EXISTS empirical_market_captures (
+    game_date     TEXT NOT NULL,
+    game_id       TEXT NOT NULL,
+    market_type   TEXT NOT NULL,          -- 'ml' | 'total'
+    capture_track TEXT NOT NULL,          -- 'morning' | 'gametime'
+    generated_at  TEXT NOT NULL,          -- PT-anchored
+    -- Frozen market state. For ML, market_line is NULL and
+    -- over/under prices are NULL. For totals, away/home prices are
+    -- NULL and market_line carries the O/U number at capture time.
+    market_line     REAL,                 -- totals: e.g. 8.5; ML: NULL
+    away_price_ml   INTEGER,              -- ML only
+    home_price_ml   INTEGER,              -- ML only
+    over_price_ml   INTEGER,              -- totals only
+    under_price_ml  INTEGER,              -- totals only
+    -- Signaled side at capture time. Derived from model_* vs
+    -- market_* on game_log at capture. NULL when no side cleared
+    -- SIGNAL_EMIT_FLOOR_PP — row still written (so we have a price
+    -- history) but it contributes 0 plays to the readout.
+    signaled_side     TEXT,               -- ML: 'home'|'away'; totals: 'over'|'under'
+    signaled_edge_pp  REAL,
+    signaled_price_ml INTEGER,            -- denormalized: price of signaled_side
+    -- Outcome (post-grade) — for the signaled side only.
+    away_score    INTEGER,
+    home_score    INTEGER,
+    actual_total  INTEGER,                -- away_score + home_score; totals grading
+    outcome       TEXT,                   -- 'win' | 'loss' | 'push'
+    pnl_per_100   REAL,
+    graded_at     TEXT,
+    PRIMARY KEY (game_date, game_id, market_type, capture_track, generated_at)
+  );
+  CREATE INDEX IF NOT EXISTS idx_emp_market_date     ON empirical_market_captures (game_date);
+  CREATE INDEX IF NOT EXISTS idx_emp_market_ungraded ON empirical_market_captures (game_date) WHERE outcome IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_emp_market_type     ON empirical_market_captures (market_type);
   CREATE TABLE IF NOT EXISTS pitcher_game_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_date TEXT NOT NULL,
@@ -2060,6 +2122,60 @@ q.updateEmpiricalSpreadOutcome = db.prepare(
   + "SET actual_margin=?, outcome=?, pnl_per_100=?, graded_at=? "
   + "WHERE game_date=? AND game_id=? AND spread_team=? AND spread_line=? "
   + "  AND side=? AND capture_track=? AND generated_at=?"
+);
+
+// empirical_market_captures (feat/morning-capture-ml-totals)
+// prepared statements. PK shape mirrors empirical_spread_outcomes;
+// the writer uses INSERT OR IGNORE so re-invoking on a key that
+// already has a row is a no-op (first-eligible-lock for the
+// morning track). gametime captures use INSERT OR REPLACE — each
+// odds-job pass writes a fresh snapshot under its own generated_at.
+q.insertOrIgnoreMarketCapture = db.prepare(
+    "INSERT OR IGNORE INTO empirical_market_captures "
+  + "(game_date, game_id, market_type, capture_track, generated_at, "
+  + " market_line, away_price_ml, home_price_ml, over_price_ml, under_price_ml, "
+  + " signaled_side, signaled_edge_pp, signaled_price_ml) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.insertOrReplaceMarketCapture = db.prepare(
+    "INSERT OR REPLACE INTO empirical_market_captures "
+  + "(game_date, game_id, market_type, capture_track, generated_at, "
+  + " market_line, away_price_ml, home_price_ml, over_price_ml, under_price_ml, "
+  + " signaled_side, signaled_edge_pp, signaled_price_ml) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.existsMorningMarketCapture = db.prepare(
+    "SELECT 1 FROM empirical_market_captures "
+  + "WHERE game_date=? AND game_id=? AND market_type=? AND capture_track='morning' LIMIT 1"
+);
+q.getUngradedMarketCapturesByGame = db.prepare(
+    "SELECT game_date, game_id, market_type, capture_track, generated_at, "
+  + "       market_line, away_price_ml, home_price_ml, over_price_ml, under_price_ml, "
+  + "       signaled_side, signaled_price_ml "
+  + "FROM empirical_market_captures "
+  + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
+);
+q.updateMarketCaptureOutcome = db.prepare(
+    "UPDATE empirical_market_captures "
+  + "SET away_score=?, home_score=?, actual_total=?, "
+  + "    outcome=?, pnl_per_100=?, graded_at=? "
+  + "WHERE game_date=? AND game_id=? AND market_type=? "
+  + "  AND capture_track=? AND generated_at=?"
+);
+// Cross-game-scan version of the ungraded pull. Used by the regrade
+// backfill endpoint to walk every completed game with at least one
+// ungraded market capture row. JOIN game_log so the caller has the
+// scores in hand without a second lookup.
+q.getUngradedMarketCaptures = db.prepare(
+    "SELECT e.game_date, e.game_id, e.market_type, e.capture_track, e.generated_at, "
+  + "       e.market_line, e.away_price_ml, e.home_price_ml, e.over_price_ml, e.under_price_ml, "
+  + "       e.signaled_side, e.signaled_price_ml, "
+  + "       g.away_team, g.home_team, g.away_score, g.home_score "
+  + "FROM empirical_market_captures e "
+  + "JOIN game_log g ON g.game_date = e.game_date AND g.game_id = e.game_id "
+  + "WHERE e.outcome IS NULL "
+  + "  AND g.away_score IS NOT NULL AND g.home_score IS NOT NULL "
+  + "ORDER BY e.game_date, e.game_id, e.market_type, e.capture_track"
 );
 // Latest signal per game for a date — backs the slate API. Filtered to
 // capture_track='gametime' so the slate keeps showing the CURRENT live

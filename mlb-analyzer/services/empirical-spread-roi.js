@@ -306,6 +306,23 @@ function buildReadout(db, fromDate, toDate, includeDetail) {
   if (includeDetail) {
     out.plays = enriched.map(formatPlayForDetail);
   }
+
+  // Markets block (feat/morning-capture-ml-totals). Runs alongside
+  // the spread aggregates above without touching them — spread
+  // aggregates remain bit-identical pre/post this branch so an A/B
+  // against a saved readout body confirms no regression. The new
+  // section reports ML + totals from empirical_market_captures with
+  // the same collapse semantics (batch-dedup per track per market;
+  // no side-summing because each row already holds ONE play via
+  // signaled_side; track-separation).
+  try {
+    out.markets = buildMarketsReadout(db, fromDate, toDate, includeDetail);
+  } catch (e) {
+    // Don't let a market-readout failure 500 the whole endpoint —
+    // spread results are still useful. Surface the error in-band so
+    // the operator sees it without grepping logs.
+    out.markets = { error: e && e.message };
+  }
   return out;
 }
 
@@ -416,6 +433,224 @@ function enrichPlay(p, gametimeKeys, gametimeSiblingByKey) {
 }
 
 // ------------------------------------------------------------ aggregates
+// ------------------------------------------------------------ markets
+// ML + totals readout. Built alongside the spread readout above —
+// reads from empirical_market_captures (the new two-track table for
+// markets without lay/take pairs). Same collapse rules apply except
+// pair-collapse is a no-op here (one row per market_type, both
+// sides' prices stored together, signaled_side identifies the play).
+//
+// CLV close source:
+//   - Same gametime-sibling-first priority as spreads.
+//   - For totals, additionally check market_line equality. If close
+//     line != frozen line: clv_pp=null, clv_reason='line_moved',
+//     line_delta (signed from bettor's side: positive = favorable
+//     move, negative = unfavorable).
+//   - No day-ahead snapshot fallback for ML/totals — there isn't a
+//     kalshi snapshot equivalent for these market types (snapshots
+//     are spread-only). clv_pp=null with reason 'no_gametime_sibling'
+//     when no gametime row exists.
+function buildMarketsReadout(db, fromDate, toDate, includeDetail) {
+  const rows = fetchMarketRows(db, fromDate, toDate);
+
+  // Batch-dedup per (game_date, game_id, market_type, capture_track).
+  const seen = new Set();
+  const deduped = [];
+  for (const r of rows) {
+    const k = [r.game_date, r.game_id, r.market_type, r.capture_track].join('|');
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push(r);
+  }
+
+  // Gametime sibling map for CLV lookup. Key: (game_date, game_id,
+  // market_type). Stores the LATEST gametime row per market.
+  const gametimeSibling = new Map();
+  for (const r of deduped) {
+    if (r.capture_track !== 'gametime') continue;
+    const k = [r.game_date, r.game_id, r.market_type].join('|');
+    gametimeSibling.set(k, r);
+  }
+
+  const enriched = deduped.map((r) => enrichMarketPlay(r, gametimeSibling));
+
+  // Top-level: by market_type (each contains morning + gametime + CLV).
+  const out = { by_type: {} };
+  for (const mt of ['ml', 'total']) {
+    const morningPlays  = enriched.filter((p) => p.market_type === mt && p.capture_track === 'morning');
+    const gametimePlays = enriched.filter((p) => p.market_type === mt && p.capture_track === 'gametime');
+    const block = {
+      morning:  aggregateTrack(morningPlays,  true),
+      gametime: aggregateTrack(gametimePlays, false),
+      clv_summary: summarizeMarketClv(morningPlays),
+    };
+    if (mt === 'total') {
+      block.morning.line_moved_n = morningPlays.filter((p) => p.clv_reason === 'line_moved').length;
+    }
+    out.by_type[mt] = block;
+  }
+  if (includeDetail) {
+    out.plays = enriched.map(formatMarketPlayForDetail);
+  }
+  return out;
+}
+
+function fetchMarketRows(db, fromDate, toDate) {
+  return db.prepare(`
+    SELECT
+      e.game_date, e.game_id, e.market_type, e.capture_track,
+      e.generated_at, e.market_line,
+      e.away_price_ml, e.home_price_ml,
+      e.over_price_ml, e.under_price_ml,
+      e.signaled_side, e.signaled_edge_pp, e.signaled_price_ml,
+      e.actual_total, e.away_score, e.home_score,
+      e.outcome, e.pnl_per_100, e.graded_at,
+      g.home_team, g.away_team
+    FROM empirical_market_captures e
+    LEFT JOIN game_log g
+      ON g.game_date = e.game_date AND g.game_id = e.game_id
+    WHERE e.outcome IS NOT NULL
+      AND (? IS NULL OR e.game_date >= ?)
+      AND (? IS NULL OR e.game_date <= ?)
+    ORDER BY e.game_date, e.game_id, e.market_type, e.capture_track,
+             e.generated_at DESC
+  `).all(fromDate || null, fromDate || null, toDate || null, toDate || null);
+}
+
+function enrichMarketPlay(p, gametimeSibling) {
+  let close_price_ml = null;
+  let close_market_line = null;
+  let close_source = null;
+  let clv_pp = null;
+  let clv_reason = null;
+  let line_delta = null;
+
+  if (p.capture_track === 'morning') {
+    const sibKey = [p.game_date, p.game_id, p.market_type].join('|');
+    const sib = gametimeSibling.get(sibKey);
+    if (sib && sib.signaled_price_ml != null) {
+      close_price_ml = sib.signaled_price_ml;
+      close_market_line = sib.market_line;
+      close_source = 'gametime_sibling';
+
+      if (p.market_type === 'total'
+          && p.market_line != null && sib.market_line != null
+          && Number(p.market_line) !== Number(sib.market_line)) {
+        // Line moved — price-vs-price comparison is not valid.
+        // line_delta signed from bettor side: positive = favorable.
+        // Over bettor: line UP is bad (need MORE runs), so favorable
+        // move = line DOWN → bettor_delta = -(close - morning).
+        // Under bettor: line UP is good → bettor_delta = (close - morning).
+        const raw = Number(sib.market_line) - Number(p.market_line);
+        if (p.signaled_side === 'over')  line_delta = round2(-raw);
+        else if (p.signaled_side === 'under') line_delta = round2(raw);
+        else line_delta = round2(raw);  // no signal: report raw delta unsigned-by-side
+        clv_reason = 'line_moved';
+        clv_pp = null;
+      } else if (p.signaled_price_ml != null) {
+        const myImpl    = impliedP(p.signaled_price_ml);
+        const closeImpl = impliedP(close_price_ml);
+        if (Number.isFinite(myImpl) && Number.isFinite(closeImpl)) {
+          clv_pp = round2((closeImpl - myImpl) * 100);
+        }
+      } else {
+        clv_reason = 'no_morning_signal';
+      }
+    } else {
+      clv_reason = 'no_gametime_sibling';
+    }
+  }
+
+  return {
+    market_type:     p.market_type,
+    game_date:       p.game_date,
+    game_id:         p.game_id,
+    away_team:       p.away_team,
+    home_team:       p.home_team,
+    capture_track:   p.capture_track,
+    generated_at:    p.generated_at,
+    market_line:     p.market_line,
+    away_price_ml:   p.away_price_ml,
+    home_price_ml:   p.home_price_ml,
+    over_price_ml:   p.over_price_ml,
+    under_price_ml:  p.under_price_ml,
+    signaled_side:   p.signaled_side,
+    signaled_price_ml: p.signaled_price_ml,
+    signaled_edge_pp: p.signaled_edge_pp == null ? null : round2(p.signaled_edge_pp * 100),
+    outcome:         p.outcome,
+    pnl_per_100:     p.pnl_per_100,
+    actual_total:    p.actual_total,
+    close_price_ml,
+    close_market_line,
+    close_source,
+    clv_pp,
+    clv_reason,
+    line_delta,
+    flags: {
+      stale_park_factor:
+        p.home_team === 'ATH' && STALE_PF_DATES_FOR_ATH.has(p.game_date),
+    },
+  };
+}
+
+function summarizeMarketClv(morningPlays) {
+  const withClv = [];
+  let missing = 0;
+  let lineMoved = 0;
+  let nFromGametime = 0;
+  for (const p of morningPlays) {
+    if (p.close_source === 'gametime_sibling') nFromGametime++;
+    if (p.clv_reason === 'line_moved') lineMoved++;
+    if (p.clv_pp == null) { missing++; continue; }
+    withClv.push(p.clv_pp);
+  }
+  if (!withClv.length) {
+    return { avg_pp: null, median_pp: null, pct_positive: null,
+             n_with_close: 0, n_missing_close: missing,
+             n_line_moved: lineMoved,
+             n_close_from_gametime_sibling: nFromGametime };
+  }
+  const sorted = withClv.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+  const positive = withClv.filter((v) => v > 0).length;
+  return {
+    avg_pp:          round2(withClv.reduce((a, b) => a + b, 0) / withClv.length),
+    median_pp:       round2(median),
+    pct_positive:    round2((positive / withClv.length) * 100),
+    n_with_close:    withClv.length,
+    n_missing_close: missing,
+    n_line_moved:    lineMoved,
+    n_close_from_gametime_sibling: nFromGametime,
+  };
+}
+
+function formatMarketPlayForDetail(p) {
+  return {
+    market_type:           p.market_type,
+    date:                  p.game_date,
+    game:                  p.away_team + '@' + p.home_team,
+    track:                 p.capture_track,
+    signaled_side:         p.signaled_side,
+    signaled_price_ml:     p.signaled_price_ml,
+    signaled_edge_pct:     p.signaled_edge_pp,
+    market_line:           p.market_line,
+    close_price_ml:        p.close_price_ml,
+    close_market_line:     p.close_market_line,
+    close_source:          p.close_source,
+    clv_pp:                p.clv_pp,
+    clv_reason:            p.clv_reason,
+    line_delta:            p.line_delta,
+    outcome:               p.outcome,
+    pnl_per_100:           p.pnl_per_100,
+    actual_total:          p.actual_total,
+    generated_at:          p.generated_at,
+    flags:                 p.flags,
+  };
+}
+
 function aggregateTrack(plays, withClv) {
   let bets = 0, wins = 0, losses = 0, pushes = 0, pnl = 0, wagered = 0;
   let clvSum = 0, clvCount = 0;
