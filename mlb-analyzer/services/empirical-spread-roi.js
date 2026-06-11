@@ -525,7 +525,159 @@ function buildDebugFunnel(db, fromDate, toDate) {
   const plays = Array.from(bestPerPair.values());
   out.stage_5_after_pair_collapse_by_track = countByTrack(plays);
 
+  // ---- CLV-lookup diagnostic (bug investigation: every morning play
+  // returns clv_reason 'no_kalshi_snapshot_for_game_date').
+  // The readout LEFT JOINs kalshi_spread_markets_snapshot on
+  //   ks.snapshot_date = e.game_date
+  //   ks.game_date     = e.game_date
+  //   ks.game_id       = e.game_id
+  //   ks.spread_team   = e.spread_team
+  //   ks.spread_line   = e.spread_line
+  // and reports clv_reason on the null match. Surface enough data to
+  // identify which dimension mismatches:
+  //   (a) Total rows per snapshot_date — is the odds-job actually
+  //       writing snapshots, and how recent are they?
+  //   (b) Coverage by (snapshot_date, game_date) pair — same date,
+  //       day-ahead, etc.
+  //   (c) For one sample morning play, the lookup key construction
+  //       side-by-side with the actual snapshot rows for that game_id
+  //       on that game_date. Format mismatches (team case, line
+  //       float, game_id shape) show up immediately.
+  out.clv_diagnostic = buildClvLookupDiagnostic(db, plays);
+
+  // ---- Cron-firing diagnostic (bug investigation: morning capture
+  // cron never fires; all morning rows have the same manual-test
+  // generated_at). Pull cron_log entries for the morning-capture job.
+  // q.logCron is called at the end of runMorningCaptureJob (jobs.js
+  // ~3150 success / ~3157 error), so a row exists iff the job ran.
+  // No row since 2026-06-08 means the cron never invoked the job —
+  // either the schedule didn't register, the process restarted with
+  // a misconfigured startCronJobs, or something earlier in the chain
+  // is throwing before logCron is reached. Also count cron_log
+  // entries for OTHER jobs in the same window — if other crons fired
+  // but morning-capture didn't, the issue is specific to this
+  // schedule's registration or handler.
+  out.cron_diagnostic = buildCronDiagnostic(db);
+
   return out;
+}
+
+// ------------------------------------------------------------ clv diag
+function buildClvLookupDiagnostic(db, plays) {
+  const diag = {};
+
+  // (a) Snapshot row totals by snapshot_date — is the writer firing?
+  diag.snapshot_rows_by_snapshot_date = db.prepare(
+    "SELECT snapshot_date, COUNT(*) AS n "
+    + "FROM kalshi_spread_markets_snapshot "
+    + "GROUP BY snapshot_date "
+    + "ORDER BY snapshot_date DESC "
+    + "LIMIT 14"
+  ).all();
+
+  // (b) Coverage matrix: how often does snapshot_date = game_date?
+  // The readout requires equality. If most rows have snapshot_date <
+  // game_date (day-ahead captures), the equality predicate would
+  // miss the relevant data.
+  diag.snapshot_coverage_by_relationship = db.prepare(
+    "SELECT CASE "
+    + "    WHEN snapshot_date = game_date  THEN 'snap_date_equals_game_date' "
+    + "    WHEN snapshot_date < game_date  THEN 'snap_date_before_game_date' "
+    + "    WHEN snapshot_date > game_date  THEN 'snap_date_after_game_date' "
+    + "  END AS relationship, "
+    + "  COUNT(*) AS n "
+    + "FROM kalshi_spread_markets_snapshot "
+    + "GROUP BY relationship"
+  ).all();
+
+  // (c) Side-by-side: ONE sample morning play's lookup key + the
+  // actual rows in the snapshot table for that play's game_id +
+  // game_date (no team/line filter so we can see if the only
+  // mismatch is line precision or team case). Pick the most recent
+  // morning play so the user can cross-check against current Kalshi.
+  const sample = plays.find((p) => p.capture_track === 'morning')
+              || plays[0]
+              || null;
+  if (sample) {
+    diag.sample_play_lookup_key = {
+      from: 'empirical_spread_outcomes row',
+      game_date:    sample.game_date,
+      game_id:      sample.game_id,
+      spread_team:  sample.spread_team,
+      spread_line:  sample.spread_line,
+      side:         sample.side,
+      capture_track: sample.capture_track,
+      generated_at: sample.generated_at,
+    };
+    diag.sample_play_join_predicates = [
+      "ks.snapshot_date = '" + sample.game_date + "'",
+      "ks.game_date     = '" + sample.game_date + "'",
+      "ks.game_id       = '" + sample.game_id   + "'",
+      "ks.spread_team   = '" + sample.spread_team + "'",
+      "ks.spread_line   = "  + sample.spread_line,
+    ];
+    // Loose match: same game_id + game_date, ANY snapshot_date,
+    // ANY team/line. Lets the user see what the snapshot table
+    // actually has for this play's game and identify the mismatched
+    // dimension by inspection.
+    diag.sample_play_snapshot_rows_loose_match = db.prepare(
+      "SELECT snapshot_date, game_date, game_id, spread_team, spread_line, "
+      + "       yes_ask_ml, no_ask_ml "
+      + "FROM kalshi_spread_markets_snapshot "
+      + "WHERE game_id = ? AND game_date = ? "
+      + "ORDER BY snapshot_date DESC, spread_team, spread_line "
+      + "LIMIT 20"
+    ).all(sample.game_id, sample.game_date);
+    // Same as above but without game_date predicate — catches the
+    // case where snapshot's game_date is formatted differently
+    // (unlikely but cheap to surface).
+    diag.sample_play_snapshot_rows_game_id_only = db.prepare(
+      "SELECT snapshot_date, game_date, game_id, spread_team, spread_line "
+      + "FROM kalshi_spread_markets_snapshot "
+      + "WHERE game_id = ? "
+      + "ORDER BY snapshot_date DESC "
+      + "LIMIT 10"
+    ).all(sample.game_id);
+  } else {
+    diag.sample_play_lookup_key = null;
+    diag.note = 'no plays surfaced from pipeline — CLV diagnostic skipped';
+  }
+
+  return diag;
+}
+
+// ------------------------------------------------------------ cron diag
+function buildCronDiagnostic(db) {
+  const diag = {};
+  diag.morning_capture_cron_log = db.prepare(
+    "SELECT id, job_type, run_date, status, message, games_updated, ran_at "
+    + "FROM cron_log "
+    + "WHERE job_type = 'morning-capture' "
+    + "ORDER BY ran_at DESC "
+    + "LIMIT 14"
+  ).all();
+  diag.morning_capture_cron_log_count = db.prepare(
+    "SELECT COUNT(*) AS n FROM cron_log WHERE job_type = 'morning-capture'"
+  ).get().n;
+  // Comparison baseline: did OTHER crons fire in the same window?
+  // If yes, the process is alive, startCronJobs ran, but the
+  // morning-capture schedule specifically has an issue.
+  diag.other_crons_recent = db.prepare(
+    "SELECT job_type, MAX(ran_at) AS last_ran, COUNT(*) AS total_rows "
+    + "FROM cron_log "
+    + "WHERE job_type != 'morning-capture' "
+    + "GROUP BY job_type "
+    + "ORDER BY last_ran DESC "
+    + "LIMIT 10"
+  ).all();
+  diag.scheduled_pattern_in_code = {
+    file:     'services/jobs.js',
+    line:     '~2364',
+    cron_expr: '30 7 * * *',
+    tz:       'America/Los_Angeles',
+    log_line_on_fire: '[cron] 7:30AM PT morning empirical-spread capture for <date>',
+  };
+  return diag;
 }
 
 function countByTrack(rows) {
