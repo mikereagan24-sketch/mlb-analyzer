@@ -365,6 +365,16 @@ function enrichPlay(p, gametimeKeys, gametimeSiblingByKey) {
     }
   }
 
+  // close_implied_pct: derived from close_price_ml so the per-play
+  // detail surfaces the close in the same %-implied form as
+  // my_implied_pct, regardless of which branch (gametime sibling or
+  // dayahead snapshot) set close_price_ml. Missing in the 17232dd
+  // commit — return block referenced an undeclared identifier and
+  // caused ReferenceError on first read.
+  const close_implied_pct = close_price_ml != null
+    ? round2(impliedP(close_price_ml) * 100)
+    : null;
+
   const still = p.capture_track === 'morning'
     ? gametimeKeys.has([p.game_date, p.game_id, p.pair_id, p.side].join(''))
     : null;
