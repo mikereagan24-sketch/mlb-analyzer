@@ -687,13 +687,14 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   // wOBA-against isn't re-added; this captures the differential). Gated:
   // disabled by default, and null per-game values (no ingest / no row /
   // no catcher) are a clean no-op.
-  let aFramingAdj = 0, hFramingAdj = 0;
-  if (CATCHER_FRAMING_ENABLED) {
-    const homeCF = game.homeCatcherFramingRvPerGame;
-    const awayCF = game.awayCatcherFramingRvPerGame;
-    if (typeof homeCF === 'number' && !isNaN(homeCF)) aFramingAdj = homeCF * CATCHER_FRAMING_MUTE;
-    if (typeof awayCF === 'number' && !isNaN(awayCF)) hFramingAdj = awayCF * CATCHER_FRAMING_MUTE;
-  }
+  //
+  // The per-side math is delegated to applyCatcherFramingDelta so the
+  // Matchups display can call the SAME function from the route and
+  // surface the exact same number the model applied. Settings flips
+  // (CATCHER_FRAMING_ENABLED, CATCHER_FRAMING_MUTE) take effect on the
+  // next display read without requiring a model rescore.
+  const aFramingAdj = applyCatcherFramingDelta(game.homeCatcherFramingRvPerGame, settings);
+  const hFramingAdj = applyCatcherFramingDelta(game.awayCatcherFramingRvPerGame, settings);
   // Team defense (Build B): the HOME team's fielding reduces the AWAY
   // offense's runs (good defenders convert more batted balls into outs),
   // and vice versa — same directional logic as framing. Positive team
@@ -1301,4 +1302,29 @@ function forecastSpIP({ index, pitcherMlbId, gameDate, settings, role }) {
   };
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast };
+// Single-source helper for the catcher-framing run delta. Mirrors the
+// inline gating inside runModel (line ~691) so anything that wants to
+// REPORT what the model would apply can call this with the same
+// (rvPerGame, settings) inputs and get the same number.
+//
+// Input rvPerGame is the raw per-game run-value (positive = catcher
+// SAVES runs from the opposing offense). Output is the SIGNED runs
+// subtracted from the offense facing this catcher. Returns 0 when the
+// toggle is off, when the value is null/NaN, or for any input the
+// model would treat as a clean no-op — the exact gating the model
+// uses so empty states display as 0 IFF the model would apply 0.
+function applyCatcherFramingDelta(rvPerGame, settings) {
+  if (!settings || !settings.CATCHER_FRAMING_ENABLED) return 0;
+  if (typeof rvPerGame !== 'number' || isNaN(rvPerGame)) return 0;
+  // Mirror the internal num() helper used at runModel's top
+  // (null/empty → default; Number() NaN → default).
+  const raw = settings.CATCHER_FRAMING_MUTE;
+  let mute = 0.5;
+  if (raw != null && raw !== '') {
+    const n = Number(raw);
+    if (!isNaN(n)) mute = n;
+  }
+  return rvPerGame * mute;
+}
+
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta };

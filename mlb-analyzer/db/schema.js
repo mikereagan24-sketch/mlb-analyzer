@@ -937,6 +937,23 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba_vs_l REAL"); } 
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_woba_vs_r REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba_vs_l REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_woba_vs_r REAL"); } catch(e) {}
+// Catcher framing inputs persisted at processGameSignals time
+// (feat/matchups-framing-impact). Stores the RAW per-game run-value
+// (pre-MUTE, pre-ENABLED-gating) so the route can apply current
+// settings at request time — that keeps the toggle live without
+// requiring a rescore after settings flip.
+// catcher_framing_state is an enum for honest empty-state display:
+//   'applied'         framing rv resolved and applied
+//   'no_lineup'       lineup hadn't been posted at compute time
+//   'no_catcher'      lineup posted but no pos=C entry
+//   'no_roster_match' catcher name didn't resolve to a roster mlb_id
+//   'no_framing_data' mlb_id resolved but no 2026 or historical row
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_catcher_name TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_catcher_name TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_catcher_framing_rv_per_game REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_catcher_framing_rv_per_game REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_catcher_framing_state TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_catcher_framing_state TEXT"); } catch(e) {}
 // PR 4 (v4 cohort): SP/bulk weights actually used in runModel. Captures
 // the per-game variable weights derived from F4 forecasts, so future
 // backtests can replay runModel knowing exactly which weight values fed

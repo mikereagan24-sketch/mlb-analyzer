@@ -1604,8 +1604,60 @@ async function renderMatchupGame(id){
     
     +renderModelOutput(g)
     +renderLineupDiff(g)
+    +renderFramingImpact(g)
     +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
     +'<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(\'' +gid+ '\')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(\'' +gid+ '\')">Rerun Model</button></div>';
+}
+
+// Catcher-framing impact block (feat/matchups-framing-impact).
+// Renders the SIGNED runs delta each side's catcher applied to the
+// OPPOSING offense — the same number model.js's
+// applyCatcherFramingDelta returned for this game on the route's last
+// read. Honest empty states: 'lineup pending' / 'no framing data' /
+// 'framing disabled' — never display 0 as if the catcher had zero
+// impact.
+function renderFramingImpact(g){
+  if (!g || !g.framing_impact) return '';
+  const fi = g.framing_impact;
+  if (!fi.enabled) {
+    return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px"><div style="font-size:10px;color:var(--text2)">Catcher framing impact</div><div style="font-size:11px;color:var(--text3);margin-top:2px">disabled (CATCHER_FRAMING_ENABLED=false)</div></div>';
+  }
+  // State → display string. Honest empty states. The 'applied' state
+  // gets the actual runs delta; everything else gets a label.
+  const stateLabel = (st) => {
+    if (st === 'no_lineup')       return 'lineup pending';
+    if (st === 'no_catcher')      return 'no catcher in lineup';
+    if (st === 'no_roster_match') return 'roster lookup miss';
+    if (st === 'no_framing_data') return 'no framing data';
+    return null;  // 'applied' falls through to numeric render
+  };
+  const sideRow = (label, teamCode, catcherName, state, deltaSignedOnOpp, oppTeam) => {
+    const sl = stateLabel(state);
+    if (sl) {
+      return '<div style="font-size:11px"><strong>'+teamCode+' C</strong> '+(catcherName?'['+catcherName+']':'')+': <span style="color:var(--text3)">'+sl+'</span></div>';
+    }
+    // Applied: format the delta. Signed from the model's perspective
+    // (delta the model SUBTRACTED from the opposing offense's runs).
+    // Positive rv_per_game means the catcher SAVES runs → opposing
+    // offense's runs went DOWN by that amount. Render as "-X.XX runs
+    // vs OPP" to make the suppression direction obvious.
+    const d = Number(deltaSignedOnOpp) || 0;
+    const sign = d > 0 ? '-' : (d < 0 ? '+' : '±');
+    const mag = Math.abs(d).toFixed(2);
+    return '<div style="font-size:11px"><strong>'+teamCode+' C</strong> ['+catcherName+']: <span style="font-weight:500">'+sign+mag+' runs</span> <span style="color:var(--text2)">vs '+oppTeam+' lineup</span></div>';
+  };
+  let netLine = '';
+  if (fi.net_edge_runs != null && fi.net_edge_team) {
+    netLine = '<div style="font-size:11px;color:var(--text2);margin-top:4px">net framing edge: <strong>'+fi.net_edge_team+' '+fi.net_edge_runs.toFixed(2)+' runs</strong></div>';
+  } else if (fi.net_edge_runs === 0) {
+    netLine = '<div style="font-size:11px;color:var(--text3);margin-top:4px">net framing edge: 0 (balanced)</div>';
+  }
+  return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
+    + '<div style="font-size:10px;color:var(--text2);margin-bottom:4px">Catcher framing impact <span style="color:var(--text3)">(MUTE × ' + fi.mute + ')</span></div>'
+    + sideRow('away', g.away_team, fi.away.catcher_name, fi.away.state, fi.away.delta_runs_on_home, g.home_team)
+    + sideRow('home', g.home_team, fi.home.catcher_name, fi.home.state, fi.home.delta_runs_on_away, g.away_team)
+    + netLine
+    + '</div>';
 }
 
 async function rerunModel(gameId){
