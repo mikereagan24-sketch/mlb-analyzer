@@ -713,7 +713,19 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     // dual-track guarantee (SELECT does not filter by capture_track),
     // and the price-freeze rationale.
     try {
-      empiricalSpreadEdge.gradeEmpiricalSpreadOutcomesForGame(db, q, gl, nowPtIso());
+      const gradedAt = nowPtIso();
+      empiricalSpreadEdge.gradeEmpiricalSpreadOutcomesForGame(db, q, gl, gradedAt);
+      // Market capture grading (ML + totals) shares the same entry
+      // point as the spread grader so no path can grade one market
+      // type without the others. Idempotent — only rows with
+      // outcome IS NULL are touched.
+      try {
+        const empMc = require('./empirical-market-capture');
+        empMc.gradeMarketCapturesForGame(db, q, gl, gradedAt);
+      } catch (mErr) {
+        console.warn('[empirical-market] grading failed for ' + gameRow.game_id
+          + ' (non-fatal): ' + (mErr && mErr.message));
+      }
     } catch (gerr) {
       console.warn('[empirical-spreads] grading failed for ' + gameRow.game_id
         + ' (non-fatal): ' + gerr.message);
@@ -2037,6 +2049,22 @@ async function runScoreJob(dateStr) {
               + ' row(s) for ' + gameId
               + ' (by track: ' + JSON.stringify(r.byTrack) + ')');
           }
+          // ML + totals market captures grade through the same entry
+          // point — separate try so an ML/totals grading failure can't
+          // undo the spread grading the score job already completed.
+          try {
+            const empMc = require('./empirical-market-capture');
+            const mr = empMc.gradeMarketCapturesForGame(db, q, gameRow, gradedAt);
+            if (mr.graded > 0) {
+              console.log('[score-job] empirical-market graded ' + mr.graded
+                + ' row(s) for ' + gameId
+                + ' (by_type=' + JSON.stringify(mr.byType)
+                + ', by_outcome=' + JSON.stringify(mr.byOutcome) + ')');
+            }
+          } catch (mErr) {
+            console.warn('[score-job] empirical-market grading failed for '
+              + gameId + ' (non-fatal): ' + mErr.message);
+          }
         } catch (e) {
           console.warn('[score-job] empirical-spreads grading failed for '
             + gameId + ' (non-fatal): ' + e.message);
@@ -2942,6 +2970,26 @@ async function runOddsJob(dateStr, opts) {
       console.warn('[empirical-spreads] generation failed (non-fatal): ' + e.message);
     }
 
+    // ML + totals gametime market capture (feat/morning-capture-ml-totals).
+    // Parallel to the spread gametime generation above. Each odds-job
+    // pass writes a fresh per-market snapshot using INSERT OR REPLACE
+    // so the LATEST generated_at per (game, market_type, 'gametime')
+    // is the close-at-first-pitch the CLV readout's gametime-sibling
+    // lookup will use. Non-fatal — a failure here must not break the
+    // odds job's success state.
+    try {
+      const empiricalMarketCapture = require('./empirical-market-capture');
+      const generatedAt = nowPtIso();
+      const mc = empiricalMarketCapture.generateMarketCapture(
+        db, q, dateStr, 'gametime', generatedAt);
+      if (mc.written > 0) {
+        console.log('[empirical-market] gametime: wrote ' + mc.written
+          + ' row(s) (by_type=' + JSON.stringify(mc.byType) + ') at ' + generatedAt);
+      }
+    } catch (e) {
+      console.warn('[empirical-market] gametime generation failed (non-fatal): ' + e.message);
+    }
+
     // Kalshi-direct TOTALS override (gated). Mirrors the ML override above:
     // when kalshi_direct_totals_enabled is on, fetch pre-game MLB totals
     // from Kalshi and OVERRIDE over_price / under_price on any oddsRaw row
@@ -3237,6 +3285,27 @@ async function runMorningCaptureJob(dateStr) {
     console.log('[morning-capture] ' + dateStr + ': ' + summary.morning.written
       + ' newly-locked game(s), ' + summary.morning.skipped + ' already-locked, '
       + summary.morning.outcomeRows + ' outcome rows at ' + generatedAt);
+
+    // (3b) Market capture (ML + totals) — feat/morning-capture-ml-totals.
+    // Parallel to the spread capture above. Eligibility is per-
+    // market_type (ML can lock at 7:35am while totals wait for weather-
+    // dependent posting at 3pm — the brief's partial-posting reality).
+    // existsMorningMarketCapture inside the engine first-eligible-locks
+    // each game/market_type independently; re-invocations are no-ops
+    // for already-locked entries. Same shared generatedAt as the
+    // spread capture above so grouping by batch is consistent.
+    try {
+      const empiricalMarketCapture = require('./empirical-market-capture');
+      const mc = empiricalMarketCapture.generateMarketCapture(
+        db, q, dateStr, 'morning', generatedAt);
+      summary.morning.market_written = mc.written;
+      summary.morning.market_by_type = mc.byType;
+      console.log('[morning-capture] market: wrote ' + mc.written
+        + ' row(s) (by_type=' + JSON.stringify(mc.byType) + ') for ' + dateStr);
+    } catch (e) {
+      console.warn('[morning-capture] market capture failed for ' + dateStr
+        + ' (non-fatal): ' + (e && e.message));
+    }
     q.logCron.run('morning-capture', dateStr, 'success',
       summary.morning.written + ' locked, ' + summary.morning.skipped + ' skipped',
       summary.morning.written);

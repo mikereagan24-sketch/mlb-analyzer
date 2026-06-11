@@ -1898,6 +1898,40 @@ router.get('/admin/morning-capture/eligibility-funnel', requireAdminToken, (req,
       + "WHERE game_date = ? AND capture_track = 'morning'"
     ).get(date).n;
 
+    // ML + totals eligibility (feat/morning-capture-ml-totals).
+    // Mirrors the spread stages but for empirical_market_captures.
+    // ML needs market_*_ml on game_log; totals needs market_total +
+    // over_price + under_price. Partial-posting reality: a game can
+    // be ML-eligible at 7:35AM and totals-eligible at 3PM as weather
+    // posts. Lock counts are per-market_type because the brief
+    // requires per-market_type eligibility.
+    out.market_ml = {
+      stage_2_game_log_with_ml_prices: db.prepare(
+        "SELECT COUNT(*) AS n FROM game_log "
+        + "WHERE game_date = ? "
+        + "  AND model_home_ml IS NOT NULL AND model_away_ml IS NOT NULL "
+        + "  AND market_home_ml IS NOT NULL AND market_away_ml IS NOT NULL"
+      ).get(date).n,
+      already_locked_games_count: db.prepare(
+        "SELECT COUNT(*) AS n FROM empirical_market_captures "
+        + "WHERE game_date = ? AND market_type = 'ml' AND capture_track = 'morning'"
+      ).get(date).n,
+    };
+    out.market_total = {
+      stage_2_game_log_with_total_prices: db.prepare(
+        "SELECT COUNT(*) AS n FROM game_log "
+        + "WHERE game_date = ? "
+        + "  AND model_total IS NOT NULL "
+        + "  AND market_total IS NOT NULL "
+        + "  AND over_price  IS NOT NULL "
+        + "  AND under_price IS NOT NULL"
+      ).get(date).n,
+      already_locked_games_count: db.prepare(
+        "SELECT COUNT(*) AS n FROM empirical_market_captures "
+        + "WHERE game_date = ? AND market_type = 'total' AND capture_track = 'morning'"
+      ).get(date).n,
+    };
+
     // Raw kalshi_spread_markets sample for the date — surface up to
     // 10 rows so the operator can eyeball line / team / ML values
     // when stages 3/4 read zero. Also surface counts by spread_line
@@ -1946,21 +1980,25 @@ router.get('/admin/morning-capture/eligibility-funnel', requireAdminToken, (req,
   }
 });
 
-// Empirical-spread regrade backfill.
+// Empirical regrade backfill — covers spreads AND ML/totals captures.
 // POST /api/admin/empirical-spread/regrade
 //   body: { from?: YYYY-MM-DD, to?: YYYY-MM-DD, dryRun?: boolean }
 //
 // Per fix/empirical-spread-grading-wiring: the grader was historically
 // only invoked inside processGameSignals's game-final branch, which no
 // cron path entered. runScoreJob now grades empirical rows directly,
-// but historical games (everything before that wiring deployed) need a
-// one-time catch-up. This endpoint walks game_log for rows with both
-// scores set and runs gradeEmpiricalSpreadOutcomesForGame per game.
+// but historical games need a one-time catch-up. Iterates every game
+// with at least one ungraded row in EITHER empirical_spread_outcomes
+// OR empirical_market_captures and calls both graders.
+//
+// Endpoint path is /empirical-spread/regrade for back-compat with the
+// previous shape — body schema unchanged. The response adds
+// total_market_graded + total_market_by_type alongside the existing
+// spread fields so a caller can see both backfills in one row.
 //
 // Idempotent on the grader side (only rows with outcome IS NULL are
 // touched), so re-running is safe. dryRun=true returns the per-game
-// graded counts without writing — useful to size a backfill before
-// committing to the SQL writes on prod.
+// counts without writing.
 router.post('/admin/empirical-spread/regrade', requireAdminToken, (req, res) => {
   try {
     const b = req.body || {};
@@ -1972,73 +2010,89 @@ router.post('/admin/empirical-spread/regrade', requireAdminToken, (req, res) => 
     if (from && to && from > to)            return res.status(400).json({ error: 'from must be <= to' });
     const dryRun = b.dryRun === true || b.dryRun === 'true';
 
-    // Pull the distinct games with scores set in the window. We could
-    // iterate q.getUngradedEmpiricalSpreads directly but that returns
-    // one row per ungraded outcome — grouping by game first means one
-    // grade call per game, which is what the function expects.
+    // Union of games with ungraded rows across BOTH tables.
     const games = db.prepare(
       "SELECT DISTINCT g.game_date, g.game_id, g.home_team, g.away_team, "
       + "                g.home_score, g.away_score "
       + "FROM game_log g "
-      + "JOIN empirical_spread_outcomes e "
-      + "  ON e.game_date = g.game_date AND e.game_id = g.game_id "
-      + "WHERE e.outcome IS NULL "
-      + "  AND g.home_score IS NOT NULL AND g.away_score IS NOT NULL "
+      + "WHERE g.home_score IS NOT NULL AND g.away_score IS NOT NULL "
       + "  AND (? IS NULL OR g.game_date >= ?) "
       + "  AND (? IS NULL OR g.game_date <= ?) "
+      + "  AND ( "
+      + "    EXISTS (SELECT 1 FROM empirical_spread_outcomes e "
+      + "            WHERE e.game_date = g.game_date AND e.game_id = g.game_id "
+      + "              AND e.outcome IS NULL) "
+      + "    OR EXISTS (SELECT 1 FROM empirical_market_captures m "
+      + "               WHERE m.game_date = g.game_date AND m.game_id = g.game_id "
+      + "                 AND m.outcome IS NULL) "
+      + "  ) "
       + "ORDER BY g.game_date, g.game_id"
     ).all(from, from, to, to);
 
     const { gradeEmpiricalSpreadOutcomesForGame } = require('../services/empirical-spread-edge');
+    const { gradeMarketCapturesForGame }          = require('../services/empirical-market-capture');
     const { nowPtIso } = require('../services/jobs');
     const gradedAt = nowPtIso();
 
     const perGame = [];
-    let totalGraded  = 0;
-    let totalSkipped = 0;
-    const totalByTrack = {};
+    let totalSpreadGraded  = 0;
+    let totalSpreadSkipped = 0;
+    let totalMarketGraded  = 0;
+    const totalByTrack  = {};
+    const totalByType   = {};
+    const totalByOutcome = {};
     for (const g of games) {
-      // dryRun: count rows that WOULD grade without writing. We
-      // reproduce the grader's SELECT but don't run the UPDATE — the
-      // grader function itself is the write side, so we shadow it
-      // here instead of adding a no-op flag to the engine (keeps the
-      // hot path simple).
       if (dryRun) {
-        const n = db.prepare(
+        const nSpread = db.prepare(
           "SELECT COUNT(*) AS n FROM empirical_spread_outcomes "
           + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
         ).get(g.game_date, g.game_id).n;
-        perGame.push({ game_date: g.game_date, game_id: g.game_id, would_grade: n });
-        totalGraded += n;
-        continue;
-      }
-      try {
-        const r = gradeEmpiricalSpreadOutcomesForGame(db, q, g, gradedAt);
+        const nMarket = db.prepare(
+          "SELECT COUNT(*) AS n FROM empirical_market_captures "
+          + "WHERE game_date=? AND game_id=? AND outcome IS NULL"
+        ).get(g.game_date, g.game_id).n;
         perGame.push({
           game_date: g.game_date, game_id: g.game_id,
-          graded: r.graded, skipped: r.skipped, by_track: r.byTrack,
+          would_grade_spread: nSpread, would_grade_market: nMarket,
         });
-        totalGraded  += r.graded;
-        totalSkipped += r.skipped;
+        totalSpreadGraded += nSpread;
+        totalMarketGraded += nMarket;
+        continue;
+      }
+      const entry = { game_date: g.game_date, game_id: g.game_id };
+      try {
+        const r = gradeEmpiricalSpreadOutcomesForGame(db, q, g, gradedAt);
+        entry.spread = { graded: r.graded, skipped: r.skipped, by_track: r.byTrack };
+        totalSpreadGraded  += r.graded;
+        totalSpreadSkipped += r.skipped;
         for (const k of Object.keys(r.byTrack)) {
           totalByTrack[k] = (totalByTrack[k] || 0) + r.byTrack[k];
         }
-      } catch (e) {
-        perGame.push({ game_date: g.game_date, game_id: g.game_id, error: e.message });
-      }
+      } catch (e) { entry.spread_error = e.message; }
+      try {
+        const mr = gradeMarketCapturesForGame(db, q, g, gradedAt);
+        entry.market = { graded: mr.graded, by_type: mr.byType, by_outcome: mr.byOutcome };
+        totalMarketGraded += mr.graded;
+        for (const k of Object.keys(mr.byType))    totalByType[k]    = (totalByType[k]    || 0) + mr.byType[k];
+        for (const k of Object.keys(mr.byOutcome)) totalByOutcome[k] = (totalByOutcome[k] || 0) + mr.byOutcome[k];
+      } catch (e) { entry.market_error = e.message; }
+      perGame.push(entry);
     }
 
     res.json({
       window: { from, to },
       dry_run: dryRun,
       games_processed: games.length,
-      total_graded:  totalGraded,
-      total_skipped: totalSkipped,
-      total_by_track: totalByTrack,
+      total_spread_graded:  totalSpreadGraded,
+      total_spread_skipped: totalSpreadSkipped,
+      total_spread_by_track: totalByTrack,
+      total_market_graded:  totalMarketGraded,
+      total_market_by_type: totalByType,
+      total_market_by_outcome: totalByOutcome,
       per_game: perGame,
     });
   } catch (e) {
-    console.error('[empirical-spread regrade] error:', e);
+    console.error('[empirical regrade] error:', e);
     res.status(500).json({ error: e.message });
   }
 });
