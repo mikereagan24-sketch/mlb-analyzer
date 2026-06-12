@@ -1083,12 +1083,19 @@ router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) 
     if (resolve) {
       // Format: TEAM|Name,TEAM|Name,... e.g.
       //   ?resolve=PIT|E. Rodriguez,SEA|J. Pereda,BOS|M. Gasper,STL|Jimmy Crooks
-      // Runs the existing resolveCatcherMlbId path against the
-      // CURRENT team_rosters + catcher_framing state and surfaces
-      // PASS 1 (team_rosters POS) and PASS 2 (catcher_framing)
-      // candidate sets separately so the operator sees exactly
-      // where the resolution succeeds or stops.
+      //
+      // Calls the EXACT same resolveCatcherMlbId production uses
+      // (single source of truth — no reimplementation). Pass the
+      // team as-is so the operator can pass lowercase to A/B test the
+      // case-handling, or just type uppercase normally. The resolver
+      // does its own .toUpperCase() so both produce the same result.
+      //
+      // Extra context fields (pass1/pass2 candidates, pos_rows_total)
+      // are computed alongside so the operator sees WHERE the
+      // resolution landed, but the final 'resolved_mlb_id' is the
+      // authoritative value from the shared function.
       const { normName, stripSfx } = require('../utils/names');
+      const { resolveCatcherMlbId } = require('../services/jobs');
       const items = resolve.split(',').map((s) => s.trim()).filter(Boolean);
       out.resolver_simulation = {};
       for (const item of items) {
@@ -1097,20 +1104,24 @@ router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) 
           out.resolver_simulation[item] = { error: 'expected TEAM|Name' };
           continue;
         }
-        const team = item.slice(0, pipe).toUpperCase();
+        const teamRaw  = item.slice(0, pipe).trim();
+        const teamUpper = teamRaw.toUpperCase();
         const name = item.slice(pipe + 1).trim();
         const norm = stripSfx(normName(name));
         const parts = norm.split(' ');
         if (parts.length < 2) {
-          out.resolver_simulation[item] = { team, name, error: 'normalized to <2 parts: "' + norm + '"' };
+          out.resolver_simulation[item] = { team: teamRaw, name, error: 'normalized to <2 parts: "' + norm + '"' };
           continue;
         }
         const last = parts[parts.length - 1];
         const firstInit = parts[0][0];
-        // PASS 1: team_rosters POS scan
+        // PASS 1 candidate set — computed locally for diagnostic
+        // visibility. The AUTHORITATIVE result below comes from the
+        // shared resolveCatcherMlbId function so we can't drift
+        // between sim and production again.
         const pass1 = [];
         try {
-          const players = q.getPositionPlayers.all(team);
+          const players = q.getPositionPlayers.all(teamUpper);
           for (const p of players) {
             const pn = stripSfx(normName(p.player_name));
             const pp = pn.split(' ');
@@ -1120,7 +1131,6 @@ router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) 
             }
           }
         } catch (e) { /* surface via empty pass1 */ }
-        // PASS 2: catcher_framing direct scan
         const pass2 = [];
         try {
           if (q.getAllCatcherFramingNames) {
@@ -1136,22 +1146,25 @@ router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) 
             }
           }
         } catch (e) { /* surface via empty pass2 */ }
-        // Total POS row count for the team — distinguishes "no rows
-        // for team at all" from "rows present, none match".
         let pos_rows_total = null;
-        try { pos_rows_total = q.getPositionPlayers.all(team).length; } catch (_) {}
+        try { pos_rows_total = q.getPositionPlayers.all(teamUpper).length; } catch (_) {}
+        // AUTHORITATIVE result — the same function processGameSignals
+        // calls. Pass teamRaw (as the operator gave it) so the
+        // resolver's own normalization is the thing under test;
+        // production would pass lowercase here too.
+        const resolved_mlb_id = resolveCatcherMlbId(teamRaw, name);
         out.resolver_simulation[item] = {
-          team, name,
-          normalized: { first_init: firstInit, last },
+          team_input:        teamRaw,
+          team_normalized:   teamUpper,
+          name,
+          normalized:        { first_init: firstInit, last },
           team_pos_rows_total: pos_rows_total,
           pass1_team_rosters_POS_candidates: pass1,
           pass2_catcher_framing_candidates: pass2,
-          would_resolve_to:
-            pass1.length === 1 ? pass1[0].mlb_id
-            : pass2.length === 1 ? pass2[0].mlb_id
-            : null,
+          resolved_mlb_id,   // from the shared resolveCatcherMlbId
           honest_miss_reason:
-            pos_rows_total === 0 ? 'team_rosters has zero rows for this team'
+            resolved_mlb_id != null ? null
+            : pos_rows_total === 0 ? 'team_rosters has zero rows for this team'
             : pass1.length === 0 && pass2.length === 0 ? 'name not in POS roster and not in catcher_framing'
             : pass1.length > 1 ? 'team_rosters POS ambiguous'
             : pass2.length > 1 ? 'catcher_framing ambiguous'
