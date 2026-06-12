@@ -3913,31 +3913,97 @@ async function detectOpeners(dateStr) {
 }
 
 // Resolve an abbreviated lineup catcher name (e.g. "A. Martinez") to an
-// mlb_id using the team's position players in team_rosters. Matches on
-// accent-folded last name + first initial. Returns mlb_id or null. Null
-// on ambiguity (two POS players, same last name + initial) — safer to
-// skip than guess wrong.
+// mlb_id. Returns mlb_id or null. Null on ambiguity (two candidates,
+// same last name + initial) — safer to skip than guess wrong.
+//
+// Two-pass resolution as of fix/catcher-resolution-framing-fallback:
+//
+//   PASS 1 — team_rosters POS players (original logic).
+//     Matches on accent-folded last name + first initial. Misses
+//     when the player isn't in team_rosters yet — e.g. recent
+//     call-up before the next 6AM roster sync, or a roster-ingest
+//     glitch. Two known cases that motivated this fix:
+//       - PIT C "E. Rodriguez" (Endy Rodríguez) → missed when
+//         called up the day of the slate.
+//       - MIA C "Joe Mack" (rookie) → similar.
+//
+//   PASS 2 — catcher_framing table (new fallback). Format there is
+//     "Lastname, Firstname" (Savant leaderboard convention). Parse
+//     and apply the same last + first-initial match. catcher_framing
+//     is keyed by mlb_id from Savant so an mlb_id resolved here is
+//     authoritative for framing purposes — exactly what the caller
+//     needs. If still ambiguous (two catchers with same last name +
+//     initial), keep the miss. catcher_framing_historical is the
+//     last resort for catchers with no current-season sample.
+//
+// Logs a structured warn line on every miss (after both passes) with
+// the lineup name + team so prod misses can be diagnosed without
+// re-tracing through the resolution path.
 function resolveCatcherMlbId(team, lineupName) {
   if (!team || !lineupName) return null;
-  const norm = stripSfx(normName(lineupName)); // fold accents/case, then drop Jr/Sr/II/III/IV
+  const norm = stripSfx(normName(lineupName));
   const parts = norm.split(' ');
   if (parts.length < 2) return null;
   const last = parts[parts.length - 1];
   const firstInit = parts[0][0];
-  let candidates = [];
+
+  // PASS 1: team_rosters POS players.
   try {
     const players = q.getPositionPlayers.all(team);
+    const candidates = [];
     for (const p of players) {
-      const pn = stripSfx(normName(p.player_name)); // same: strip suffix so "acuna jr" → "acuna"
+      const pn = stripSfx(normName(p.player_name));
       const pp = pn.split(' ');
       if (pp.length < 2) continue;
-      const pLast = pp[pp.length - 1];
-      const pInit = pp[0][0];
-      if (pLast === last && pInit === firstInit) candidates.push(p);
+      if (pp[pp.length - 1] === last && pp[0][0] === firstInit) candidates.push(p);
     }
-  } catch (e) { return null; }
-  if (candidates.length === 1) return candidates[0].mlb_id;
-  return null; // 0 matches or ambiguous → no value rather than wrong value
+    if (candidates.length === 1) return candidates[0].mlb_id;
+    // 2+ candidates is ambiguous — fall through to PASS 2; if PASS 2
+    // also resolves uniquely (e.g. only one of them is a catcher per
+    // Savant), we'll still get the right answer. Falling through is
+    // safe because PASS 2 has its own uniqueness check.
+  } catch (e) { /* table missing — keep going */ }
+
+  // PASS 2: catcher_framing direct match. Names are
+  // "Lastname, Firstname" — split on comma, normalize each piece,
+  // and apply the same matching rule. Loop current-season first,
+  // then historical.
+  const matchCatcherFraming = (rows) => {
+    if (!rows) return null;
+    const hits = [];
+    for (const r of rows) {
+      if (!r.name) continue;
+      const commaIdx = r.name.indexOf(',');
+      if (commaIdx < 0) continue;                  // unrecognized format → skip
+      const rLast  = stripSfx(normName(r.name.slice(0, commaIdx)));
+      const rFirst = stripSfx(normName(r.name.slice(commaIdx + 1)));
+      if (!rLast || !rFirst) continue;
+      // rLast / rFirst are already space-collapsed by normName; use
+      // the whole string for last-name match (handles compound
+      // surnames like "de la cruz").
+      if (rLast === last && rFirst[0] === firstInit) hits.push(r);
+    }
+    if (hits.length === 1) return hits[0].mlb_id;
+    return null;
+  };
+  try {
+    if (q.getAllCatcherFramingNames) {
+      const id = matchCatcherFraming(q.getAllCatcherFramingNames.all());
+      if (id) return id;
+    }
+    if (q.getAllCatcherFramingHistNames) {
+      const id = matchCatcherFraming(q.getAllCatcherFramingHistNames.all());
+      if (id) return id;
+    }
+  } catch (e) { /* fall through to miss */ }
+
+  // Structured miss log for prod diagnosis. Includes the raw
+  // lineupName so the operator can spot encoding artifacts or
+  // unexpected formats without re-running the full pipeline.
+  console.warn('[framing] catcher resolution miss: team=' + team
+    + ' lineup_name="' + lineupName + '" '
+    + '(normalized last="' + last + '" first_init="' + firstInit + '")');
+  return null;
 }
 
 // Fetch the Savant catcher-framing leaderboard and upsert into

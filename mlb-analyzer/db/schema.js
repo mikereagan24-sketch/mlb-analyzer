@@ -1744,6 +1744,12 @@ q.upsertCatcherFraming = db.prepare(
   "  name=excluded.name, rv_tot=excluded.rv_tot, pitches=excluded.pitches, updated_at=excluded.updated_at"
 );
 q.getCatcherFramingById = db.prepare("SELECT mlb_id,name,rv_tot,pitches FROM catcher_framing WHERE mlb_id=?");
+// Full scan of catcher_framing — used as a fallback in
+// resolveCatcherMlbId when the team_rosters lookup misses. Small
+// table (~60 rows / season) so the linear scan in JS is cheap; the
+// SQL only needs to surface name + mlb_id.
+q.getAllCatcherFramingNames = db.prepare("SELECT mlb_id, name FROM catcher_framing");
+q.getAllCatcherFramingHistNames = db.prepare("SELECT mlb_id, name FROM catcher_framing_historical");
 q.getFramingByCatcherName = db.prepare(
   "SELECT cf.mlb_id, cf.rv_tot, cf.pitches FROM team_rosters tr " +
   "JOIN catcher_framing cf ON cf.mlb_id = tr.mlb_id " +
