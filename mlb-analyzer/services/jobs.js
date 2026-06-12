@@ -3962,6 +3962,19 @@ async function detectOpeners(dateStr) {
 // re-tracing through the resolution path.
 function resolveCatcherMlbId(team, lineupName) {
   if (!team || !lineupName) return null;
+  // CASE NORMALIZATION (fix/resolver-team-case-and-single-source).
+  // Production callers in processGameSignals derive team from
+  // game_id.split('-')[0] / [1], and makeGameId in services/scraper.js
+  // lower-cases the abbreviations — so awayAbbr/homeAbbr arrive here
+  // as e.g. 'pit', 'stl'. team_rosters.team is stored UPPERCASE by
+  // the roster ingest (fetchActiveRosters iterates MLB_TEAM_IDS keys,
+  // which are uppercase). SQLite TEXT '=' is case-sensitive, so the
+  // PASS 1 q.getPositionPlayers.all('pit') returns ZERO rows — the
+  // root cause of the four reported framing misses on PIT/SEA/BOS/
+  // STL (none of which had a PASS 2 catcher_framing lifeline because
+  // they're absent from that table). Upper-casing once here is the
+  // single defensive boundary for every caller.
+  team = String(team).toUpperCase();
   const norm = stripSfx(normName(lineupName));
   const parts = norm.split(' ');
   if (parts.length < 2) return null;
@@ -4311,4 +4324,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId };
