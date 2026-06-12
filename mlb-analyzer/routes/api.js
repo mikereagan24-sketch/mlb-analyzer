@@ -546,6 +546,16 @@ router.get('/games/:date', (req, res) => {
       console.warn('[api] empirical-spread attach failed: ' + e.message);
     }
     const now = Date.now();
+    // Single-source the catcher-framing delta from services/model.js.
+    // applyCatcherFramingDelta does the SAME (MUTE × ENABLED) gating
+    // runModel does internally — so the per-game framing block the UI
+    // renders matches exactly what the model would apply at this
+    // settings state. Settings flips (CATCHER_FRAMING_ENABLED, MUTE)
+    // take effect immediately on this read without requiring a
+    // rescore. Persisted inputs (raw rv + state code) come from
+    // processGameSignals's catcher-framing block.
+    const { applyCatcherFramingDelta } = require('../services/model');
+    const _framingSettings = getSettings();
     const result = games.map(g => {
       const awayLU = tryParse(g.away_lineup_json);
       const homeLU = tryParse(g.home_lineup_json);
@@ -566,6 +576,56 @@ router.get('/games/:date', (req, res) => {
         weather_quality: _classifyAge(_ageMs(g.weather_quality_at, now)),
         scores_quality: _classifyAge(_ageMs(g.scores_quality_at, now)),
         lineup_sensitivity: _lineupSensitivity(g),
+      };
+      // Catcher-framing impact block (feat/matchups-framing-impact).
+      // For each side, surface the catcher and the SIGNED runs delta
+      // applied to the OPPOSING offense. The home catcher's framing
+      // reduces the AWAY offense's runs, and vice versa — mirrors
+      // runModel's directional logic. delta_runs is computed via the
+      // shared helper from model.js. Net edge = signed difference of
+      // the two deltas, framed from the team that benefits.
+      const homeDeltaOnAway = applyCatcherFramingDelta(
+        g.home_catcher_framing_rv_per_game, _framingSettings);
+      const awayDeltaOnHome = applyCatcherFramingDelta(
+        g.away_catcher_framing_rv_per_game, _framingSettings);
+      const _enabled = !!(_framingSettings && _framingSettings.CATCHER_FRAMING_ENABLED);
+      const mute = (_framingSettings && _framingSettings.CATCHER_FRAMING_MUTE != null)
+        ? Number(_framingSettings.CATCHER_FRAMING_MUTE) : 0.5;
+      // Net framing edge: bigger framing impact = bigger runs delta
+      // applied to the OPPOSING offense. The team whose catcher
+      // suppresses MORE runs has the framing edge.
+      // net = abs(homeDeltaOnAway) - abs(awayDeltaOnHome), assigned
+      // to the larger-delta side.
+      let netEdgeRuns = null, netEdgeTeam = null;
+      if (_enabled && (g.home_catcher_framing_state === 'applied'
+                    || g.away_catcher_framing_state === 'applied')) {
+        const aH = Math.abs(homeDeltaOnAway);
+        const aA = Math.abs(awayDeltaOnHome);
+        if (aH > aA)      { netEdgeRuns = aH - aA; netEdgeTeam = g.home_team; }
+        else if (aA > aH) { netEdgeRuns = aA - aH; netEdgeTeam = g.away_team; }
+        else              { netEdgeRuns = 0;       netEdgeTeam = null; }
+      }
+      out.framing_impact = {
+        enabled:           _enabled,
+        mute,
+        away: {
+          catcher_name:        g.away_catcher_name,
+          rv_per_game_raw:     g.away_catcher_framing_rv_per_game,
+          state:               g.away_catcher_framing_state,
+          // delta_runs_on_home: runs the AWAY catcher's framing
+          // SUBTRACTS from the HOME offense (signed; positive means
+          // the away catcher saved runs from the home offense, so
+          // home's projected runs went DOWN by that amount).
+          delta_runs_on_home:  awayDeltaOnHome,
+        },
+        home: {
+          catcher_name:        g.home_catcher_name,
+          rv_per_game_raw:     g.home_catcher_framing_rv_per_game,
+          state:               g.home_catcher_framing_state,
+          delta_runs_on_away:  homeDeltaOnAway,
+        },
+        net_edge_runs:   netEdgeRuns,
+        net_edge_team:   netEdgeTeam,
       };
       // Only attach when the thresholds passed above. Omitting the
       // field entirely (rather than setting null) keeps the slate

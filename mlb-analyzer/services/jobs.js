@@ -393,6 +393,13 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   // runModel applies these only when CATCHER_FRAMING_ENABLED and a value
   // is present — null is a clean no-op.
   let awayCatcherFramingRvPerGame = null, homeCatcherFramingRvPerGame = null;
+  // Per-side catcher inputs persisted for the Matchups display
+  // (feat/matchups-framing-impact). Names from the lineup; state code
+  // mirrors the silent-no-op branches below so the UI can render
+  // honest empty states ('lineup pending', 'no framing data') instead
+  // of a misleading 0.
+  let awayCatcherName = null, homeCatcherName = null;
+  let awayCatcherFramingState = null, homeCatcherFramingState = null;
   try {
     if (q.getCatcherFramingById && q.getPositionPlayers) {
       const findCatcher = (lu) => {
@@ -423,12 +430,16 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         if (!pitches || pitches <= 0) return null;
         return (rvTot / pitches) * takesPerGame;
       };
+      // Returns { rv, state }. state ∈ enum documented in
+      // db/schema.js's catcher_framing_state column. rv is the raw
+      // per-game value before MUTE/ENABLED gating — model.js's
+      // applyCatcherFramingDelta does the gating.
       const perGame = (team, catcherName) => {
-        if (catcherName === null) return null;         // no lineup yet — silent
+        if (catcherName === null) return { rv: null, state: 'no_lineup' };
         if (catcherName === '') {
           if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
             + ': lineup has no catcher (pos=C) — no framing applied');
-          return null;
+          return { rv: null, state: 'no_catcher' };
         }
         // Abbreviated lineup name ("A. Martinez") → mlb_id via roster
         // (accent-folded last+initial) → framing row.
@@ -436,14 +447,14 @@ function processGameSignals(gameRow, wobaIdx, settings) {
         if (!mlbId) {
           if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
             + ': catcher "' + catcherName + '" did not resolve to a roster mlb_id — no framing applied (check roster / name format)');
-          return null;
+          return { rv: null, state: 'no_roster_match' };
         }
         // Primary: current-season (2026) framing, used as-is (already
         // post-ABS). Only trusted when it clears the min-pitches floor —
         // a 200-pitch 2026 sample is noisier than a 3-year baseline.
         const row = q.getCatcherFramingById.get(mlbId);
         if (row && row.pitches >= min2026) {
-          return rate(row.rv_tot, row.pitches);
+          return { rv: rate(row.rv_tot, row.pitches), state: 'applied' };
         }
         // Fallback: 2023-2025 historical baseline, scaled by absFactor to
         // express pre-ABS values in 2026-equivalent units. Applies when the
@@ -455,16 +466,24 @@ function processGameSignals(gameRow, wobaIdx, settings) {
             if (r != null) {
               if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
                 + ': catcher "' + catcherName + '" (id ' + mlbId + ') low/no 2026 sample — using 2023-25 baseline ×' + absFactor);
-              return r * absFactor;
+              return { rv: r * absFactor, state: 'applied' };
             }
           }
         }
         if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
           + ': catcher "' + catcherName + '" (id ' + mlbId + ') has no 2026 or historical framing row — no framing applied');
-        return null;
+        return { rv: null, state: 'no_framing_data' };
       };
-      awayCatcherFramingRvPerGame = perGame(awayAbbr, findCatcher(gameRow.away_lineup_json));
-      homeCatcherFramingRvPerGame = perGame(homeAbbr, findCatcher(gameRow.home_lineup_json));
+      const awayC = findCatcher(gameRow.away_lineup_json);
+      const homeC = findCatcher(gameRow.home_lineup_json);
+      awayCatcherName = awayC || null;   // '' becomes null for display (no_catcher state still set)
+      homeCatcherName = homeC || null;
+      const awayRes = perGame(awayAbbr, awayC);
+      const homeRes = perGame(homeAbbr, homeC);
+      awayCatcherFramingRvPerGame = awayRes.rv;
+      homeCatcherFramingRvPerGame = homeRes.rv;
+      awayCatcherFramingState = awayRes.state;
+      homeCatcherFramingState = homeRes.state;
     }
   } catch (e) { /* missing table / ingest not built → null, no-op */ }
   // Defensive impact (Build B): team fielding run value, summed over the 7
@@ -640,6 +659,27 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   } catch (e) {
     // Non-critical — log and continue. Doesn't block signal firing.
     console.warn('[bullpen-persist] ' + gameRow.game_id + ': ' + e.message);
+  }
+  // Catcher-framing inputs (feat/matchups-framing-impact). Raw rv +
+  // state code per side. Settings gating (MUTE × ENABLED) is applied
+  // at READ time by the route via applyCatcherFramingDelta in
+  // services/model.js — toggle flips take effect immediately without
+  // requiring a rescore. Non-critical write — wrap try/catch so a
+  // schema migration mid-deploy can't break signal firing.
+  try {
+    db.prepare(`UPDATE game_log SET
+      away_catcher_name=?, home_catcher_name=?,
+      away_catcher_framing_rv_per_game=?, home_catcher_framing_rv_per_game=?,
+      away_catcher_framing_state=?, home_catcher_framing_state=?
+      WHERE game_date=? AND game_id=?`)
+      .run(
+        awayCatcherName, homeCatcherName,
+        awayCatcherFramingRvPerGame, homeCatcherFramingRvPerGame,
+        awayCatcherFramingState, homeCatcherFramingState,
+        gameRow.game_date, gameRow.game_id
+      );
+  } catch (e) {
+    console.warn('[framing-persist] ' + gameRow.game_id + ': ' + e.message);
   }
   // PR 4 + PR B: persist the weights runModel actually used. SP weights
   // come from stdModel (standard non-opener path). Opener/bulk/bullpen
