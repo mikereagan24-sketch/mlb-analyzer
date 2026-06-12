@@ -1066,6 +1066,27 @@ async function runLineupJob(dateStr) {
   console.log('[lineup-job] Starting for ' + dateStr);
   let gamesUpdated = 0;
   try {
+    // Step 0: belt-and-suspenders roster freshness check
+    // (fix/roster-staleness-on-lineup-pass). The 6AM PT cron is the
+    // only scheduled roster refresh, so any callup/IL-return whose
+    // status.code='A' lands AFTER 6AM PT today is invisible to the
+    // catcher-framing resolver (and any other team_rosters consumer)
+    // for the remainder of the day. runRosterJobIfStale only fires
+    // the statsapi pull when the most recent team_rosters row is
+    // older than maxAgeHrs — so on a healthy 6AM cron this is a fast
+    // no-op skip, but lineup-job passes after midday will catch
+    // mid-morning + early-afternoon transactions before they break
+    // signal scoring. 4h chosen so the 8AM lineup-job sees the 6AM
+    // roster (2h old → skip), the noon lineup-job triggers a refresh
+    // (6h old), and post-noon passes piggyback on the noon refresh
+    // until the 5-6PM pass triggers another. Caps max-callup-
+    // staleness at ~4h instead of 24h with no new cron entries.
+    try {
+      await runRosterJobIfStale(4);
+    } catch (e) {
+      console.warn('[lineup-job] runRosterJobIfStale failed (non-fatal): ' + (e && e.message));
+    }
+
     // Step 1: bootstrap game_log from statsapi schedule. statsapi has the
     // canonical schedule (matchups + scheduled time + probable SPs) for
     // dates well before RotoWire publishes. Bootstrap rows are upserted
