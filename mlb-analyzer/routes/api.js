@@ -950,6 +950,223 @@ router.post('/jobs/rosters', async (req, res) => {
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
+// Per-team roster status diagnostic (diag/roster-per-team-status).
+// READ-ONLY — does not touch team_rosters or call runRosterJob. Lets
+// the operator confirm/refute the empty-teams hypothesis behind
+// repeated 'no_roster_match' framing states without running the
+// ingest blind.
+//
+// Three sections:
+//
+//   1. per_team_counts: SELECT team, COUNT(*), COUNT(role='POS'),
+//      MAX(updated_at) FROM team_rosters GROUP BY team for ALL 30 teams
+//      (or the subset in ?teams=). Empty teams show n_rows=0; teams
+//      missing from the table show n_rows=null.
+//
+//   2. live_fetch: when ?probe=true, also calls the statsapi roster
+//      endpoint for each requested team and reports {ok, n_active,
+//      sample_names, status, error_message}. Isolates whether the
+//      cause is upstream (statsapi 404/empty) or downstream (fetch
+//      OK but team_rosters not populated → ingest path bug).
+//
+//   3. resolver_simulation: when ?resolve=team|name,team|name,...
+//      runs the existing resolveCatcherMlbId logic against the
+//      CURRENT team_rosters + catcher_framing state and reports
+//      pass1 / pass2 candidates and the final mlb_id. Lets the
+//      operator paste the four known cases and see exactly what the
+//      resolver sees.
+router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) => {
+  try {
+    const teamsParam = (req.query.teams || '').trim();
+    const probe   = req.query.probe === 'true' || req.query.probe === '1';
+    const resolve = (req.query.resolve || '').trim();
+
+    // Per-team counts — one row per team in team_rosters PLUS one row
+    // per known team that has no rows at all (LEFT JOIN on a derived
+    // teams list).
+    const counts = db.prepare(
+        "SELECT team, COUNT(*) AS n_rows, "
+      + "       SUM(CASE WHEN role='POS' THEN 1 ELSE 0 END) AS n_pos, "
+      + "       SUM(CASE WHEN role='POS' AND position='C' THEN 1 ELSE 0 END) AS n_c, "
+      + "       MAX(updated_at) AS last_updated_at_utc "
+      + "FROM team_rosters GROUP BY team ORDER BY team"
+    ).all();
+    const seen = new Set(counts.map((r) => r.team));
+    // The 30 MLB team abbreviations — hard-coded here so the
+    // diagnostic surfaces teams whose entire row set is missing.
+    // Same set as services/scraper.js MLB_TEAM_IDS.
+    const ALL_TEAMS = ['ARI','ATL','BAL','BOS','CHC','CWS','CIN','CLE','COL',
+                       'DET','HOU','KC','LAA','LAD','MIA','MIL','MIN','NYM',
+                       'NYY','ATH','PHI','PIT','SD','SF','SEA','STL','TB',
+                       'TEX','TOR','WAS'];
+    for (const t of ALL_TEAMS) {
+      if (!seen.has(t)) {
+        counts.push({ team: t, n_rows: 0, n_pos: 0, n_c: 0, last_updated_at_utc: null });
+      }
+    }
+    counts.sort((a, b) => a.team.localeCompare(b.team));
+    // Age in hours since last_updated_at_utc — handy for spotting
+    // single teams stuck on an old refresh while peers are fresh.
+    const nowMs = Date.now();
+    for (const r of counts) {
+      if (r.last_updated_at_utc) {
+        const t = Date.parse(r.last_updated_at_utc.replace(' ', 'T') + 'Z');
+        r.age_hours = isNaN(t) ? null : Math.round((nowMs - t) / 36000) / 100;
+      } else {
+        r.age_hours = null;
+      }
+    }
+
+    const out = { per_team_counts: counts };
+
+    // Subset for probe/resolve. If ?teams= not given, default to
+    // the four currently-broken cases so the operator can hit the
+    // endpoint with no params and get all three sections for them.
+    const requestedTeams = teamsParam
+      ? teamsParam.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+      : ['PIT', 'SEA', 'BOS', 'STL'];
+
+    if (probe) {
+      // Live statsapi roster fetch per team. Mirrors
+      // services/scraper.js fetchActiveRosters' per-team request
+      // exactly (same URL, same hydrate). Reports the active-count
+      // and a few sample names + ids so the operator can confirm
+      // the upstream is returning real data.
+      const MLB_TEAM_IDS = {
+        ARI:109,ATL:144,BAL:110,BOS:111,CHC:112,CWS:145,CIN:113,CLE:114,COL:115,
+        DET:116,HOU:117,KC:118,LAA:108,LAD:119,MIA:146,MIL:158,MIN:142,NYM:121,
+        NYY:147,ATH:133,PHI:143,PIT:134,SD:135,SF:137,SEA:136,STL:138,TB:139,
+        TEX:140,TOR:141,WAS:120,
+      };
+      const ACTIVE_STATUS_CODE = 'A';
+      out.live_fetch = {};
+      for (const team of requestedTeams) {
+        const teamId = MLB_TEAM_IDS[team];
+        if (!teamId) {
+          out.live_fetch[team] = { ok: false, error: 'unknown team abbreviation' };
+          continue;
+        }
+        const url = 'https://statsapi.mlb.com/api/v1/teams/' + teamId
+          + '/roster?rosterType=active&season=2026&hydrate=person(stats(type=season,sportId=1))';
+        try {
+          const r = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } });
+          if (!r.ok) {
+            out.live_fetch[team] = { ok: false, status: r.status, statusText: r.statusText };
+            continue;
+          }
+          const data = await r.json();
+          const all = data.roster || [];
+          const active = all.filter((p) => !p.status || !p.status.code || p.status.code === ACTIVE_STATUS_CODE);
+          const dropped = all.filter((p) => p.status && p.status.code && p.status.code !== ACTIVE_STATUS_CODE);
+          out.live_fetch[team] = {
+            ok: true,
+            n_raw_roster: all.length,
+            n_after_active_filter: active.length,
+            n_dropped_for_status: dropped.length,
+            sample_active: active.slice(0, 5).map((p) => ({
+              name: p.person?.fullName || null,
+              id:   p.person?.id || null,
+              pos:  p.position?.abbreviation || null,
+              status: p.status?.code || null,
+            })),
+            sample_dropped: dropped.slice(0, 5).map((p) => ({
+              name: p.person?.fullName || null,
+              status: (p.status?.code || '') + '/' + (p.status?.description || ''),
+            })),
+          };
+        } catch (e) {
+          out.live_fetch[team] = { ok: false, error: e.message };
+        }
+      }
+    }
+
+    if (resolve) {
+      // Format: TEAM|Name,TEAM|Name,... e.g.
+      //   ?resolve=PIT|E. Rodriguez,SEA|J. Pereda,BOS|M. Gasper,STL|Jimmy Crooks
+      // Runs the existing resolveCatcherMlbId path against the
+      // CURRENT team_rosters + catcher_framing state and surfaces
+      // PASS 1 (team_rosters POS) and PASS 2 (catcher_framing)
+      // candidate sets separately so the operator sees exactly
+      // where the resolution succeeds or stops.
+      const { normName, stripSfx } = require('../utils/names');
+      const items = resolve.split(',').map((s) => s.trim()).filter(Boolean);
+      out.resolver_simulation = {};
+      for (const item of items) {
+        const pipe = item.indexOf('|');
+        if (pipe < 0) {
+          out.resolver_simulation[item] = { error: 'expected TEAM|Name' };
+          continue;
+        }
+        const team = item.slice(0, pipe).toUpperCase();
+        const name = item.slice(pipe + 1).trim();
+        const norm = stripSfx(normName(name));
+        const parts = norm.split(' ');
+        if (parts.length < 2) {
+          out.resolver_simulation[item] = { team, name, error: 'normalized to <2 parts: "' + norm + '"' };
+          continue;
+        }
+        const last = parts[parts.length - 1];
+        const firstInit = parts[0][0];
+        // PASS 1: team_rosters POS scan
+        const pass1 = [];
+        try {
+          const players = q.getPositionPlayers.all(team);
+          for (const p of players) {
+            const pn = stripSfx(normName(p.player_name));
+            const pp = pn.split(' ');
+            if (pp.length < 2) continue;
+            if (pp[pp.length - 1] === last && pp[0][0] === firstInit) {
+              pass1.push({ player_name: p.player_name, mlb_id: p.mlb_id, position: p.position });
+            }
+          }
+        } catch (e) { /* surface via empty pass1 */ }
+        // PASS 2: catcher_framing direct scan
+        const pass2 = [];
+        try {
+          if (q.getAllCatcherFramingNames) {
+            for (const r of q.getAllCatcherFramingNames.all()) {
+              if (!r.name) continue;
+              const ci = r.name.indexOf(',');
+              if (ci < 0) continue;
+              const rLast  = stripSfx(normName(r.name.slice(0, ci)));
+              const rFirst = stripSfx(normName(r.name.slice(ci + 1)));
+              if (rLast === last && rFirst && rFirst[0] === firstInit) {
+                pass2.push({ catcher_framing_name: r.name, mlb_id: r.mlb_id });
+              }
+            }
+          }
+        } catch (e) { /* surface via empty pass2 */ }
+        // Total POS row count for the team — distinguishes "no rows
+        // for team at all" from "rows present, none match".
+        let pos_rows_total = null;
+        try { pos_rows_total = q.getPositionPlayers.all(team).length; } catch (_) {}
+        out.resolver_simulation[item] = {
+          team, name,
+          normalized: { first_init: firstInit, last },
+          team_pos_rows_total: pos_rows_total,
+          pass1_team_rosters_POS_candidates: pass1,
+          pass2_catcher_framing_candidates: pass2,
+          would_resolve_to:
+            pass1.length === 1 ? pass1[0].mlb_id
+            : pass2.length === 1 ? pass2[0].mlb_id
+            : null,
+          honest_miss_reason:
+            pos_rows_total === 0 ? 'team_rosters has zero rows for this team'
+            : pass1.length === 0 && pass2.length === 0 ? 'name not in POS roster and not in catcher_framing'
+            : pass1.length > 1 ? 'team_rosters POS ambiguous'
+            : pass2.length > 1 ? 'catcher_framing ambiguous'
+            : null,
+        };
+      }
+    }
+
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/roster/per-team-status] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Catcher framing ingest: pull Savant leaderboard → catcher_framing table.
 router.post('/jobs/catcher-framing', async (req, res) => {
   console.log('[api] catcher-framing job fired');
