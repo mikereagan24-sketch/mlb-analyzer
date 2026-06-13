@@ -867,22 +867,35 @@ function _parseFramingCsv(text) {
 // catchers with a stable multi-year sample. Pre-ABS values; the model
 // applies the ABS scaling factor at use-time, not here.
 //
-// min_pitches=1 in the URL bypasses Savant's default leaderboard
-// qualifier (their "qualified catchers only" view, which excluded
-// catchers like Endy Rodríguez whose multi-year sample was real but
-// fell below Savant's own minimum innings/chances threshold). We
-// take everything Savant has and apply our own 750-pitch aggregate
-// floor in JS below — single floor, set in our code, not at the
-// CSV producer's discretion. Same param name used for fetchCatcherFraming
-// is left at Savant default since that table's read-time floor
-// (CATCHER_FRAMING_MIN_PITCHES_2026, default 750) already governs.
+// minPitches=100 bypasses Savant's default leaderboard qualifier
+// (their "Qualified" view, which excluded catchers like Endy
+// Rodríguez whose multi-year sample was real but fell below
+// Savant's own innings threshold). We take everything Savant has
+// at the lowest dropdown setting (100) and apply our own
+// 750-pitch aggregate floor in JS below — single floor, set in
+// our code, not at the CSV producer's discretion.
+//
+// Param-name trap: it is camelCase 'minPitches' and the default
+// value is the string 'q' (qualified). Confirmed via the
+// <select id="ddlMinPitches"> on the leaderboard page — options are
+// q, 100, 250, 500, 750, 1000, 1250, 1500. Common snake_case names
+// (min_pitches, min_called_pitches, etc.) are silently ignored —
+// the prior commit's min_pitches=1 was a no-op (byte-identical
+// 59-row response to the default). Direct CSV row-count probe
+// (59 → 128) confirmed minPitches=100 is the right knob.
+//
+// fetchCatcherFraming (current season) URL deliberately untouched —
+// the model's read-time CATCHER_FRAMING_MIN_PITCHES_2026 floor
+// (default 750) already governs there, and the consumer falls
+// through to this historical baseline when current-season is below
+// the floor.
 async function fetchCatcherFramingHistorical(opts) {
   const o = opts || {};
   const startY = o.seasonStart || 2023;
   const endY = o.seasonEnd || 2025;
   const minPitches = o.minPitches != null ? o.minPitches : 750;
   const url = `https://baseballsavant.mlb.com/leaderboard/catcher-framing`
-    + `?seasonStart=${startY}&seasonEnd=${endY}&type=catcher&min_pitches=1&csv=true`;
+    + `?seasonStart=${startY}&seasonEnd=${endY}&type=catcher&minPitches=100&csv=true`;
   const resp = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
