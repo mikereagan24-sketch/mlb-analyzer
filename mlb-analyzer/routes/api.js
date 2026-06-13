@@ -2094,6 +2094,39 @@ router.get('/admin/empirical-spread/roi-readout', requireAdminToken, (req, res) 
   }
 });
 
+// FRV hindsight backtest (read-only, no writes, no settings changes).
+// GET /api/admin/frv-backtest?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
+//
+// Re-runs the framing+FRV vs framing-only comparison on the corrected
+// substrate (post resolver case fix fc16748 + Savant qualifier camel-
+// Case fix f4c2645). Reports emit-floor and UI-highlight aggregates,
+// FRV-delta small/large split, and B∩C intersection. Default response
+// is compact JSON (no per-signal arrays) so it can be curled and read
+// without jq; ?detail=true adds a plays[] array for spot-checking.
+//
+// Logic lives in services/frv-backtest.js so the script-based 4-config
+// diagnostic and this endpoint share no code paths but read from the
+// same production resolver — same principle as the catcher-roster
+// diagnostic (commit fc16748): one resolver, two callers.
+router.get('/admin/frv-backtest', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+    const detail = req.query.detail === 'true' || req.query.detail === '1';
+
+    const { runFrvBacktest } = require('../services/frv-backtest');
+    const out = runFrvBacktest({ fromDate: from, toDate: to, includeDetail: detail });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/frv-backtest] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Morning-capture eligibility funnel (read-only diagnostic).
 // GET /api/admin/morning-capture/eligibility-funnel?date=YYYY-MM-DD
 //
