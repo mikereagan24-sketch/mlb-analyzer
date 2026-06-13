@@ -866,13 +866,23 @@ function _parseFramingCsv(text) {
 // or a pre-aggregated row. Applies a min-pitches floor so we only keep
 // catchers with a stable multi-year sample. Pre-ABS values; the model
 // applies the ABS scaling factor at use-time, not here.
+//
+// min_pitches=1 in the URL bypasses Savant's default leaderboard
+// qualifier (their "qualified catchers only" view, which excluded
+// catchers like Endy Rodríguez whose multi-year sample was real but
+// fell below Savant's own minimum innings/chances threshold). We
+// take everything Savant has and apply our own 750-pitch aggregate
+// floor in JS below — single floor, set in our code, not at the
+// CSV producer's discretion. Same param name used for fetchCatcherFraming
+// is left at Savant default since that table's read-time floor
+// (CATCHER_FRAMING_MIN_PITCHES_2026, default 750) already governs.
 async function fetchCatcherFramingHistorical(opts) {
   const o = opts || {};
   const startY = o.seasonStart || 2023;
   const endY = o.seasonEnd || 2025;
   const minPitches = o.minPitches != null ? o.minPitches : 750;
   const url = `https://baseballsavant.mlb.com/leaderboard/catcher-framing`
-    + `?seasonStart=${startY}&seasonEnd=${endY}&type=catcher&csv=true`;
+    + `?seasonStart=${startY}&seasonEnd=${endY}&type=catcher&min_pitches=1&csv=true`;
   const resp = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',

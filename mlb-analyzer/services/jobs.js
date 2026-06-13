@@ -4086,6 +4086,17 @@ async function runCatcherFramingHistJob(opts) {
   const minPitches = o.minPitches != null ? o.minPitches : 750;
   console.log('[framing-hist] fetching ' + startY + '-' + endY + ' baseline (min ' + minPitches + ' pitches)...');
   try {
+    // Snapshot the existing mlb_id set BEFORE the ingest so the
+    // response can report which catchers are newly cleared by the
+    // (now lower-qualifier) Savant CSV + our 750-pitch aggregate
+    // floor. Used by feat/catcher-framing-hist-lower-qualifier to
+    // surface what changed when the Savant URL switched from default
+    // (Savant-qualified-only) to min_pitches=1 (everything).
+    const beforeRows = db.prepare(
+      "SELECT mlb_id, name, pitches FROM catcher_framing_historical"
+    ).all();
+    const beforeIds = new Set(beforeRows.map((r) => r.mlb_id));
+
     const rows = await fetchCatcherFramingHistorical({ seasonStart: startY, seasonEnd: endY, minPitches });
     let applied = 0;
     const tx = db.transaction((rs) => {
@@ -4096,8 +4107,33 @@ async function runCatcherFramingHistJob(opts) {
       }
     });
     tx(rows);
-    console.log('[framing-hist] upserted ' + applied + ' catchers (>= ' + minPitches + ' pitches, ' + startY + '-' + endY + ')');
-    return { success: true, applied, season_start: startY, season_end: endY, min_pitches: minPitches };
+
+    // Diff: new catchers cleared the 750-pitch floor that previously
+    // weren't in the table. Sorted ascending by pitches so the
+    // marginal additions (catchers just above the floor) appear
+    // first — those are the ones most likely to have been excluded
+    // by Savant's prior default qualifier.
+    const newEntries = rows
+      .filter((r) => r.mlb_id && r.pitches >= minPitches && !beforeIds.has(r.mlb_id))
+      .map((r) => ({ mlb_id: r.mlb_id, name: r.name, pitches: r.pitches, rv_tot: r.rv_tot }))
+      .sort((a, b) => a.pitches - b.pitches);
+
+    console.log('[framing-hist] upserted ' + applied + ' catchers'
+      + ' (>= ' + minPitches + ' pitches, ' + startY + '-' + endY + ')'
+      + ' — was ' + beforeRows.length + ', now ' + applied
+      + ', +' + newEntries.length + ' new');
+
+    return {
+      success: true,
+      applied,
+      season_start: startY,
+      season_end: endY,
+      min_pitches: minPitches,
+      before_count: beforeRows.length,
+      after_count: applied,
+      new_catchers_cleared: newEntries.length,
+      new_catcher_details: newEntries,
+    };
   } catch (e) {
     console.error('[framing-hist] job failed: ' + e.message);
     return { success: false, error: e.message };
