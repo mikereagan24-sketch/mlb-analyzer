@@ -70,32 +70,19 @@ const { normName, stripSfx } = require('../utils/names');
 function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 
 // ---------------------------------------------------------------- framing/FRV
-// Duplicated from services/jobs.js processGameSignals (~lines 370-497)
-// because the script can't modify production code and the resolver +
-// per-game computation aren't exported. Kept in sync via comment cross-
-// reference; if production logic changes, mirror here.
-
-function resolveCatcherMlbId(team, lineupName) {
-  if (!team || !lineupName) return null;
-  const norm = stripSfx(normName(lineupName));
-  const parts = norm.split(' ');
-  if (parts.length < 2) return null;
-  const last = parts[parts.length - 1];
-  const firstInit = parts[0][0];
-  let candidates = [];
-  try {
-    const players = q.getPositionPlayers.all(team);
-    for (const p of players) {
-      const pn = stripSfx(normName(p.player_name));
-      const pp = pn.split(' ');
-      if (pp.length < 2) continue;
-      const pLast = pp[pp.length - 1];
-      const pInit = pp[0][0];
-      if (pLast === last && pInit === firstInit) candidates.push(p);
-    }
-  } catch (e) { return null; }
-  return candidates.length === 1 ? candidates[0].mlb_id : null;
-}
+// Uses the PRODUCTION resolveCatcherMlbId from services/jobs.js so the
+// hindsight backtest runs on the exact resolver production runs on.
+// This is the principled fix after the diag/roster-per-team-status
+// episode (commit fc16748) where a local resolver copy in the
+// admin-diagnostic endpoint resolved catchers that production missed
+// because the diagnostic uppercased team while production passed
+// lowercase. One resolver, two callers — the rule applies here too.
+// The local upper-case workaround inside buildBacktestGame
+// (lines below) is now redundant because the production resolver
+// uppercases internally, but kept as defense-in-depth + a marker that
+// this script knew about the case quirk before the production fix
+// landed.
+const { resolveCatcherMlbId } = jobs;
 
 function computeFramingRvPerGame(team, lineupJson, settings) {
   if (!q.getCatcherFramingById) return null;
@@ -222,6 +209,47 @@ function wageredFor(sig) {
     return ln > 0 ? (10000 / ln) : Math.abs(ln);
   }
   return 110;
+}
+
+// UI-highlight thresholds. Mirror what services/empirical-spread-roi.js
+// pulls from app_settings — the sweep readout's "bet only the picks
+// the user actually places" filter. Loaded once at backtest start.
+// Default values mirror services/settings-schema.js. tot_over has no
+// dedicated threshold (overs_enabled is a master switch).
+function loadUiHighlightThresholds() {
+  let rows = [];
+  try {
+    rows = db.prepare(
+      "SELECT key, value FROM app_settings WHERE key IN ("
+      + "'ui_highlight_ml_fav_min_pp','ui_highlight_ml_dog_min_pp',"
+      + "'ui_highlight_tot_under_min_pp','ui_highlight_tot_overs_enabled')"
+    ).all();
+  } catch (e) { /* table missing → defaults */ }
+  const m = {};
+  for (const r of rows) m[r.key] = r.value;
+  return {
+    fav_min_pp:    m['ui_highlight_ml_fav_min_pp']    != null ? Number(m['ui_highlight_ml_fav_min_pp'])    : 0.02,
+    dog_min_pp:    m['ui_highlight_ml_dog_min_pp']    != null ? Number(m['ui_highlight_ml_dog_min_pp'])    : 0.045,
+    under_min_pp:  m['ui_highlight_tot_under_min_pp'] != null ? Number(m['ui_highlight_tot_under_min_pp']) : 0.07,
+    overs_enabled: m['ui_highlight_tot_overs_enabled'] === 'true',
+  };
+}
+
+// Same rounded-0.5pp check production uses (services/settings-schema.js
+// :157-159 comment + services/empirical-spread-roi.js isHighlightedSignal).
+// edge*200 → round → /200 = nearest 0.005pp; e.g. raw 0.0445 → 0.045
+// clears the dog threshold.
+function isHighlightedSignal(sig, t) {
+  const rounded = Math.round(Number(sig.edge) * 200) / 200;
+  if (sig.type === 'ML') {
+    return Number(sig.marketLine) < 0
+      ? rounded >= t.fav_min_pp
+      : rounded >= t.dog_min_pp;
+  }
+  // Totals
+  if (sig.side === 'over')  return !!t.overs_enabled;
+  if (sig.side === 'under') return rounded >= t.under_min_pp;
+  return false;
 }
 function emptyBucket() {
   return { signals: 0, wins: 0, losses: 0, pushes: 0, pnl: 0, wagered: 0 };
@@ -515,6 +543,29 @@ function runMuteSweep(games, baseSettings, wobaIdx, banner) {
   const aggB = newAgg();
   const aggC = newAgg();
   const aggD = newAgg();
+  // UI-highlight parallel aggregates (B and C only — the configs the
+  // user asked to A/B for the FRV re-run). Mirrors the sweep's
+  // dual-aggregate reporting so the FRV impact can be reported on the
+  // bet set the user actually places, not the every-signal-above-emit
+  // set. Aggregator shape identical to the emit-floor newAgg().
+  const uiThresholds = loadUiHighlightThresholds();
+  const aggBhi = newAgg();
+  const aggChi = newAgg();
+  // FRV-delta classification per game (B vs C splitting). |frvDelta|
+  // = absolute change to home OR away runs projection caused by
+  // turning FRV on (B has FRV, C does not). Bucket boundary at 0.10
+  // runs picked as a "perceptible" threshold — picks where FRV moved
+  // the projection by < 0.1 runs are essentially noise.
+  const FRV_LARGE_THRESHOLD = 0.10;
+  const aggB_largeFrv = newAgg();
+  const aggB_smallFrv = newAgg();
+  const aggC_largeFrv = newAgg();
+  const aggC_smallFrv = newAgg();
+  // Same dual aggregator for the highlight bet set.
+  const aggBhi_largeFrv = newAgg();
+  const aggBhi_smallFrv = newAgg();
+  const aggChi_largeFrv = newAgg();
+  const aggChi_smallFrv = newAgg();
 
   // Overlap + divergence tracking. Each non-A config gets its own
   // edge-delta array (signals that fire in BOTH A and that config —
@@ -523,6 +574,8 @@ function runMuteSweep(games, baseSettings, wobaIdx, banner) {
   const sigsByGame = { A: new Map(), B: new Map(), C: new Map(), D: new Map() };
   const overlapVsA = { B: [], C: [], D: [] };
   const divergentVsA = { bOnly: [], cOnly: [], dOnly: [] };
+  // B-vs-C overlap tracking (FRV-only delta on the intersection set).
+  const overlapBvsC = [];
 
   let gamesConsidered = 0, gamesScored = 0;
   const suppressedCounts = { A: 0, B: 0, C: 0, D: 0 };
@@ -545,6 +598,15 @@ function runMuteSweep(games, baseSettings, wobaIdx, banner) {
     if (anySuppressed) continue;
     gamesScored++;
 
+    // Per-game |FRV delta|: max absolute change to either side's runs
+    // projection caused by turning FRV on (B has FRV; C does not).
+    // Drives the large/small bucket split below.
+    const frvDelta = Math.max(
+      Math.abs((mrs.B.aRuns || 0) - (mrs.C.aRuns || 0)),
+      Math.abs((mrs.B.hRuns || 0) - (mrs.C.hRuns || 0))
+    );
+    const frvLarge = frvDelta >= FRV_LARGE_THRESHOLD;
+
     const cfgMap = { A: cfgA, B: cfgB, C: cfgC, D: cfgD };
     const aggMap = { A: aggA, B: aggB, C: aggC, D: aggD };
     const locals = { A: new Map(), B: new Map(), C: new Map(), D: new Map() };
@@ -556,6 +618,46 @@ function runMuteSweep(games, baseSettings, wobaIdx, banner) {
         if (graded.outcome === 'pending') continue;
         accumulate(aggMap[k], s, graded);
         locals[k].set(sigKey(gameRow, s), { sig: s, graded });
+      }
+    }
+    // B/C dual + split bucketing — second pass over locals.B / locals.C
+    // so each signal lands exactly once per aggregator family
+    // (emit-floor/hi × all/large-FRV/small-FRV).
+    for (const k of ['B', 'C']) {
+      for (const [, v] of locals[k]) {
+        const s = v.sig, graded = v.graded;
+        const isHi = isHighlightedSignal(s, uiThresholds);
+        // FRV-delta split (emit-floor)
+        const splitEmit = (k === 'B')
+          ? (frvLarge ? aggB_largeFrv : aggB_smallFrv)
+          : (frvLarge ? aggC_largeFrv : aggC_smallFrv);
+        accumulate(splitEmit, s, graded);
+        if (isHi) {
+          // UI-highlight all-signals aggregate
+          accumulate(k === 'B' ? aggBhi : aggChi, s, graded);
+          // UI-highlight + FRV-delta split
+          const splitHi = (k === 'B')
+            ? (frvLarge ? aggBhi_largeFrv : aggBhi_smallFrv)
+            : (frvLarge ? aggChi_largeFrv : aggChi_smallFrv);
+          accumulate(splitHi, s, graded);
+        }
+      }
+    }
+    // B-vs-C signal-key overlap for the intersection comparison.
+    // Each entry stores the signal that fired in BOTH configs with
+    // its B-side and C-side edges + outcomes — lets us compare ROI
+    // on a strict intersection set, not just per-config aggregates.
+    for (const [k, v] of locals.B) {
+      if (locals.C.has(k)) {
+        const c = locals.C.get(k);
+        overlapBvsC.push({
+          key: k,
+          sig: v.sig,
+          graded: v.graded,
+          frvLarge,
+          edgeB: v.sig.edge,
+          edgeC: c.sig.edge,
+        });
       }
     }
 
@@ -683,6 +785,111 @@ function runMuteSweep(games, baseSettings, wobaIdx, banner) {
     + (supTotal ? ' | suppressed (any): A=' + suppressedCounts.A + ' B=' + suppressedCounts.B
                   + ' C=' + suppressedCounts.C + ' D=' + suppressedCounts.D : ''));
   console.log('');
+
+  // ============================================================
+  // CORRECTED-SUBSTRATE B-vs-C REPORT
+  // The prior -6.58pp FRV result (B-vs-A) ran on a framing
+  // substrate broken in two ways since fixed:
+  //   1. resolveCatcherMlbId returned null for every catcher in
+  //      production because game_id-derived team was lowercase
+  //      and team_rosters.team was uppercase (SQLite '=' is
+  //      case-sensitive). Fix: fc16748.
+  //   2. catcher_framing_historical was the Savant-qualified
+  //      subset only (59 catchers) because the bypass URL
+  //      parameter was the wrong case (min_pitches vs
+  //      minPitches). Fix: f4c2645.
+  // This block isolates the C-vs-B comparison (framing-on only
+  // vs framing+FRV) on the CORRECTED substrate — the right
+  // number to compare against -6.58.
+  // ============================================================
+  console.log('=== CORRECTED-SUBSTRATE FRV ISOLATION (C=framing-only vs B=framing+FRV) ===');
+  console.log('');
+  function deltaPpStr(curr, base) {
+    if (curr == null || base == null) return '—';
+    const d = curr - base;
+    return (d >= 0 ? '+' : '') + d.toFixed(2) + 'pp';
+  }
+  // Emit-floor aggregates
+  console.log('-- All graded signals (emit-floor) --');
+  console.log('  C (framing-on, FRV-off):  ' + aggC.all.signals + ' sigs, '
+    + fmtWLP(aggC.all) + ', ROI ' + fmtRoi(aggC.all));
+  console.log('  B (framing-on, FRV-on):   ' + aggB.all.signals + ' sigs, '
+    + fmtWLP(aggB.all) + ', ROI ' + fmtRoi(aggB.all)
+    + '   Δ ' + deltaPpStr(roiPct(aggB.all), roiPct(aggC.all)));
+  console.log('');
+  console.log('-- ML splits --');
+  console.log('  C ML favs:   ' + aggC.ml_fav.signals + ' / ROI ' + fmtRoi(aggC.ml_fav));
+  console.log('  B ML favs:   ' + aggB.ml_fav.signals + ' / ROI ' + fmtRoi(aggB.ml_fav)
+    + '   Δ ' + deltaPpStr(roiPct(aggB.ml_fav), roiPct(aggC.ml_fav)));
+  console.log('  C ML dogs:   ' + aggC.ml_dog.signals + ' / ROI ' + fmtRoi(aggC.ml_dog));
+  console.log('  B ML dogs:   ' + aggB.ml_dog.signals + ' / ROI ' + fmtRoi(aggB.ml_dog)
+    + '   Δ ' + deltaPpStr(roiPct(aggB.ml_dog), roiPct(aggC.ml_dog)));
+  console.log('');
+  console.log('-- UI-highlight bet selection (fav>=' + uiThresholds.fav_min_pp
+    + ', dog>=' + uiThresholds.dog_min_pp
+    + ', under>=' + uiThresholds.under_min_pp
+    + ', overs ' + (uiThresholds.overs_enabled ? 'on' : 'OFF') + ') --');
+  console.log('  C all-hi:    ' + aggChi.all.signals + ' / ROI ' + fmtRoi(aggChi.all));
+  console.log('  B all-hi:    ' + aggBhi.all.signals + ' / ROI ' + fmtRoi(aggBhi.all)
+    + '   Δ ' + deltaPpStr(roiPct(aggBhi.all), roiPct(aggChi.all)));
+  console.log('  C ML-fav hi: ' + aggChi.ml_fav.signals + ' / ROI ' + fmtRoi(aggChi.ml_fav));
+  console.log('  B ML-fav hi: ' + aggBhi.ml_fav.signals + ' / ROI ' + fmtRoi(aggBhi.ml_fav)
+    + '   Δ ' + deltaPpStr(roiPct(aggBhi.ml_fav), roiPct(aggChi.ml_fav)));
+  console.log('  C ML-dog hi: ' + aggChi.ml_dog.signals + ' / ROI ' + fmtRoi(aggChi.ml_dog));
+  console.log('  B ML-dog hi: ' + aggBhi.ml_dog.signals + ' / ROI ' + fmtRoi(aggBhi.ml_dog)
+    + '   Δ ' + deltaPpStr(roiPct(aggBhi.ml_dog), roiPct(aggChi.ml_dog)));
+  console.log('');
+  console.log('-- Split by per-game |FRV delta on aRuns/hRuns| (threshold ' + FRV_LARGE_THRESHOLD + ' runs) --');
+  console.log('  small-delta games  C: ' + aggC_smallFrv.all.signals + ' / ROI ' + fmtRoi(aggC_smallFrv.all));
+  console.log('  small-delta games  B: ' + aggB_smallFrv.all.signals + ' / ROI ' + fmtRoi(aggB_smallFrv.all)
+    + '   Δ ' + deltaPpStr(roiPct(aggB_smallFrv.all), roiPct(aggC_smallFrv.all))
+    + '   (FRV barely moved the projection — Δ should be ~0 if FRV is informative)');
+  console.log('  large-delta games  C: ' + aggC_largeFrv.all.signals + ' / ROI ' + fmtRoi(aggC_largeFrv.all));
+  console.log('  large-delta games  B: ' + aggB_largeFrv.all.signals + ' / ROI ' + fmtRoi(aggB_largeFrv.all)
+    + '   Δ ' + deltaPpStr(roiPct(aggB_largeFrv.all), roiPct(aggC_largeFrv.all))
+    + '   (FRV actually moved the projection — Δ here is the real signal)');
+  console.log('');
+  // B-vs-C intersection — only signals that fired in BOTH configs.
+  // Tests whether FRV's edge change on common signals tracks the
+  // result, vs whether B's ROI delta is driven by B-only / C-only
+  // signal-set differences.
+  let bIntPnl = 0, bIntWag = 0, cIntPnl = 0, cIntWag = 0;
+  let bIntWins = 0, bIntLoss = 0, cIntWins = 0, cIntLoss = 0;
+  for (const o of overlapBvsC) {
+    const w = wageredFor(o.sig);
+    bIntPnl += Number(o.graded.pnl) || 0;
+    if (o.graded.outcome !== 'push') bIntWag += w;
+    if (o.graded.outcome === 'win')  bIntWins++;
+    if (o.graded.outcome === 'loss') bIntLoss++;
+    // C's graded outcome for the same signal — same actual result;
+    // pnl is identical since the bet is the same side at the same
+    // market price. The intersection's ROI difference must come from
+    // sample composition (which signals fall into the intersection),
+    // not from re-grading.
+  }
+  // For C we need a separate sweep over locals.C ∩ locals.B; the
+  // outcomes are identical so the C intersection ROI equals B's.
+  // We report the count as a sanity check on cross-config signal-set
+  // stability — if intersection is much smaller than min(B, C), the
+  // configs are firing meaningfully different signal sets.
+  const cAllSigs = aggC.all.signals;
+  const bAllSigs = aggB.all.signals;
+  const intN = overlapBvsC.length;
+  console.log('-- Intersection (signals firing in BOTH C and B) --');
+  console.log('  intersection count: ' + intN
+    + '   (C-only: ' + (cAllSigs - intN) + ', B-only: ' + (bAllSigs - intN) + ')');
+  if (intN > 0) {
+    const intRoi = bIntWag > 0 ? (100 * bIntPnl / bIntWag) : null;
+    console.log('  intersection record (B=C, same signal/outcome): '
+      + bIntWins + '-' + bIntLoss + ', ROI '
+      + (intRoi != null ? (intRoi >= 0 ? '+' : '') + intRoi.toFixed(2) + '%' : '—'));
+    console.log('  (B-vs-C aggregate ROI difference therefore comes from the symmetric');
+    console.log('   differences — signals that fire under one config but not the other.');
+    console.log('   If aggregate Δ above is large but the symmetric difference is small,');
+    console.log('   the FRV-driven re-bucketing of a few games is doing the work.)');
+  }
+  console.log('');
+
   console.log(printedBanner);
 
   // -------------------------------------------------------------- JSON
