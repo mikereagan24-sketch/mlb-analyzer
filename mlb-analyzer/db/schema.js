@@ -390,6 +390,49 @@ db.exec(`
     PRIMARY KEY (snapshot_date, mlb_id, position)
   );
   CREATE INDEX IF NOT EXISTS idx_frv_snap_date ON fielding_frv_snapshot(snapshot_date);
+  -- Team baserunning aggregates (season-to-date). One row per (season,
+  -- team). bsr is the FanGraphs cumulative baserunning runs (UBR + wSB
+  -- + wGDP), surfaced here so the runmodel can read a team-level
+  -- baserunning adjustment alongside framing/FRV. Component fields
+  -- captured for diagnostics + future per-component sweeps. g (games
+  -- played) is used to derive a per-game rate at read time —
+  -- materializing the rate here would couple to season length.
+  --
+  -- Source: FanGraphs team-aggregated batting leaderboard
+  -- (team=0,ts on the leaders API). Refreshed daily by
+  -- runBaserunningJob; snapshot mirror in team_baserunning_snapshot.
+  CREATE TABLE IF NOT EXISTS team_baserunning (
+    season INTEGER NOT NULL,
+    team TEXT NOT NULL,
+    bsr REAL,
+    ubr REAL,
+    wsb REAL,
+    wgdp REAL,
+    sb INTEGER,
+    cs INTEGER,
+    g INTEGER,
+    refreshed_at TEXT,
+    PRIMARY KEY (season, team)
+  );
+  -- Daily snapshot of team_baserunning — same date-accurate-backtest
+  -- rationale as catcher_framing_snapshot / fielding_frv_snapshot.
+  -- Lets a future forward-honest backtest pull the BsR value as it
+  -- stood on game_date, not the current-state value (which is look-
+  -- ahead when applied to early-season games).
+  CREATE TABLE IF NOT EXISTS team_baserunning_snapshot (
+    snapshot_date TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    team TEXT NOT NULL,
+    bsr REAL,
+    ubr REAL,
+    wsb REAL,
+    wgdp REAL,
+    sb INTEGER,
+    cs INTEGER,
+    g INTEGER,
+    PRIMARY KEY (snapshot_date, season, team)
+  );
+  CREATE INDEX IF NOT EXISTS idx_team_baserunning_snapshot_date ON team_baserunning_snapshot(snapshot_date);
   -- Kalshi MLB spread ladder (KXMLBSPREAD series). One row per
   -- (game_date, game_id, spread_team, spread_line) — each Kalshi
   -- game exposes ~10-12 spread markets (1.5 through 9.5 in 1-run
@@ -2103,6 +2146,80 @@ q.snapshotFieldingFrv = (snapshotDate, rows) => {
   });
   tx(snapshotDate, rows);
 };
+
+// ------------------------------------------------------------------
+// Team baserunning helpers. team_baserunning is the live snapshot
+// (one row per (season, team), latest values), team_baserunning_snapshot
+// preserves daily history keyed by snapshot_date for forward-honest
+// backtests. Same delete-then-insert idempotency on the snapshot side
+// as framing/FRV.
+q._upsertTeamBaserunning = db.prepare(
+  "INSERT INTO team_baserunning "
+  + "(season, team, bsr, ubr, wsb, wgdp, sb, cs, g, refreshed_at) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?) "
+  + "ON CONFLICT(season, team) DO UPDATE SET "
+  + "bsr=excluded.bsr, ubr=excluded.ubr, wsb=excluded.wsb, wgdp=excluded.wgdp, "
+  + "sb=excluded.sb, cs=excluded.cs, g=excluded.g, refreshed_at=excluded.refreshed_at"
+);
+// rows are [{team, bsr, ubr, wsb, wgdp, sb, cs, g}]. Skip rows
+// without a team identifier (PK violation otherwise).
+q.upsertTeamBaserunning = (season, rows, refreshedAt) => {
+  const tx = db.transaction((s, rs, t) => {
+    for (const r of rs) {
+      if (r == null || !r.team) continue;
+      q._upsertTeamBaserunning.run(
+        Number(s), String(r.team),
+        r.bsr  == null ? null : Number(r.bsr),
+        r.ubr  == null ? null : Number(r.ubr),
+        r.wsb  == null ? null : Number(r.wsb),
+        r.wgdp == null ? null : Number(r.wgdp),
+        r.sb   == null ? null : Math.round(Number(r.sb)),
+        r.cs   == null ? null : Math.round(Number(r.cs)),
+        r.g    == null ? null : Math.round(Number(r.g)),
+        t);
+    }
+  });
+  tx(season, rows, refreshedAt);
+};
+q._snapTeamBaserunningClearDate = db.prepare(
+  "DELETE FROM team_baserunning_snapshot WHERE snapshot_date=?"
+);
+q._snapTeamBaserunningInsert = db.prepare(
+  "INSERT OR REPLACE INTO team_baserunning_snapshot "
+  + "(snapshot_date, season, team, bsr, ubr, wsb, wgdp, sb, cs, g) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotTeamBaserunning = (snapshotDate, season, rows) => {
+  const tx = db.transaction((d, s, rs) => {
+    q._snapTeamBaserunningClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || !r.team) continue;
+      q._snapTeamBaserunningInsert.run(d, Number(s), String(r.team),
+        r.bsr  == null ? null : Number(r.bsr),
+        r.ubr  == null ? null : Number(r.ubr),
+        r.wsb  == null ? null : Number(r.wsb),
+        r.wgdp == null ? null : Number(r.wgdp),
+        r.sb   == null ? null : Math.round(Number(r.sb)),
+        r.cs   == null ? null : Math.round(Number(r.cs)),
+        r.g    == null ? null : Math.round(Number(r.g)));
+    }
+  });
+  tx(snapshotDate, season, rows);
+};
+// Read helpers — live and snapshot. The "as-of" variant pulls the
+// latest snapshot at or before a date (used by forward-honest path
+// once enough snapshot history accumulates).
+q.getTeamBaserunning = db.prepare(
+  "SELECT season, team, bsr, ubr, wsb, wgdp, sb, cs, g, refreshed_at "
+  + "FROM team_baserunning WHERE season=?"
+);
+q.getTeamBaserunningAsOf = db.prepare(
+  "SELECT season, team, bsr, ubr, wsb, wgdp, sb, cs, g "
+  + "FROM team_baserunning_snapshot "
+  + "WHERE season=? AND snapshot_date = ( "
+  + "  SELECT MAX(snapshot_date) FROM team_baserunning_snapshot "
+  + "  WHERE season=? AND snapshot_date <= ?)"
+);
 
 // ------------------------------------------------------------------
 // Daily kalshi_spread_markets snapshot. Same delete-then-insert

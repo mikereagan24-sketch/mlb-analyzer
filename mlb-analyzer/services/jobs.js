@@ -2,7 +2,7 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchTeamBaserunning, fetchSchedule } = require('./scraper');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -2410,6 +2410,12 @@ function startCronJobs() {
     // Non-fatal: a Savant hiccup must not abort the morning chain.
     try { await runFieldingFrvJob(); }
     catch(e) { console.error('[cron-frv] failed:', e && e.message); }
+    // Team baserunning (FG team-aggregated BsR). Daily snapshot for
+    // forward-honest backtests; the live table is also used as the
+    // current-state hindsight reference. Non-fatal: an FG hiccup must
+    // not abort the morning chain.
+    try { await runBaserunningJob(); }
+    catch(e) { console.error('[cron-baserunning] failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 7AM PT morning refresh: odds -> weather -> lineups -> rerun all games ---
@@ -4286,6 +4292,35 @@ async function runFieldingFrvJob(opts) {
   }
 }
 
+// Team baserunning daily refresh + snapshot. Fetches FG team-
+// aggregated BsR (and components) for the current season, upserts
+// into team_baserunning, then mirrors to team_baserunning_snapshot
+// at today's PT date. Same shape as runFieldingFrvJob; PT-anchored
+// snapshot to match the framing/FRV convention. Non-fatal failure
+// on either fetch or snapshot — never blocks the rest of the cron.
+async function runBaserunningJob(opts) {
+  const o = opts || {};
+  const season = o.season || new Date().getFullYear();
+  console.log('[baserunning] fetching FG team BsR for season ' + season + '...');
+  try {
+    const rows = await fetchTeamBaserunning(season);
+    const refreshedAt = new Date().toISOString();
+    q.upsertTeamBaserunning(season, rows, refreshedAt);
+    console.log('[baserunning] upserted ' + rows.length + ' team rows for ' + season);
+    try {
+      const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      q.snapshotTeamBaserunning(snapDate, season, rows);
+      console.log('[baserunning-snapshot] captured ' + rows.length + ' rows for ' + snapDate);
+    } catch (e) {
+      console.warn('[baserunning-snapshot] capture failed (non-fatal): ' + e.message);
+    }
+    return { success: true, applied: rows.length, season };
+  } catch (e) {
+    console.error('[baserunning] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -4450,4 +4485,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId };
+module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId };
