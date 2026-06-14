@@ -2871,6 +2871,13 @@ async function runOddsJob(dateStr, opts) {
           const oddsById = new Map();
           for (const o of oddsRaw) oddsById.set(o.game_id, o);
           let overridden = 0, skippedLocked = 0, missingFromOdds = 0;
+          // Snapshot rows accumulated regardless of override/lock fate
+          // — observation of Kalshi's ML market for the CLV close
+          // fallback in services/empirical-spread-roi.js. Mirrors the
+          // spreads snapshot's "capture everything Kalshi shows"
+          // convention. Fee-adjusted values stored, same shift as
+          // game_log.
+          const mlSnapshotRows = [];
           for (const k of kalshiRows) {
             // Prefer the game_id the Kalshi client emits — it includes the
             // doubleheader nightcap suffix (e.g. "stl-cin-g2") that the
@@ -2880,6 +2887,20 @@ async function runOddsJob(dateStr, opts) {
             // single-game case if k.game_id is ever absent — defensive
             // against an older Kalshi-client build that doesn't emit it.
             const gameId = k.game_id || makeGameId(k.away_team, k.home_team);
+            const awayFeeMl = feeAdjustAmerican(k.away.ask_ml);
+            const homeFeeMl = feeAdjustAmerican(k.home.ask_ml);
+            // Snapshot every Kalshi row, locked or not, in-oddsRaw or
+            // not. The snapshot is independent observation; the lock
+            // only blocks the game_log override below.
+            mlSnapshotRows.push({
+              game_date: dateStr, game_id: gameId,
+              away_ask_dollars: k.away.ask_dollars,
+              home_ask_dollars: k.home.ask_dollars,
+              away_ask_ml: awayFeeMl,
+              home_ask_ml: homeFeeMl,
+              volume_24h_away: k.volume_24h_away,
+              volume_24h_home: k.volume_24h_home,
+            });
             const o = oddsById.get(gameId);
             if (!o) {
               console.warn('[odds] Kalshi-direct: ' + gameId
@@ -2895,8 +2916,8 @@ async function runOddsJob(dateStr, opts) {
             // ML override only. Totals, spreads, sources for non-ML markets,
             // and every other field stay as Unabated/OddsAPI set them. ML
             // values are FEE-ADJUSTED (see CLV note above the helper).
-            o.market_away_ml = feeAdjustAmerican(k.away.ask_ml);
-            o.market_home_ml = feeAdjustAmerican(k.home.ask_ml);
+            o.market_away_ml = awayFeeMl;
+            o.market_home_ml = homeFeeMl;
             o.ml_source = 'kalshi';
             overridden++;
           }
@@ -2909,6 +2930,18 @@ async function runOddsJob(dateStr, opts) {
             console.warn('[odds] Kalshi-direct: ' + kalshiRows.length
               + ' Kalshi game(s) returned but ZERO matched oddsRaw game_ids — mapping likely broken'
               + ' (check abbr normalization in services/kalshi.js). Proceeding with unmodified oddsRaw.');
+          }
+
+          // PT-anchored ML snapshot — matches the spreads snapshot tz
+          // convention. Non-fatal: snapshot failure must not block the
+          // ML override above. CLV-only consumer.
+          try {
+            const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+            q.snapshotKalshiMlMarkets(snapDate, mlSnapshotRows);
+            console.log('[odds-snapshot] Kalshi ML: captured ' + mlSnapshotRows.length
+              + ' rows for ' + snapDate);
+          } catch (e) {
+            console.warn('[odds-snapshot] Kalshi ML snapshot failed (non-fatal): ' + e.message);
           }
         }
       } catch (e) {
@@ -3128,9 +3161,46 @@ async function runOddsJob(dateStr, opts) {
           for (const o of oddsRaw) oddsById.set(o.game_id, o);
           let overridden = 0, skippedLocked = 0, missingFromOdds = 0;
           let skippedNoExistingTotal = 0, skippedLineGap = 0, skippedFeeFail = 0;
+          // Snapshot rows accumulated for EVERY kalshi event,
+          // regardless of override skip path. CLV close-price fallback
+          // in services/empirical-spread-roi.js consumes this. Mirrors
+          // the spreads snapshot convention.
+          const totalsSnapshotRows = [];
           for (const k of kalshiTotals) {
             const gameId = k.game_id || makeGameId(k.away_team, k.home_team);
             const o = oddsById.get(gameId);
+
+            // === SNAPSHOT rung selection (independent observation) ===
+            // Prefer the rung matching existing market_total (exact,
+            // then nearest within 0.5) — same rung the override would
+            // pick. Falls back to Kalshi's default chosen rung
+            // (closest-to-$0.50 over) when no market_total exists or
+            // the ladder doesn't bracket. ALWAYS produces a rung so
+            // snapshot coverage is independent of override fate.
+            let candidateRung = null;
+            let nearestRung = null, nearestDist = Infinity;
+            if (o && o.market_total != null) {
+              candidateRung = k.ladder.find(r => r.strike === o.market_total);
+              if (!candidateRung) {
+                for (const r of k.ladder) {
+                  const d = Math.abs(r.strike - o.market_total);
+                  if (d < nearestDist) { nearestRung = r; nearestDist = d; }
+                }
+                if (nearestRung && nearestDist <= 0.5) candidateRung = nearestRung;
+              }
+            }
+            const snapRung = candidateRung
+              || { strike: k.line, over_ask: k.over.ask_dollars, under_ask: k.under.ask_dollars };
+            totalsSnapshotRows.push({
+              game_date: dateStr, game_id: gameId,
+              market_line: snapRung.strike,
+              over_ask_dollars: snapRung.over_ask,
+              under_ask_dollars: snapRung.under_ask,
+              over_price_ml: feeAdjustAmericanFromC(snapRung.over_ask),
+              under_price_ml: feeAdjustAmericanFromC(snapRung.under_ask),
+            });
+
+            // === OVERRIDE (gated on existing market_total + lock) ===
             if (!o) {
               console.warn('[odds] Kalshi-direct totals: ' + gameId
                 + ' not in oddsRaw — skipping');
@@ -3157,25 +3227,15 @@ async function runOddsJob(dateStr, opts) {
             // Set this BEFORE the line-gap skip so we capture divergence
             // even when prices aren't overridden.
             o.kalshi_implied_total = (k.implied_total != null) ? k.implied_total : k.line;
-            // Pick the ladder rung at market_total (exact, then nearest
-            // within 0.5).
-            let chosenRung = k.ladder.find(r => r.strike === o.market_total);
-            if (!chosenRung) {
-              let best = null, bestDist = Infinity;
-              for (const r of k.ladder) {
-                const d = Math.abs(r.strike - o.market_total);
-                if (d < bestDist) { best = r; bestDist = d; }
-              }
-              if (!best || bestDist > 0.5) {
-                console.warn('[odds] Kalshi-direct totals: ' + gameId
-                  + ' nearest Kalshi rung (' + (best ? best.strike : 'none')
-                  + ') is >0.5 off existing total (' + o.market_total
-                  + ') — leaving on backup');
-                skippedLineGap++;
-                continue;
-              }
-              chosenRung = best;
+            if (!candidateRung) {
+              console.warn('[odds] Kalshi-direct totals: ' + gameId
+                + ' nearest Kalshi rung (' + (nearestRung ? nearestRung.strike : 'none')
+                + ') is >0.5 off existing total (' + o.market_total
+                + ') — leaving on backup');
+              skippedLineGap++;
+              continue;
             }
+            const chosenRung = candidateRung;
             const overFeeMl = feeAdjustAmericanFromC(chosenRung.over_ask);
             const underFeeMl = feeAdjustAmericanFromC(chosenRung.under_ask);
             if (overFeeMl == null || underFeeMl == null) {
@@ -3200,6 +3260,18 @@ async function runOddsJob(dateStr, opts) {
             console.warn('[odds] Kalshi-direct totals: ' + kalshiTotals.length
               + ' Kalshi total event(s) returned but ZERO matched oddsRaw game_ids — mapping likely broken'
               + ' (check abbr normalization / doubleheader suffix). Proceeding with unmodified oddsRaw.');
+          }
+
+          // PT-anchored totals snapshot — matches the spreads/ML
+          // snapshot tz convention. Non-fatal: snapshot failure must
+          // not block the totals override above. CLV-only consumer.
+          try {
+            const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+            q.snapshotKalshiTotalsMarkets(snapDate, totalsSnapshotRows);
+            console.log('[odds-snapshot] Kalshi totals: captured ' + totalsSnapshotRows.length
+              + ' rows for ' + snapDate);
+          } catch (e) {
+            console.warn('[odds-snapshot] Kalshi totals snapshot failed (non-fatal): ' + e.message);
           }
         }
       } catch (e) {
