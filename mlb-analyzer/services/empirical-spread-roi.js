@@ -568,8 +568,39 @@ function enrichMarketPlay(p, gametimeSibling) {
   if (p.capture_track === 'morning') {
     const sibKey = [p.game_date, p.game_id, p.market_type].join('|');
     const sib = gametimeSibling.get(sibKey);
-    if (sib && sib.signaled_price_ml != null) {
-      close_price_ml = sib.signaled_price_ml;
+    // Side-specific gametime price on MORNING's signaled side.
+    //
+    // Pre-fix this branch read sib.signaled_price_ml — the gametime
+    // model's OWN signal price — which is null whenever gametime
+    // didn't emit a signal (most passes, given the model's gametime
+    // view often loses edge as the market moves toward fair). The
+    // grader still wrote outcome='no_signal' for those rows, so they
+    // passed `WHERE outcome IS NOT NULL` and became the latest sibling,
+    // then failed the close-price check and fell through to the
+    // "no_gametime_sibling" reason — losing CLV on ~2/3 of bets while
+    // the sibling row was sitting there with valid side prices the
+    // writer captures unconditionally.
+    //
+    // The right close is the gametime price on the side MORNING bet,
+    // not the side gametime would have bet. Spreads has always done
+    // this correctly (sib.yes_ask_ml at enrichPlay :356) because its
+    // sibling map is keyed by side; ML/totals' sibling map is per-
+    // market, so the side lookup happens here against MORNING's
+    // signaled_side instead of being baked into the key.
+    let sibPrice = null;
+    if (sib) {
+      if (p.market_type === 'ml') {
+        sibPrice = p.signaled_side === 'away' ? sib.away_price_ml
+                 : p.signaled_side === 'home' ? sib.home_price_ml
+                 : null;
+      } else if (p.market_type === 'total') {
+        sibPrice = p.signaled_side === 'over'  ? sib.over_price_ml
+                 : p.signaled_side === 'under' ? sib.under_price_ml
+                 : null;
+      }
+    }
+    if (sib && sibPrice != null) {
+      close_price_ml = sibPrice;
       close_market_line = sib.market_line;
       close_source = 'gametime_sibling';
 
