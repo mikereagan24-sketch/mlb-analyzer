@@ -475,17 +475,38 @@ function buildMarketsReadout(db, fromDate, toDate, includeDetail) {
   const enriched = deduped.map((r) => enrichMarketPlay(r, gametimeSibling));
 
   // Top-level: by market_type (each contains morning + gametime + CLV).
+  //
+  // Bets / record / pnl filter to rows the model actually picked a
+  // side on (signaled_side != null). The grader writes outcome=
+  // 'no_signal' on rows where chooseMl/TotalSignaledSide returned no
+  // side (no edge cleared the emit floor); pre-fix those rows
+  // inflated the bets count without contributing wins/losses/pushes
+  // — the readout was lying about how many bets there were. CLV
+  // already only fires for signaled rows (the side-keyed sibling +
+  // snapshot lookups both bail when signaled_side is null), so this
+  // is a labeling-only fix; no CLV math change.
+  //
+  // summarizeMarketClv receives the UNFILTERED morningPlays so it
+  // can count n_no_signal_morning_rows separately — that count is
+  // useful selectivity signal (e.g. model picked a side on only 14
+  // of 30 ML games), not noise to hide.
   const out = { by_type: {} };
   for (const mt of ['ml', 'total']) {
     const morningPlays  = enriched.filter((p) => p.market_type === mt && p.capture_track === 'morning');
     const gametimePlays = enriched.filter((p) => p.market_type === mt && p.capture_track === 'gametime');
+    const signaledMorningPlays  = morningPlays.filter((p)  => p.signaled_side != null);
+    const signaledGametimePlays = gametimePlays.filter((p) => p.signaled_side != null);
     const block = {
-      morning:  aggregateTrack(morningPlays,  true),
-      gametime: aggregateTrack(gametimePlays, false),
+      morning:  aggregateTrack(signaledMorningPlays,  true),
+      gametime: aggregateTrack(signaledGametimePlays, false),
       clv_summary: summarizeMarketClv(morningPlays),
     };
     if (mt === 'total') {
-      block.morning.line_moved_n = morningPlays.filter((p) => p.clv_reason === 'line_moved').length;
+      // line_moved only fires on signaled rows (the line check is
+      // inside the sib-with-sibPrice branch which itself requires
+      // a signaled side). Filter or unfiltered list gives the same
+      // count; keep on the signaled list for consistency.
+      block.morning.line_moved_n = signaledMorningPlays.filter((p) => p.clv_reason === 'line_moved').length;
     }
     out.by_type[mt] = block;
   }
@@ -730,12 +751,24 @@ function enrichMarketPlay(p, gametimeSibling) {
 }
 
 function summarizeMarketClv(morningPlays) {
+  // Receives UNFILTERED morningPlays so it can count no_signal rows
+  // separately (the model passed on those games — useful selectivity
+  // signal, exposed as n_no_signal_morning_rows). CLV math runs ONLY
+  // over signaled rows so n_with_close / n_missing_close / n_line_
+  // moved / source counters reflect actual bets, not captures.
+  let nNoSignal = 0;
+  const signaled = [];
+  for (const p of morningPlays) {
+    if (!p.signaled_side) { nNoSignal++; continue; }
+    signaled.push(p);
+  }
+
   const withClv = [];
   let missing = 0;
   let lineMoved = 0;
   let nFromGametime = 0;
   let nFromSnapshot = 0;
-  for (const p of morningPlays) {
+  for (const p of signaled) {
     if (p.close_source === 'gametime_sibling')   nFromGametime++;
     if (p.close_source === CLV_FROM_DAYAHEAD_SNAP) nFromSnapshot++;
     if (p.clv_reason === 'line_moved') lineMoved++;
@@ -746,8 +779,9 @@ function summarizeMarketClv(morningPlays) {
     return { avg_pp: null, median_pp: null, pct_positive: null,
              n_with_close: 0, n_missing_close: missing,
              n_line_moved: lineMoved,
-             n_close_from_gametime_sibling: nFromGametime,
-             n_close_from_dayahead_snapshot: nFromSnapshot };
+             n_close_from_gametime_sibling:  nFromGametime,
+             n_close_from_dayahead_snapshot: nFromSnapshot,
+             n_no_signal_morning_rows:       nNoSignal };
   }
   const sorted = withClv.slice().sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -764,6 +798,7 @@ function summarizeMarketClv(morningPlays) {
     n_line_moved:    lineMoved,
     n_close_from_gametime_sibling:  nFromGametime,
     n_close_from_dayahead_snapshot: nFromSnapshot,
+    n_no_signal_morning_rows:       nNoSignal,
   };
 }
 
