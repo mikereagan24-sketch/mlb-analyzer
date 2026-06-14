@@ -2198,6 +2198,47 @@ router.get('/admin/runmult-totals-backtest', requireAdminToken, (req, res) => {
   }
 });
 
+// Under-selection diagnostic (read-only, no writes, no settings).
+// GET /api/admin/under-selection-diagnostic?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
+//
+// Slices emit-floor TOTAL under signals across six dimensions:
+// model_total, park_factor, roof, edge_runs, bullpen_heavy, month.
+// Per cell: n, W/L, record, ROI%, mean(model_total - actual_total),
+// noise_band_pp (=100/sqrt(n)).
+//
+// Motivation: the RUN_MULT fine-grid sweep (commit c3941c1) proved
+// the ~-1 run projection miss on under-emitted games is invariant
+// to the multiplier. The bias therefore lives in selection or run-
+// gen inputs, not the scalar. This re-tests the 5/23 fault lines
+// (model_total bucket, park_factor, roof, edge size) on the
+// corrected substrate over a wider window.
+//
+// headline_reads: worst_accuracy_cell across all slices (n>=20),
+// high_model_total_bucket (the 5/23 "don't fire unders at high
+// totals" gate), may_vs_june stability, small_n_flags, quick
+// comparator vectors for model_total/park_factor/edge_runs.
+//
+// Logic in services/under-selection-diagnostic.js. Substrate:
+// framing per production live state, FRV explicitly off.
+router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+    const detail = req.query.detail === 'true' || req.query.detail === '1';
+
+    const { runUnderSelectionDiagnostic } = require('../services/under-selection-diagnostic');
+    const out = runUnderSelectionDiagnostic({ fromDate: from, toDate: to, includeDetail: detail });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/under-selection-diagnostic] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Morning-capture eligibility funnel (read-only diagnostic).
 // GET /api/admin/morning-capture/eligibility-funnel?date=YYYY-MM-DD
 //
