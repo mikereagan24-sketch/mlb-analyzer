@@ -2127,6 +2127,42 @@ router.get('/admin/frv-backtest', requireAdminToken, (req, res) => {
   }
 });
 
+// Temperature → totals backtest (read-only, no writes, no settings).
+// GET /api/admin/temp-backtest?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
+//
+// Five-config sweep of the temp_run_adj formula (PROD step, HOT1 +
+// 0.9 above 90F, HOT2 steeper top, LIN continuous (tempF-65)*0.052
+// clamped +/-1.3, LIN2 steeper continuous (tempF-65)*0.10 clamped
+// +/-1.5). Recomputes ONLY temp_run_adj per config — same framing,
+// same FRV-off, same roof gating (closed=0, partial x0.5).
+//
+// Hypothesis under test: production caps temp at +0.6 above 80F,
+// under-weighting hot games. Critical split is the 85F+ temp bucket;
+// configs are identical below ~80F so movement there is noise. The
+// hot_85plus bucket is also reported filtered to roof=open since
+// closed-roof games zero out the temp delta entirely.
+//
+// Logic lives in services/temp-backtest.js. Same admin-token gate as
+// the FRV backtest endpoint.
+router.get('/admin/temp-backtest', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+    const detail = req.query.detail === 'true' || req.query.detail === '1';
+
+    const { runTempBacktest } = require('../services/temp-backtest');
+    const out = runTempBacktest({ fromDate: from, toDate: to, includeDetail: detail });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/temp-backtest] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Morning-capture eligibility funnel (read-only diagnostic).
 // GET /api/admin/morning-capture/eligibility-funnel?date=YYYY-MM-DD
 //
