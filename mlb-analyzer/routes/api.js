@@ -2276,6 +2276,58 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
   }
 });
 
+// Baserunning hindsight backtest (read-only, no writes, no settings).
+// GET /api/admin/baserunning-backtest?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
+//
+// Counterfactual: shift each team's projected runs by their season-
+// to-date BsR/game (a team's baserunning helps its own offense),
+// recompute Pythag inline (no production model change), measure
+// (a) accuracy delta on |model_margin − actual_margin| and
+// (b) ML CLV delta on bets the model would have signaled with vs
+// without BsR. DIRECTION-ONLY — current-state BsR applied
+// retroactively is look-ahead.
+//
+// Disposition: if both deltas land inside their noise bands, BsR
+// stays OFF (same as FRV). Small clean positive on either metric
+// earns a forward-snapshot follow-up (~30d of
+// team_baserunning_snapshot accumulation) — NOT a wire-to-prod.
+//
+// Requires team_baserunning seeded; if empty, the response surfaces
+// that and the operator hits /admin/refresh/baserunning first.
+router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+    const detail = req.query.detail === 'true' || req.query.detail === '1';
+
+    const { runBaserunningBacktest } = require('../services/baserunning-backtest');
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/baserunning-backtest] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual trigger for runBaserunningJob — fetch + persist + snapshot.
+// Lets the operator seed team_baserunning immediately without waiting
+// for the 6AM PT cron, useful right after this branch deploys.
+router.post('/admin/refresh/baserunning', requireAdminToken, async (req, res) => {
+  try {
+    const { runBaserunningJob } = require('../services/jobs');
+    const season = req.body && req.body.season ? Number(req.body.season) : undefined;
+    const out = await runBaserunningJob({ season });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/refresh/baserunning] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Empirical market-capture coverage diagnostic (read-only).
 // GET /api/admin/empirical-capture/coverage?from=YYYY-MM-DD&to=YYYY-MM-DD
 //

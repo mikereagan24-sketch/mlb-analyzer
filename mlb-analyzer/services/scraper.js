@@ -992,6 +992,64 @@ async function fetchFieldingFrv(opts) {
 // with the same upsert loop. Probable SP hand isn't surfaced inline by the
 // schedule endpoint even with deep hydrate — we batch /api/v1/people for
 // every probable pitcher in a single follow-up call (vs N round-trips).
+// Team-aggregated baserunning leaderboard from FanGraphs. One row per
+// team per season; BsR is the cumulative season-to-date value (sum of
+// UBR + wSB + wGDP). Refreshed daily by runBaserunningJob.
+//
+// Endpoint: FG public leaders API with team=0,ts (team aggregation)
+// and type=8 (advanced view, includes BsR/UBR/wSB/wGDP). qual=0 to
+// avoid the PA qualifier filter (we want every team, including ones
+// with low-PA partial seasons in case of expansion / midseason data
+// quirks). month=0 = full season.
+//
+// FG abbr normalization mirrors the bat-proj CSV ingest at
+// routes/api.js:155-157 (KCR→KC, SDP→SD, SFG→SF, TBR→TB, WSN→WAS,
+// CHW→CWS). Any unmapped FG abbr passes through as-is; the readout
+// caller logs unrecognized teams.
+async function fetchTeamBaserunning(season) {
+  const yr = season || new Date().getFullYear();
+  const url = 'https://www.fangraphs.com/api/leaders/major-league/data'
+    + '?stats=bat&lg=all&qual=0&type=8'
+    + '&season=' + yr + '&season1=' + yr
+    + '&team=0,ts&month=0&postseason=&ind=0';
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/json,*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer': 'https://www.fangraphs.com/leaders/major-league',
+    },
+  });
+  if (!resp.ok) throw new Error('FG team baserunning fetch ' + resp.status);
+  let body;
+  try { body = await resp.json(); }
+  catch (e) { throw new Error('FG team baserunning returned non-JSON'); }
+  // FG wraps the rows in { data: [...] } (current API) or returns the
+  // array directly (legacy). Accept either.
+  const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
+  if (!rows) throw new Error('FG team baserunning: no data array in response');
+  const FG_MAP = { KCR: 'KC', SDP: 'SD', SFG: 'SF', TBR: 'TB', WSN: 'WAS', CHW: 'CWS' };
+  const out = [];
+  for (const r of rows) {
+    const teamRaw = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+    if (!teamRaw) continue;
+    const team = FG_MAP[teamRaw] || teamRaw;
+    const num = (v) => (v == null || v === '' ? null : Number(v));
+    out.push({
+      team,
+      bsr:  num(r.BsR),
+      ubr:  num(r.UBR),
+      wsb:  num(r.wSB),
+      wgdp: num(r.wGDP),
+      sb:   num(r.SB),
+      cs:   num(r.CS),
+      g:    num(r.G),
+    });
+  }
+  if (!out.length) throw new Error('FG team baserunning: parsed zero rows');
+  return out;
+}
+
 async function fetchSchedule(dateStr) {
   console.log('[scraper] fetchSchedule requested for ' + dateStr);
   const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=' +
@@ -1252,4 +1310,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor };
+module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchTeamBaserunning, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor };
