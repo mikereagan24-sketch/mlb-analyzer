@@ -496,6 +496,14 @@ function buildMarketsReadout(db, fromDate, toDate, includeDetail) {
 }
 
 function fetchMarketRows(db, fromDate, toDate) {
+  // LEFT JOIN against kalshi_ml_markets_snapshot AND
+  // kalshi_totals_markets_snapshot — same "latest snapshot_date <=
+  // game_date" pattern the spreads readout uses (see fetchGradedRows
+  // above). When the gametime sibling is absent for a morning row,
+  // these snapshot prices act as the CLV close-price fallback.
+  // Single-game PK on both snapshot tables means one row per
+  // (game_date, game_id, snapshot_date) — the LEFT JOIN doesn't
+  // multiply.
   return db.prepare(`
     SELECT
       e.game_date, e.game_id, e.market_type, e.capture_track,
@@ -505,10 +513,41 @@ function fetchMarketRows(db, fromDate, toDate) {
       e.signaled_side, e.signaled_edge_pp, e.signaled_price_ml,
       e.actual_total, e.away_score, e.home_score,
       e.outcome, e.pnl_per_100, e.graded_at,
-      g.home_team, g.away_team
+      g.home_team, g.away_team,
+      kms.away_ask_ml   AS snap_ml_away_ask_ml,
+      kms.home_ask_ml   AS snap_ml_home_ask_ml,
+      kms.snapshot_date AS snap_ml_snapshot_date,
+      kts.market_line    AS snap_total_market_line,
+      kts.over_price_ml  AS snap_total_over_price_ml,
+      kts.under_price_ml AS snap_total_under_price_ml,
+      kts.snapshot_date  AS snap_total_snapshot_date
     FROM empirical_market_captures e
     LEFT JOIN game_log g
       ON g.game_date = e.game_date AND g.game_id = e.game_id
+    LEFT JOIN kalshi_ml_markets_snapshot kms
+      ON  e.market_type    = 'ml'
+      AND kms.game_date    = e.game_date
+      AND kms.game_id      = e.game_id
+      AND kms.snapshot_date <= e.game_date
+      AND NOT EXISTS (
+        SELECT 1 FROM kalshi_ml_markets_snapshot kms2
+        WHERE kms2.game_date     = kms.game_date
+          AND kms2.game_id       = kms.game_id
+          AND kms2.snapshot_date <= e.game_date
+          AND kms2.snapshot_date  > kms.snapshot_date
+      )
+    LEFT JOIN kalshi_totals_markets_snapshot kts
+      ON  e.market_type    = 'total'
+      AND kts.game_date    = e.game_date
+      AND kts.game_id      = e.game_id
+      AND kts.snapshot_date <= e.game_date
+      AND NOT EXISTS (
+        SELECT 1 FROM kalshi_totals_markets_snapshot kts2
+        WHERE kts2.game_date     = kts.game_date
+          AND kts2.game_id       = kts.game_id
+          AND kts2.snapshot_date <= e.game_date
+          AND kts2.snapshot_date  > kts.snapshot_date
+      )
     WHERE e.outcome IS NOT NULL
       AND (? IS NULL OR e.game_date >= ?)
       AND (? IS NULL OR e.game_date <= ?)
@@ -521,6 +560,7 @@ function enrichMarketPlay(p, gametimeSibling) {
   let close_price_ml = null;
   let close_market_line = null;
   let close_source = null;
+  let close_snap_date = null;
   let clv_pp = null;
   let clv_reason = null;
   let line_delta = null;
@@ -557,7 +597,71 @@ function enrichMarketPlay(p, gametimeSibling) {
         clv_reason = 'no_morning_signal';
       }
     } else {
-      clv_reason = 'no_gametime_sibling';
+      // No gametime sibling — try the day-ahead snapshot fallback.
+      // Mirrors the spreads CLV second-prong at enrichPlay (above).
+      // Snapshot rows are written from runOddsJob's Kalshi-direct
+      // ML / totals override blocks (jobs.js), one row per game per
+      // snapshot_date, with prices fee-adjusted on the same shift as
+      // game_log — directly comparable to morning's frozen price.
+      if (p.market_type === 'ml' && p.signaled_side != null) {
+        const snapPrice = p.signaled_side === 'away' ? p.snap_ml_away_ask_ml
+                        : p.signaled_side === 'home' ? p.snap_ml_home_ask_ml
+                        : null;
+        if (snapPrice != null) {
+          close_price_ml  = snapPrice;
+          close_source    = CLV_FROM_DAYAHEAD_SNAP;
+          close_snap_date = p.snap_ml_snapshot_date || null;
+        } else if (p.snap_ml_snapshot_date == null) {
+          clv_reason = CLV_NO_CLOSING_SNAPSHOT;
+        } else {
+          clv_reason = CLV_SIDE_PRICE_NULL;
+        }
+      } else if (p.market_type === 'total' && p.signaled_side != null) {
+        // Totals snapshot: must match morning's market_line. If the
+        // snapshot's line differs, it's the same line-moved case as
+        // the sibling branch — null CLV, line_moved reason.
+        if (p.snap_total_market_line == null) {
+          clv_reason = CLV_NO_CLOSING_SNAPSHOT;
+        } else if (p.market_line != null
+                && Number(p.market_line) !== Number(p.snap_total_market_line)) {
+          const raw = Number(p.snap_total_market_line) - Number(p.market_line);
+          if (p.signaled_side === 'over')  line_delta = round2(-raw);
+          else if (p.signaled_side === 'under') line_delta = round2(raw);
+          else line_delta = round2(raw);
+          clv_reason = 'line_moved';
+        } else {
+          const snapPrice = p.signaled_side === 'over'  ? p.snap_total_over_price_ml
+                          : p.signaled_side === 'under' ? p.snap_total_under_price_ml
+                          : null;
+          if (snapPrice != null) {
+            close_price_ml    = snapPrice;
+            close_market_line = p.snap_total_market_line;
+            close_source      = CLV_FROM_DAYAHEAD_SNAP;
+            close_snap_date   = p.snap_total_snapshot_date || null;
+          } else {
+            clv_reason = CLV_SIDE_PRICE_NULL;
+          }
+        }
+      } else {
+        // No signaled_side ⇒ no plays to compute CLV against. Same
+        // as the no_morning_signal path above; surface a distinct
+        // reason for visibility.
+        clv_reason = 'no_morning_signal';
+      }
+
+      // If the snapshot path produced a close_price_ml, compute CLV
+      // here (the sibling branch above did this inline; replicating
+      // for the fallback so both prongs end at the same shape).
+      if (close_price_ml != null && p.signaled_price_ml != null) {
+        const myImpl    = impliedP(p.signaled_price_ml);
+        const closeImpl = impliedP(close_price_ml);
+        if (Number.isFinite(myImpl) && Number.isFinite(closeImpl)) {
+          clv_pp = round2((closeImpl - myImpl) * 100);
+        }
+      } else if (clv_reason == null) {
+        // No close from either prong, no other reason set.
+        clv_reason = 'no_gametime_sibling';
+      }
     }
   }
 
@@ -583,6 +687,7 @@ function enrichMarketPlay(p, gametimeSibling) {
     close_price_ml,
     close_market_line,
     close_source,
+    close_snap_date,
     clv_pp,
     clv_reason,
     line_delta,
@@ -598,8 +703,10 @@ function summarizeMarketClv(morningPlays) {
   let missing = 0;
   let lineMoved = 0;
   let nFromGametime = 0;
+  let nFromSnapshot = 0;
   for (const p of morningPlays) {
-    if (p.close_source === 'gametime_sibling') nFromGametime++;
+    if (p.close_source === 'gametime_sibling')   nFromGametime++;
+    if (p.close_source === CLV_FROM_DAYAHEAD_SNAP) nFromSnapshot++;
     if (p.clv_reason === 'line_moved') lineMoved++;
     if (p.clv_pp == null) { missing++; continue; }
     withClv.push(p.clv_pp);
@@ -608,7 +715,8 @@ function summarizeMarketClv(morningPlays) {
     return { avg_pp: null, median_pp: null, pct_positive: null,
              n_with_close: 0, n_missing_close: missing,
              n_line_moved: lineMoved,
-             n_close_from_gametime_sibling: nFromGametime };
+             n_close_from_gametime_sibling: nFromGametime,
+             n_close_from_dayahead_snapshot: nFromSnapshot };
   }
   const sorted = withClv.slice().sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -623,7 +731,8 @@ function summarizeMarketClv(morningPlays) {
     n_with_close:    withClv.length,
     n_missing_close: missing,
     n_line_moved:    lineMoved,
-    n_close_from_gametime_sibling: nFromGametime,
+    n_close_from_gametime_sibling:  nFromGametime,
+    n_close_from_dayahead_snapshot: nFromSnapshot,
   };
 }
 
@@ -640,6 +749,7 @@ function formatMarketPlayForDetail(p) {
     close_price_ml:        p.close_price_ml,
     close_market_line:     p.close_market_line,
     close_source:          p.close_source,
+    close_snap_date:       p.close_snap_date,
     clv_pp:                p.clv_pp,
     clv_reason:            p.clv_reason,
     line_delta:            p.line_delta,

@@ -440,6 +440,52 @@ db.exec(`
     PRIMARY KEY (snapshot_date, game_date, game_id, spread_team, spread_line)
   );
   CREATE INDEX IF NOT EXISTS idx_spread_snap_date ON kalshi_spread_markets_snapshot (snapshot_date);
+  -- Daily snapshots of Kalshi ML and totals markets — parallel to
+  -- kalshi_spread_markets_snapshot. Backstop the empirical-market-
+  -- capture CLV close lookup when the gametime live capture is
+  -- absent (over_price/under_price null at the gametime pass, cron
+  -- timing miss, etc.). Without these the ML/totals CLV is null
+  -- for any morning capture whose gametime sibling didn't fire.
+  -- See services/empirical-spread-roi.js fetchMarketRows for the
+  -- consuming LEFT JOIN.
+  --
+  -- ML: one row per game (binary market, two sides). Prices stored
+  -- are FEE-ADJUSTED with the 1-cent shift — same convention as
+  -- game_log.market_*_ml, so a snapshot row is directly comparable
+  -- to the morning capture's frozen price.
+  CREATE TABLE IF NOT EXISTS kalshi_ml_markets_snapshot (
+    snapshot_date TEXT NOT NULL,
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    away_ask_dollars REAL,
+    home_ask_dollars REAL,
+    away_ask_ml INTEGER,
+    home_ask_ml INTEGER,
+    volume_24h_away REAL,
+    volume_24h_home REAL,
+    PRIMARY KEY (snapshot_date, game_date, game_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_snap_date ON kalshi_ml_markets_snapshot (snapshot_date);
+  -- Totals: one row per game per snapshot_date, recording the rung
+  -- whose strike matches the production override's chosen line
+  -- (else Kalshi's default closest-to-$0.50 rung). market_line is a
+  -- column (not in PK) because we keep only ONE rung per game per
+  -- snapshot — the rung the override path used for game_log writes.
+  -- If morning capture's market_line differs at lookup time, the
+  -- line_moved branch in empirical-spread-roi handles it (sibling
+  -- and snapshot both compared against morning's frozen line).
+  CREATE TABLE IF NOT EXISTS kalshi_totals_markets_snapshot (
+    snapshot_date TEXT NOT NULL,
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    market_line REAL,
+    over_ask_dollars REAL,
+    under_ask_dollars REAL,
+    over_price_ml INTEGER,
+    under_price_ml INTEGER,
+    PRIMARY KEY (snapshot_date, game_date, game_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_totals_snap_date ON kalshi_totals_markets_snapshot (snapshot_date);
   -- Empirical spread signals. One row per (game_date, game_id,
   -- generated_at) — each odds-job run captures a fresh snapshot of
   -- the empirical edge analysis defined in services/empirical-
@@ -2090,6 +2136,68 @@ q.snapshotKalshiSpreads = (snapshotDate, rows) => {
         r.yes_ask_ml == null ? null : Number(r.yes_ask_ml),
         r.no_ask_ml  == null ? null : Number(r.no_ask_ml),
         r.volume_24h == null ? null : Number(r.volume_24h));
+    }
+  });
+  tx(snapshotDate, rows);
+};
+
+// Daily kalshi_ml_markets snapshot. Same delete-then-insert pattern
+// as the spreads writer. Rows: [{game_date, game_id, away_ask_dollars,
+// home_ask_dollars, away_ask_ml, home_ask_ml, volume_24h_away,
+// volume_24h_home}]. Rows missing any PK component skipped.
+q._snapKalshiMlClearDate = db.prepare(
+  "DELETE FROM kalshi_ml_markets_snapshot WHERE snapshot_date=?"
+);
+q._snapKalshiMlInsert = db.prepare(
+  "INSERT OR REPLACE INTO kalshi_ml_markets_snapshot "
+  + "(snapshot_date, game_date, game_id, "
+  + " away_ask_dollars, home_ask_dollars, away_ask_ml, home_ask_ml, "
+  + " volume_24h_away, volume_24h_home) "
+  + "VALUES (?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotKalshiMlMarkets = (snapshotDate, rows) => {
+  const tx = db.transaction((d, rs) => {
+    q._snapKalshiMlClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.game_date == null || r.game_id == null) continue;
+      q._snapKalshiMlInsert.run(d,
+        r.game_date, r.game_id,
+        r.away_ask_dollars == null ? null : Number(r.away_ask_dollars),
+        r.home_ask_dollars == null ? null : Number(r.home_ask_dollars),
+        r.away_ask_ml == null ? null : Number(r.away_ask_ml),
+        r.home_ask_ml == null ? null : Number(r.home_ask_ml),
+        r.volume_24h_away == null ? null : Number(r.volume_24h_away),
+        r.volume_24h_home == null ? null : Number(r.volume_24h_home));
+    }
+  });
+  tx(snapshotDate, rows);
+};
+
+// Daily kalshi_totals_markets snapshot. Same pattern. Rows:
+// [{game_date, game_id, market_line, over_ask_dollars,
+//   under_ask_dollars, over_price_ml, under_price_ml}].
+q._snapKalshiTotalsClearDate = db.prepare(
+  "DELETE FROM kalshi_totals_markets_snapshot WHERE snapshot_date=?"
+);
+q._snapKalshiTotalsInsert = db.prepare(
+  "INSERT OR REPLACE INTO kalshi_totals_markets_snapshot "
+  + "(snapshot_date, game_date, game_id, market_line, "
+  + " over_ask_dollars, under_ask_dollars, "
+  + " over_price_ml, under_price_ml) "
+  + "VALUES (?,?,?,?,?,?,?,?)"
+);
+q.snapshotKalshiTotalsMarkets = (snapshotDate, rows) => {
+  const tx = db.transaction((d, rs) => {
+    q._snapKalshiTotalsClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.game_date == null || r.game_id == null) continue;
+      q._snapKalshiTotalsInsert.run(d,
+        r.game_date, r.game_id,
+        r.market_line == null ? null : Number(r.market_line),
+        r.over_ask_dollars == null ? null : Number(r.over_ask_dollars),
+        r.under_ask_dollars == null ? null : Number(r.under_ask_dollars),
+        r.over_price_ml == null ? null : Number(r.over_price_ml),
+        r.under_price_ml == null ? null : Number(r.under_price_ml));
     }
   });
   tx(snapshotDate, rows);
