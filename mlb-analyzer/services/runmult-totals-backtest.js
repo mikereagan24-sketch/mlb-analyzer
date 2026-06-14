@@ -2,43 +2,47 @@
 
 // RUN_MULT × totals backtest — admin-endpoint version.
 //
-// Reruns the model over a graded window under ten RUN_MULT values,
-// varying ONLY the RUN_MULT setting that scales the
+// Reruns the model over a graded window under a fine grid of
+// RUN_MULT values, varying ONLY the RUN_MULT setting that scales the
 // (team_woba - WOBA_BASELINE) * RUN_MULT * park_factor term at
 // services/model.js:679-680. Everything else identical: same framing
 // substrate (whatever production runs), FRV explicitly OFF (matches
 // brief's "current framing, FRV off = production"). Same wind/temp
 // inputs read from game_log as-is.
 //
-// SWEEP
-//   41, 42, 43, 44, 45.5 (PROD), 46, 47, 48, 49, 50
+// SWEEP (fine grid)
+//   45.0, 45.5 (PROD), 46.0, 46.5, 47.0, 47.5, 48.0
 //
-//   The original downward sweep (45.5..41) found mean(model-actual)
-//   at -0.73 at 45.5 and getting MORE negative as RUN_MULT dropped —
-//   i.e. the model UNDER-projects, and the accuracy-optimal RUN_MULT
-//   sits above the tested band, not below it. This widened sweep
-//   tests up to 50 to find the zero-crossing on the high side; the
-//   downward leg is kept (41..45) so the prior result is reproducible
-//   in the same response.
+//   The widened 41..50 step-1 sweep showed accuracy still improving
+//   at the top of the range (best at 50) but with a non-monotone
+//   wobble in tot_under ROI across 45..48. This finer step-0.5 grid
+//   over the 45..48 band asks: is the wobble real local structure
+//   or sampling noise? headline_reads.tot_under_noise_band quantifies
+//   the noise floor (≈ 100/sqrt(n) pp at -110 odds) so the operator
+//   can read spread-vs-noise directly.
 //
 // MOTIVATION
-//   Original hypothesis from the 5/23 totals study: model OVER-
-//   projects, RUN_MULT too high → drop it. Downward sweep falsified
-//   that — accuracy gets worse going down. The same response (overs
-//   lose, unders win) is then EITHER (a) the under-projection
-//   manifesting as the model emitting under signals on games that
-//   actually go OVER the market because the under signal is meant
-//   to be a "stay-low" cue and lower scoring games naturally hit
-//   under more often by base rate, OR (b) something other than
-//   RUN_MULT is driving the over/under ROI gap — e.g. wind/temp
-//   asymmetry, market-line skew, or TOT_SLOPE.
+//   Three independent sweeps so far on the same window:
+//     1. Downward 45.5..41 — accuracy gets worse going down.
+//     2. Widened 41..50    — accuracy improves going up; best=50,
+//        diff still negative. ROI on tot_under wobbles non-
+//        monotonically across 45..48 — looks like noise but unclear.
+//     3. (this) fine 45..48 step-0.5 — resolution test on the wobble.
 //
-//   This widened sweep is about finding the mechanistically-honest
-//   target on accuracy. The ROI story is reported alongside but the
-//   accuracy zero-crossing is the load-bearing number; if accuracy-
-//   optimal sits at 49 or 50 and over-side ROI is still negative
-//   there, the over-bias on ROI is NOT a RUN_MULT problem and a
-//   different lever is needed.
+//   If the wobble flattens at fine resolution (spread < noise band),
+//   the prior wobble was sampling noise and RUN_MULT has no local
+//   structure in this band — the only signal is the long monotonic
+//   accuracy improvement going up, which extends past 50. If the
+//   wobble persists with spread > noise band, there IS local
+//   structure (e.g. some RUN_MULT values land on more market lines
+//   than others).
+//
+//   Companion check: per_side_accuracy_trajectory's under_games
+//   mean_diff should stay ~-1.0 to -1.1 flat across the fine grid
+//   if RUN_MULT isn't the accuracy lever — meaning even at the
+//   under-emitted subset of games, model under-projects by the same
+//   amount regardless of coefficient. If under_games mean_diff stays
+//   flat across 45..48 it ends the "tweak RUN_MULT" thread.
 //
 //   RUN_MULT *also* affects ML (via aRuns/hRuns → Pythagorean win
 //   prob). This backtest is about TOTALS only; ML signals are
@@ -278,12 +282,13 @@ function projectBucket(b) {
 // Sweep configuration.
 // ============================================================
 
-// Widened sweep: 41..50 with 45.5 (PROD) included. Original downward-
-// only sweep showed accuracy-optimal RUN_MULT sits above 45.5; this
-// includes 46..50 to find the zero-crossing. PROD label is the 45.5
-// entry; output includes live_settings_RUN_MULT so the operator can
-// spot a mismatch if production has shifted since the brief.
-const RUN_MULT_VALUES = [41.0, 42.0, 43.0, 44.0, 45.5, 46.0, 47.0, 48.0, 49.0, 50.0];
+// Fine grid 45.0..48.0 step 0.5 — the resolution-finding sweep. The
+// widened 41..50 step-1 sweep showed best accuracy at 50 (extreme)
+// but with a non-monotone wobble in tot_under ROI across 45..48. The
+// wobble is either real local structure or sampling noise; this fine
+// grid resolves it and headline_reads.tot_under_noise_band quantifies
+// the noise floor so the operator can tell which it is. PROD = 45.5.
+const RUN_MULT_VALUES = [45.0, 45.5, 46.0, 46.5, 47.0, 47.5, 48.0];
 
 function newTotsBuckets() {
   return {
@@ -569,6 +574,61 @@ function runRunMultTotalsBacktest(opts) {
     if (ui.tot_under.signals < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'ui_highlight', side: 'under', n: ui.tot_under.signals });
   }
 
+  // 6. tot_under emit-floor noise band — the resolution test the brief
+  //    asked for. Per cfg report n + ROI + crude SE in pp; then the
+  //    spread (max-min) across cfgs and a flag for whether the spread
+  //    sits within the noise band.
+  //
+  //    Noise floor model:
+  //      A totals bet at -110 wins +100/110 ≈ +0.909 units, loses
+  //      -110/110 = -1.000 units per unit wagered. Per-bet ROI swing
+  //      is ~1.909 units. Var of single-bet ROI at p≈0.524 ≈ 0.91,
+  //      stddev ≈ 0.95 units = ~95pp. SE of the mean ROI on n bets
+  //      ≈ 95/sqrt(n) pp. Rounded to 100/sqrt(n) for legibility — the
+  //      brief's "1/sqrt(n) * typical-odds" framing.
+  //
+  //      A meaningful spread across configs needs to exceed roughly
+  //      sqrt(2) × mean(SE) (diff of two near-independent means);
+  //      report the 2× factor as a conservative threshold instead.
+  function seBandPp(n) {
+    return n > 0 ? Number((100 / Math.sqrt(n)).toFixed(4)) : null;
+  }
+  const under_ef_per_value = cfgs.map(c => {
+    const b = results[c.run_mult].emit_floor.tot_under;
+    return {
+      run_mult: c.run_mult,
+      under_n: b.signals,
+      under_roi_pct: b.roi_pct,
+      se_noise_band_pp: seBandPp(b.signals),
+    };
+  });
+  const rois = under_ef_per_value.map(x => x.under_roi_pct).filter(x => x != null);
+  const ses  = under_ef_per_value.map(x => x.se_noise_band_pp).filter(x => x != null);
+  const spread = (rois.length >= 2)
+    ? Number((Math.max.apply(null, rois) - Math.min.apply(null, rois)).toFixed(4))
+    : null;
+  const meanSe = ses.length ? (ses.reduce((s, x) => s + x, 0) / ses.length) : null;
+  // Conservative two-SE band on a single mean ROI; spread across
+  // configs needs to clear ~sqrt(2)*meanSe to be a real difference,
+  // and 2*meanSe is a stricter bar. Brief: flag when within noise.
+  const noise_floor_pp = meanSe != null ? Number((2 * meanSe).toFixed(4)) : null;
+  const is_spread_within_noise = (spread != null && noise_floor_pp != null)
+    ? spread < noise_floor_pp
+    : null;
+
+  const tot_under_noise_band = {
+    per_value: under_ef_per_value,
+    spread_pp: spread,
+    noise_floor_pp,
+    is_spread_within_noise,
+    interpretation: is_spread_within_noise === true
+      ? 'tot_under ROI is FLAT across the fine grid (spread < noise floor) — the prior wide-sweep wobble was sampling noise; RUN_MULT has no detectable local structure in 45..48 on this window.'
+      : is_spread_within_noise === false
+        ? 'tot_under ROI spread EXCEEDS the noise floor — real local structure in 45..48; investigate which value (and why).'
+        : 'insufficient data to evaluate spread vs noise.',
+    note: 'Noise band = 100/sqrt(n) pp per cfg (crude per-bet SE at -110 odds, p~0.524). noise_floor_pp = 2 * mean(per-cfg SE) as a conservative threshold on the cross-cfg spread; sqrt(2)*meanSE is the formal diff-of-means SE but is less conservative.',
+  };
+
   const out = {
     bias_warning: 'HINDSIGHT BIASED — DIRECTIONAL ONLY. Counterfactual rerun: "what would the model have signaled if RUN_MULT were different." Outcomes observed after the fact.',
     scope_note: 'TOTALS-ONLY. RUN_MULT also affects ML (via aRuns/hRuns → Pythagorean win prob) but ML signals are excluded from these aggregates per the brief.',
@@ -603,8 +663,14 @@ function runRunMultTotalsBacktest(opts) {
       tot_under_roi_trajectory: under_roi_trajectory,
       // Per-side accuracy across all sweep values — over_games vs
       // under_games mean_diff. Divergence at the same cfg = under-
-      // projection is selection-driven, not uniform.
+      // projection is selection-driven, not uniform. On the fine
+      // grid, under_games mean_diff staying flat ~-1.0..-1.1 across
+      // the whole band ends the "RUN_MULT is the accuracy lever"
+      // thread.
       per_side_accuracy_trajectory,
+      // tot_under emit-floor noise band — resolution test. spread_pp
+      // < noise_floor_pp ⇒ prior wide-sweep wobble was noise.
+      tot_under_noise_band,
       // Composition shift across configs.
       signal_mix_trajectory,
       small_sample_flags,
