@@ -2276,6 +2276,171 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
   }
 });
 
+// Empirical market-capture coverage diagnostic (read-only).
+// GET /api/admin/empirical-capture/coverage?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Per (market_type, capture_track): row counts and orphan analysis.
+// An "orphan" is a morning capture with no gametime sibling — the
+// CLV-blocking case that motivates the snapshot fallback. Orphans
+// bucketed by the current eligibility state in game_log:
+//   null_model_lines    — model_*_ml or model_total null
+//   null_ml_prices      — ML row missing market_home_ml/market_away_ml
+//   null_total_line     — totals row missing market_total
+//   null_total_prices   — totals row missing over_price or under_price
+//   eligibility_ok_now  — all fields present now (gametime pass
+//                         skipped for a reason no longer visible —
+//                         likely cron-timing miss or transient null)
+//
+// per_date trajectory + sample orphan list (capped at 200) with
+// game_date, game_id, current_state, bucket — lets the operator
+// spot structural patterns (same 7pm games every day) vs scatter.
+//
+// Logic inline in routes/api.js since it's a single-query diagnostic
+// — no need for a service module. SELECTs only, no writes.
+router.get('/admin/empirical-capture/coverage', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+
+    // 1. Per (market_type, capture_track) row counts.
+    const trackCounts = db.prepare(
+      "SELECT market_type, capture_track, COUNT(DISTINCT game_date || '|' || game_id) AS n_games "
+      + "FROM empirical_market_captures "
+      + "WHERE game_date >= ? AND game_date <= ? "
+      + "GROUP BY market_type, capture_track"
+    ).all(from, to);
+    const counts = { ml: { morning: 0, gametime: 0 }, total: { morning: 0, gametime: 0 } };
+    for (const r of trackCounts) {
+      if (counts[r.market_type] && counts[r.market_type][r.capture_track] != null) {
+        counts[r.market_type][r.capture_track] = r.n_games;
+      }
+    }
+
+    // 2. Orphan morning captures — morning rows whose (game_date,
+    //    game_id, market_type) has no capture_track='gametime' row.
+    //    LEFT JOIN'd against current game_log so we can attribute
+    //    each orphan to a current-state eligibility bucket.
+    const orphans = db.prepare(
+      "SELECT m.game_date, m.game_id, m.market_type, "
+      + "       g.model_home_ml, g.model_away_ml, g.model_total, "
+      + "       g.market_home_ml, g.market_away_ml, "
+      + "       g.market_total, g.over_price, g.under_price, "
+      + "       g.odds_locked_at, g.ml_source, g.total_source, "
+      + "       g.away_team, g.home_team, g.game_time "
+      + "FROM empirical_market_captures m "
+      + "LEFT JOIN game_log g ON g.game_date = m.game_date AND g.game_id = m.game_id "
+      + "WHERE m.game_date >= ? AND m.game_date <= ? "
+      + "  AND m.capture_track = 'morning' "
+      + "  AND NOT EXISTS ( "
+      + "    SELECT 1 FROM empirical_market_captures m2 "
+      + "    WHERE m2.game_date = m.game_date "
+      + "      AND m2.game_id = m.game_id "
+      + "      AND m2.market_type = m.market_type "
+      + "      AND m2.capture_track = 'gametime' "
+      + "  ) "
+      + "ORDER BY m.game_date, m.game_id, m.market_type"
+    ).all(from, to);
+
+    function bucketize(o) {
+      const nullModel = o.model_home_ml == null || o.model_away_ml == null || o.model_total == null;
+      if (nullModel) return 'null_model_lines';
+      if (o.market_type === 'ml') {
+        if (o.market_home_ml == null || o.market_away_ml == null) return 'null_ml_prices';
+      } else if (o.market_type === 'total') {
+        if (o.market_total == null) return 'null_total_line';
+        if (o.over_price == null || o.under_price == null) return 'null_total_prices';
+      }
+      return 'eligibility_ok_now';
+    }
+
+    // Bucket counts + per-date + per-bucket sample list (capped 200
+    // entries total to keep response readable).
+    const bucketCounts = { ml: {}, total: {} };
+    const perDate = {}; // date → { ml_orphans, total_orphans }
+    const sample = [];
+    const SAMPLE_CAP = 200;
+    for (const o of orphans) {
+      const b = bucketize(o);
+      if (!bucketCounts[o.market_type][b]) bucketCounts[o.market_type][b] = 0;
+      bucketCounts[o.market_type][b]++;
+      if (!perDate[o.game_date]) perDate[o.game_date] = { ml_orphans: 0, total_orphans: 0 };
+      if (o.market_type === 'ml')    perDate[o.game_date].ml_orphans++;
+      if (o.market_type === 'total') perDate[o.game_date].total_orphans++;
+      if (sample.length < SAMPLE_CAP) {
+        sample.push({
+          game_date: o.game_date, game_id: o.game_id,
+          market_type: o.market_type, bucket: b,
+          game_time: o.game_time,
+          teams: o.away_team + '@' + o.home_team,
+          current_state: {
+            model_home_ml: o.model_home_ml, model_away_ml: o.model_away_ml,
+            model_total: o.model_total,
+            market_home_ml: o.market_home_ml, market_away_ml: o.market_away_ml,
+            market_total: o.market_total,
+            over_price: o.over_price, under_price: o.under_price,
+            odds_locked_at: o.odds_locked_at,
+            ml_source: o.ml_source, total_source: o.total_source,
+          },
+        });
+      }
+    }
+    const perDateArr = Object.keys(perDate).sort().map(d => ({
+      date: d,
+      ml_orphans: perDate[d].ml_orphans,
+      total_orphans: perDate[d].total_orphans,
+    }));
+
+    // 3. Total captures (all rows, not distinct games) — surface
+    //    multi-pass gametime counts so the operator can see if the
+    //    gametime cron is running normally on most games.
+    const rawCounts = db.prepare(
+      "SELECT market_type, capture_track, COUNT(*) AS n_rows "
+      + "FROM empirical_market_captures "
+      + "WHERE game_date >= ? AND game_date <= ? "
+      + "GROUP BY market_type, capture_track"
+    ).all(from, to);
+    const rowCounts = { ml: { morning: 0, gametime: 0 }, total: { morning: 0, gametime: 0 } };
+    for (const r of rawCounts) {
+      if (rowCounts[r.market_type] && rowCounts[r.market_type][r.capture_track] != null) {
+        rowCounts[r.market_type][r.capture_track] = r.n_rows;
+      }
+    }
+
+    const totalOrphans = { ml: 0, total: 0 };
+    for (const o of orphans) totalOrphans[o.market_type]++;
+
+    res.json({
+      window: { from, to },
+      games_captured: counts,
+      rows_captured: rowCounts,
+      orphan_morning_counts: totalOrphans,
+      orphan_buckets: bucketCounts,
+      bucket_legend: {
+        null_model_lines:   'model_home_ml / model_away_ml / model_total null in game_log NOW — game lost model lines after morning lock',
+        null_ml_prices:     'market_home_ml or market_away_ml null in game_log NOW (ML row)',
+        null_total_line:    'market_total null in game_log NOW (totals row)',
+        null_total_prices:  'over_price or under_price null in game_log NOW (totals row, likely Kalshi-direct skip)',
+        eligibility_ok_now: 'all fields populated NOW — gametime pass skipped for a reason no longer visible (likely cron-timing miss, transient null at gametime, or pass never ran for this game)',
+      },
+      per_date: perDateArr,
+      sample_orphans: sample,
+      sample_capped_at: SAMPLE_CAP,
+      notes: [
+        'Orphan = morning capture row with no capture_track=gametime sibling.',
+        'Buckets reflect game_log state NOW (not at the failed gametime pass time) — useful for "still missing now" patterns; transient gametime nulls that have since been backfilled show as eligibility_ok_now.',
+        'per_date.ml_orphans / total_orphans counts let you spot date-specific spikes (cron miss for one day) vs steady-state misses (structural).',
+      ],
+    });
+  } catch (e) {
+    console.error('[admin/empirical-capture/coverage] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Morning-capture eligibility funnel (read-only diagnostic).
 // GET /api/admin/morning-capture/eligibility-funnel?date=YYYY-MM-DD
 //
