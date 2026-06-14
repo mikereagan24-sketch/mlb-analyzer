@@ -2163,6 +2163,41 @@ router.get('/admin/temp-backtest', requireAdminToken, (req, res) => {
   }
 });
 
+// RUN_MULT × totals backtest (read-only, no writes, no settings).
+// GET /api/admin/runmult-totals-backtest?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
+//
+// Sweeps RUN_MULT in {45.5, 44, 43, 42, 41} over graded games. TOTALS
+// ONLY — RUN_MULT also affects ML via aRuns/hRuns → Pythag, but ML
+// signals are filtered out. Substrate: framing per production live
+// state, FRV explicitly off.
+//
+// Reports per RUN_MULT: emit_floor + ui_highlight (all/tot_over/
+// tot_under separately), over-minus-under ROI gap, all-totals net
+// pnl, mean(model_total - actual_total) accuracy metric, signal-mix
+// composition. Headline reads: accuracy-optimal RUN_MULT (closest to
+// zero mean_diff), under-side ROI trajectory (hazard: under wins may
+// ride on the same over-bias being corrected), signal-mix shift.
+//
+// Logic lives in services/runmult-totals-backtest.js.
+router.get('/admin/runmult-totals-backtest', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+    const detail = req.query.detail === 'true' || req.query.detail === '1';
+
+    const { runRunMultTotalsBacktest } = require('../services/runmult-totals-backtest');
+    const out = runRunMultTotalsBacktest({ fromDate: from, toDate: to, includeDetail: detail });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/runmult-totals-backtest] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Morning-capture eligibility funnel (read-only diagnostic).
 // GET /api/admin/morning-capture/eligibility-funnel?date=YYYY-MM-DD
 //
