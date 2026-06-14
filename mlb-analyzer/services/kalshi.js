@@ -581,6 +581,14 @@ async function getKalshiMlbTotals(date, opts) {
   // Fee-adjust a single side's American odds. C is the side's ask price
   // in dollars; the inversion through probToAmerican is float-fragile at
   // the boundaries so we guard both ends. Returns null on degenerate input.
+  //
+  // INTENTIONAL DIVERGENCE from the same-named helper in jobs.js:3101:
+  // this version does NOT apply the 1-cent bettor-unfavorable shift
+  // that the live persistence path uses. Sole consumer is the
+  // `--totals` CLI debug print at kalshi.js:947-948 (developer
+  // inspection of raw ladder fee math); no UI / no persisted price /
+  // no signal calc reads it. If a new caller starts persisting this
+  // value, mirror the jobs.js shift here too.
   const feeAdjustAmericanFromC = (C) => {
     if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
     const adj = C + kalshiTakerFeeRate(C);

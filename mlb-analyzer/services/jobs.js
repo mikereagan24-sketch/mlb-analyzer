@@ -3095,16 +3095,34 @@ async function runOddsJob(dateStr, opts) {
         if (!kalshiTotals.length) {
           console.log('[odds] Kalshi-direct totals: no pre-game markets returned for ' + dateStr);
         } else {
-          // Per-side, C-input fee adjustment. Same shape as the ML helper
-          // but starting from a contract dollar price (the ladder rung's
-          // raw over_ask / under_ask) instead of American odds.
+          // Per-side, C-input fee adjustment. Same shape as the ML
+          // helper (feeAdjustAmerican at ~line 2845) and the spreads
+          // helper (feeAdjustAmericanSpread at ~line 2940) — starts
+          // from a contract dollar price (the ladder rung's raw
+          // over_ask / under_ask) instead of American odds, applies
+          // Kalshi's per-contract taker fee, converts to American at
+          // 2-decimal precision, then subtracts 1.0 toward the
+          // bettor-unfavorable direction so the stored value never
+          // overstates the price available on Kalshi.
+          //
+          // Pre-fix this rounded the raw float directly, landing 1
+          // cent in the bettor's favor every time — symmetric ML
+          // bug that was fixed for ML/spreads but missed on totals.
+          // Single-helper edit; o.over_price / o.under_price write
+          // sites below already consume its return.
           function feeAdjustAmericanFromC(C) {
             if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
             const adj = C + kalshiTakerFeeRate(C);
             if (!(adj > 0.001 && adj < 0.999)) return null;
-            return adj >= 0.5
-              ? -Math.round(100 * adj / (1 - adj))
-              :  Math.round(100 * (1 - adj) / adj);
+            if (adj >= 0.5) {
+              const americanFloat = -(100 * adj / (1 - adj));
+              const twoDecimal    = Math.round(americanFloat * 100) / 100;
+              return Math.round(twoDecimal - 1.0);
+            } else {
+              const americanFloat = 100 * (1 - adj) / adj;
+              const twoDecimal    = Math.round(americanFloat * 100) / 100;
+              return Math.round(twoDecimal - 1.0);
+            }
           }
           const oddsById = new Map();
           for (const o of oddsRaw) oddsById.set(o.game_id, o);
