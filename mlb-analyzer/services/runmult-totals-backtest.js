@@ -2,7 +2,7 @@
 
 // RUN_MULT × totals backtest — admin-endpoint version.
 //
-// Reruns the model over a graded window under five RUN_MULT values,
+// Reruns the model over a graded window under ten RUN_MULT values,
 // varying ONLY the RUN_MULT setting that scales the
 // (team_woba - WOBA_BASELINE) * RUN_MULT * park_factor term at
 // services/model.js:679-680. Everything else identical: same framing
@@ -11,21 +11,34 @@
 // inputs read from game_log as-is.
 //
 // SWEEP
-//   45.5 (PROD), 44.0, 43.0, 42.0, 41.0
-//   (~-3% to -10% off the 45.5 baseline — the range the 5/23 totals
-//   study suggested. Smaller step at the top, wider toward 41 to
-//   span the band where mean(model - actual) is expected to cross
-//   zero.)
+//   41, 42, 43, 44, 45.5 (PROD), 46, 47, 48, 49, 50
+//
+//   The original downward sweep (45.5..41) found mean(model-actual)
+//   at -0.73 at 45.5 and getting MORE negative as RUN_MULT dropped —
+//   i.e. the model UNDER-projects, and the accuracy-optimal RUN_MULT
+//   sits above the tested band, not below it. This widened sweep
+//   tests up to 50 to find the zero-crossing on the high side; the
+//   downward leg is kept (41..45) so the prior result is reproducible
+//   in the same response.
 //
 // MOTIVATION
-//   Two independent analyses (5/23 totals study, 6/13 temp backtest)
-//   converged on a systematic totals over-projection: overs lose
-//   ~-5%, unders win ~+1.5%, consistent across temp buckets and temp
-//   configs. The 5/23 study attributed it to RUN_MULT being too high
-//   and noted RUN_MULT was in the big parameter sweep that closed
-//   negative — likely because aggregate ROI washed out the totals-
-//   side-specific correction. This endpoint isolates the over and
-//   under sides instead of aggregating.
+//   Original hypothesis from the 5/23 totals study: model OVER-
+//   projects, RUN_MULT too high → drop it. Downward sweep falsified
+//   that — accuracy gets worse going down. The same response (overs
+//   lose, unders win) is then EITHER (a) the under-projection
+//   manifesting as the model emitting under signals on games that
+//   actually go OVER the market because the under signal is meant
+//   to be a "stay-low" cue and lower scoring games naturally hit
+//   under more often by base rate, OR (b) something other than
+//   RUN_MULT is driving the over/under ROI gap — e.g. wind/temp
+//   asymmetry, market-line skew, or TOT_SLOPE.
+//
+//   This widened sweep is about finding the mechanistically-honest
+//   target on accuracy. The ROI story is reported alongside but the
+//   accuracy zero-crossing is the load-bearing number; if accuracy-
+//   optimal sits at 49 or 50 and over-side ROI is still negative
+//   there, the over-bias on ROI is NOT a RUN_MULT problem and a
+//   different lever is needed.
 //
 //   RUN_MULT *also* affects ML (via aRuns/hRuns → Pythagorean win
 //   prob). This backtest is about TOTALS only; ML signals are
@@ -33,19 +46,34 @@
 //   explicitly.
 //
 // HEADLINE CELLS TO READ
-//   - over_under_gap_pp per RUN_MULT — over_roi - under_roi. PROD's
-//     gap is the "bias"; the RUN_MULT that drives it toward 0 is
-//     the ROI-optimal sample-driven value.
 //   - model_accuracy.mean_diff_model_minus_actual per RUN_MULT — the
 //     value that crosses ~0 is the accuracy-optimal mechanistically-
-//     honest target, INDEPENDENT of ROI. If accuracy- and ROI-
-//     optimal diverge, that's a hint the totals-emission threshold
-//     (TOT_SLOPE / TOT_EMIT_FLOOR) is doing some of the work.
-//   - tot_under_roi_trajectory — does under-side ROI collapse as
-//     RUN_MULT drops? Under wins might ride on the bias; removing
-//     the bias may remove the win. Critical hazard to surface.
-//   - signal_mix_trajectory — lower RUN_MULT generates fewer overs /
-//     more unders. Visible composition shift.
+//     honest target, INDEPENDENT of ROI. Prior downward sweep showed
+//     this is negative at every value down to 41; the widened sweep
+//     is meant to find the zero-crossing on the high side. If the
+//     crossing still sits at the sweep extreme (50), the operator
+//     needs to widen again or accept that the bias is large enough
+//     to need a different lever.
+//   - per-side accuracy: mean(model-actual) over games that fired
+//     OVER vs games that fired UNDER, separately. Lets us see
+//     whether the under-projection is uniform across games or
+//     concentrated on one side — concentration suggests the
+//     selection effect (which games the model thinks are unders) is
+//     part of the story, not just RUN_MULT magnitude.
+//   - over_under_gap_pp per RUN_MULT — over_roi - under_roi. The
+//     "bias" on ROI; the RUN_MULT that drives it toward 0 is the
+//     ROI-optimal sample-driven value. If this diverges from the
+//     accuracy-optimal, ROI is being moved by something other than
+//     RUN_MULT (TOT_SLOPE / TOT_EMIT_FLOOR, market skew, etc.).
+//   - tot_over_roi_trajectory — over-side sample SHOULD grow going
+//     up (more under-projected games tip into over signals). The
+//     prior sweep had over n in single digits at 41; flag n<50 so
+//     the operator can see where the sample becomes readable.
+//   - tot_under_roi_trajectory — under-side sample shrinks going up.
+//     If under ROI collapses as RUN_MULT rises, the under wins were
+//     riding on the over-bias being corrected.
+//   - signal_mix_trajectory — overs grow + unders shrink going up.
+//     Visible composition shift.
 //
 // ⚠ HINDSIGHT BIAS ⚠
 //   Counterfactual rerun. Game outcomes observed after the fact.
@@ -250,10 +278,12 @@ function projectBucket(b) {
 // Sweep configuration.
 // ============================================================
 
-// Brief specifies these five values verbatim. PROD is labeled 45.5;
-// production may have shifted — output includes live_settings_RUN_MULT
-// so the operator can spot the mismatch.
-const RUN_MULT_VALUES = [45.5, 44.0, 43.0, 42.0, 41.0];
+// Widened sweep: 41..50 with 45.5 (PROD) included. Original downward-
+// only sweep showed accuracy-optimal RUN_MULT sits above 45.5; this
+// includes 46..50 to find the zero-crossing. PROD label is the 45.5
+// entry; output includes live_settings_RUN_MULT so the operator can
+// spot a mismatch if production has shifted since the brief.
+const RUN_MULT_VALUES = [41.0, 42.0, 43.0, 44.0, 45.5, 46.0, 47.0, 48.0, 49.0, 50.0];
 
 function newTotsBuckets() {
   return {
@@ -261,6 +291,10 @@ function newTotsBuckets() {
     tot_over:  emptyBucket(),
     tot_under: emptyBucket(),
   };
+}
+
+function newAccBucket() {
+  return { sum_diff: 0, sum_estTot: 0, sum_actual: 0, n: 0 };
 }
 
 function newCfgAgg() {
@@ -271,12 +305,29 @@ function newCfgAgg() {
     // averaged across the scored game set. Same game set across all
     // configs (apples-to-apples), so the difference between cfg means
     // is purely the RUN_MULT effect on estTot.
-    accuracy: { sum_diff: 0, sum_estTot: 0, sum_actual: 0, n: 0 },
+    accuracy: newAccBucket(),
+    // Per-side accuracy: same statistic restricted to games where the
+    // config emitted at least one over signal (or under signal) at
+    // emit-floor. Lets us see whether the under-projection is uniform
+    // across games or concentrated on one side — concentration means
+    // the selection effect (which games the model thinks are unders)
+    // is part of the story, not just RUN_MULT magnitude.
+    accuracy_over_games:  newAccBucket(),
+    accuracy_under_games: newAccBucket(),
+  };
+}
+
+function projectAcc(bucket) {
+  const mean = (s, n) => (n > 0 ? Number((s / n).toFixed(4)) : null);
+  return {
+    n_games:                       bucket.n,
+    mean_model_total:              mean(bucket.sum_estTot, bucket.n),
+    mean_actual_total:             mean(bucket.sum_actual, bucket.n),
+    mean_diff_model_minus_actual:  mean(bucket.sum_diff,   bucket.n),
   };
 }
 
 function projectCfgAgg(a) {
-  const mean = (s, n) => (n > 0 ? Number((s / n).toFixed(4)) : null);
   return {
     emit_floor:   {
       all:       projectBucket(a.emit_floor.all),
@@ -288,11 +339,13 @@ function projectCfgAgg(a) {
       tot_over:  projectBucket(a.ui_highlight.tot_over),
       tot_under: projectBucket(a.ui_highlight.tot_under),
     },
-    model_accuracy: {
-      n_games: a.accuracy.n,
-      mean_model_total:                mean(a.accuracy.sum_estTot, a.accuracy.n),
-      mean_actual_total:               mean(a.accuracy.sum_actual, a.accuracy.n),
-      mean_diff_model_minus_actual:    mean(a.accuracy.sum_diff, a.accuracy.n),
+    model_accuracy:       projectAcc(a.accuracy),
+    model_accuracy_by_side: {
+      // Subset of the scored game set restricted to games where this
+      // config emitted an over (under) signal at emit-floor. Counts
+      // games, not signals — a game with two overs counts once.
+      over_games:  projectAcc(a.accuracy_over_games),
+      under_games: projectAcc(a.accuracy_under_games),
     },
   };
 }
@@ -363,22 +416,28 @@ function runRunMultTotalsBacktest(opts) {
       const { c, mr } = pc;
       const agg = aggs[c.run_mult];
 
-      // Accuracy bookkeeping — mean(model_total - actual_total) per
-      // RUN_MULT. Same game set across configs by the suppression
-      // cut above, so cross-config differences are pure RUN_MULT
-      // effect.
       const estTot = Number(mr.estTot) || 0;
       const diff = estTot - actualTotal;
+
+      // Whole-game accuracy bucket (every scored game contributes).
       agg.accuracy.sum_diff   += diff;
       agg.accuracy.sum_estTot += estTot;
       agg.accuracy.sum_actual += actualTotal;
       agg.accuracy.n          += 1;
 
+      // Single pass: accumulate signals and track whether this cfg
+      // emitted any over / any under signal at emit-floor for this
+      // game. Per-side accuracy is bumped after the pass so each side
+      // sees the game exactly once even if multiple signals fired.
+      let firedOver = false, firedUnder = false;
       const sigs = model.getSignals(baseGame, mr, c.settings);
       for (const s of sigs) {
         if (s.type === 'ML') continue; // brief: totals only
         const graded = model.calcPnl(s, gameRow.away_score, gameRow.home_score, gameRow.market_total);
         if (graded.outcome === 'pending') continue;
+
+        if (s.side === 'over')  firedOver = true;
+        if (s.side === 'under') firedUnder = true;
 
         accumulateTots(agg.emit_floor, s, graded);
         const hi = isHighlightedSignal(s, uiThresholds);
@@ -396,6 +455,19 @@ function runRunMultTotalsBacktest(opts) {
             highlighted: hi,
           });
         }
+      }
+
+      if (firedOver) {
+        agg.accuracy_over_games.sum_diff   += diff;
+        agg.accuracy_over_games.sum_estTot += estTot;
+        agg.accuracy_over_games.sum_actual += actualTotal;
+        agg.accuracy_over_games.n          += 1;
+      }
+      if (firedUnder) {
+        agg.accuracy_under_games.sum_diff   += diff;
+        agg.accuracy_under_games.sum_estTot += estTot;
+        agg.accuracy_under_games.sum_actual += actualTotal;
+        agg.accuracy_under_games.n          += 1;
       }
     }
   }
@@ -419,10 +491,12 @@ function runRunMultTotalsBacktest(opts) {
   }
 
   // Critical reads.
-  // 1. RUN_MULT closest to mean(model - actual) == 0. We pick the
-  //    value with the smallest |mean_diff|, AND note whether that
-  //    value sits inside the tested range or at an extreme (a clamp
-  //    at 45.5 or 41 means the operator should expand the sweep).
+  // 1. RUN_MULT closest to mean(model - actual) == 0 across the
+  //    whole-game sample. If at a sweep extreme (41 or 50), the
+  //    true zero-crossing is outside the tested band and the operator
+  //    should widen again. The prior downward-only sweep hit this:
+  //    best was 45.5 (the top of that band) with diff = -0.73; this
+  //    widened sweep should expose the actual crossing.
   let bestAccVal = null, bestAccAbs = Infinity, bestAccDiff = null;
   for (const c of cfgs) {
     const d = results[c.run_mult].model_accuracy.mean_diff_model_minus_actual;
@@ -456,7 +530,22 @@ function runRunMultTotalsBacktest(opts) {
     },
   }));
 
-  // 3. Signal-mix shift across configs (emit-floor and ui_highlight).
+  // 3. Per-side accuracy trajectory — the new read this revision
+  //    adds. mean(model - actual) restricted to games where the cfg
+  //    fired an over (over_games) vs an under (under_games), per
+  //    cfg. A large divergence between the two columns at the same
+  //    cfg means the under-projection is concentrated on one side
+  //    (selection effect), not uniform across all games.
+  const per_side_accuracy_trajectory = cfgs.map(c => {
+    const a = results[c.run_mult].model_accuracy_by_side;
+    return {
+      run_mult: c.run_mult,
+      over_games:  { n: a.over_games.n,  mean_diff_model_minus_actual: a.over_games.mean_diff_model_minus_actual  },
+      under_games: { n: a.under_games.n, mean_diff_model_minus_actual: a.under_games.mean_diff_model_minus_actual },
+    };
+  });
+
+  // 4. Signal-mix shift across configs (emit-floor and ui_highlight).
   const signal_mix_trajectory = cfgs.map(c => {
     const ef = results[c.run_mult].emit_floor;
     const ui = results[c.run_mult].ui_highlight;
@@ -469,7 +558,7 @@ function runRunMultTotalsBacktest(opts) {
     };
   });
 
-  // 4. Small-sample flags. Brief threshold: any side n < 50.
+  // 5. Small-sample flags. Brief threshold: any side n < 50.
   const small_sample_flags = [];
   for (const c of cfgs) {
     const ef = results[c.run_mult].emit_floor;
@@ -498,19 +587,25 @@ function runRunMultTotalsBacktest(opts) {
     sweep_values: RUN_MULT_VALUES,
     results,
     headline_reads: {
-      // The RUN_MULT minimizing |mean(model - actual)|. If this sits
-      // at a sweep extreme (45.5 or 41), the true zero-crossing is
-      // outside the tested band — operator should widen the sweep.
+      // The RUN_MULT minimizing |mean(model - actual)| over the
+      // whole game set. If at sweep extreme (41 or 50), the true
+      // crossing is outside the tested band — operator should widen
+      // the sweep again or accept the bias is bigger than a
+      // coefficient nudge can fix.
       accuracy_optimal_run_mult: bestAccVal,
       accuracy_optimal_mean_diff_model_minus_actual: bestAccDiff != null ? Number(bestAccDiff.toFixed(4)) : null,
       accuracy_optimal_at_sweep_extreme: accExtremes,
-      // Under-side trajectory and over-side trajectory side-by-side
-      // for direct visual comparison ("did closing the over gap kill
-      // the under win?").
-      tot_under_roi_trajectory: under_roi_trajectory,
+      // Side-by-side ROI trajectories across all sweep values.
+      // Over-side sample SHOULD grow going up; under shrinks going
+      // up. Reading the two together answers: does correcting the
+      // bias kill the under win?
       tot_over_roi_trajectory:  over_roi_trajectory,
-      // Composition shift — overs should shrink and unders grow as
-      // RUN_MULT drops.
+      tot_under_roi_trajectory: under_roi_trajectory,
+      // Per-side accuracy across all sweep values — over_games vs
+      // under_games mean_diff. Divergence at the same cfg = under-
+      // projection is selection-driven, not uniform.
+      per_side_accuracy_trajectory,
+      // Composition shift across configs.
       signal_mix_trajectory,
       small_sample_flags,
     },
