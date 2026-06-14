@@ -1646,11 +1646,21 @@ function renderFramingImpact(g){
     const mag = Math.abs(d).toFixed(2);
     return '<div style="font-size:11px"><strong>'+teamCode+' C</strong> ['+catcherName+']: <span style="font-weight:500">'+sign+mag+' runs</span> <span style="color:var(--text2)">vs '+oppTeam+' lineup</span></div>';
   };
+  // Two nets, both signed scalars in runs. net_edge_runs/team is
+  // the magnitude+beneficiary of the margin (scoreboard tilt — the
+  // delta the model applied to the Pythag input for ML/spread).
+  // net_total_runs_delta is the signed delta the model applied to
+  // estTot. Label each for what it is.
   let netLine = '';
   if (fi.net_edge_runs != null && fi.net_edge_team) {
-    netLine = '<div style="font-size:11px;color:var(--text2);margin-top:4px">net framing edge: <strong>'+fi.net_edge_team+' '+fi.net_edge_runs.toFixed(2)+' runs</strong></div>';
+    netLine += '<div style="font-size:11px;color:var(--text2);margin-top:4px">scoreboard tilt (ML): <strong>'+fi.net_edge_team+' +'+fi.net_edge_runs.toFixed(2)+' runs</strong></div>';
   } else if (fi.net_edge_runs === 0) {
-    netLine = '<div style="font-size:11px;color:var(--text3);margin-top:4px">net framing edge: 0 (balanced)</div>';
+    netLine += '<div style="font-size:11px;color:var(--text3);margin-top:4px">scoreboard tilt (ML): 0 (balanced)</div>';
+  }
+  if (fi.net_total_runs_delta != null) {
+    const td = Number(fi.net_total_runs_delta) || 0;
+    const tdSign = td > 0 ? '+' : (td < 0 ? '−' : '±');
+    netLine += '<div style="font-size:11px;color:var(--text3);margin-top:2px">total runs delta (O/U): '+tdSign+Math.abs(td).toFixed(2)+' runs</div>';
   }
   return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
     + '<div style="font-size:10px;color:var(--text2);margin-bottom:4px">Catcher framing impact <span style="color:var(--text3)">(MUTE × ' + fi.mute + ')</span></div>'

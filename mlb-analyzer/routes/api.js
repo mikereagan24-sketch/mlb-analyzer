@@ -591,19 +591,49 @@ router.get('/games/:date', (req, res) => {
       const _enabled = !!(_framingSettings && _framingSettings.CATCHER_FRAMING_ENABLED);
       const mute = (_framingSettings && _framingSettings.CATCHER_FRAMING_MUTE != null)
         ? Number(_framingSettings.CATCHER_FRAMING_MUTE) : 0.5;
-      // Net framing edge: bigger framing impact = bigger runs delta
-      // applied to the OPPOSING offense. The team whose catcher
-      // suppresses MORE runs has the framing edge.
-      // net = abs(homeDeltaOnAway) - abs(awayDeltaOnHome), assigned
-      // to the larger-delta side.
+      // Two distinct nets, derived from the model's framing math at
+      // services/model.js:696-710. Both are SIGNED scalars in runs,
+      // derived from the same two per-side deltas exposed above —
+      // they MUST equal what runModel applied (Δ on Pythag input
+      // and Δ on estTot) for the same settings state.
+      //
+      //   aRuns = aRunsRaw - homeDeltaOnAway        (away offense)
+      //   hRuns = hRunsRaw - awayDeltaOnHome        (home offense)
+      //
+      // Margin (home - away) delta — what flows into the Pythag ratio
+      // and therefore the ML / spread. >0 ⇒ home favored.
+      //   Δ(hRuns - aRuns) = -awayDeltaOnHome - (-homeDeltaOnAway)
+      //                    = homeDeltaOnAway - awayDeltaOnHome
+      //
+      // Total delta — what flows into estTot. >0 ⇒ more total runs.
+      //   Δ(hRuns + aRuns) = -awayDeltaOnHome + -homeDeltaOnAway
+      //                    = -(homeDeltaOnAway + awayDeltaOnHome)
+      //
+      // Prior bug: net_edge_runs used abs(homeDelta) - abs(awayDelta),
+      // which is neither quantity. On a game where one catcher is
+      // good and the other is bad (signs oppose), the buggy formula
+      // happens to land near the total-runs magnitude — but it
+      // understates the margin tilt by ~2x because the two effects
+      // ADD on margin (both push the same team's score line) while
+      // partially cancelling on total. Live example CHC@SF: deltas
+      // +0.07 (Susac) and -0.05 (Kelly); margin = +0.12 (SF), total
+      // = -0.02; buggy display showed ~0.02.
+      const netMarginHomeMinusAway = homeDeltaOnAway - awayDeltaOnHome;
+      const netTotalRunsDelta      = -(homeDeltaOnAway + awayDeltaOnHome);
+
+      // Magnitude + beneficiary for the existing UI "net" label,
+      // now derived from the margin (the scoreboard tilt). Null
+      // when framing isn't applied for either side.
       let netEdgeRuns = null, netEdgeTeam = null;
       if (_enabled && (g.home_catcher_framing_state === 'applied'
                     || g.away_catcher_framing_state === 'applied')) {
-        const aH = Math.abs(homeDeltaOnAway);
-        const aA = Math.abs(awayDeltaOnHome);
-        if (aH > aA)      { netEdgeRuns = aH - aA; netEdgeTeam = g.home_team; }
-        else if (aA > aH) { netEdgeRuns = aA - aH; netEdgeTeam = g.away_team; }
-        else              { netEdgeRuns = 0;       netEdgeTeam = null; }
+        if (Math.abs(netMarginHomeMinusAway) > 1e-9) {
+          netEdgeRuns = Math.abs(netMarginHomeMinusAway);
+          netEdgeTeam = netMarginHomeMinusAway > 0 ? g.home_team : g.away_team;
+        } else {
+          netEdgeRuns = 0;
+          netEdgeTeam = null;
+        }
       }
       out.framing_impact = {
         enabled:           _enabled,
@@ -624,8 +654,15 @@ router.get('/games/:date', (req, res) => {
           state:               g.home_catcher_framing_state,
           delta_runs_on_away:  homeDeltaOnAway,
         },
+        // Scoreboard tilt (margin). Magnitude + beneficiary for UI.
         net_edge_runs:   netEdgeRuns,
         net_edge_team:   netEdgeTeam,
+        // Signed margin delta the model applied to Pythag/ML/spread
+        // (home - away). Same number runModel uses internally.
+        net_margin_runs_home_minus_away: netMarginHomeMinusAway,
+        // Signed total-runs delta the model applied to estTot. >0 ⇒
+        // framing nets to a higher projected total.
+        net_total_runs_delta: netTotalRunsDelta,
       };
       // Only attach when the thresholds passed above. Omitting the
       // field entirely (rather than setting null) keeps the slate
