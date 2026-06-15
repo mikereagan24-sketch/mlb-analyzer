@@ -2517,6 +2517,152 @@ router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
   }
 });
 
+// Name-resolver trace (read-only). Diagnoses WHY a specific
+// (team, name) pair fails resolveCatcherMlbId.
+// GET /api/admin/resolver-trace?team=ATL&name=Ronald%20Acuna
+//
+// Background: the lineup-coverage audit reported 87.84% resolve rate
+// with concentration on STAR REGULARS (Acuña, Judge, Ramirez, etc.).
+// Code review of resolveCatcherMlbId + normName shows accent folding
+// and first-initial matching ARE implemented — so the empirical
+// failures must come from data state (roster gap, encoding edge,
+// ingest issue) rather than missing logic. This endpoint shows the
+// actual data state for one pair so the fix can target the real
+// cause rather than guess.
+//
+// Output:
+//   input                       echoed team+name
+//   normalized_input            full_norm, last, first_init
+//   roster_team_total           how many POS players we have for
+//                                 this team (0 = stale ingest)
+//   strict_candidates           PASS-1 logic: matching last AND
+//                                 first_init. Empty = no roster
+//                                 entry survives both filters.
+//   by_last_name_only           Roster entries with matching last
+//                                 name, regardless of first init.
+//                                 Reveals first-init mismatches
+//                                 ("R. Acuña" → first_init "r", but
+//                                  roster might store as
+//                                  "Ronald A. Acuña" → first_init "r"
+//                                  still — unless the first name is
+//                                  encoded oddly).
+//   by_first_init_only          Roster entries with matching first
+//                                 init, regardless of last name.
+//                                 Reveals last-name encoding issues
+//                                 (NFD-resistant characters like ø,
+//                                  æ, œ stripped to nothing by the
+//                                  [^a-z\s] regex, breaking match).
+//   raw_roster_sample           First 5 roster entries' raw +
+//                                 normalized names so the operator
+//                                 can eyeball encoding quirks.
+//   final_result                What resolveCatcherMlbId actually
+//                                 returned for this input.
+//   diagnosis                   Human-readable cause: 'no_strict_
+//                                 match_no_last_name_match',
+//                                 'no_strict_match_last_name_only',
+//                                 'ambiguous_last_first_init',
+//                                 'empty_roster', etc.
+router.get('/admin/resolver-trace', requireAdminToken, (req, res) => {
+  try {
+    const team = (req.query.team || '').toString().trim().toUpperCase();
+    const name = (req.query.name || '').toString().trim();
+    if (!team) return res.status(400).json({ error: 'team required (e.g. ATL)' });
+    if (!name) return res.status(400).json({ error: 'name required (e.g. "Ronald Acuna")' });
+
+    const { resolveCatcherMlbId } = require('../services/jobs');
+    const { normName, stripSfx } = require('../utils/names');
+
+    // Reproduce the resolver's normalization steps in-place so the
+    // operator can see the EXACT intermediate values.
+    const norm = stripSfx(normName(name));
+    const parts = norm.split(' ');
+    const last = parts.length >= 2 ? parts[parts.length - 1] : null;
+    const first_init = parts.length >= 2 && parts[0] ? parts[0][0] : null;
+
+    // Pull the team's full POS roster for inspection.
+    const rosterRaw = db.prepare(
+      "SELECT player_name, mlb_id, position FROM team_rosters "
+      + "WHERE team=? AND role='POS' ORDER BY player_name"
+    ).all(team);
+
+    const rosterNormalized = rosterRaw.map(p => {
+      const pn = stripSfx(normName(p.player_name || ''));
+      const pp = pn.split(' ');
+      return {
+        raw_name: p.player_name,
+        mlb_id: p.mlb_id,
+        position: p.position,
+        normalized: pn,
+        normalized_last: pp.length >= 1 ? pp[pp.length - 1] : null,
+        normalized_first_init: pp.length >= 1 && pp[0] ? pp[0][0] : null,
+        parts_count: pp.length,
+      };
+    });
+
+    const strict_candidates = rosterNormalized.filter(p =>
+      p.parts_count >= 2 && p.normalized_last === last && p.normalized_first_init === first_init
+    );
+    const by_last_name_only = rosterNormalized.filter(p =>
+      p.parts_count >= 1 && p.normalized_last === last
+    );
+    const by_first_init_only = first_init ? rosterNormalized.filter(p =>
+      p.parts_count >= 1 && p.normalized_first_init === first_init
+    ) : [];
+
+    // Raw first 5 rows so encoding quirks (HTML entities, weird
+    // Unicode) are visible without paging.
+    const raw_roster_sample = rosterRaw.slice(0, 5);
+
+    // Run the actual resolver — this is the production answer.
+    const final_mlb_id = resolveCatcherMlbId(team, name);
+
+    // Diagnosis
+    let diagnosis;
+    if (rosterRaw.length === 0) {
+      diagnosis = 'empty_roster (team_rosters has no POS players for this team — roster ingest gap or team abbreviation mismatch)';
+    } else if (parts.length < 2) {
+      diagnosis = 'single_token_input (normalized to ' + JSON.stringify(parts) + '; resolver requires ≥2 tokens for first+last)';
+    } else if (strict_candidates.length === 1) {
+      diagnosis = 'strict_match (resolver should return ' + strict_candidates[0].mlb_id + ')';
+    } else if (strict_candidates.length > 1) {
+      diagnosis = 'ambiguous_last_first_init (' + strict_candidates.length + ' candidates with same last+first_init — resolver returns null by design)';
+    } else if (by_last_name_only.length === 0 && by_first_init_only.length === 0) {
+      diagnosis = 'no_last_or_first_match (the normalized last="' + last + '" and first_init="' + first_init + '" find NO roster entries — player likely missing from team_rosters, or roster row\'s name normalizes to something different. Check raw_roster_sample for encoding quirks.)';
+    } else if (by_last_name_only.length > 0) {
+      diagnosis = 'last_name_match_but_first_init_mismatch (' + by_last_name_only.length + ' roster row(s) share the last name "' + last + '" but their first_init differs — input first_init="' + first_init + '" vs roster first_inits=[' + by_last_name_only.map(p => p.normalized_first_init).join(',') + ']. Likely a name encoding issue on the roster side.)';
+    } else {
+      diagnosis = 'first_init_match_but_last_name_mismatch (' + by_first_init_only.length + ' roster row(s) share first_init "' + first_init + '" but their last names differ — input last="' + last + '" vs roster lasts include [' + by_first_init_only.slice(0, 10).map(p => p.normalized_last).join(',') + ']. Likely the LAST NAME contains a non-NFD-decomposable character stripped by the a-z filter on one side.)';
+    }
+
+    res.json({
+      input: { team, name },
+      normalized_input: {
+        full_norm: norm,
+        parts,
+        last,
+        first_init,
+      },
+      roster_team_total: rosterRaw.length,
+      strict_candidates,
+      by_last_name_only,
+      by_first_init_only_sample: by_first_init_only.slice(0, 20),
+      by_first_init_only_total: by_first_init_only.length,
+      raw_roster_sample,
+      final_result: { mlb_id: final_mlb_id, resolved: final_mlb_id != null },
+      diagnosis,
+      notes: [
+        'normalized values reflect normName + stripSfx (services/utils/names.js).',
+        'strict_candidates is the PASS-1 logic resolveCatcherMlbId actually uses.',
+        'by_last_name_only and by_first_init_only are diagnostic widenings to identify which axis failed.',
+        'raw_roster_sample shows actual stored characters — copy-paste a name to spot encoding quirks (HTML entities, non-NFD-decomposable chars like ø/æ/œ that the a-z regex strips entirely).',
+      ],
+    });
+  } catch (e) {
+    console.error('[admin/resolver-trace] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Empirical market-capture coverage diagnostic (read-only).
 // GET /api/admin/empirical-capture/coverage?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
