@@ -4319,6 +4319,30 @@ async function runBaserunningJob(opts) {
   try {
     const rows = await fetchTeamBaserunning(season, cookieValue);
     const refreshedAt = new Date().toISOString();
+    // Stale-row cleanup. The pre-field-name-fix upsert wrote rows
+    // with team = HTML anchor string (e.g. '<A HREF=...>LAD</A>').
+    // The clean abbr 'LAD' didn't PK-conflict with the anchor row
+    // so both stuck around — verified_count ballooned to 60 with
+    // 30 garbage + 30 clean. Drop garbage rows for this season
+    // before the upsert so the table converges to 30 clean rows.
+    // Also clean the snapshot table cross-season (same root cause).
+    let cleanedLive = 0, cleanedSnap = 0;
+    try {
+      cleanedLive = db.prepare(
+        "DELETE FROM team_baserunning WHERE season=? "
+        + "AND (team LIKE '%<%' OR length(team) > 4 OR bsr IS NULL)"
+      ).run(Number(season)).changes;
+      cleanedSnap = db.prepare(
+        "DELETE FROM team_baserunning_snapshot "
+        + "WHERE team LIKE '%<%' OR length(team) > 4 OR bsr IS NULL"
+      ).run().changes;
+      if (cleanedLive || cleanedSnap) {
+        console.log('[baserunning] cleanup deleted ' + cleanedLive
+          + ' stale live row(s), ' + cleanedSnap + ' stale snapshot row(s)');
+      }
+    } catch (e) {
+      console.warn('[baserunning] cleanup failed (non-fatal): ' + e.message);
+    }
     q.upsertTeamBaserunning(season, rows, refreshedAt);
     console.log('[baserunning] upserted ' + rows.length + ' team rows for ' + season);
     // Post-write verification — actual SELECT COUNT, not the
@@ -4361,6 +4385,8 @@ async function runBaserunningJob(opts) {
       verified_count,
       non_null_bsr_count,
       season,
+      cleaned_stale_live_rows: cleanedLive,
+      cleaned_stale_snapshot_rows: cleanedSnap,
       sample_parsed,
       sample_db,
     };
