@@ -3,7 +3,7 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
-const { fetchTeamBaserunning } = require('./fangraphs');
+const { fetchTeamBaserunning, fetchPlayerBaserunning } = require('./fangraphs');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -2422,6 +2422,8 @@ function startCronJobs() {
     // not abort the morning chain.
     try { await runBaserunningJob(); }
     catch(e) { console.error('[cron-baserunning] failed:', e && e.message); }
+    try { await runPlayerBaserunningJob(); }
+    catch(e) { console.error('[cron-player-baserunning] failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 7AM PT morning refresh: odds -> weather -> lineups -> rerun all games ---
@@ -4424,6 +4426,65 @@ async function runBaserunningJob(opts) {
   }
 }
 
+// Player-level baserunning daily refresh + snapshot. Mirrors
+// runBaserunningJob's shape but pulls ind=1 (individuals). Aggregation
+// across mid-season trade splits happens inside fetchPlayerBaserunning;
+// this job just persists the result. Same fangraphs_session_cookie
+// dependency.
+async function runPlayerBaserunningJob(opts) {
+  const o = opts || {};
+  const season = o.season || new Date().getFullYear();
+  const cookieRow = q.getSetting.get('fangraphs_session_cookie');
+  const cookieValue = cookieRow && cookieRow.value ? String(cookieRow.value).trim() : '';
+  if (!cookieValue) {
+    console.warn('[player-baserunning] fangraphs_session_cookie not configured — skipping. Paste via Model tab and re-run /admin/refresh/player-baserunning.');
+    return { success: false, error: 'fangraphs_session_cookie not configured. Paste from Model tab.' };
+  }
+  console.log('[player-baserunning] fetching FG player BsR for season ' + season + '...');
+  try {
+    const rows = await fetchPlayerBaserunning(season, cookieValue);
+    const refreshedAt = new Date().toISOString();
+    q.upsertPlayerBaserunning(season, rows, refreshedAt);
+    console.log('[player-baserunning] upserted ' + rows.length + ' player rows for ' + season);
+    // Post-write verification
+    let verified_count = null, non_null_bsr_count = null, sample_db = [];
+    try {
+      verified_count = db.prepare(
+        "SELECT COUNT(*) AS n FROM player_baserunning WHERE season=?"
+      ).get(Number(season)).n;
+      non_null_bsr_count = db.prepare(
+        "SELECT COUNT(*) AS n FROM player_baserunning WHERE season=? AND bsr IS NOT NULL"
+      ).get(Number(season)).n;
+      sample_db = db.prepare(
+        "SELECT season, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g "
+        + "FROM player_baserunning WHERE season=? ORDER BY bsr DESC LIMIT 5"
+      ).all(Number(season));
+    } catch (e) {
+      console.warn('[player-baserunning] verify-count failed (non-fatal): ' + e.message);
+    }
+    const sample_parsed = rows.slice(0, 3);
+    try {
+      const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      q.snapshotPlayerBaserunning(snapDate, season, rows);
+      console.log('[player-baserunning-snapshot] captured ' + rows.length + ' rows for ' + snapDate);
+    } catch (e) {
+      console.warn('[player-baserunning-snapshot] capture failed (non-fatal): ' + e.message);
+    }
+    return {
+      success: true,
+      applied: rows.length,
+      verified_count,
+      non_null_bsr_count,
+      season,
+      sample_parsed,
+      sample_db,
+    };
+  } catch (e) {
+    console.error('[player-baserunning] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -4675,4 +4736,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId };
