@@ -2294,6 +2294,13 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
 //
 // Requires team_baserunning seeded; if empty, the response surfaces
 // that and the operator hits /admin/refresh/baserunning first.
+//
+// LEVEL — ?level=player switches to per-game lineup-sum-of-starters
+// (resolves each lineup slot via resolveBacktestMlbId, sums season
+// BsR from player_baserunning, divides by team games_played). Same
+// denominator + same accuracy/CLV harness as the team-level path so
+// the two are directly comparable. Requires player_baserunning
+// seeded (POST /admin/refresh/player-baserunning).
 router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
   try {
     const from = req.query.from;
@@ -2303,9 +2310,10 @@ router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
     if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
     if (from > to) return res.status(400).json({ error: 'from must be <= to' });
     const detail = req.query.detail === 'true' || req.query.detail === '1';
+    const level = req.query.level === 'player' ? 'player' : 'team';
 
     const { runBaserunningBacktest } = require('../services/baserunning-backtest');
-    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail });
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level });
     res.json(out);
   } catch (e) {
     console.error('[admin/baserunning-backtest] error:', e);
@@ -2339,6 +2347,23 @@ router.post('/admin/refresh/season-rosters', requireAdminToken, async (req, res)
     res.json(out);
   } catch (e) {
     console.error('[admin/refresh/season-rosters] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual trigger for runPlayerBaserunningJob — FG player-level
+// leaderboard with ind=1. Returns ~700-900 individual rows aggregated
+// by xMLBAMID (mid-season trade splits summed). Same pattern as
+// /admin/refresh/baserunning. Required before the player-level
+// backtest can resolve lineup BsR sums.
+router.post('/admin/refresh/player-baserunning', requireAdminToken, async (req, res) => {
+  try {
+    const { runPlayerBaserunningJob } = require('../services/jobs');
+    const season = req.body && req.body.season ? Number(req.body.season) : undefined;
+    const out = await runPlayerBaserunningJob({ season });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/refresh/player-baserunning] error:', e);
     res.status(500).json({ error: e.message });
   }
 });

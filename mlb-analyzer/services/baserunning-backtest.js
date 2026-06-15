@@ -287,15 +287,60 @@ function runBaserunningBacktest(opts) {
   const WP_CLAMP_HI = Number(cfg.WP_CLAMP_HI != null ? cfg.WP_CLAMP_HI : 0.90);
   const EMIT_FLOOR  = Number(cfg.SIGNAL_EMIT_FLOOR_PP != null ? cfg.SIGNAL_EMIT_FLOOR_PP : 0.01);
 
+  // LEVEL switch — 'team' (default, existing) or 'player'. Player level
+  // reuses the same harness (Pythag, accuracy, CLV) but builds per-team
+  // BsR/game from the 9 starters' season BsR sum instead of the team-
+  // aggregate row. Resolves each starter via resolveBacktestMlbId (the
+  // 100%-resolving union of active 26-man + season fullSeason). Same
+  // denominator (real games-played from game_log) so units match team
+  // level exactly.
+  const level = opts.level === 'player' ? 'player' : 'team';
+  const { resolveBacktestMlbId } = jobs;
+
   const season = Number(fromDate.slice(0, 4));
-  const bsrRows = q.getTeamBaserunning.all(season);
-  if (!bsrRows.length) {
-    return {
-      bias_warning: 'team_baserunning is empty for season ' + season
-        + ' — run runBaserunningJob first to seed it. Backtest skipped.',
-      window: { from: fromDate, to: toDate },
-      teams_with_bsr: 0,
-    };
+
+  // Build the per-team BsR/game source. Team level: aggregate row /
+  // games_played. Player level: per-player BsR cumulative map, summed
+  // in-loop per lineup.
+  let bsrRows = null;
+  let playerBsrById = null;
+
+  if (level === 'team') {
+    bsrRows = q.getTeamBaserunning.all(season);
+    if (!bsrRows.length) {
+      return {
+        bias_warning: 'team_baserunning is empty for season ' + season
+          + ' — run runBaserunningJob first to seed it. Backtest skipped.',
+        window: { from: fromDate, to: toDate },
+        level,
+        teams_with_bsr: 0,
+      };
+    }
+  } else {
+    if (!q.getPlayerBaserunning) {
+      return {
+        bias_warning: 'player_baserunning helpers missing — db migration not yet applied.',
+        window: { from: fromDate, to: toDate },
+        level,
+      };
+    }
+    const playerRows = q.getPlayerBaserunning.all(season);
+    if (!playerRows.length) {
+      return {
+        bias_warning: 'player_baserunning is empty for season ' + season
+          + ' — POST /admin/refresh/player-baserunning first to seed. Backtest skipped.',
+        window: { from: fromDate, to: toDate },
+        level,
+        players_with_bsr: 0,
+      };
+    }
+    playerBsrById = new Map();
+    for (const r of playerRows) {
+      if (r.bsr == null) continue;
+      const id = Number(r.mlbam_id);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      playerBsrById.set(id, Number(r.bsr));
+    }
   }
 
   // ---- DIVISOR FIX ----
@@ -327,41 +372,49 @@ function runBaserunningBacktest(opts) {
     if (home) gamesByTeam.set(home, (gamesByTeam.get(home) || 0) + 1);
   }
 
+  // Team-level BsR/game map (used only in team mode but the denominator
+  // map applies to both — player level reads denominator from gamesByTeam
+  // directly inside the lineup sum).
   const bsrByTeam = new Map();
   const denominatorByTeam = {};
   let teamsWithBsr = 0, sumAbsBsrPerGame = 0;
   const teamsMissingGameCount = [];
-  for (const r of bsrRows) {
-    if (r.bsr == null) continue;
-    const teamKey = String(r.team).toUpperCase();
-    // Skip stale/garbage team rows that the field-name fix replaced
-    // but the pre-fix upsert left behind (HTML-anchor team values
-    // that didn't conflict with the new clean abbr on PK so they
-    // stuck around). The job-side cleanup deletes these going
-    // forward; defensive check here in case any persist.
-    if (teamKey.includes('<') || teamKey.length > 4) continue;
-    const realG = gamesByTeam.get(teamKey);
-    if (!realG || realG <= 0) {
-      teamsMissingGameCount.push(teamKey);
-      continue;
+  if (level === 'team') {
+    for (const r of bsrRows) {
+      if (r.bsr == null) continue;
+      const teamKey = String(r.team).toUpperCase();
+      if (teamKey.includes('<') || teamKey.length > 4) continue;
+      const realG = gamesByTeam.get(teamKey);
+      if (!realG || realG <= 0) { teamsMissingGameCount.push(teamKey); continue; }
+      const perGame = r.bsr / realG;
+      bsrByTeam.set(teamKey, perGame);
+      denominatorByTeam[teamKey] = realG;
+      teamsWithBsr++;
+      sumAbsBsrPerGame += Math.abs(perGame);
     }
-    const perGame = r.bsr / realG;
-    bsrByTeam.set(teamKey, perGame);
-    denominatorByTeam[teamKey] = realG;
-    teamsWithBsr++;
-    sumAbsBsrPerGame += Math.abs(perGame);
+    if (teamsWithBsr === 0) {
+      return {
+        bias_warning: 'No team_baserunning rows resolved to real games-played from game_log for season ' + season,
+        window: { from: fromDate, to: toDate },
+        level,
+        teams_with_bsr: 0,
+        teams_missing_game_count: teamsMissingGameCount,
+      };
+    }
+  } else {
+    // Player mode: still surface the denominator per team for the
+    // coverage block; we won't precompute per-team BsR rates because
+    // they're per-game (lineup-dependent).
+    for (const [team, g] of gamesByTeam) {
+      if (g > 0) denominatorByTeam[team] = g;
+    }
   }
-  if (teamsWithBsr === 0) {
-    return {
-      bias_warning: 'No team_baserunning rows resolved to real games-played from game_log for season ' + season,
-      window: { from: fromDate, to: toDate },
-      teams_with_bsr: 0,
-      teams_missing_game_count: teamsMissingGameCount,
-    };
-  }
-  const avgAbsBsrPerGame = sumAbsBsrPerGame / teamsWithBsr;
-  const avgGamesPerTeam = Object.values(denominatorByTeam).reduce((s, x) => s + x, 0)
-    / Object.values(denominatorByTeam).length;
+  const avgAbsBsrPerGame = level === 'team' && teamsWithBsr > 0
+    ? sumAbsBsrPerGame / teamsWithBsr : null;
+  const avgGamesPerTeam = Object.values(denominatorByTeam).length > 0
+    ? Object.values(denominatorByTeam).reduce((s, x) => s + x, 0)
+      / Object.values(denominatorByTeam).length
+    : null;
 
   const games = db.prepare(
     "SELECT * FROM game_log "
@@ -388,13 +441,51 @@ function runBaserunningBacktest(opts) {
 
   const plays = [];
 
+  // Player-level slot-resolution counters (only meaningful in player
+  // mode; harmless extras when team mode runs).
+  let lineupSlotsTotal = 0, lineupSlotsResolved = 0, lineupSlotsWithBsr = 0;
+  const playersUsed = new Set();
+
+  // Lineup-sum-of-starters BsR-per-game (player mode). Returns null if
+  // the lineup is empty / team has no games_played / no slot resolves.
+  // Resolved slots without a player_baserunning row contribute 0
+  // (neutral baserunner) — common for September call-ups with no
+  // season total yet.
+  function computePlayerLineupBsRPerGame(team, lineupJson) {
+    const realG = gamesByTeam.get(team);
+    if (!realG || realG <= 0) return null;
+    const lineup = tryParse(lineupJson) || [];
+    if (!lineup.length) return null;
+    let sum = 0, anyResolved = false;
+    for (const p of lineup) {
+      if (!p || !p.name) continue;
+      lineupSlotsTotal++;
+      const mlbId = resolveBacktestMlbId(team, p.name);
+      if (!mlbId) continue;
+      lineupSlotsResolved++;
+      const bsr = playerBsrById.get(Number(mlbId));
+      if (bsr != null) {
+        sum += bsr;
+        lineupSlotsWithBsr++;
+        playersUsed.add(Number(mlbId));
+        anyResolved = true;
+      }
+    }
+    if (!anyResolved) return null;
+    return sum / realG;
+  }
+
   for (const gameRow of games) {
     gamesConsidered++;
     const parts = (gameRow.game_id || '').split('-');
     const awayTeam = (parts[0] || '').toUpperCase();
     const homeTeam = (parts[1] || '').toUpperCase();
-    const awayBsRPerGame = bsrByTeam.get(awayTeam);
-    const homeBsRPerGame = bsrByTeam.get(homeTeam);
+    const awayBsRPerGame = level === 'team'
+      ? bsrByTeam.get(awayTeam)
+      : computePlayerLineupBsRPerGame(awayTeam, gameRow.away_lineup_json);
+    const homeBsRPerGame = level === 'team'
+      ? bsrByTeam.get(homeTeam)
+      : computePlayerLineupBsRPerGame(homeTeam, gameRow.home_lineup_json);
     if (awayBsRPerGame == null || homeBsRPerGame == null) {
       gamesMissingBsr++;
       if (awayBsRPerGame == null) missingTeams.add(awayTeam);
@@ -518,25 +609,45 @@ function runBaserunningBacktest(opts) {
   const clvNoiseBandWith = clvWith.n_with_close > 0
     ? Number((100 / Math.sqrt(clvWith.n_with_close)).toFixed(4)) : null;
 
+  // Coverage block changes shape by level.
+  const baserunning_coverage = level === 'team' ? {
+    season,
+    level,
+    teams_with_bsr: teamsWithBsr,
+    avg_abs_team_bsr_per_game: avgAbsBsrPerGame != null ? Number(avgAbsBsrPerGame.toFixed(4)) : null,
+    avg_games_per_team_denominator: avgGamesPerTeam != null ? Number(avgGamesPerTeam.toFixed(2)) : null,
+    denominator_by_team: denominatorByTeam,
+    teams_missing_game_count: teamsMissingGameCount,
+    denominator_source: 'game_log.completed-games-up-to-toDate (NOT FG team_baserunning.g, which is sum-of-player-games at team=0,ts and is ~15x inflated)',
+    note: 'Per-team BsR/game = season BsR / real_games_played. Expect avg_abs_per_game ~0.03-0.10, avg_games_per_team_denominator ~60-80 mid-June.',
+  } : {
+    season,
+    level,
+    total_players_with_bsr: playerBsrById ? playerBsrById.size : 0,
+    lineup_slots_total:     lineupSlotsTotal,
+    lineup_slots_resolved:  lineupSlotsResolved,
+    lineup_slots_with_bsr:  lineupSlotsWithBsr,
+    slot_resolve_rate_pct:  lineupSlotsTotal > 0
+      ? Number((100 * lineupSlotsResolved / lineupSlotsTotal).toFixed(2)) : null,
+    slot_bsr_coverage_pct:  lineupSlotsTotal > 0
+      ? Number((100 * lineupSlotsWithBsr / lineupSlotsTotal).toFixed(2)) : null,
+    unique_players_used:    playersUsed.size,
+    avg_games_per_team_denominator: avgGamesPerTeam != null ? Number(avgGamesPerTeam.toFixed(2)) : null,
+    denominator_source: 'sum_of_9_starters_season_BsR / game_log.completed-games (team\'s real games). Units match team-level.',
+    note: 'Per-game lineup BsR = Σ(starters\' season BsR) / team_games_played. Resolved slots with no player_baserunning row contribute 0 (neutral); slots that resolve_rate misses (call-ups) skipped. Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).',
+  };
+
   const out = {
-    bias_warning: 'HINDSIGHT BIASED — DIRECTION-ONLY. team_baserunning carries season-cumulative BsR; applying it to early-season games is look-ahead. Forward-honest version awaits ~30d of team_baserunning_snapshot accumulation.',
-    scope_note: 'ML-side only. BsR added to each team\'s projected runs (a team\'s baserunning helps its own offense). estTot and totals signals untouched in this readout.',
+    bias_warning: 'HINDSIGHT BIASED — DIRECTION-ONLY. Season-cumulative BsR applied retroactively (look-ahead). Forward-honest version awaits ~30d of *_baserunning_snapshot accumulation.',
+    scope_note: 'ML-side only. Per-team BsR/game added to each team\'s projected runs (own baserunning helps own offense). estTot and totals untouched.',
+    level,
     window: { from: fromDate, to: toDate },
     games_considered: gamesConsidered,
     games_scored: gamesScored,
     games_suppressed: suppressed,
     games_skipped_missing_bsr: gamesMissingBsr,
     missing_teams: Array.from(missingTeams).sort(),
-    baserunning_coverage: {
-      season,
-      teams_with_bsr: teamsWithBsr,
-      avg_abs_team_bsr_per_game: Number(avgAbsBsrPerGame.toFixed(4)),
-      avg_games_per_team_denominator: Number(avgGamesPerTeam.toFixed(2)),
-      denominator_by_team: denominatorByTeam,
-      teams_missing_game_count: teamsMissingGameCount,
-      denominator_source: 'game_log.completed-games-up-to-toDate (NOT FG team_baserunning.g, which is sum-of-player-games at team=0,ts and is ~15x inflated)',
-      note: 'Per-team BsR/game = season BsR / real_games_played. Expect avg_abs_per_game ~0.03-0.10, avg_games_per_team_denominator ~60-80 mid-June.',
-    },
+    baserunning_coverage,
     accuracy: {
       n_games: nAcc,
       without: {

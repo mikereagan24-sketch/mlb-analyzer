@@ -455,6 +455,47 @@ db.exec(`
     PRIMARY KEY (snapshot_date, season, team)
   );
   CREATE INDEX IF NOT EXISTS idx_team_baserunning_snapshot_date ON team_baserunning_snapshot(snapshot_date);
+  -- Player-level baserunning (FanGraphs leaderboard with ind=1 instead
+  -- of team=0,ts). One row per (season, mlbam_id) — aggregated across
+  -- mid-season trade-window splits so the player has a single season
+  -- total. mlbam_id == FG's xMLBAMID == statsapi's person.id (the join
+  -- key the backtest resolver returns).
+  --
+  -- Source: FanGraphs leaders endpoint with the same pinned-URL
+  -- shape as team_baserunning, but team=0 + ind=1. Aggregated on
+  -- write because a traded player shows up with one row per team in
+  -- FG's response; we want season-cumulative skill per player.
+  CREATE TABLE IF NOT EXISTS player_baserunning (
+    season INTEGER NOT NULL,
+    mlbam_id INTEGER NOT NULL,
+    name TEXT,
+    bsr REAL,
+    ubr REAL,
+    wsb REAL,
+    wgdp REAL,
+    sb INTEGER,
+    cs INTEGER,
+    g INTEGER,
+    refreshed_at TEXT,
+    PRIMARY KEY (season, mlbam_id)
+  );
+  -- Daily snapshot mirror — same forward-honest backtest rationale as
+  -- team_baserunning_snapshot.
+  CREATE TABLE IF NOT EXISTS player_baserunning_snapshot (
+    snapshot_date TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    mlbam_id INTEGER NOT NULL,
+    name TEXT,
+    bsr REAL,
+    ubr REAL,
+    wsb REAL,
+    wgdp REAL,
+    sb INTEGER,
+    cs INTEGER,
+    g INTEGER,
+    PRIMARY KEY (snapshot_date, season, mlbam_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_player_baserunning_snapshot_date ON player_baserunning_snapshot(snapshot_date);
   -- Kalshi MLB spread ladder (KXMLBSPREAD series). One row per
   -- (game_date, game_id, spread_team, spread_line) — each Kalshi
   -- game exposes ~10-12 spread markets (1.5 through 9.5 in 1-run
@@ -2253,6 +2294,72 @@ q.getTeamBaserunningAsOf = db.prepare(
   + "WHERE season=? AND snapshot_date = ( "
   + "  SELECT MAX(snapshot_date) FROM team_baserunning_snapshot "
   + "  WHERE season=? AND snapshot_date <= ?)"
+);
+
+// Player-level baserunning helpers. Same delete-then-insert pattern
+// on the snapshot side; the live table is upserted by season+mlbam_id
+// so a partial re-run doesn't lose rows. Aggregation across trade-
+// window FG splits happens BEFORE this writer — the caller hands us
+// already-aggregated rows.
+q._upsertPlayerBaserunning = db.prepare(
+  "INSERT INTO player_baserunning "
+  + "(season, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, refreshed_at) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+  + "ON CONFLICT(season, mlbam_id) DO UPDATE SET "
+  + "name=excluded.name, bsr=excluded.bsr, ubr=excluded.ubr, wsb=excluded.wsb, "
+  + "wgdp=excluded.wgdp, sb=excluded.sb, cs=excluded.cs, g=excluded.g, "
+  + "refreshed_at=excluded.refreshed_at"
+);
+q.upsertPlayerBaserunning = (season, rows, refreshedAt) => {
+  const tx = db.transaction((s, rs, t) => {
+    for (const r of rs) {
+      if (r == null || r.mlbam_id == null) continue;
+      q._upsertPlayerBaserunning.run(
+        Number(s),
+        Math.round(Number(r.mlbam_id)),
+        r.name || null,
+        r.bsr  == null ? null : Number(r.bsr),
+        r.ubr  == null ? null : Number(r.ubr),
+        r.wsb  == null ? null : Number(r.wsb),
+        r.wgdp == null ? null : Number(r.wgdp),
+        r.sb   == null ? null : Math.round(Number(r.sb)),
+        r.cs   == null ? null : Math.round(Number(r.cs)),
+        r.g    == null ? null : Math.round(Number(r.g)),
+        t);
+    }
+  });
+  tx(season, rows, refreshedAt);
+};
+q._snapPlayerBaserunningClearDate = db.prepare(
+  "DELETE FROM player_baserunning_snapshot WHERE snapshot_date=?"
+);
+q._snapPlayerBaserunningInsert = db.prepare(
+  "INSERT OR REPLACE INTO player_baserunning_snapshot "
+  + "(snapshot_date, season, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotPlayerBaserunning = (snapshotDate, season, rows) => {
+  const tx = db.transaction((d, s, rs) => {
+    q._snapPlayerBaserunningClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.mlbam_id == null) continue;
+      q._snapPlayerBaserunningInsert.run(d, Number(s),
+        Math.round(Number(r.mlbam_id)),
+        r.name || null,
+        r.bsr  == null ? null : Number(r.bsr),
+        r.ubr  == null ? null : Number(r.ubr),
+        r.wsb  == null ? null : Number(r.wsb),
+        r.wgdp == null ? null : Number(r.wgdp),
+        r.sb   == null ? null : Math.round(Number(r.sb)),
+        r.cs   == null ? null : Math.round(Number(r.cs)),
+        r.g    == null ? null : Math.round(Number(r.g)));
+    }
+  });
+  tx(snapshotDate, season, rows);
+};
+q.getPlayerBaserunning = db.prepare(
+  "SELECT season, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, refreshed_at "
+  + "FROM player_baserunning WHERE season=?"
 );
 
 // ------------------------------------------------------------------

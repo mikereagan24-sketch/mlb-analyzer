@@ -401,4 +401,136 @@ async function fetchTeamBaserunning(season, cookieValue) {
   return out;
 }
 
-module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning };
+// Player-level baserunning leaderboard from FanGraphs. Same pinned-URL
+// shape as fetchTeamBaserunning but with team=0 (no aggregation) and
+// ind=1 (individuals). Returns ~700-900 rows depending on how many
+// non-qualified batters have appeared. PK is xMLBAMID (= statsapi
+// person.id = our mlb_id).
+//
+// AGGREGATION across mid-season trade-window splits: a player traded
+// mid-season appears with one row per team. We sum BsR/UBR/wSB/
+// wGDP/SB/CS/G across all their rows so the result is season-
+// cumulative per player. Final shape: one entry per mlbam_id with
+// the player's total season skill.
+//
+// Field-name convention identical to team-level (verified from Mike's
+// captured response): BaseRunning (not BsR), wBsR (not wSB), GDPRuns
+// (not wGDP). UBR and GDPRuns are populated at player level (they
+// were null at team-aggregate). xMLBAMID is the join key.
+async function fetchPlayerBaserunning(season, cookieValue) {
+  const yr = season || new Date().getFullYear();
+  const startdate = yr + '-03-01';
+  const enddate   = yr + '-11-01';
+  // Mirror the team-level URL but: team=0 (no aggregation), ind=1
+  // (individual players), pageitems=2000 (cover the full leaderboard
+  // in one page — typical individual count is ~700-900).
+  const url = 'https://www.fangraphs.com/api/leaders/major-league/data'
+    + '?age='
+    + '&pos=all'
+    + '&stats=bat'
+    + '&lg=all'
+    + '&qual=0'
+    + '&season='     + yr
+    + '&season1='    + yr
+    + '&startdate='  + startdate
+    + '&enddate='    + enddate
+    + '&month=0'
+    + '&hand='
+    + '&team=0'
+    + '&pageitems=2000'
+    + '&pagenum=1'
+    + '&ind=1'
+    + '&rost=0'
+    + '&players=0'
+    + '&type=8'
+    + '&postseason='
+    + '&sortdir=default'
+    + '&sortstat=WAR';
+  const resp = await fetch(url, { headers: baseHeaders(cookieValue) });
+  if (!resp.ok) {
+    const respDiag = {};
+    for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
+      const v = resp.headers.get(h);
+      if (v) respDiag[h] = v;
+    }
+    console.warn('[fg-player-baserunning] HTTP ' + resp.status + ' ' + url
+      + ' | cookie_present=' + !!cookieValue
+      + ' | response_headers=' + JSON.stringify(respDiag));
+    throw new Error('FG player baserunning fetch ' + resp.status
+      + (resp.status === 403 ? ' (Cloudflare/Member-auth gate — verify fangraphs_session_cookie)'
+       : resp.status === 404 ? ' (URL or query params drifted — re-capture from Network tab)'
+       : ''));
+  }
+  const text = await resp.text();
+  let body;
+  try { body = JSON.parse(text); }
+  catch (e) { throw new Error('FG player baserunning returned non-JSON (first 200): ' + text.slice(0, 200)); }
+  const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
+  if (!rows || !rows.length) {
+    throw new Error('FG player baserunning: zero rows | top-level keys: '
+      + Object.keys(body || {}).join(','));
+  }
+  console.log('[fg-player-baserunning] FG response field keys (row 0): '
+    + Object.keys(rows[0] || {}).slice(0, 60).join(','));
+
+  // Aggregate per xMLBAMID (= our mlb_id). Mid-season trade splits
+  // are summed. Skip rows without xMLBAMID — we can't join them later.
+  const num = (v) => (v == null || v === '' ? null : Number(v));
+  const accByMlbam = new Map();
+  let skippedNoId = 0;
+  for (const r of rows) {
+    const mlbamRaw = r.xMLBAMID || r.MLBAMID || r.xmlbamid;
+    if (mlbamRaw == null || mlbamRaw === '') { skippedNoId++; continue; }
+    const mlbam_id = Math.round(Number(mlbamRaw));
+    if (!Number.isFinite(mlbam_id) || mlbam_id <= 0) { skippedNoId++; continue; }
+    let agg = accByMlbam.get(mlbam_id);
+    if (!agg) {
+      agg = {
+        mlbam_id,
+        name: (r.PlayerName || r.PlayerNameRoute || r.Name || '').toString().trim() || null,
+        bsr: 0, ubr: 0, wsb: 0, wgdp: 0, sb: 0, cs: 0, g: 0,
+        _bsrHas: false, _ubrHas: false, _wsbHas: false, _wgdpHas: false,
+        _sbHas: false, _csHas: false, _gHas: false,
+      };
+      accByMlbam.set(mlbam_id, agg);
+    }
+    const bsr  = num(r.BaseRunning);
+    const ubr  = num(r.UBR);
+    const wsb  = num(r.wBsR);
+    const wgdp = num(r.GDPRuns);
+    const sb   = num(r.SB);
+    const cs   = num(r.CS);
+    const g    = num(r.G);
+    if (bsr  != null) { agg.bsr  += bsr;  agg._bsrHas  = true; }
+    if (ubr  != null) { agg.ubr  += ubr;  agg._ubrHas  = true; }
+    if (wsb  != null) { agg.wsb  += wsb;  agg._wsbHas  = true; }
+    if (wgdp != null) { agg.wgdp += wgdp; agg._wgdpHas = true; }
+    if (sb   != null) { agg.sb   += sb;   agg._sbHas   = true; }
+    if (cs   != null) { agg.cs   += cs;   agg._csHas   = true; }
+    if (g    != null) { agg.g    += g;    agg._gHas    = true; }
+  }
+  if (skippedNoId) {
+    console.warn('[fg-player-baserunning] skipped ' + skippedNoId
+      + ' row(s) with no xMLBAMID (can\'t join — likely minor-leaguers or non-MLB IDs)');
+  }
+  const out = [];
+  for (const agg of accByMlbam.values()) {
+    out.push({
+      mlbam_id: agg.mlbam_id,
+      name:     agg.name,
+      bsr:  agg._bsrHas  ? agg.bsr  : null,
+      ubr:  agg._ubrHas  ? agg.ubr  : null,
+      wsb:  agg._wsbHas  ? agg.wsb  : null,
+      wgdp: agg._wgdpHas ? agg.wgdp : null,
+      sb:   agg._sbHas   ? agg.sb   : null,
+      cs:   agg._csHas   ? agg.cs   : null,
+      g:    agg._gHas    ? agg.g    : null,
+    });
+  }
+  console.log('[fg-player-baserunning] SUCCESS (' + out.length
+    + ' unique players, raw rows=' + rows.length
+    + ', traded-or-split=' + (rows.length - out.length - skippedNoId) + ')');
+  return out;
+}
+
+module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning };
