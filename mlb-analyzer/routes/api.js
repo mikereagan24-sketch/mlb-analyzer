@@ -2507,6 +2507,18 @@ router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
       return x.resolve_rate_pct - y.resolve_rate_pct;
     });
 
+    // Confirm season_roster is populated before reporting. If it
+    // isn't, the operator likely forgot POST /admin/refresh/season-
+    // rosters and the rate will misleadingly equal what live
+    // resolution gives.
+    const seasonRosterTotal = db.prepare(
+      "SELECT COUNT(*) AS n FROM team_rosters_season"
+    ).get();
+    const seasonRosterTeams = db.prepare(
+      "SELECT COUNT(DISTINCT team) AS n FROM team_rosters_season"
+    ).get();
+    const seasonRosterSeeded = (seasonRosterTotal && seasonRosterTotal.n > 0);
+
     res.json({
       window: { from, to },
       games: {
@@ -2525,11 +2537,20 @@ router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
       by_team: byTeamArr,
       unresolved_sample: unresolvedSample,
       unresolved_sample_capped_at: UNRESOLVED_CAP,
+      season_roster_state: {
+        seeded: seasonRosterSeeded,
+        total_rows: seasonRosterTotal ? seasonRosterTotal.n : 0,
+        distinct_teams: seasonRosterTeams ? seasonRosterTeams.n : 0,
+        warning: seasonRosterSeeded ? null
+          : 'team_rosters_season is EMPTY — hit POST /admin/refresh/season-rosters first. Without it the backtest resolver falls back to active-only and the rate will undercount.',
+      },
       notes: [
-        'Resolver = resolveCatcherMlbId(team, name) from services/jobs.js — same production-proven path FRV/framing use.',
+        'Resolver = resolveBacktestMlbId(team, name) from services/jobs.js — UNIONs active 26-man + season fullSeason. Recovers IL\'d / AAA stars (Acuña/Judge/etc.) that the live resolver correctly misses.',
+        'Live signal generation (catcher framing, FRV in processGameSignals) continues to use resolveCatcherMlbId (active only) — released players can\'t accidentally appear in tonight\'s calc.',
         'Every batting-order slot in both lineups is resolved (no position filter — every batter runs the bases).',
         'by_team is sorted worst-first so concentration shows up at the top.',
         'unresolved_sample is a HEAD sample (first 20 encountered, not random). If concentration is by date, the sample skews to early-window games.',
+        'If season_roster_state.seeded is false, this endpoint will report a deceptively low rate (active-only behavior).',
       ],
     });
   } catch (e) {
@@ -2590,7 +2611,7 @@ router.get('/admin/resolver-trace', requireAdminToken, (req, res) => {
     if (!team) return res.status(400).json({ error: 'team required (e.g. ATL)' });
     if (!name) return res.status(400).json({ error: 'name required (e.g. "Ronald Acuna")' });
 
-    const { resolveCatcherMlbId } = require('../services/jobs');
+    const { resolveCatcherMlbId, resolveBacktestMlbId } = require('../services/jobs');
     const { normName, stripSfx } = require('../utils/names');
 
     // Reproduce the resolver's normalization steps in-place so the
@@ -2600,82 +2621,119 @@ router.get('/admin/resolver-trace', requireAdminToken, (req, res) => {
     const last = parts.length >= 2 ? parts[parts.length - 1] : null;
     const first_init = parts.length >= 2 && parts[0] ? parts[0][0] : null;
 
-    // Pull the team's full POS roster for inspection.
-    const rosterRaw = db.prepare(
+    // Pull BOTH roster sources. team_rosters is active 26-man only
+    // (correctly excludes IL/AAA); team_rosters_season is the full-
+    // season superset that backtest resolution falls back to.
+    const activeRaw = db.prepare(
       "SELECT player_name, mlb_id, position FROM team_rosters "
       + "WHERE team=? AND role='POS' ORDER BY player_name"
     ).all(team);
+    const seasonRaw = db.prepare(
+      "SELECT player_name, mlb_id, position FROM team_rosters_season "
+      + "WHERE team=? AND role='POS' ORDER BY player_name"
+    ).all(team);
 
-    const rosterNormalized = rosterRaw.map(p => {
-      const pn = stripSfx(normName(p.player_name || ''));
-      const pp = pn.split(' ');
+    function normalizeRoster(rows) {
+      return rows.map(p => {
+        const pn = stripSfx(normName(p.player_name || ''));
+        const pp = pn.split(' ');
+        return {
+          raw_name: p.player_name,
+          mlb_id: p.mlb_id,
+          position: p.position,
+          normalized: pn,
+          normalized_last: pp.length >= 1 ? pp[pp.length - 1] : null,
+          normalized_first_init: pp.length >= 1 && pp[0] ? pp[0][0] : null,
+          parts_count: pp.length,
+        };
+      });
+    }
+    function findCandidates(rosterNorm) {
       return {
-        raw_name: p.player_name,
-        mlb_id: p.mlb_id,
-        position: p.position,
-        normalized: pn,
-        normalized_last: pp.length >= 1 ? pp[pp.length - 1] : null,
-        normalized_first_init: pp.length >= 1 && pp[0] ? pp[0][0] : null,
-        parts_count: pp.length,
+        strict: rosterNorm.filter(p =>
+          p.parts_count >= 2 && p.normalized_last === last && p.normalized_first_init === first_init),
+        by_last: rosterNorm.filter(p =>
+          p.parts_count >= 1 && p.normalized_last === last),
+        by_first: first_init ? rosterNorm.filter(p =>
+          p.parts_count >= 1 && p.normalized_first_init === first_init) : [],
       };
-    });
+    }
+    const activeNorm = normalizeRoster(activeRaw);
+    const seasonNorm = normalizeRoster(seasonRaw);
+    const active = findCandidates(activeNorm);
+    const season = findCandidates(seasonNorm);
 
-    const strict_candidates = rosterNormalized.filter(p =>
-      p.parts_count >= 2 && p.normalized_last === last && p.normalized_first_init === first_init
-    );
-    const by_last_name_only = rosterNormalized.filter(p =>
-      p.parts_count >= 1 && p.normalized_last === last
-    );
-    const by_first_init_only = first_init ? rosterNormalized.filter(p =>
-      p.parts_count >= 1 && p.normalized_first_init === first_init
-    ) : [];
+    // Run BOTH resolvers so the operator sees what live signal
+    // generation gets vs what backtest gets for the same input.
+    const live_mlb_id     = resolveCatcherMlbId(team, name);
+    const backtest_mlb_id = resolveBacktestMlbId(team, name);
 
-    // Raw first 5 rows so encoding quirks (HTML entities, weird
-    // Unicode) are visible without paging.
-    const raw_roster_sample = rosterRaw.slice(0, 5);
-
-    // Run the actual resolver — this is the production answer.
-    const final_mlb_id = resolveCatcherMlbId(team, name);
-
-    // Diagnosis
+    // Diagnosis — distinguishes temporal-mismatch (player missing
+    // from active but present in season) from genuine
+    // unresolvable cases. Stops misdiagnosing IL'd plain-ASCII
+    // players as "non-NFD char" issues.
     let diagnosis;
-    if (rosterRaw.length === 0) {
-      diagnosis = 'empty_roster (team_rosters has no POS players for this team — roster ingest gap or team abbreviation mismatch)';
-    } else if (parts.length < 2) {
+    if (parts.length < 2) {
       diagnosis = 'single_token_input (normalized to ' + JSON.stringify(parts) + '; resolver requires ≥2 tokens for first+last)';
-    } else if (strict_candidates.length === 1) {
-      diagnosis = 'strict_match (resolver should return ' + strict_candidates[0].mlb_id + ')';
-    } else if (strict_candidates.length > 1) {
-      diagnosis = 'ambiguous_last_first_init (' + strict_candidates.length + ' candidates with same last+first_init — resolver returns null by design)';
-    } else if (by_last_name_only.length === 0 && by_first_init_only.length === 0) {
-      diagnosis = 'no_last_or_first_match (the normalized last="' + last + '" and first_init="' + first_init + '" find NO roster entries — player likely missing from team_rosters, or roster row\'s name normalizes to something different. Check raw_roster_sample for encoding quirks.)';
-    } else if (by_last_name_only.length > 0) {
-      diagnosis = 'last_name_match_but_first_init_mismatch (' + by_last_name_only.length + ' roster row(s) share the last name "' + last + '" but their first_init differs — input first_init="' + first_init + '" vs roster first_inits=[' + by_last_name_only.map(p => p.normalized_first_init).join(',') + ']. Likely a name encoding issue on the roster side.)';
+    } else if (activeRaw.length === 0 && seasonRaw.length === 0) {
+      diagnosis = 'empty_rosters_both (no POS players in either team_rosters or team_rosters_season for ' + team + ' — ingest hasn\'t fired or team abbr mismatch)';
+    } else if (active.strict.length === 1) {
+      diagnosis = 'strict_match_active (resolveCatcherMlbId returns ' + active.strict[0].mlb_id + ', live signals work)';
+    } else if (active.strict.length === 0 && season.strict.length === 1) {
+      diagnosis = 'absent_from_active_present_in_season (resolveCatcherMlbId fails (correctly — player not on current 26-man, likely IL/AAA), resolveBacktestMlbId returns ' + season.strict[0].mlb_id + '. THIS IS THE TEMPORAL MISMATCH the season-roster union was built to fix.)';
+    } else if (active.strict.length === 0 && season.strict.length === 0
+            && active.by_last.length === 1) {
+      diagnosis = 'unique_last_active_fallback (PASS 1b: only one ' + team + ' active player with last="' + last + '", resolves via fallback to mlb_id ' + active.by_last[0].mlb_id + ')';
+    } else if (active.strict.length === 0 && season.strict.length === 0
+            && season.by_last.length === 1) {
+      diagnosis = 'unique_last_season_fallback (PASS 1b: only one ' + team + ' season player with last="' + last + '", resolves via fallback to mlb_id ' + season.by_last[0].mlb_id + ')';
+    } else if (active.strict.length > 1 || season.strict.length > 1) {
+      diagnosis = 'ambiguous_last_first_init (active=' + active.strict.length
+        + ', season=' + season.strict.length + ' candidates — resolver returns null by design)';
+    } else if (active.by_last.length === 0 && season.by_last.length === 0
+            && active.by_first.length === 0 && season.by_first.length === 0) {
+      diagnosis = 'absent_from_both (player not in active OR season roster — released, never-rostered, or season_roster ingest hasn\'t populated this team yet. seed via POST /admin/refresh/season-rosters first if season_roster_team_total=0.)';
+    } else if (active.by_last.length > 0 || season.by_last.length > 0) {
+      const sources = [];
+      if (active.by_last.length > 0) sources.push('active first_inits=[' + active.by_last.map(p => p.normalized_first_init).join(',') + ']');
+      if (season.by_last.length > 0) sources.push('season first_inits=[' + season.by_last.map(p => p.normalized_first_init).join(',') + ']');
+      diagnosis = 'last_name_match_but_first_init_mismatch (rows share last="' + last + '" but first_init differs from input first_init="' + first_init + '". ' + sources.join('; ') + '. Likely a first-name normalization edge on the roster side.)';
     } else {
-      diagnosis = 'first_init_match_but_last_name_mismatch (' + by_first_init_only.length + ' roster row(s) share first_init "' + first_init + '" but their last names differ — input last="' + last + '" vs roster lasts include [' + by_first_init_only.slice(0, 10).map(p => p.normalized_last).join(',') + ']. Likely the LAST NAME contains a non-NFD-decomposable character stripped by the a-z filter on one side.)';
+      const seasonHasFirstInit = season.by_first.length > 0;
+      const activeHasFirstInit = active.by_first.length > 0;
+      diagnosis = 'first_init_match_but_last_name_mismatch (rows share first_init "' + first_init + '" but lasts differ. active.by_first=' + activeHasFirstInit + ' season.by_first=' + seasonHasFirstInit + '. Could be a non-NFD-decomposable char in the last name on one side.)';
     }
 
     res.json({
       input: { team, name },
-      normalized_input: {
-        full_norm: norm,
-        parts,
-        last,
-        first_init,
+      normalized_input: { full_norm: norm, parts, last, first_init },
+      roster_sizes: {
+        active_team_total: activeRaw.length,
+        season_team_total: seasonRaw.length,
+        season_team_seeded: seasonRaw.length > 0,
       },
-      roster_team_total: rosterRaw.length,
-      strict_candidates,
-      by_last_name_only,
-      by_first_init_only_sample: by_first_init_only.slice(0, 20),
-      by_first_init_only_total: by_first_init_only.length,
-      raw_roster_sample,
-      final_result: { mlb_id: final_mlb_id, resolved: final_mlb_id != null },
+      active_roster: {
+        strict_candidates: active.strict,
+        by_last_name_only: active.by_last,
+        by_first_init_only_total: active.by_first.length,
+        raw_sample: activeRaw.slice(0, 3),
+      },
+      season_roster: {
+        strict_candidates: season.strict,
+        by_last_name_only: season.by_last,
+        by_first_init_only_total: season.by_first.length,
+        raw_sample: seasonRaw.slice(0, 3),
+      },
+      final_result: {
+        live: { mlb_id: live_mlb_id, resolved: live_mlb_id != null },
+        backtest: { mlb_id: backtest_mlb_id, resolved: backtest_mlb_id != null },
+      },
       diagnosis,
       notes: [
-        'normalized values reflect normName + stripSfx (services/utils/names.js).',
-        'strict_candidates is the PASS-1 logic resolveCatcherMlbId actually uses.',
-        'by_last_name_only and by_first_init_only are diagnostic widenings to identify which axis failed.',
-        'raw_roster_sample shows actual stored characters — copy-paste a name to spot encoding quirks (HTML entities, non-NFD-decomposable chars like ø/æ/œ that the a-z regex strips entirely).',
+        'live = resolveCatcherMlbId (active 26-man, used by production signal generation).',
+        'backtest = resolveBacktestMlbId (active ∪ season, used by /admin/lineup-coverage + all *-backtest services).',
+        'absent_from_active_present_in_season = the IL/AAA temporal-mismatch case. Live correctly misses (player not playing tonight); backtest correctly recovers (player WAS playing historically).',
+        'If season_team_seeded is false, hit POST /admin/refresh/season-rosters first — the season table is empty until the job runs.',
       ],
     });
   } catch (e) {
