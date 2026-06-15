@@ -3,9 +3,38 @@
 // Shared name normalization + fuzzy lookup for woba_data and roster matching.
 // Single source of truth — do not inline copies of this logic elsewhere.
 
+// Characters that NFD does NOT decompose to a base + combining mark.
+// Without explicit handling they survive the combining-mark strip and
+// then get stripped to nothing by the [^a-z\s] filter — silently
+// breaking comparisons when one side has the precomposed char and the
+// other has it manually transliterated (common in scraped sources,
+// e.g. lineup feed has "Bjorn" but roster has "Bjørn"). Mapping these
+// before NFD lets both sides converge on the same a-z output.
+//
+// Coverage: Scandinavian (ø, æ), Polish (ł), German (ß), Vietnamese
+// consonants (đ), Turkish (ı), French (œ). Add new entries as new
+// failure modes surface; the transliteration is a one-way fold so
+// over-broad entries can't break exact-match lookups that are
+// already correct.
+const NORM_TRANSLIT = {
+  'ø': 'o',  'Ø': 'o',   // ø Ø
+  'æ': 'ae', 'Æ': 'ae',  // æ Æ
+  'œ': 'oe', 'Œ': 'oe',  // œ Œ
+  'ß': 'ss',                  // ß
+  'đ': 'd',  'Đ': 'd',   // đ Đ
+  'ł': 'l',  'Ł': 'l',   // ł Ł
+  'ı': 'i',  'İ': 'i',   // ı İ
+};
+const NORM_TRANSLIT_RE = new RegExp('[' + Object.keys(NORM_TRANSLIT).join('') + ']', 'g');
+
 function normName(n) {
-  return (n || '').toLowerCase().normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+  return (n || '')
+    // Translit BEFORE NFD so we hit the precomposed forms; NFD on
+    // these is a no-op since they have no decomposition.
+    .replace(NORM_TRANSLIT_RE, (c) => NORM_TRANSLIT[c])
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z\s]/g, '')
     .replace(/\s+/g, ' ')
     .trim();

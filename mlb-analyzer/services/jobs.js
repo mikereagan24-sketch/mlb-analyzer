@@ -4078,21 +4078,44 @@ function resolveCatcherMlbId(team, lineupName) {
   const last = parts[parts.length - 1];
   const firstInit = parts[0][0];
 
-  // PASS 1: team_rosters POS players.
+  // PASS 1: team_rosters POS players. Two-tier match.
+  //   1a strict: same last name AND same first_init.
+  //   1b unique-last-name fallback: if 1a returned ZERO candidates AND
+  //      exactly ONE roster row on this team has the matching last
+  //      name (any first init), use it. Catches first-name encoding
+  //      mismatches where one side has the full first ("Ronald") and
+  //      the other has an oddly-normalized form, AND scenarios where
+  //      a player's preferred name differs from statsapi's fullName.
+  //      Scoped per-team so a "Smith" on one team won't false-match
+  //      a "Smith" on another. Skipped when ≥2 last-name matches
+  //      exist (genuine ambiguity — same null result as before).
   try {
     const players = q.getPositionPlayers.all(team);
-    const candidates = [];
+    const candidatesStrict = [];
+    const candidatesByLast = [];
     for (const p of players) {
       const pn = stripSfx(normName(p.player_name));
       const pp = pn.split(' ');
       if (pp.length < 2) continue;
-      if (pp[pp.length - 1] === last && pp[0][0] === firstInit) candidates.push(p);
+      if (pp[pp.length - 1] !== last) continue;
+      candidatesByLast.push(p);
+      if (pp[0][0] === firstInit) candidatesStrict.push(p);
     }
-    if (candidates.length === 1) return candidates[0].mlb_id;
-    // 2+ candidates is ambiguous — fall through to PASS 2; if PASS 2
-    // also resolves uniquely (e.g. only one of them is a catcher per
-    // Savant), we'll still get the right answer. Falling through is
-    // safe because PASS 2 has its own uniqueness check.
+    if (candidatesStrict.length === 1) return candidatesStrict[0].mlb_id;
+    if (candidatesStrict.length === 0 && candidatesByLast.length === 1) {
+      // 1b unique-last fallback. Log it so prod can audit any false
+      // positives — if a wrong player resolves this way, the warn
+      // line in render logs lets us spot it.
+      console.warn('[resolver] PASS 1b unique-last fallback: team=' + team
+        + ' lineup_name="' + lineupName + '" → resolved to "'
+        + candidatesByLast[0].player_name + '" (mlb_id ' + candidatesByLast[0].mlb_id
+        + ') — strict last+first_init had zero candidates, only one last-name match on roster');
+      return candidatesByLast[0].mlb_id;
+    }
+    // 2+ strict candidates is ambiguous — fall through to PASS 2; if
+    // PASS 2 also resolves uniquely (e.g. only one of them is a
+    // catcher per Savant), we'll still get the right answer. Falling
+    // through is safe because PASS 2 has its own uniqueness check.
   } catch (e) { /* table missing — keep going */ }
 
   // PASS 2: catcher_framing direct match. Names are
