@@ -337,12 +337,38 @@ async function fetchTeamBaserunning(season, cookieValue) {
   // 'BsR' but FG returned a slightly different field name.
   console.log('[fg-baserunning] FG response field keys (row 0): '
     + Object.keys(rows[0] || {}).slice(0, 60).join(','));
-  // Team-aggregate sanity guard. With team=0%2Cts each Team value
-  // appears exactly once. >1 row per Team means aggregation didn't
-  // take effect and we'd be parsing per-player rows.
+  // ---- FIELD NAMES (verified from Mike's captured response) ----
+  // Team identity: r.TeamNameAbb is a clean abbr (e.g. "PIT").
+  // Prefer it over r.Team, which the team=0,ts view returns as an
+  // HTML anchor (<A HREF=...>LAD</A>). TeamNameAbb is plain text;
+  // no regex stripping needed. r.TeamName is the full city name —
+  // not used, kept here as fallback only.
+  //
+  // Baserunning columns:
+  //   r.BaseRunning  → bsr   (total BsR, e.g. 5.965)
+  //   r.wBsR         → wsb   (weighted; FG renamed from wSB)
+  //   r.UBR          → ubr   (NULL at team-aggregate level on this
+  //                            view — only populated at player level)
+  //   r.GDPRuns      → wgdp  (NULL at team-aggregate level too)
+  //   r.SB / r.CS    → sb / cs (raw counts, always populated)
+  //   r.G            → g     (games played; ~1000+ at team level
+  //                            since it's team-game-count summed
+  //                            across all players)
+  //
+  // SHAPE NOTE — team=0,ts returns one PLAYER-LABELED row per team,
+  // but the BaseRunning value is the TEAM TOTAL (not a single
+  // player's). G of ~1000+ on each row confirms aggregate-across-
+  // players-not-games. This is the right shape for the team-level
+  // backtest. The future player-level variant (~700 individual
+  // rows, each with their own BaseRunning) drops team=0,ts and uses
+  // ind=1 instead — NOT built here.
+  //
+  // Team-aggregate sanity guard: with team=0,ts each TeamNameAbb
+  // appears exactly once. >1 row per team = aggregation didn't take
+  // effect.
   const teamCounts = new Map();
   for (const r of rows) {
-    const t = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+    const t = String(r.TeamNameAbb || r.TeamName || '').trim().toUpperCase();
     if (t) teamCounts.set(t, (teamCounts.get(t) || 0) + 1);
   }
   let maxPerTeam = 0;
@@ -355,16 +381,16 @@ async function fetchTeamBaserunning(season, cookieValue) {
   const FG_MAP = { KCR: 'KC', SDP: 'SD', SFG: 'SF', TBR: 'TB', WSN: 'WAS', CHW: 'CWS' };
   const out = [];
   for (const r of rows) {
-    const teamRaw = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+    const teamRaw = String(r.TeamNameAbb || r.TeamName || '').trim().toUpperCase();
     if (!teamRaw) continue;
     const team = FG_MAP[teamRaw] || teamRaw;
     const num = (v) => (v == null || v === '' ? null : Number(v));
     out.push({
       team,
-      bsr:  num(r.BsR),
+      bsr:  num(r.BaseRunning),
       ubr:  num(r.UBR),
-      wsb:  num(r.wSB),
-      wgdp: num(r.wGDP),
+      wsb:  num(r.wBsR),
+      wgdp: num(r.GDPRuns),
       sb:   num(r.SB),
       cs:   num(r.CS),
       g:    num(r.G),
