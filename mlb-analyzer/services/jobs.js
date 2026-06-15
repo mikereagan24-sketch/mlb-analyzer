@@ -2,7 +2,8 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchTeamBaserunning, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
+const { fetchTeamBaserunning } = require('./fangraphs');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -4298,12 +4299,25 @@ async function runFieldingFrvJob(opts) {
 // at today's PT date. Same shape as runFieldingFrvJob; PT-anchored
 // snapshot to match the framing/FRV convention. Non-fatal failure
 // on either fetch or snapshot — never blocks the rest of the cron.
+//
+// AUTH: reuses the same fangraphs_session_cookie the projection
+// scraper consumes. Initial implementation tried unauthenticated
+// browser-mimic headers and got 403'd by Cloudflare — moved to the
+// proven baseHeaders pattern. Cookie pasted by operator via the
+// Model tab; if absent, the job logs the missing-cookie state and
+// returns success=false (non-fatal — never blocks the cron chain).
 async function runBaserunningJob(opts) {
   const o = opts || {};
   const season = o.season || new Date().getFullYear();
+  const cookieRow = q.getSetting.get('fangraphs_session_cookie');
+  const cookieValue = cookieRow && cookieRow.value ? String(cookieRow.value).trim() : '';
+  if (!cookieValue) {
+    console.warn('[baserunning] fangraphs_session_cookie not configured — skipping. Paste via Model tab and re-run /admin/refresh/baserunning.');
+    return { success: false, error: 'fangraphs_session_cookie not configured. Paste from Model tab.' };
+  }
   console.log('[baserunning] fetching FG team BsR for season ' + season + '...');
   try {
-    const rows = await fetchTeamBaserunning(season);
+    const rows = await fetchTeamBaserunning(season, cookieValue);
     const refreshedAt = new Date().toISOString();
     q.upsertTeamBaserunning(season, rows, refreshedAt);
     console.log('[baserunning] upserted ' + rows.length + ' team rows for ' + season);
