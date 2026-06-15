@@ -47,7 +47,11 @@ const { db, q } = require('../db/schema');
 const model = require('./model');
 const jobs  = require('./jobs');
 const { impliedP } = require('./model');
-const { resolveCatcherMlbId } = jobs;
+// Backtest-only resolver (UNIONs active 26-man + season fullSeason).
+// See services/jobs.js resolveBacktestMlbId. Imported under the
+// historical name to minimize diff churn against the team-level
+// baserunning backtest harness.
+const { resolveBacktestMlbId: resolveCatcherMlbId } = jobs;
 
 function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 

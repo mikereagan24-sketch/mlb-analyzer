@@ -308,6 +308,28 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(team, player_name)
   );
+  -- Season-cumulative roster (statsapi rosterType=fullSeason). Superset
+  -- of team_rosters — includes currently-IL players who were active
+  -- earlier in the season, plus players who appeared on the team during
+  -- a mid-season trade window. Used ONLY by backtest resolution
+  -- (resolveBacktestMlbId in services/jobs.js); live signal generation
+  -- continues to use team_rosters (active 26-man) so released players
+  -- can't accidentally resolve in tonight's lineup.
+  --
+  -- Same shape as team_rosters so the resolver can match rows without
+  -- per-table column shimming. Refreshed by runSeasonRosterJob on the
+  -- same 6AM PT cadence as the active roster.
+  CREATE TABLE IF NOT EXISTS team_rosters_season (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team TEXT NOT NULL,
+    player_name TEXT NOT NULL,
+    mlb_id INTEGER,
+    role TEXT NOT NULL,
+    hand TEXT,
+    position TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(team, player_name)
+  );
   -- Catcher framing run values (Statcast catcher-framing leaderboard).
   -- Keyed by mlb_id, which Savant provides directly and which a lineup
   -- catcher resolves to via team_rosters. rv_tot is cumulative season
@@ -1821,6 +1843,18 @@ q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,r
     mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, position=excluded.position, updated_at=excluded.updated_at`);
 q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
 q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
+
+// Season roster (statsapi rosterType=fullSeason) — used by
+// resolveBacktestMlbId only. Same writer/reader shape as the active
+// roster so the resolver can match identically.
+q.upsertSeasonRoster = db.prepare(`INSERT INTO team_rosters_season (team,player_name,mlb_id,role,hand,position,updated_at)
+  VALUES (?,?,?,?,?,?,datetime('now'))
+  ON CONFLICT(team,player_name) DO UPDATE SET
+    mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, position=excluded.position, updated_at=excluded.updated_at`);
+q.clearSeasonRoster = db.prepare("DELETE FROM team_rosters_season WHERE team=?");
+q.getSeasonPositionPlayers = db.prepare(
+  "SELECT player_name, mlb_id, position FROM team_rosters_season WHERE team=? AND role='POS'"
+);
 
 // Catcher framing: upsert (for the Savant ingest, built later), point
 // lookup by mlb_id, and a name→mlb_id bridge through team_rosters so a

@@ -32,11 +32,19 @@ const { db, q } = require('../db/schema');
 const model = require('./model');
 const jobs  = require('./jobs');
 
-// Single source of truth — the same resolver production uses for
-// catcher framing and FRV. fc16748 made resolveCatcherMlbId
-// uppercase its team input internally, so we no longer need the old
-// awayAbbr.toUpperCase() workaround that the original script carried.
-const { resolveCatcherMlbId } = jobs;
+// BACKTEST resolver — UNIONs active 26-man + season fullSeason.
+// Historical lineups in this backtest's window (5/01-6/14) contain
+// stars like Acuña/Judge/Ramirez who are currently IL and therefore
+// absent from active 26-man. resolveBacktestMlbId falls back to
+// team_rosters_season for them, recovering ~12% of fielder slots
+// that previously dropped silently. The prior -0.70/-1.76pp FRV
+// shelve verdict was measured on the dropped subset; this rerun on
+// clean inputs is the re-test the disposition was waiting for.
+//
+// Variable name kept as resolveCatcherMlbId for diff hygiene with
+// the upstream backtest scripts; functionally it's the broader
+// backtest resolver.
+const { resolveBacktestMlbId: resolveCatcherMlbId } = jobs;
 
 function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 

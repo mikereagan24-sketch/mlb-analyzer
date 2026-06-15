@@ -2,7 +2,7 @@
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
 const { fetchTeamBaserunning } = require('./fangraphs');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
@@ -2406,6 +2406,11 @@ function startCronJobs() {
     console.log('[cron] 6AM PT roster refresh');
     try { await runRosterJob(); }
     catch(e) { console.error('[cron-roster] failed:', e && e.message); }
+    // Season-cumulative roster (statsapi fullSeason) — backtest-only
+    // resolver source. Runs after the active roster so a statsapi
+    // hiccup on this call doesn't block tonight's live roster.
+    try { await runSeasonRosterJob(); }
+    catch(e) { console.error('[cron-roster-season] failed:', e && e.message); }
     // Refresh the trailing-3yr Fielding Run Value after rosters (daily is
     // ample — it's a multi-season aggregate that barely moves day to day).
     // Non-fatal: a Savant hiccup must not abort the morning chain.
@@ -4475,6 +4480,93 @@ async function runRosterJob() {
   }
 }
 
+// Season-cumulative roster pull (statsapi rosterType=fullSeason).
+// Writes to team_rosters_season — a SEPARATE table from team_rosters,
+// consumed ONLY by resolveBacktestMlbId. Live signal generation
+// continues to read team_rosters (active 26-man) so this job can't
+// silently change live behavior.
+//
+// Same delete-then-insert pattern as runRosterJob. No FG roles
+// overlay (the role-based filters that matter live aren't applied to
+// backtest resolution — backtest only cares about POS slots).
+// Non-fatal failure mirrors runRosterJob.
+async function runSeasonRosterJob() {
+  console.log('[roster-season] Starting season roster pull for all 30 teams...');
+  try {
+    const rosters = await fetchSeasonRosters();
+    let totalPlayers = 0;
+    const upsert = q.upsertSeasonRoster;
+    for (const [team, players] of Object.entries(rosters)) {
+      if (!players.length) continue;
+      q.clearSeasonRoster.run(team);
+      for (const p of players) {
+        upsert.run(team, p.name, p.mlb_id, p.role, p.hand, p.position || null);
+      }
+      totalPlayers += players.length;
+    }
+    console.log(`[roster-season] statsapi pull done — ${totalPlayers} players across ${Object.keys(rosters).length} teams`);
+    return { success: true, teams: Object.keys(rosters).length, players: totalPlayers };
+  } catch(e) {
+    console.error('[roster-season] Error: '+e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+// Backtest-only name → mlb_id resolver. Tries the production active-
+// roster resolver first (matches today's lineup against today's
+// 26-man) and falls back to the season roster (full-season players,
+// covers currently-IL stars who were active when the historical
+// lineup was set).
+//
+// LIVE SIGNAL GENERATION DOES NOT CALL THIS. Catcher framing + FRV in
+// processGameSignals stay on resolveCatcherMlbId. This function is
+// reserved for /admin/lineup-coverage, services/frv-backtest.js, and
+// the planned player-BsR backtest — surfaces where lineups are
+// historical (5/01-6/14) and the IL'd-now stars need to resolve.
+//
+// Matching logic mirrors resolveCatcherMlbId's PASS 1 + 1b inline so
+// the season-roster path gets the same accent-folding / unique-last-
+// name fallback semantics. PASS 2 (catcher_framing) is inherited
+// through the resolveCatcherMlbId delegation at the top.
+function resolveBacktestMlbId(team, lineupName) {
+  // Try the live resolver first — covers active 26-man + framing
+  // PASS 2. The live resolver already logs structured warns on miss,
+  // which we don't want spamming for routine backtest IL'd-player
+  // misses, but accepting a few extra log lines is cheaper than
+  // duplicating PASS 2 here.
+  const live = resolveCatcherMlbId(team, lineupName);
+  if (live) return live;
+
+  // Fall back to season roster. Same matching shape as PASS 1 / 1b.
+  if (!team || !lineupName) return null;
+  team = String(team).toUpperCase();
+  const norm = stripSfx(normName(lineupName));
+  const parts = norm.split(' ');
+  if (parts.length < 2) return null;
+  const last = parts[parts.length - 1];
+  const firstInit = parts[0][0];
+
+  try {
+    if (!q.getSeasonPositionPlayers) return null;
+    const players = q.getSeasonPositionPlayers.all(team);
+    const candidatesStrict = [];
+    const candidatesByLast = [];
+    for (const p of players) {
+      const pn = stripSfx(normName(p.player_name));
+      const pp = pn.split(' ');
+      if (pp.length < 2) continue;
+      if (pp[pp.length - 1] !== last) continue;
+      candidatesByLast.push(p);
+      if (pp[0][0] === firstInit) candidatesStrict.push(p);
+    }
+    if (candidatesStrict.length === 1) return candidatesStrict[0].mlb_id;
+    if (candidatesStrict.length === 0 && candidatesByLast.length === 1) {
+      return candidatesByLast[0].mlb_id;
+    }
+  } catch (e) { /* season table missing or query failed → null */ }
+  return null;
+}
+
 // Pulls FanGraphs RosterResource depth charts for all 30 teams, matches
 // FG names against the freshly-pulled team_rosters (so we can join name →
 // mlb_id), writes pitcher_fg_role keyed by mlb_id, and updates the
@@ -4583,4 +4675,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId };

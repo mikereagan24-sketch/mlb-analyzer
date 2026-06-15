@@ -813,6 +813,67 @@ async function fetchActiveRosters() {
   return results;
 }
 
+// Season-cumulative roster (statsapi rosterType=fullSeason). Superset of
+// the active 26-man — includes currently-IL players who were active
+// earlier, plus mid-season trade/release windows. Critical for backtest
+// resolution against historical lineups where stars like Acuña/Judge/
+// Ramirez played earlier in the season but are currently IL.
+//
+// NO active-status filter — we WANT IL'd players here. statsapi's
+// fullSeason returns the union of everyone who's been on the team this
+// season; we trust that union directly. SP/RP/POS classification
+// mirrors fetchActiveRosters' logic so the downstream resolver doesn't
+// care which source the row came from.
+//
+// Stats hydration is skipped (the SP/RP classification still works
+// from stats.gamesPitched/gamesStarted when present; for fullSeason
+// rows where stats may be sparse on partial-season players, default
+// to RP — RP is the safer default since SP misclassification would
+// distort the bullpen weights for live signals, and these rows never
+// reach live signal generation).
+async function fetchSeasonRosters() {
+  const results = {};
+  const teams = Object.keys(MLB_TEAM_IDS);
+  for (const team of teams) {
+    try {
+      const teamId = MLB_TEAM_IDS[team];
+      const url = `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=fullSeason&season=2026&hydrate=person(stats(type=season,sportId=1))`;
+      const data = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } }).then(r => r.json());
+      const allRoster = data.roster || [];
+      results[team] = allRoster.map(p => {
+        const isPitcher = p.position?.type === 'Pitcher';
+        const posAbbr = p.position?.abbreviation || null;
+        if (!isPitcher) {
+          return {
+            name: p.person?.fullName || '',
+            mlb_id: p.person?.id || null,
+            role: 'POS',
+            hand: p.person?.batSide?.code || 'R',
+            position: posAbbr
+          };
+        }
+        const stats = p.person?.stats?.[0]?.splits?.[0]?.stat || {};
+        const gs = parseInt(stats.gamesStarted) || 0;
+        const g  = parseInt(stats.gamesPitched) || 0;
+        const role = (gs > 0 && gs / Math.max(g, 1) >= 0.5) ? 'SP' : 'RP';
+        return {
+          name: p.person?.fullName || '',
+          mlb_id: p.person?.id || null,
+          role,
+          hand: p.person?.pitchHand?.code || 'R',
+          position: posAbbr || 'P'
+        };
+      });
+      const nPOS = results[team].filter(p => p.role === 'POS').length;
+      console.log(`[roster-season] ${team}: ${results[team].length} players (${nPOS} POS)`);
+    } catch (e) {
+      console.error(`[roster-season] ${team} error: ${e.message}`);
+      results[team] = [];
+    }
+  }
+  return results;
+}
+
 // Fetch the Statcast catcher-framing leaderboard CSV from Baseball Savant.
 // Savant returns the CSV only with a browser User-Agent (default fetch UA
 // gets an empty body — confirmed). Columns we use: id (mlb_id), name
@@ -1252,4 +1313,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor };
+module.exports = { fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor };

@@ -49,7 +49,8 @@ const jobs  = require('./jobs');
 
 // Same production resolver the FRV backtest uses — needed by
 // buildBacktestGame for framing/FRV input computation.
-const { resolveCatcherMlbId } = jobs;
+// Backtest-only resolver (UNIONs active + season). See services/jobs.js.
+const { resolveBacktestMlbId: resolveCatcherMlbId } = jobs;
 
 function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 
