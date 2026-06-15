@@ -237,127 +237,135 @@ async function refreshAllFanGraphs(cookieValue) {
 
 // Team-aggregated baserunning leaderboard from FanGraphs.
 //
-// AUTH (fixed in 910255f): proven baseHeaders pattern + session
-// cookie cleared the Cloudflare 403. URL DISCOVERY (this revision):
-// the previously-guessed /api/leaders/major-league/data 404'd —
-// FG has reorganized the leaders API. Try the current most-likely
-// paths in order, log each attempt, first 200 with team-aggregated
-// JSON wins. The success-line names the URL that worked so the
-// operator can paste it back and we pin once observed.
+// URL pinned (verified 200, returns 30 team-aggregated rows with
+// BsR/UBR/wSB/wGDP/SB/CS — Mike's Network-tab capture 2026-06-15):
+//
+//   /api/leaders/major-league/data
+//     ?age=&pos=all&stats=bat&lg=all&qual=0
+//     &season=YYYY&season1=YYYY
+//     &startdate=YYYY-03-01&enddate=YYYY-11-01
+//     &month=0&hand=
+//     &team=0%2Cts                    ← URL-ENCODED comma; raw comma 404s
+//     &pageitems=30&pagenum=1         ← pagination required, even for 30 teams
+//     &ind=0&rost=0&players=0
+//     &type=8                          ← advanced view incl. baserunning
+//     &postseason=&sortdir=default&sortstat=WAR
+//
+// The prior 404s came from an INCOMPLETE query string — missing
+// startdate/enddate/pageitems/pagenum + sending a raw comma in
+// team=0,ts. All present-even-if-empty params (age, hand, pos,
+// postseason, sortdir, sortstat) are required by FG's API gate;
+// dropping any one returns 404.
+//
+// AUTH: same baseHeaders(cookieValue) pattern as the projection
+// scraper. Cookie must be configured at app_settings.
+// fangraphs_session_cookie (paste via Model tab).
 //
 // FG abbr normalization mirrors the bat-proj CSV ingest at
 // routes/api.js:155-157 (KCR→KC, SDP→SD, SFG→SF, TBR→TB, WSN→WAS,
 // CHW→CWS). Any unmapped FG abbr passes through as-is.
+//
+// On non-OK: logs URL + cookie_present + selected CF/server response
+// headers for diagnostics so a future FG regression is debuggable.
+// Team-aggregate guard (1 row per Team) catches the case where FG
+// accepts the request but the team aggregation didn't take effect.
 async function fetchTeamBaserunning(season, cookieValue) {
   const yr = season || new Date().getFullYear();
-  // Common query string across variants. team=0,ts is FG's
-  // documented selector for team-aggregated rows (one row per team);
-  // type=8 is the "advanced" stat view that includes BsR/UBR/wSB/
-  // wGDP; qual=0 disables the PA qualifier so all 30 teams come
-  // back. month=0 = full season.
-  const baseQuery = 'stats=bat&lg=all&qual=0&type=8'
-    + '&season=' + yr + '&season1=' + yr
-    + '&team=0,ts&month=0';
-  // URL candidates in priority order. Pulled from FG patterns
-  // observed in adjacent endpoints:
-  //   - /api/leaders/major-league             — modern Next.js
-  //     convention, matches /api/leaders/splits/splits-leaders
-  //     shape (working in fangraphs.js for actuals).
-  //   - /api/leaders/major-league/data        — original guess
-  //     (legacy /data suffix; kept for diagnostic completeness so
-  //     the operator confirms the 404 reproduces).
-  //   - /leaders/major-league?...&download=1  — page URL with FG's
-  //     historical download flag; returns JSON despite the name on
-  //     the projection endpoint, may behave the same here.
-  const candidates = [
-    'https://www.fangraphs.com/api/leaders/major-league?'      + baseQuery,
-    'https://www.fangraphs.com/api/leaders/major-league/data?' + baseQuery,
-    'https://www.fangraphs.com/leaders/major-league?'          + baseQuery + '&download=1',
-  ];
+  // season must be the FG-side year for both startdate/enddate. The
+  // wide window (Mar 1 → Nov 1) safely covers regular season + most
+  // postseason without overlapping into the next year.
+  const startdate = yr + '-03-01';
+  const enddate   = yr + '-11-01';
+  // Order matches Mike's captured URL so the request bytes are
+  // identical to what FG's own client sends — any param-order
+  // sensitivity in their gate is sidestepped. team=0%2Cts is the
+  // URL-encoded comma (raw comma 404s).
+  const url = 'https://www.fangraphs.com/api/leaders/major-league/data'
+    + '?age='
+    + '&pos=all'
+    + '&stats=bat'
+    + '&lg=all'
+    + '&qual=0'
+    + '&season='     + yr
+    + '&season1='    + yr
+    + '&startdate='  + startdate
+    + '&enddate='    + enddate
+    + '&month=0'
+    + '&hand='
+    + '&team=0%2Cts'
+    + '&pageitems=30'
+    + '&pagenum=1'
+    + '&ind=0'
+    + '&rost=0'
+    + '&players=0'
+    + '&type=8'
+    + '&postseason='
+    + '&sortdir=default'
+    + '&sortstat=WAR';
 
-  let lastErr = null;
-  for (const url of candidates) {
-    let resp;
-    try {
-      resp = await fetch(url, { headers: baseHeaders(cookieValue) });
-    } catch (e) {
-      console.warn('[fg-baserunning] fetch exception on ' + url + ': ' + e.message);
-      lastErr = e;
-      continue;
+  const resp = await fetch(url, { headers: baseHeaders(cookieValue) });
+  if (!resp.ok) {
+    const respDiag = {};
+    for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
+      const v = resp.headers.get(h);
+      if (v) respDiag[h] = v;
     }
-    if (!resp.ok) {
-      const respDiag = {};
-      for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
-        const v = resp.headers.get(h);
-        if (v) respDiag[h] = v;
-      }
-      console.warn('[fg-baserunning] HTTP ' + resp.status + ' ' + url
-        + ' | cookie_present=' + !!cookieValue
-        + ' | response_headers=' + JSON.stringify(respDiag));
-      lastErr = new Error('FG team baserunning fetch ' + resp.status + ' for ' + url);
-      continue;
-    }
-    const text = await resp.text();
-    let body;
-    try { body = JSON.parse(text); }
-    catch (e) {
-      console.warn('[fg-baserunning] non-JSON response from ' + url
-        + ' (first 200 chars): ' + text.slice(0, 200));
-      lastErr = new Error('FG team baserunning returned non-JSON from ' + url);
-      continue;
-    }
-    // FG wraps rows in { data: [...] } or returns the array directly.
-    const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
-    if (!rows || !rows.length) {
-      console.warn('[fg-baserunning] zero rows from ' + url
-        + ' | top-level keys: ' + Object.keys(body || {}).join(','));
-      lastErr = new Error('FG team baserunning: zero rows from ' + url);
-      continue;
-    }
-    // Sanity: confirm this is team-aggregated, not per-player. With
-    // team=0,ts each Team value should appear exactly once. If we see
-    // multiple rows per team, the team-aggregation selector isn't
-    // taking effect under this URL.
-    const teamCounts = new Map();
-    for (const r of rows) {
-      const t = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
-      if (t) teamCounts.set(t, (teamCounts.get(t) || 0) + 1);
-    }
-    let maxPerTeam = 0;
-    for (const v of teamCounts.values()) if (v > maxPerTeam) maxPerTeam = v;
-    if (maxPerTeam > 1) {
-      console.warn('[fg-baserunning] ' + url + ' returned per-player rows ('
-        + rows.length + ' rows, ' + teamCounts.size + ' teams, max '
-        + maxPerTeam + ' per team) — team=0,ts not taking effect');
-      lastErr = new Error('FG team baserunning: per-player shape from ' + url);
-      continue;
-    }
-    const FG_MAP = { KCR: 'KC', SDP: 'SD', SFG: 'SF', TBR: 'TB', WSN: 'WAS', CHW: 'CWS' };
-    const out = [];
-    for (const r of rows) {
-      const teamRaw = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
-      if (!teamRaw) continue;
-      const team = FG_MAP[teamRaw] || teamRaw;
-      const num = (v) => (v == null || v === '' ? null : Number(v));
-      out.push({
-        team,
-        bsr:  num(r.BsR),
-        ubr:  num(r.UBR),
-        wsb:  num(r.wSB),
-        wgdp: num(r.wGDP),
-        sb:   num(r.SB),
-        cs:   num(r.CS),
-        g:    num(r.G),
-      });
-    }
-    if (!out.length) {
-      lastErr = new Error('FG team baserunning: parsed zero usable rows from ' + url);
-      continue;
-    }
-    console.log('[fg-baserunning] SUCCESS on ' + url + ' (' + out.length + ' team rows)');
-    return out;
+    console.warn('[fg-baserunning] HTTP ' + resp.status + ' ' + url
+      + ' | cookie_present=' + !!cookieValue
+      + ' | response_headers=' + JSON.stringify(respDiag));
+    throw new Error('FG team baserunning fetch ' + resp.status
+      + (resp.status === 403 ? ' (likely Cloudflare/Member-auth gate — verify fangraphs_session_cookie)'
+       : resp.status === 404 ? ' (URL or query params drifted from the pinned shape; re-capture from Network tab)'
+       : ''));
   }
-  throw lastErr || new Error('FG team baserunning: all candidate URLs failed');
+  const text = await resp.text();
+  let body;
+  try { body = JSON.parse(text); }
+  catch (e) {
+    throw new Error('FG team baserunning returned non-JSON (first 200 chars): ' + text.slice(0, 200));
+  }
+  // FG wraps rows in { data: [...] } or returns the array directly.
+  const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
+  if (!rows || !rows.length) {
+    throw new Error('FG team baserunning: zero rows | top-level keys: '
+      + Object.keys(body || {}).join(','));
+  }
+  // Team-aggregate sanity guard. With team=0%2Cts each Team value
+  // appears exactly once. >1 row per Team means aggregation didn't
+  // take effect and we'd be parsing per-player rows.
+  const teamCounts = new Map();
+  for (const r of rows) {
+    const t = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+    if (t) teamCounts.set(t, (teamCounts.get(t) || 0) + 1);
+  }
+  let maxPerTeam = 0;
+  for (const v of teamCounts.values()) if (v > maxPerTeam) maxPerTeam = v;
+  if (maxPerTeam > 1) {
+    throw new Error('FG team baserunning: per-player shape ('
+      + rows.length + ' rows, ' + teamCounts.size + ' teams, max '
+      + maxPerTeam + ' per team) — team aggregation selector failed');
+  }
+  const FG_MAP = { KCR: 'KC', SDP: 'SD', SFG: 'SF', TBR: 'TB', WSN: 'WAS', CHW: 'CWS' };
+  const out = [];
+  for (const r of rows) {
+    const teamRaw = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+    if (!teamRaw) continue;
+    const team = FG_MAP[teamRaw] || teamRaw;
+    const num = (v) => (v == null || v === '' ? null : Number(v));
+    out.push({
+      team,
+      bsr:  num(r.BsR),
+      ubr:  num(r.UBR),
+      wsb:  num(r.wSB),
+      wgdp: num(r.wGDP),
+      sb:   num(r.SB),
+      cs:   num(r.CS),
+      g:    num(r.G),
+    });
+  }
+  if (!out.length) throw new Error('FG team baserunning: parsed zero usable rows');
+  console.log('[fg-baserunning] SUCCESS (' + out.length + ' team rows for season ' + yr + ')');
+  return out;
 }
 
 module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning };
