@@ -2328,6 +2328,41 @@ router.post('/admin/refresh/baserunning', requireAdminToken, async (req, res) =>
   }
 });
 
+// Read-back diagnostic: direct SELECT from team_baserunning so the
+// operator can confirm the seed actually committed without running
+// the full backtest. Surfaces row counts, distinct seasons, and
+// sample rows — pinpoints write-commit vs read-key-mismatch vs
+// FG-field-name-mismatch (sample rows show whether bsr is populated
+// or null on committed rows).
+router.get('/admin/team-baserunning/peek', requireAdminToken, (req, res) => {
+  try {
+    const total = db.prepare("SELECT COUNT(*) AS n FROM team_baserunning").get();
+    const bySeason = db.prepare(
+      "SELECT season, COUNT(*) AS n, "
+      + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr, "
+      + "       MAX(refreshed_at) AS latest_refresh "
+      + "FROM team_baserunning GROUP BY season ORDER BY season DESC"
+    ).all();
+    const sample = db.prepare(
+      "SELECT season, team, bsr, ubr, wsb, wgdp, sb, cs, g, refreshed_at "
+      + "FROM team_baserunning ORDER BY season DESC, team LIMIT 10"
+    ).all();
+    res.json({
+      total_rows: total ? total.n : 0,
+      by_season: bySeason,
+      sample,
+      notes: [
+        'total_rows = COUNT(*) over team_baserunning. If 0, no upsert has committed (or DB file mismatch).',
+        'by_season.n_with_bsr = rows where bsr IS NOT NULL. If n_with_bsr < n, the FG parser dropped bsr values — check Render logs for "[fg-baserunning] FG response field keys" to see actual FG field names.',
+        'sample rows show committed values directly. Compare against POST /admin/refresh/baserunning sample_parsed to spot write-side drops.',
+      ],
+    });
+  } catch (e) {
+    console.error('[admin/team-baserunning/peek] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Empirical market-capture coverage diagnostic (read-only).
 // GET /api/admin/empirical-capture/coverage?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
