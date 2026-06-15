@@ -283,22 +283,9 @@ function runBaserunningBacktest(opts) {
   const WP_CLAMP_HI = Number(cfg.WP_CLAMP_HI != null ? cfg.WP_CLAMP_HI : 0.90);
   const EMIT_FLOOR  = Number(cfg.SIGNAL_EMIT_FLOOR_PP != null ? cfg.SIGNAL_EMIT_FLOOR_PP : 0.01);
 
-  // Load team baserunning. Per-game rate uses team.g (season game
-  // count) — accurate mid-season. Falls back to 162 if g is missing
-  // (unlikely; FG always returns G on the team aggregate).
   const season = Number(fromDate.slice(0, 4));
   const bsrRows = q.getTeamBaserunning.all(season);
-  const bsrByTeam = new Map();
-  let teamsWithBsr = 0, sumAbsBsrPerGame = 0;
-  for (const r of bsrRows) {
-    if (r.bsr == null) continue;
-    const g = (r.g != null && r.g > 0) ? r.g : 162;
-    const perGame = r.bsr / g;
-    bsrByTeam.set(String(r.team).toUpperCase(), perGame);
-    teamsWithBsr++;
-    sumAbsBsrPerGame += Math.abs(perGame);
-  }
-  if (teamsWithBsr === 0) {
+  if (!bsrRows.length) {
     return {
       bias_warning: 'team_baserunning is empty for season ' + season
         + ' — run runBaserunningJob first to seed it. Backtest skipped.',
@@ -306,7 +293,71 @@ function runBaserunningBacktest(opts) {
       teams_with_bsr: 0,
     };
   }
+
+  // ---- DIVISOR FIX ----
+  // The team_baserunning.g column is the FG team=0,ts aggregate G,
+  // which is the SUM of every player's games (~1050+ mid-season),
+  // NOT the team's games played (~70 mid-season). Pre-fix this
+  // service divided r.bsr by r.g → per-game rate ~15x too small,
+  // and the counterfactual margin shift inherited the same scaling
+  // error. Use real games-played from game_log instead.
+  //
+  // Counts every completed game (away_score AND home_score non-null)
+  // up to the window's toDate, exploded to team rows via the
+  // away-home split in game_id. Same "hindsight current-state" tier
+  // as BsR itself — both numerator and denominator are season-to-
+  // date at end of window. Forward-honest version (per-date games
+  // played at scoring time) waits on snapshot accumulation per the
+  // original brief.
+  const completedRows = db.prepare(
+    "SELECT game_id FROM game_log "
+    + "WHERE game_date <= ? AND away_score IS NOT NULL AND home_score IS NOT NULL"
+  ).all(toDate);
+  const gamesByTeam = new Map();
+  for (const r of completedRows) {
+    const parts = (r.game_id || '').split('-');
+    if (parts.length < 2) continue;
+    const away = (parts[0] || '').toUpperCase();
+    const home = (parts[1] || '').toUpperCase();
+    if (away) gamesByTeam.set(away, (gamesByTeam.get(away) || 0) + 1);
+    if (home) gamesByTeam.set(home, (gamesByTeam.get(home) || 0) + 1);
+  }
+
+  const bsrByTeam = new Map();
+  const denominatorByTeam = {};
+  let teamsWithBsr = 0, sumAbsBsrPerGame = 0;
+  const teamsMissingGameCount = [];
+  for (const r of bsrRows) {
+    if (r.bsr == null) continue;
+    const teamKey = String(r.team).toUpperCase();
+    // Skip stale/garbage team rows that the field-name fix replaced
+    // but the pre-fix upsert left behind (HTML-anchor team values
+    // that didn't conflict with the new clean abbr on PK so they
+    // stuck around). The job-side cleanup deletes these going
+    // forward; defensive check here in case any persist.
+    if (teamKey.includes('<') || teamKey.length > 4) continue;
+    const realG = gamesByTeam.get(teamKey);
+    if (!realG || realG <= 0) {
+      teamsMissingGameCount.push(teamKey);
+      continue;
+    }
+    const perGame = r.bsr / realG;
+    bsrByTeam.set(teamKey, perGame);
+    denominatorByTeam[teamKey] = realG;
+    teamsWithBsr++;
+    sumAbsBsrPerGame += Math.abs(perGame);
+  }
+  if (teamsWithBsr === 0) {
+    return {
+      bias_warning: 'No team_baserunning rows resolved to real games-played from game_log for season ' + season,
+      window: { from: fromDate, to: toDate },
+      teams_with_bsr: 0,
+      teams_missing_game_count: teamsMissingGameCount,
+    };
+  }
   const avgAbsBsrPerGame = sumAbsBsrPerGame / teamsWithBsr;
+  const avgGamesPerTeam = Object.values(denominatorByTeam).reduce((s, x) => s + x, 0)
+    / Object.values(denominatorByTeam).length;
 
   const games = db.prepare(
     "SELECT * FROM game_log "
@@ -476,7 +527,11 @@ function runBaserunningBacktest(opts) {
       season,
       teams_with_bsr: teamsWithBsr,
       avg_abs_team_bsr_per_game: Number(avgAbsBsrPerGame.toFixed(4)),
-      note: 'Per-team BsR/game = season BsR / games played; max ±0.15 typical. Margin shift (away_BsR_per_game − home_BsR_per_game) is the bettable Pythag input change.',
+      avg_games_per_team_denominator: Number(avgGamesPerTeam.toFixed(2)),
+      denominator_by_team: denominatorByTeam,
+      teams_missing_game_count: teamsMissingGameCount,
+      denominator_source: 'game_log.completed-games-up-to-toDate (NOT FG team_baserunning.g, which is sum-of-player-games at team=0,ts and is ~15x inflated)',
+      note: 'Per-team BsR/game = season BsR / real_games_played. Expect avg_abs_per_game ~0.03-0.10, avg_games_per_team_denominator ~60-80 mid-June.',
     },
     accuracy: {
       n_games: nAcc,
