@@ -235,76 +235,129 @@ async function refreshAllFanGraphs(cookieValue) {
   return results;
 }
 
-// Team-aggregated baserunning leaderboard from FanGraphs. One row per
-// team per season; BsR is the cumulative season-to-date value (sum of
-// UBR + wSB + wGDP). Refreshed daily by runBaserunningJob.
+// Team-aggregated baserunning leaderboard from FanGraphs.
 //
-// AUTH NOTE — this endpoint 403s without a Member session cookie. The
-// initial implementation (in scraper.js with browser-mimic headers only)
-// got Cloudflare-blocked. Mirrors the proven projection-scraper pattern
-// (baseHeaders + cookie) so it lives alongside its siblings here.
-//
-// Endpoint: FG public leaders API with team=0,ts (team aggregation)
-// and type=8 (advanced view, includes BsR/UBR/wSB/wGDP). qual=0 to
-// avoid the PA qualifier filter. month=0 = full season.
+// AUTH (fixed in 910255f): proven baseHeaders pattern + session
+// cookie cleared the Cloudflare 403. URL DISCOVERY (this revision):
+// the previously-guessed /api/leaders/major-league/data 404'd —
+// FG has reorganized the leaders API. Try the current most-likely
+// paths in order, log each attempt, first 200 with team-aggregated
+// JSON wins. The success-line names the URL that worked so the
+// operator can paste it back and we pin once observed.
 //
 // FG abbr normalization mirrors the bat-proj CSV ingest at
 // routes/api.js:155-157 (KCR→KC, SDP→SD, SFG→SF, TBR→TB, WSN→WAS,
 // CHW→CWS). Any unmapped FG abbr passes through as-is.
-//
-// On non-OK response: logs response headers (cf-ray, server, content-
-// type) for diagnostics so the operator can tell whether a future
-// regression is auth, WAF, or schema. Throws so the caller (job) logs
-// the failure.
 async function fetchTeamBaserunning(season, cookieValue) {
   const yr = season || new Date().getFullYear();
-  const url = 'https://www.fangraphs.com/api/leaders/major-league/data'
-    + '?stats=bat&lg=all&qual=0&type=8'
+  // Common query string across variants. team=0,ts is FG's
+  // documented selector for team-aggregated rows (one row per team);
+  // type=8 is the "advanced" stat view that includes BsR/UBR/wSB/
+  // wGDP; qual=0 disables the PA qualifier so all 30 teams come
+  // back. month=0 = full season.
+  const baseQuery = 'stats=bat&lg=all&qual=0&type=8'
     + '&season=' + yr + '&season1=' + yr
-    + '&team=0,ts&month=0&postseason=&ind=0';
-  const resp = await fetch(url, { headers: baseHeaders(cookieValue) });
-  if (!resp.ok) {
-    // Surface the diagnostic block the user asked for. Don't echo the
-    // cookie value; just its presence and the response side.
-    const respDiag = {};
-    for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
-      const v = resp.headers.get(h);
-      if (v) respDiag[h] = v;
+    + '&team=0,ts&month=0';
+  // URL candidates in priority order. Pulled from FG patterns
+  // observed in adjacent endpoints:
+  //   - /api/leaders/major-league             — modern Next.js
+  //     convention, matches /api/leaders/splits/splits-leaders
+  //     shape (working in fangraphs.js for actuals).
+  //   - /api/leaders/major-league/data        — original guess
+  //     (legacy /data suffix; kept for diagnostic completeness so
+  //     the operator confirms the 404 reproduces).
+  //   - /leaders/major-league?...&download=1  — page URL with FG's
+  //     historical download flag; returns JSON despite the name on
+  //     the projection endpoint, may behave the same here.
+  const candidates = [
+    'https://www.fangraphs.com/api/leaders/major-league?'      + baseQuery,
+    'https://www.fangraphs.com/api/leaders/major-league/data?' + baseQuery,
+    'https://www.fangraphs.com/leaders/major-league?'          + baseQuery + '&download=1',
+  ];
+
+  let lastErr = null;
+  for (const url of candidates) {
+    let resp;
+    try {
+      resp = await fetch(url, { headers: baseHeaders(cookieValue) });
+    } catch (e) {
+      console.warn('[fg-baserunning] fetch exception on ' + url + ': ' + e.message);
+      lastErr = e;
+      continue;
     }
-    console.warn('[fg-baserunning] HTTP ' + resp.status + ' for ' + url
-      + ' | cookie_present=' + !!cookieValue
-      + ' | response_headers=' + JSON.stringify(respDiag));
-    throw new Error('FG team baserunning fetch ' + resp.status
-      + (resp.status === 403 ? ' (likely Cloudflare/Member-auth gate — verify fangraphs_session_cookie)' : ''));
+    if (!resp.ok) {
+      const respDiag = {};
+      for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
+        const v = resp.headers.get(h);
+        if (v) respDiag[h] = v;
+      }
+      console.warn('[fg-baserunning] HTTP ' + resp.status + ' ' + url
+        + ' | cookie_present=' + !!cookieValue
+        + ' | response_headers=' + JSON.stringify(respDiag));
+      lastErr = new Error('FG team baserunning fetch ' + resp.status + ' for ' + url);
+      continue;
+    }
+    const text = await resp.text();
+    let body;
+    try { body = JSON.parse(text); }
+    catch (e) {
+      console.warn('[fg-baserunning] non-JSON response from ' + url
+        + ' (first 200 chars): ' + text.slice(0, 200));
+      lastErr = new Error('FG team baserunning returned non-JSON from ' + url);
+      continue;
+    }
+    // FG wraps rows in { data: [...] } or returns the array directly.
+    const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
+    if (!rows || !rows.length) {
+      console.warn('[fg-baserunning] zero rows from ' + url
+        + ' | top-level keys: ' + Object.keys(body || {}).join(','));
+      lastErr = new Error('FG team baserunning: zero rows from ' + url);
+      continue;
+    }
+    // Sanity: confirm this is team-aggregated, not per-player. With
+    // team=0,ts each Team value should appear exactly once. If we see
+    // multiple rows per team, the team-aggregation selector isn't
+    // taking effect under this URL.
+    const teamCounts = new Map();
+    for (const r of rows) {
+      const t = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+      if (t) teamCounts.set(t, (teamCounts.get(t) || 0) + 1);
+    }
+    let maxPerTeam = 0;
+    for (const v of teamCounts.values()) if (v > maxPerTeam) maxPerTeam = v;
+    if (maxPerTeam > 1) {
+      console.warn('[fg-baserunning] ' + url + ' returned per-player rows ('
+        + rows.length + ' rows, ' + teamCounts.size + ' teams, max '
+        + maxPerTeam + ' per team) — team=0,ts not taking effect');
+      lastErr = new Error('FG team baserunning: per-player shape from ' + url);
+      continue;
+    }
+    const FG_MAP = { KCR: 'KC', SDP: 'SD', SFG: 'SF', TBR: 'TB', WSN: 'WAS', CHW: 'CWS' };
+    const out = [];
+    for (const r of rows) {
+      const teamRaw = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
+      if (!teamRaw) continue;
+      const team = FG_MAP[teamRaw] || teamRaw;
+      const num = (v) => (v == null || v === '' ? null : Number(v));
+      out.push({
+        team,
+        bsr:  num(r.BsR),
+        ubr:  num(r.UBR),
+        wsb:  num(r.wSB),
+        wgdp: num(r.wGDP),
+        sb:   num(r.SB),
+        cs:   num(r.CS),
+        g:    num(r.G),
+      });
+    }
+    if (!out.length) {
+      lastErr = new Error('FG team baserunning: parsed zero usable rows from ' + url);
+      continue;
+    }
+    console.log('[fg-baserunning] SUCCESS on ' + url + ' (' + out.length + ' team rows)');
+    return out;
   }
-  const text = await resp.text();
-  let body;
-  try { body = JSON.parse(text); }
-  catch (e) { throw new Error('FG team baserunning returned non-JSON: ' + text.slice(0, 200)); }
-  // FG wraps the rows in { data: [...] } (current API) or returns the
-  // array directly (legacy). Accept either.
-  const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
-  if (!rows) throw new Error('FG team baserunning: no data array in response');
-  const FG_MAP = { KCR: 'KC', SDP: 'SD', SFG: 'SF', TBR: 'TB', WSN: 'WAS', CHW: 'CWS' };
-  const out = [];
-  for (const r of rows) {
-    const teamRaw = (r.Team || r.TeamName || r.team || '').trim().toUpperCase();
-    if (!teamRaw) continue;
-    const team = FG_MAP[teamRaw] || teamRaw;
-    const num = (v) => (v == null || v === '' ? null : Number(v));
-    out.push({
-      team,
-      bsr:  num(r.BsR),
-      ubr:  num(r.UBR),
-      wsb:  num(r.wSB),
-      wgdp: num(r.wGDP),
-      sb:   num(r.SB),
-      cs:   num(r.CS),
-      g:    num(r.G),
-    });
-  }
-  if (!out.length) throw new Error('FG team baserunning: parsed zero rows');
-  return out;
+  throw lastErr || new Error('FG team baserunning: all candidate URLs failed');
 }
 
 module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning };
