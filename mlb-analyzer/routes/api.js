@@ -2363,6 +2363,160 @@ router.get('/admin/team-baserunning/peek', requireAdminToken, (req, res) => {
   }
 });
 
+// Lineup coverage + name-to-mlb_id resolve-rate audit (read-only).
+// GET /api/admin/lineup-coverage?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Gate for the player-level baserunning backtest. Reports:
+//   - games:   completeness counts (total, both_present,
+//              both_complete_9, partial)
+//   - resolve: total slots, resolved, unresolved, resolve_rate_pct
+//              using the SAME resolveCatcherMlbId production resolver
+//              that FRV/framing already exercise. Iterates every
+//              batting-order slot in both lineups (all 9, no position
+//              filter — every batter runs the bases).
+//   - by_team: resolve rate broken down by team so we can see if
+//              misses concentrate on stale rosters around call-ups
+//              (per the prior FRV experience).
+//   - unresolved_sample: up to 20 entries {game_date, game_id, team,
+//              name, slot_pos} so the operator can eyeball WHY they
+//              miss (call-up not in team_rosters, ambiguous last-
+//              name+initial, normalization edge case).
+//
+// Disposition gate (operator decides):
+//   resolve_rate_pct >= 90  → green-light player-BsR build
+//   resolve_rate_pct <  80  → stop; player-level too contaminated
+//   80-90                   → discuss
+router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+
+    const { resolveCatcherMlbId } = require('../services/jobs');
+    function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
+
+    // Pull completed games in the window. Note: we score on COMPLETED
+    // games (scores non-null) since that's what the backtest itself
+    // would iterate — postponed/upcoming games with null lineups
+    // shouldn't drag the coverage rate down for the use-case we care
+    // about.
+    const rows = db.prepare(
+      "SELECT game_date, game_id, away_lineup_json, home_lineup_json "
+      + "FROM game_log "
+      + "WHERE game_date >= ? AND game_date <= ? "
+      + "  AND away_score IS NOT NULL AND home_score IS NOT NULL "
+      + "ORDER BY game_date, game_id"
+    ).all(from, to);
+
+    // Game completeness counts
+    let total = rows.length;
+    let bothPresent = 0, bothComplete9 = 0, partial = 0;
+    // Resolve aggregates
+    let totalSlots = 0, resolved = 0;
+    const byTeam = new Map(); // team → { total, resolved }
+    const unresolvedSample = [];
+    const UNRESOLVED_CAP = 20;
+
+    function bumpTeam(team, isResolved) {
+      if (!team) return;
+      let agg = byTeam.get(team);
+      if (!agg) { agg = { total: 0, resolved: 0 }; byTeam.set(team, agg); }
+      agg.total++;
+      if (isResolved) agg.resolved++;
+    }
+
+    for (const r of rows) {
+      const a = tryParse(r.away_lineup_json) || [];
+      const h = tryParse(r.home_lineup_json) || [];
+      const bothPresentRow = (a.length > 0 && h.length > 0);
+      const bothComplete9Row = (a.length === 9 && h.length === 9);
+      const partialRow = (a.length > 0 && a.length < 9) || (h.length > 0 && h.length < 9);
+      if (bothPresentRow) bothPresent++;
+      if (bothComplete9Row) bothComplete9++;
+      if (partialRow) partial++;
+
+      const parts = (r.game_id || '').split('-');
+      const awayTeam = (parts[0] || '').toUpperCase();
+      const homeTeam = (parts[1] || '').toUpperCase();
+
+      function processLineup(lu, team) {
+        if (!Array.isArray(lu) || !team) return;
+        for (const p of lu) {
+          if (!p || !p.name) continue;
+          totalSlots++;
+          const mlbId = resolveCatcherMlbId(team, p.name);
+          const ok = (mlbId != null);
+          if (ok) resolved++;
+          bumpTeam(team, ok);
+          if (!ok && unresolvedSample.length < UNRESOLVED_CAP) {
+            unresolvedSample.push({
+              game_date: r.game_date,
+              game_id: r.game_id,
+              team,
+              name: p.name,
+              slot_pos: p.pos || null,
+            });
+          }
+        }
+      }
+      processLineup(a, awayTeam);
+      processLineup(h, homeTeam);
+    }
+
+    const resolveRatePct = totalSlots > 0
+      ? Number((100 * resolved / totalSlots).toFixed(2))
+      : null;
+
+    // Per-team breakdown, sorted by resolve rate ascending (worst
+    // first — where the call-ups / stale-roster damage concentrates).
+    const byTeamArr = Array.from(byTeam.entries()).map(([team, agg]) => ({
+      team,
+      total_slots: agg.total,
+      resolved: agg.resolved,
+      resolve_rate_pct: agg.total > 0
+        ? Number((100 * agg.resolved / agg.total).toFixed(2))
+        : null,
+    })).sort((x, y) => {
+      // Nulls last, then ascending rate.
+      if (x.resolve_rate_pct == null) return 1;
+      if (y.resolve_rate_pct == null) return -1;
+      return x.resolve_rate_pct - y.resolve_rate_pct;
+    });
+
+    res.json({
+      window: { from, to },
+      games: {
+        total,
+        both_present: bothPresent,
+        both_complete_9: bothComplete9,
+        partial,
+      },
+      resolve: {
+        total_slots: totalSlots,
+        resolved,
+        unresolved: totalSlots - resolved,
+        resolve_rate_pct: resolveRatePct,
+        gate: 'resolve_rate_pct >= 90 = green-light player-BsR build; < 80 = stop; 80-90 = discuss',
+      },
+      by_team: byTeamArr,
+      unresolved_sample: unresolvedSample,
+      unresolved_sample_capped_at: UNRESOLVED_CAP,
+      notes: [
+        'Resolver = resolveCatcherMlbId(team, name) from services/jobs.js — same production-proven path FRV/framing use.',
+        'Every batting-order slot in both lineups is resolved (no position filter — every batter runs the bases).',
+        'by_team is sorted worst-first so concentration shows up at the top.',
+        'unresolved_sample is a HEAD sample (first 20 encountered, not random). If concentration is by date, the sample skews to early-window games.',
+      ],
+    });
+  } catch (e) {
+    console.error('[admin/lineup-coverage] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Empirical market-capture coverage diagnostic (read-only).
 // GET /api/admin/empirical-capture/coverage?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
