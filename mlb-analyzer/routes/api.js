@@ -2328,6 +2328,21 @@ router.post('/admin/refresh/baserunning', requireAdminToken, async (req, res) =>
   }
 });
 
+// Manual trigger for runSeasonRosterJob — backtest-only roster pull
+// (statsapi rosterType=fullSeason). Same pattern as
+// /admin/refresh/baserunning so the operator can seed immediately
+// after this branch deploys without waiting for the 6AM PT cron.
+router.post('/admin/refresh/season-rosters', requireAdminToken, async (req, res) => {
+  try {
+    const { runSeasonRosterJob } = require('../services/jobs');
+    const out = await runSeasonRosterJob();
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/refresh/season-rosters] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Read-back diagnostic: direct SELECT from team_baserunning so the
 // operator can confirm the seed actually committed without running
 // the full backtest. Surfaces row counts, distinct seasons, and
@@ -2395,7 +2410,13 @@ router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
     if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
     if (from > to) return res.status(400).json({ error: 'from must be <= to' });
 
-    const { resolveCatcherMlbId } = require('../services/jobs');
+    // BACKTEST resolver — UNIONs active 26-man + season fullSeason.
+    // Currently-IL stars (Acuña/Judge/Ramirez) are absent from active
+    // but present in season, so historical lineups containing them
+    // now resolve. Production live signal generation continues to use
+    // resolveCatcherMlbId (active only) — released players can't
+    // accidentally appear in tonight's live calc.
+    const { resolveBacktestMlbId } = require('../services/jobs');
     function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 
     // Pull completed games in the window. Note: we score on COMPLETED
@@ -2447,7 +2468,7 @@ router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
         for (const p of lu) {
           if (!p || !p.name) continue;
           totalSlots++;
-          const mlbId = resolveCatcherMlbId(team, p.name);
+          const mlbId = resolveBacktestMlbId(team, p.name);
           const ok = (mlbId != null);
           if (ok) resolved++;
           bumpTeam(team, ok);
