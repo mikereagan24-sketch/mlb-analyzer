@@ -4321,6 +4321,33 @@ async function runBaserunningJob(opts) {
     const refreshedAt = new Date().toISOString();
     q.upsertTeamBaserunning(season, rows, refreshedAt);
     console.log('[baserunning] upserted ' + rows.length + ' team rows for ' + season);
+    // Post-write verification — actual SELECT COUNT, not the
+    // pre-write rows.length, so the operator can distinguish
+    // "mapped 30" from "committed 30 visible to subsequent reads".
+    // Also non_null_bsr_count to catch the case where 30 rows
+    // commit but every bsr column is null (parser field-name miss).
+    let verified_count = null, non_null_bsr_count = null, sample_db = [];
+    try {
+      const cRow = db.prepare(
+        "SELECT COUNT(*) AS n FROM team_baserunning WHERE season=?"
+      ).get(Number(season));
+      verified_count = cRow ? cRow.n : null;
+      const bRow = db.prepare(
+        "SELECT COUNT(*) AS n FROM team_baserunning WHERE season=? AND bsr IS NOT NULL"
+      ).get(Number(season));
+      non_null_bsr_count = bRow ? bRow.n : null;
+      sample_db = db.prepare(
+        "SELECT season, team, bsr, ubr, wsb, wgdp, sb, cs, g "
+        + "FROM team_baserunning WHERE season=? ORDER BY team LIMIT 3"
+      ).all(Number(season));
+    } catch (e) {
+      console.warn('[baserunning] verify-count failed (non-fatal): ' + e.message);
+    }
+    // Sample parsed rows from the fetched array so the operator can
+    // see what got mapped from FG's response — directly comparable
+    // to sample_db. If sample_parsed has populated bsr but sample_db
+    // doesn't, the write side dropped them.
+    const sample_parsed = rows.slice(0, 3);
     try {
       const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
       q.snapshotTeamBaserunning(snapDate, season, rows);
@@ -4328,7 +4355,15 @@ async function runBaserunningJob(opts) {
     } catch (e) {
       console.warn('[baserunning-snapshot] capture failed (non-fatal): ' + e.message);
     }
-    return { success: true, applied: rows.length, season };
+    return {
+      success: true,
+      applied: rows.length,
+      verified_count,
+      non_null_bsr_count,
+      season,
+      sample_parsed,
+      sample_db,
+    };
   } catch (e) {
     console.error('[baserunning] job failed: ' + e.message);
     return { success: false, error: e.message };

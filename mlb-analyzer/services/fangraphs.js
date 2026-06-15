@@ -330,6 +330,13 @@ async function fetchTeamBaserunning(season, cookieValue) {
     throw new Error('FG team baserunning: zero rows | top-level keys: '
       + Object.keys(body || {}).join(','));
   }
+  // Log FG's actual field keys on the first row so a capitalization
+  // drift (BsR vs Bsr vs bsr) is visible in Render logs without a
+  // re-deploy. If the upsert ends up with 30 rows but bsr columns
+  // are all null, this line tells us why — the parser is looking for
+  // 'BsR' but FG returned a slightly different field name.
+  console.log('[fg-baserunning] FG response field keys (row 0): '
+    + Object.keys(rows[0] || {}).slice(0, 60).join(','));
   // Team-aggregate sanity guard. With team=0%2Cts each Team value
   // appears exactly once. >1 row per Team means aggregation didn't
   // take effect and we'd be parsing per-player rows.
