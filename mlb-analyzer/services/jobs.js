@@ -3,7 +3,7 @@
 const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
-const { fetchTeamBaserunning, fetchPlayerBaserunning } = require('./fangraphs');
+const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
 const { fetchAllTeamRoles } = require('./fangraphs-roles');
 const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
@@ -2424,6 +2424,8 @@ function startCronJobs() {
     catch(e) { console.error('[cron-baserunning] failed:', e && e.message); }
     try { await runPlayerBaserunningJob(); }
     catch(e) { console.error('[cron-player-baserunning] failed:', e && e.message); }
+    try { await runPlayerBaserunningTrailingJob(); }
+    catch(e) { console.error('[cron-player-baserunning-trailing] failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 7AM PT morning refresh: odds -> weather -> lineups -> rerun all games ---
@@ -4485,6 +4487,68 @@ async function runPlayerBaserunningJob(opts) {
   }
 }
 
+// Trailing-window (~365-day rolling) player baserunning. Same shape
+// as runPlayerBaserunningJob but with explicit startdate/enddate that
+// span across the season boundary. Default window: today minus 365
+// days → today (PT). Caller can override via opts.startdate /
+// opts.enddate (YYYY-MM-DD) for backfill or special-case runs.
+//
+// Single rolling window persisted at a time — clear+insert pattern.
+// No snapshot mirror for v1 (forward-honest path waits until we
+// confirm trailing-1yr player level beats team-level).
+async function runPlayerBaserunningTrailingJob(opts) {
+  const o = opts || {};
+  const cookieRow = q.getSetting.get('fangraphs_session_cookie');
+  const cookieValue = cookieRow && cookieRow.value ? String(cookieRow.value).trim() : '';
+  if (!cookieValue) {
+    console.warn('[player-baserunning-trailing] fangraphs_session_cookie not configured — skipping. Paste via Model tab and re-run /admin/refresh/player-baserunning-trailing.');
+    return { success: false, error: 'fangraphs_session_cookie not configured. Paste from Model tab.' };
+  }
+  // Default to PT today − 365 days through PT today. PT for
+  // consistency with the framing/FRV/baserunning snapshot tz.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const oneYearAgo = (() => {
+    const d = new Date(today + 'T12:00:00Z');
+    d.setFullYear(d.getFullYear() - 1);
+    return d.toISOString().slice(0, 10);
+  })();
+  const startdate = o.startdate || oneYearAgo;
+  const enddate   = o.enddate   || today;
+  console.log('[player-baserunning-trailing] fetching FG player BsR window=' + startdate + '..' + enddate + '...');
+  try {
+    const rows = await fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue);
+    const refreshedAt = new Date().toISOString();
+    q.replacePlayerBaserunningTrailing(rows, startdate, enddate, refreshedAt);
+    console.log('[player-baserunning-trailing] persisted ' + rows.length + ' player rows for window ' + startdate + '..' + enddate);
+    // Verification — counts + sanity sample (top BsR rows by abs value).
+    let verified_count = null, non_null_bsr_count = null, sample_db = [];
+    try {
+      verified_count = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing").get().n;
+      non_null_bsr_count = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing WHERE bsr IS NOT NULL").get().n;
+      // Top 5 by BsR — sanity check the trailing values look right
+      // (Carroll/De La Cruz/Buxton range ~8-10 per the probe).
+      sample_db = db.prepare(
+        "SELECT mlbam_id, name, bsr, g, window_startdate, window_enddate "
+        + "FROM player_baserunning_trailing WHERE bsr IS NOT NULL "
+        + "ORDER BY bsr DESC LIMIT 5"
+      ).all();
+    } catch (e) {
+      console.warn('[player-baserunning-trailing] verify-count failed (non-fatal): ' + e.message);
+    }
+    return {
+      success: true,
+      applied: rows.length,
+      verified_count,
+      non_null_bsr_count,
+      window: { startdate, enddate },
+      sample_db_top_5_by_bsr: sample_db,
+    };
+  } catch (e) {
+    console.error('[player-baserunning-trailing] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runRosterJob() {
   console.log('[roster] Starting active roster pull for all 30 teams...');
   try {
@@ -4736,4 +4800,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId };

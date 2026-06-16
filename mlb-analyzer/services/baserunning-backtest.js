@@ -287,23 +287,25 @@ function runBaserunningBacktest(opts) {
   const WP_CLAMP_HI = Number(cfg.WP_CLAMP_HI != null ? cfg.WP_CLAMP_HI : 0.90);
   const EMIT_FLOOR  = Number(cfg.SIGNAL_EMIT_FLOOR_PP != null ? cfg.SIGNAL_EMIT_FLOOR_PP : 0.01);
 
-  // LEVEL switch — 'team' (default, existing) or 'player'. Player level
-  // reuses the same harness (Pythag, accuracy, CLV) but builds per-team
-  // BsR/game from the 9 starters' season BsR sum instead of the team-
-  // aggregate row. Resolves each starter via resolveBacktestMlbId (the
-  // 100%-resolving union of active 26-man + season fullSeason). Same
-  // denominator (real games-played from game_log) so units match team
-  // level exactly.
+  // LEVEL switch — 'team' (default) or 'player'. Player level reuses
+  // the same harness (Pythag, accuracy, CLV) but builds per-team
+  // BsR/game from the 9 starters' BsR sum instead of the team-
+  // aggregate row.
+  //
+  // WINDOW switch (player-level only) — 'ytd' (default, season=2026
+  // cumulative from player_baserunning) or 'trailing' (~365-day rolling
+  // from player_baserunning_trailing). Trailing addresses the ~70-game
+  // YTD sample noise that washed out lineup-specificity in the first
+  // player-level run.
   const level = opts.level === 'player' ? 'player' : 'team';
+  const window = opts.window === 'trailing' ? 'trailing' : 'ytd';
   const { resolveBacktestMlbId } = jobs;
 
   const season = Number(fromDate.slice(0, 4));
 
-  // Build the per-team BsR/game source. Team level: aggregate row /
-  // games_played. Player level: per-player BsR cumulative map, summed
-  // in-loop per lineup.
   let bsrRows = null;
   let playerBsrById = null;
+  let playerWindowMeta = null;   // for trailing mode response
 
   if (level === 'team') {
     bsrRows = q.getTeamBaserunning.all(season);
@@ -316,21 +318,21 @@ function runBaserunningBacktest(opts) {
         teams_with_bsr: 0,
       };
     }
-  } else {
+  } else if (window === 'ytd') {
     if (!q.getPlayerBaserunning) {
       return {
         bias_warning: 'player_baserunning helpers missing — db migration not yet applied.',
         window: { from: fromDate, to: toDate },
-        level,
+        level, window,
       };
     }
     const playerRows = q.getPlayerBaserunning.all(season);
     if (!playerRows.length) {
       return {
         bias_warning: 'player_baserunning is empty for season ' + season
-          + ' — POST /admin/refresh/player-baserunning first to seed. Backtest skipped.',
+          + ' — POST /admin/refresh/player-baserunning first to seed.',
         window: { from: fromDate, to: toDate },
-        level,
+        level, window,
         players_with_bsr: 0,
       };
     }
@@ -340,6 +342,41 @@ function runBaserunningBacktest(opts) {
       const id = Number(r.mlbam_id);
       if (!Number.isFinite(id) || id <= 0) continue;
       playerBsrById.set(id, Number(r.bsr));
+    }
+  } else {
+    // window === 'trailing'
+    if (!q.getPlayerBaserunningTrailing) {
+      return {
+        bias_warning: 'player_baserunning_trailing helpers missing — db migration not yet applied.',
+        window: { from: fromDate, to: toDate },
+        level, window,
+      };
+    }
+    const playerRows = q.getPlayerBaserunningTrailing.all();
+    if (!playerRows.length) {
+      return {
+        bias_warning: 'player_baserunning_trailing is empty — POST /admin/refresh/player-baserunning-trailing first to seed.',
+        window: { from: fromDate, to: toDate },
+        level, window,
+        players_with_bsr: 0,
+      };
+    }
+    playerBsrById = new Map();
+    for (const r of playerRows) {
+      if (r.bsr == null) continue;
+      const id = Number(r.mlbam_id);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      playerBsrById.set(id, Number(r.bsr));
+    }
+    // Surface the actual trailing window (from one of the persisted
+    // rows) so the response is honest about what data ran.
+    const sample = playerRows[0];
+    if (sample) {
+      playerWindowMeta = {
+        startdate: sample.window_startdate,
+        enddate:   sample.window_enddate,
+        refreshed_at: sample.refreshed_at,
+      };
     }
   }
 
@@ -623,6 +660,9 @@ function runBaserunningBacktest(opts) {
   } : {
     season,
     level,
+    window,
+    bsr_source_table: window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning',
+    trailing_window: playerWindowMeta,
     total_players_with_bsr: playerBsrById ? playerBsrById.size : 0,
     lineup_slots_total:     lineupSlotsTotal,
     lineup_slots_resolved:  lineupSlotsResolved,
@@ -633,14 +673,17 @@ function runBaserunningBacktest(opts) {
       ? Number((100 * lineupSlotsWithBsr / lineupSlotsTotal).toFixed(2)) : null,
     unique_players_used:    playersUsed.size,
     avg_games_per_team_denominator: avgGamesPerTeam != null ? Number(avgGamesPerTeam.toFixed(2)) : null,
-    denominator_source: 'sum_of_9_starters_season_BsR / game_log.completed-games (team\'s real games). Units match team-level.',
-    note: 'Per-game lineup BsR = Σ(starters\' season BsR) / team_games_played. Resolved slots with no player_baserunning row contribute 0 (neutral); slots that resolve_rate misses (call-ups) skipped. Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).',
+    denominator_source: 'sum_of_9_starters_BsR / game_log.completed-games (team\'s real games). Units match team-level.',
+    note: 'Per-game lineup BsR = Σ(starters\' ' + (window === 'trailing' ? 'trailing-1yr' : 'YTD season') + ' BsR) / team_games_played. Resolved slots with no row in ' + (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning') + ' contribute 0 (neutral). Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).',
   };
 
   const out = {
-    bias_warning: 'HINDSIGHT BIASED — DIRECTION-ONLY. Season-cumulative BsR applied retroactively (look-ahead). Forward-honest version awaits ~30d of *_baserunning_snapshot accumulation.',
+    bias_warning: window === 'trailing'
+      ? 'HINDSIGHT BIASED — DIRECTION-ONLY. Trailing-1yr cumulative BsR (window dates in baserunning_coverage.trailing_window) applied retroactively to games in [from..to]. The trailing window is a better true-talent estimate than YTD (~2x sample) but still hindsight when applied to early-window games. Forward-honest path waits on snapshot accumulation.'
+      : 'HINDSIGHT BIASED — DIRECTION-ONLY. Season-cumulative BsR applied retroactively (look-ahead). Forward-honest version awaits ~30d of *_baserunning_snapshot accumulation.',
     scope_note: 'ML-side only. Per-team BsR/game added to each team\'s projected runs (own baserunning helps own offense). estTot and totals untouched.',
     level,
+    bsr_window: level === 'player' ? window : null,
     window: { from: fromDate, to: toDate },
     games_considered: gamesConsidered,
     games_scored: gamesScored,
