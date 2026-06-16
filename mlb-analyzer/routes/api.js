@@ -2311,9 +2311,10 @@ router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
     if (from > to) return res.status(400).json({ error: 'from must be <= to' });
     const detail = req.query.detail === 'true' || req.query.detail === '1';
     const level = req.query.level === 'player' ? 'player' : 'team';
+    const window = req.query.window === 'trailing' ? 'trailing' : 'ytd';
 
     const { runBaserunningBacktest } = require('../services/baserunning-backtest');
-    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level });
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window });
     res.json(out);
   } catch (e) {
     console.error('[admin/baserunning-backtest] error:', e);
@@ -2364,6 +2365,21 @@ router.post('/admin/refresh/player-baserunning', requireAdminToken, async (req, 
     res.json(out);
   } catch (e) {
     console.error('[admin/refresh/player-baserunning] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Trailing-1yr player BsR refresh. Default window: today − 365d → today.
+// Override via body { startdate, enddate } (YYYY-MM-DD).
+router.post('/admin/refresh/player-baserunning-trailing', requireAdminToken, async (req, res) => {
+  try {
+    const { runPlayerBaserunningTrailingJob } = require('../services/jobs');
+    const startdate = req.body && req.body.startdate ? String(req.body.startdate) : undefined;
+    const enddate   = req.body && req.body.enddate   ? String(req.body.enddate)   : undefined;
+    const out = await runPlayerBaserunningTrailingJob({ startdate, enddate });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/refresh/player-baserunning-trailing] error:', e);
     res.status(500).json({ error: e.message });
   }
 });

@@ -533,4 +533,119 @@ async function fetchPlayerBaserunning(season, cookieValue) {
   return out;
 }
 
-module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning };
+// Trailing-window player baserunning. Same shape as
+// fetchPlayerBaserunning but with explicit startdate/enddate so the
+// caller can span across season boundaries. Probe verified FG honors
+// the custom range (top-10 G = 126-162, BsR ~8-10 = full trailing
+// year, ~2x YTD-only).
+//
+// Aggregation by xMLBAMID is identical to fetchPlayerBaserunning —
+// mid-season trade splits (Devers "2 Tms") summed to one row per
+// player.
+async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
+  if (!startdate || !enddate) throw new Error('fetchPlayerBaserunningTrailing: startdate and enddate required (YYYY-MM-DD)');
+  const startYear = Number(startdate.slice(0, 4));
+  const endYear   = Number(enddate.slice(0, 4));
+  const url = 'https://www.fangraphs.com/api/leaders/major-league/data'
+    + '?age='
+    + '&pos=all'
+    + '&stats=bat'
+    + '&lg=all'
+    + '&qual=0'
+    + '&season='   + endYear           // FG uses season as the "end" year of the range
+    + '&season1='  + startYear         // season1 = start year
+    + '&startdate=' + startdate
+    + '&enddate='   + enddate
+    + '&month=0'
+    + '&hand='
+    + '&team=0'
+    + '&pageitems=2000'
+    + '&pagenum=1'
+    + '&ind=1'
+    + '&rost=0'
+    + '&players=0'
+    + '&type=8'
+    + '&postseason='
+    + '&sortdir=default'
+    + '&sortstat=WAR';
+  const resp = await fetch(url, { headers: baseHeaders(cookieValue) });
+  if (!resp.ok) {
+    const respDiag = {};
+    for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
+      const v = resp.headers.get(h);
+      if (v) respDiag[h] = v;
+    }
+    console.warn('[fg-player-baserunning-trailing] HTTP ' + resp.status + ' ' + url
+      + ' | cookie_present=' + !!cookieValue
+      + ' | response_headers=' + JSON.stringify(respDiag));
+    throw new Error('FG player BsR trailing fetch ' + resp.status);
+  }
+  const text = await resp.text();
+  let body;
+  try { body = JSON.parse(text); }
+  catch (e) { throw new Error('FG player BsR trailing returned non-JSON (first 200): ' + text.slice(0, 200)); }
+  const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
+  if (!rows || !rows.length) {
+    throw new Error('FG player BsR trailing: zero rows | top-level keys: ' + Object.keys(body || {}).join(','));
+  }
+  console.log('[fg-player-baserunning-trailing] FG response field keys (row 0): '
+    + Object.keys(rows[0] || {}).slice(0, 60).join(','));
+  const num = (v) => (v == null || v === '' ? null : Number(v));
+  const accByMlbam = new Map();
+  let skippedNoId = 0;
+  for (const r of rows) {
+    const mlbamRaw = r.xMLBAMID || r.MLBAMID || r.xmlbamid;
+    if (mlbamRaw == null || mlbamRaw === '') { skippedNoId++; continue; }
+    const mlbam_id = Math.round(Number(mlbamRaw));
+    if (!Number.isFinite(mlbam_id) || mlbam_id <= 0) { skippedNoId++; continue; }
+    let agg = accByMlbam.get(mlbam_id);
+    if (!agg) {
+      agg = {
+        mlbam_id,
+        name: (r.PlayerName || r.PlayerNameRoute || r.Name || '').toString().trim() || null,
+        bsr: 0, ubr: 0, wsb: 0, wgdp: 0, sb: 0, cs: 0, g: 0,
+        _bsrHas: false, _ubrHas: false, _wsbHas: false, _wgdpHas: false,
+        _sbHas: false, _csHas: false, _gHas: false,
+      };
+      accByMlbam.set(mlbam_id, agg);
+    }
+    const bsr  = num(r.BaseRunning);
+    const ubr  = num(r.UBR);
+    const wsb  = num(r.wBsR);
+    const wgdp = num(r.GDPRuns);
+    const sb   = num(r.SB);
+    const cs   = num(r.CS);
+    const g    = num(r.G);
+    if (bsr  != null) { agg.bsr  += bsr;  agg._bsrHas  = true; }
+    if (ubr  != null) { agg.ubr  += ubr;  agg._ubrHas  = true; }
+    if (wsb  != null) { agg.wsb  += wsb;  agg._wsbHas  = true; }
+    if (wgdp != null) { agg.wgdp += wgdp; agg._wgdpHas = true; }
+    if (sb   != null) { agg.sb   += sb;   agg._sbHas   = true; }
+    if (cs   != null) { agg.cs   += cs;   agg._csHas   = true; }
+    if (g    != null) { agg.g    += g;    agg._gHas    = true; }
+  }
+  if (skippedNoId) {
+    console.warn('[fg-player-baserunning-trailing] skipped ' + skippedNoId + ' row(s) with no xMLBAMID');
+  }
+  const out = [];
+  for (const agg of accByMlbam.values()) {
+    out.push({
+      mlbam_id: agg.mlbam_id,
+      name:     agg.name,
+      bsr:  agg._bsrHas  ? agg.bsr  : null,
+      ubr:  agg._ubrHas  ? agg.ubr  : null,
+      wsb:  agg._wsbHas  ? agg.wsb  : null,
+      wgdp: agg._wgdpHas ? agg.wgdp : null,
+      sb:   agg._sbHas   ? agg.sb   : null,
+      cs:   agg._csHas   ? agg.cs   : null,
+      g:    agg._gHas    ? agg.g    : null,
+    });
+  }
+  console.log('[fg-player-baserunning-trailing] SUCCESS (' + out.length
+    + ' unique players, raw rows=' + rows.length
+    + ', stints-merged=' + (rows.length - out.length - skippedNoId)
+    + ', window=' + startdate + '..' + enddate + ')');
+  return out;
+}
+
+module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing };
