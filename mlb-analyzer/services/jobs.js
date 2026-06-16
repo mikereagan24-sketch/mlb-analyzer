@@ -4534,17 +4534,31 @@ async function runPlayerBaserunningTrailingJob(opts) {
     } catch (e) {
       console.warn('[player-baserunning-trailing-snapshot] capture failed (non-fatal): ' + e.message);
     }
-    // Verification — counts + sanity sample (top BsR rows by abs value).
+    // Verification — counts + sanity sample (top BsR rows) + multi-
+    // team aggregation visibility so the operator can eyeball how
+    // many traded-mid-window players inherit the xMLBAMID aggregation
+    // before running the backtest.
     let verified_count = null, non_null_bsr_count = null, sample_db = [];
+    let multi_team_count = null, multi_team_sample = [];
     try {
       verified_count = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing").get().n;
       non_null_bsr_count = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing WHERE bsr IS NOT NULL").get().n;
+      multi_team_count = db.prepare(
+        "SELECT COUNT(*) AS n FROM player_baserunning_trailing WHERE stint_count > 1"
+      ).get().n;
       // Top 5 by BsR — sanity check the trailing values look right
       // (Carroll/De La Cruz/Buxton range ~8-10 per the probe).
       sample_db = db.prepare(
-        "SELECT mlbam_id, name, bsr, g, window_startdate, window_enddate "
+        "SELECT mlbam_id, name, bsr, g, stint_count, window_startdate, window_enddate "
         + "FROM player_baserunning_trailing WHERE bsr IS NOT NULL "
         + "ORDER BY bsr DESC LIMIT 5"
+      ).all();
+      // Top multi-team players so the operator can eyeball (Devers,
+      // any mid-window trade with non-trivial BsR).
+      multi_team_sample = db.prepare(
+        "SELECT mlbam_id, name, bsr, g, stint_count "
+        + "FROM player_baserunning_trailing WHERE stint_count > 1 "
+        + "ORDER BY ABS(COALESCE(bsr, 0)) DESC LIMIT 5"
       ).all();
     } catch (e) {
       console.warn('[player-baserunning-trailing] verify-count failed (non-fatal): ' + e.message);
@@ -4554,9 +4568,13 @@ async function runPlayerBaserunningTrailingJob(opts) {
       applied: rows.length,
       verified_count,
       non_null_bsr_count,
+      multi_team_count,
+      multi_team_pct: (verified_count && verified_count > 0 && multi_team_count != null)
+        ? Number((100 * multi_team_count / verified_count).toFixed(2)) : null,
       window: { startdate, enddate },
       snapshot_captured,
       sample_db_top_5_by_bsr: sample_db,
+      multi_team_sample,
     };
   } catch (e) {
     console.error('[player-baserunning-trailing] job failed: ' + e.message);
