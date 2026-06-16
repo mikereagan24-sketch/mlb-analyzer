@@ -511,8 +511,10 @@ db.exec(`
   -- intentionally not snapshotted for v1.
   --
   -- Forward-honest path is the existing player_baserunning_snapshot
-  -- table (YTD-season snapshots). Trailing-snapshot equivalent
-  -- deferred until v1 shows life.
+  -- table (YTD-season snapshots). Trailing-snapshot equivalent lives
+  -- in player_baserunning_trailing_snapshot (below) — same daily
+  -- delete-then-insert pattern, keyed on snapshot_date so the forward
+  -- backtest can read each player's trailing-1yr BsR AS OF a past date.
   CREATE TABLE IF NOT EXISTS player_baserunning_trailing (
     mlbam_id INTEGER PRIMARY KEY,
     name TEXT,
@@ -527,6 +529,38 @@ db.exec(`
     window_enddate TEXT,
     refreshed_at TEXT
   );
+  -- Daily snapshot mirror of player_baserunning_trailing. Starts the
+  -- forward-honest clock for the trailing-1yr player BsR variant: the
+  -- forward backtest reads as-of-game_date values so it NEVER applies
+  -- future BsR to past games.
+  --
+  -- window_startdate / window_enddate name the trailing period the
+  -- row's values cover. These should differ row-to-row across
+  -- snapshot_date as the trailing window rolls (e.g. snapshot
+  -- 2026-06-16 covers 2025-06-16..2026-06-16; snapshot 2026-06-17
+  -- covers 2025-06-17..2026-06-17). Carrying them on every row keeps
+  -- the as-of reads self-describing without a separate metadata join.
+  --
+  -- Same delete-then-insert idempotency on the snapshot side as
+  -- player_baserunning_snapshot. PK includes snapshot_date so a
+  -- same-day re-run starts clean.
+  CREATE TABLE IF NOT EXISTS player_baserunning_trailing_snapshot (
+    snapshot_date TEXT NOT NULL,
+    mlbam_id INTEGER NOT NULL,
+    name TEXT,
+    bsr REAL,
+    ubr REAL,
+    wsb REAL,
+    wgdp REAL,
+    sb INTEGER,
+    cs INTEGER,
+    g INTEGER,
+    window_startdate TEXT,
+    window_enddate TEXT,
+    PRIMARY KEY (snapshot_date, mlbam_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_player_baserunning_trailing_snapshot_date
+    ON player_baserunning_trailing_snapshot(snapshot_date);
   -- Kalshi MLB spread ladder (KXMLBSPREAD series). One row per
   -- (game_date, game_id, spread_team, spread_line) — each Kalshi
   -- game exposes ~10-12 spread markets (1.5 through 9.5 in 1-run
@@ -2432,6 +2466,68 @@ q.getPlayerBaserunningTrailingWindow = db.prepare(
   + "       COUNT(*) AS n_rows, "
   + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr "
   + "FROM player_baserunning_trailing"
+);
+
+// Trailing-1yr player BsR snapshot helpers. Mirrors
+// player_baserunning_snapshot: delete-then-insert per snapshot_date
+// inside a single transaction so a same-day re-run starts clean. The
+// caller hands the current player_baserunning_trailing rows in
+// (already aggregated across trade splits by the trailing job).
+q._snapPlayerBaserunningTrailingClearDate = db.prepare(
+  "DELETE FROM player_baserunning_trailing_snapshot WHERE snapshot_date=?"
+);
+q._snapPlayerBaserunningTrailingInsert = db.prepare(
+  "INSERT OR REPLACE INTO player_baserunning_trailing_snapshot "
+  + "(snapshot_date, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  + " window_startdate, window_enddate) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotPlayerBaserunningTrailing = (snapshotDate, rows, windowStart, windowEnd) => {
+  const tx = db.transaction((d, rs, ws, we) => {
+    q._snapPlayerBaserunningTrailingClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.mlbam_id == null) continue;
+      q._snapPlayerBaserunningTrailingInsert.run(d,
+        Math.round(Number(r.mlbam_id)),
+        r.name || null,
+        r.bsr  == null ? null : Number(r.bsr),
+        r.ubr  == null ? null : Number(r.ubr),
+        r.wsb  == null ? null : Number(r.wsb),
+        r.wgdp == null ? null : Number(r.wgdp),
+        r.sb   == null ? null : Math.round(Number(r.sb)),
+        r.cs   == null ? null : Math.round(Number(r.cs)),
+        r.g    == null ? null : Math.round(Number(r.g)),
+        ws || null, we || null);
+    }
+  });
+  tx(snapshotDate, rows, windowStart, windowEnd);
+};
+// Read helpers — as-of and coverage diagnostics. The "as-of" variant
+// pulls the latest snapshot at or before a date so the forward backtest
+// reads point-in-time BsR for a past game_date without leaking future
+// data. Returns one row per (mlbam_id) — the per-player BsR that was
+// known at end-of-day on snapshot_date.
+q.getPlayerBaserunningTrailingAsOf = db.prepare(
+  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  + "       window_startdate, window_enddate, snapshot_date "
+  + "FROM player_baserunning_trailing_snapshot "
+  + "WHERE snapshot_date = ( "
+  + "  SELECT MAX(snapshot_date) FROM player_baserunning_trailing_snapshot "
+  + "  WHERE snapshot_date <= ?)"
+);
+q.getPlayerBaserunningTrailingSnapshotDates = db.prepare(
+  "SELECT snapshot_date, COUNT(*) AS n_rows, "
+  + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr, "
+  + "       MIN(window_startdate) AS window_startdate, "
+  + "       MAX(window_enddate)   AS window_enddate "
+  + "FROM player_baserunning_trailing_snapshot "
+  + "GROUP BY snapshot_date ORDER BY snapshot_date"
+);
+q.getPlayerBaserunningTrailingSnapshotCoverage = db.prepare(
+  "SELECT COUNT(DISTINCT snapshot_date) AS n_snapshot_days, "
+  + "       MIN(snapshot_date) AS first_snapshot_date, "
+  + "       MAX(snapshot_date) AS last_snapshot_date "
+  + "FROM player_baserunning_trailing_snapshot"
 );
 
 // ------------------------------------------------------------------

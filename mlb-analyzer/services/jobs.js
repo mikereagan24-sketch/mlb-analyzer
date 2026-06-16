@@ -4494,8 +4494,10 @@ async function runPlayerBaserunningJob(opts) {
 // opts.enddate (YYYY-MM-DD) for backfill or special-case runs.
 //
 // Single rolling window persisted at a time — clear+insert pattern.
-// No snapshot mirror for v1 (forward-honest path waits until we
-// confirm trailing-1yr player level beats team-level).
+// Each successful run also writes a daily snapshot row per player to
+// player_baserunning_trailing_snapshot (PT-anchored snapshot_date),
+// starting the forward-honest clock so the backtest can read each
+// player's trailing-1yr BsR as-of a past game_date.
 async function runPlayerBaserunningTrailingJob(opts) {
   const o = opts || {};
   const cookieRow = q.getSetting.get('fangraphs_session_cookie');
@@ -4520,6 +4522,18 @@ async function runPlayerBaserunningTrailingJob(opts) {
     const refreshedAt = new Date().toISOString();
     q.replacePlayerBaserunningTrailing(rows, startdate, enddate, refreshedAt);
     console.log('[player-baserunning-trailing] persisted ' + rows.length + ' player rows for window ' + startdate + '..' + enddate);
+    // Daily snapshot mirror — starts the forward-honest clock. PT date
+    // matches the framing/FRV/baserunning snapshot tz. Same delete-then-
+    // insert idempotency, so a same-day re-run rewrites cleanly.
+    let snapshot_captured = null;
+    try {
+      const snapDate = today; // PT today, computed above
+      q.snapshotPlayerBaserunningTrailing(snapDate, rows, startdate, enddate);
+      snapshot_captured = { snapshot_date: snapDate, rows: rows.length, window_startdate: startdate, window_enddate: enddate };
+      console.log('[player-baserunning-trailing-snapshot] captured ' + rows.length + ' rows for ' + snapDate);
+    } catch (e) {
+      console.warn('[player-baserunning-trailing-snapshot] capture failed (non-fatal): ' + e.message);
+    }
     // Verification — counts + sanity sample (top BsR rows by abs value).
     let verified_count = null, non_null_bsr_count = null, sample_db = [];
     try {
@@ -4541,6 +4555,7 @@ async function runPlayerBaserunningTrailingJob(opts) {
       verified_count,
       non_null_bsr_count,
       window: { startdate, enddate },
+      snapshot_captured,
       sample_db_top_5_by_bsr: sample_db,
     };
   } catch (e) {

@@ -2301,6 +2301,17 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
 // denominator + same accuracy/CLV harness as the team-level path so
 // the two are directly comparable. Requires player_baserunning
 // seeded (POST /admin/refresh/player-baserunning).
+//
+// FORWARD-HONEST — ?forwardHonest=true (player + trailing only) reads
+// each game's BsR AS OF its game_date from
+// player_baserunning_trailing_snapshot, never applying future BsR to
+// past games. Games earlier than the first snapshot are skipped. This
+// is the only baserunning variant whose CLV is a clean forward
+// measurement; the daily snapshot starts accumulating from the next
+// 6 AM PT job after the snapshot table ships. See response
+// .forward_honest_expectation for the verdict bar (NOT a 30-day
+// verdict — CLV typically needs 60-90 days; ROI is near-useless until
+// bet count is large). Measurement only — NOT wired to live scoring.
 router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
   try {
     const from = req.query.from;
@@ -2312,9 +2323,10 @@ router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
     const detail = req.query.detail === 'true' || req.query.detail === '1';
     const level = req.query.level === 'player' ? 'player' : 'team';
     const window = req.query.window === 'trailing' ? 'trailing' : 'ytd';
+    const forwardHonest = req.query.forwardHonest === 'true' || req.query.forwardHonest === '1';
 
     const { runBaserunningBacktest } = require('../services/baserunning-backtest');
-    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window });
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest });
     res.json(out);
   } catch (e) {
     console.error('[admin/baserunning-backtest] error:', e);

@@ -327,8 +327,19 @@ function runBaserunningBacktest(opts) {
   // from player_baserunning_trailing). Trailing addresses the ~70-game
   // YTD sample noise that washed out lineup-specificity in the first
   // player-level run.
+  //
+  // FORWARD-HONEST switch (player + trailing only) — when true, reads
+  // each player's BsR AS OF game_date from
+  // player_baserunning_trailing_snapshot, never applying future BsR to
+  // past games. Games with no snapshot at-or-before their date are
+  // skipped. Coverage data (n_snapshot_days, date range) is surfaced
+  // in baserunning_coverage so an early/empty result is interpretable.
+  // No other variant supports forward mode (team/YTD snapshot tables
+  // exist but are not wired here — out of scope for this build).
   const level = opts.level === 'player' ? 'player' : 'team';
   const window = opts.window === 'trailing' ? 'trailing' : 'ytd';
+  const forwardHonestRequested = !!opts.forwardHonest;
+  const forwardHonest = forwardHonestRequested && level === 'player' && window === 'trailing';
   const { resolveBacktestMlbId } = jobs;
 
   const season = Number(fromDate.slice(0, 4));
@@ -373,8 +384,9 @@ function runBaserunningBacktest(opts) {
       if (!Number.isFinite(id) || id <= 0) continue;
       playerBsrById.set(id, Number(r.bsr));
     }
-  } else {
-    // window === 'trailing'
+  } else if (!forwardHonest) {
+    // window === 'trailing', hindsight mode — current cumulative
+    // trailing-1yr row per player applied to all games in [from..to].
     if (!q.getPlayerBaserunningTrailing) {
       return {
         bias_warning: 'player_baserunning_trailing helpers missing — db migration not yet applied.',
@@ -406,6 +418,29 @@ function runBaserunningBacktest(opts) {
         startdate: sample.window_startdate,
         enddate:   sample.window_enddate,
         refreshed_at: sample.refreshed_at,
+      };
+    }
+  } else {
+    // Forward-honest path. No upfront load — each game's BsR map is
+    // built lazily from player_baserunning_trailing_snapshot at the
+    // game's date (cache keyed on the resolved snapshot_date). Pre-
+    // flight: confirm any snapshot data exists, otherwise the run is
+    // structurally empty and we surface that explicitly.
+    if (!q.getPlayerBaserunningTrailingAsOf || !q.getPlayerBaserunningTrailingSnapshotCoverage) {
+      return {
+        bias_warning: 'player_baserunning_trailing_snapshot helpers missing — db migration not yet applied. Forward-honest mode requires the snapshot table + as-of read.',
+        window: { from: fromDate, to: toDate },
+        level, window, mode: 'forward_honest',
+      };
+    }
+    const cov = q.getPlayerBaserunningTrailingSnapshotCoverage.get();
+    if (!cov || !cov.n_snapshot_days) {
+      return {
+        bias_warning: 'player_baserunning_trailing_snapshot has no rows yet. Forward-honest mode reads point-in-time BsR per game_date; without snapshot history it can\'t score any game. The 6 AM PT job (runPlayerBaserunningTrailingJob) writes a snapshot row each day — wait for accumulation.',
+        window: { from: fromDate, to: toDate },
+        level, window, mode: 'forward_honest',
+        snapshot_coverage: { n_snapshot_days: 0, first_snapshot_date: null, last_snapshot_date: null },
+        expectation: 'Forward CLV typically needs 60-90 days of snapshots before it clears its noise band, given ~4 bets/20 cross the emit threshold from BsR. This is a clock, not a verdict.',
       };
     }
   }
@@ -513,12 +548,59 @@ function runBaserunningBacktest(opts) {
   let lineupSlotsTotal = 0, lineupSlotsResolved = 0, lineupSlotsWithBsr = 0;
   const playersUsed = new Set();
 
+  // Forward-mode per-date BsR map cache. Each entry is the as-of
+  // snapshot Map at the date the snapshot was actually taken (the
+  // resolved snapshot_date, not the game_date — many games map to the
+  // same snapshot row). Tracks which snapshot dates the run consumed
+  // so coverage diagnostics are exact.
+  const playerBsrByDate = new Map();      // key: snapshot_date → Map(mlbam_id → bsr)
+  const snapshotDateByGameDate = new Map(); // key: game_date → snapshot_date (or null)
+  const snapshotDatesUsed = new Set();
+  let gamesSkippedNoSnapshot = 0;
+  function getPlayerBsrMapForGame(gameDate) {
+    if (snapshotDateByGameDate.has(gameDate)) {
+      const sd = snapshotDateByGameDate.get(gameDate);
+      return { snapshotDate: sd, map: sd ? playerBsrByDate.get(sd) : null };
+    }
+    const rows = q.getPlayerBaserunningTrailingAsOf.all(gameDate);
+    if (!rows || !rows.length) {
+      snapshotDateByGameDate.set(gameDate, null);
+      return { snapshotDate: null, map: null };
+    }
+    const sd = rows[0].snapshot_date;
+    snapshotDateByGameDate.set(gameDate, sd);
+    if (!playerBsrByDate.has(sd)) {
+      const m = new Map();
+      for (const r of rows) {
+        if (r.bsr == null) continue;
+        const id = Number(r.mlbam_id);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        m.set(id, Number(r.bsr));
+      }
+      playerBsrByDate.set(sd, m);
+      // Snapshot window meta — captured the first time a snapshot
+      // is consumed. window_startdate/enddate vary across snapshot
+      // dates (rolling), so this records the most-recently-used.
+      playerWindowMeta = {
+        startdate: rows[0].window_startdate,
+        enddate:   rows[0].window_enddate,
+        snapshot_date: sd,
+      };
+    }
+    snapshotDatesUsed.add(sd);
+    return { snapshotDate: sd, map: playerBsrByDate.get(sd) };
+  }
+
   // Lineup-sum-of-starters BsR-per-game (player mode). Returns null if
   // the lineup is empty / team has no games_played / no slot resolves.
   // Resolved slots without a player_baserunning row contribute 0
   // (neutral baserunner) — common for September call-ups with no
-  // season total yet.
-  function computePlayerLineupBsRPerGame(team, lineupJson) {
+  // season total yet. In forward-honest mode `bsrMap` is the as-of
+  // snapshot map for this game's date; otherwise it's the static
+  // pre-loaded map (passed in for both paths so the function has no
+  // implicit dependency on outer state).
+  function computePlayerLineupBsRPerGame(team, lineupJson, bsrMap) {
+    if (!bsrMap) return null;
     const realG = gamesByTeam.get(team);
     if (!realG || realG <= 0) return null;
     const lineup = tryParse(lineupJson) || [];
@@ -530,7 +612,7 @@ function runBaserunningBacktest(opts) {
       const mlbId = resolveBacktestMlbId(team, p.name);
       if (!mlbId) continue;
       lineupSlotsResolved++;
-      const bsr = playerBsrById.get(Number(mlbId));
+      const bsr = bsrMap.get(Number(mlbId));
       if (bsr != null) {
         sum += bsr;
         lineupSlotsWithBsr++;
@@ -547,12 +629,25 @@ function runBaserunningBacktest(opts) {
     const parts = (gameRow.game_id || '').split('-');
     const awayTeam = (parts[0] || '').toUpperCase();
     const homeTeam = (parts[1] || '').toUpperCase();
+    // Pick the BsR map for this game. Hindsight modes use the
+    // pre-loaded `playerBsrById`; forward mode resolves the as-of
+    // snapshot for game_date. Games with no snapshot at-or-before
+    // their date are skipped before model scoring.
+    let bsrMapForGame = playerBsrById;
+    if (forwardHonest) {
+      const got = getPlayerBsrMapForGame(gameRow.game_date);
+      if (!got.map) {
+        gamesSkippedNoSnapshot++;
+        continue;
+      }
+      bsrMapForGame = got.map;
+    }
     const awayBsRPerGame = level === 'team'
       ? bsrByTeam.get(awayTeam)
-      : computePlayerLineupBsRPerGame(awayTeam, gameRow.away_lineup_json);
+      : computePlayerLineupBsRPerGame(awayTeam, gameRow.away_lineup_json, bsrMapForGame);
     const homeBsRPerGame = level === 'team'
       ? bsrByTeam.get(homeTeam)
-      : computePlayerLineupBsRPerGame(homeTeam, gameRow.home_lineup_json);
+      : computePlayerLineupBsRPerGame(homeTeam, gameRow.home_lineup_json, bsrMapForGame);
     if (awayBsRPerGame == null || homeBsRPerGame == null) {
       gamesMissingBsr++;
       if (awayBsRPerGame == null) missingTeams.add(awayTeam);
@@ -700,6 +795,26 @@ function runBaserunningBacktest(opts) {
   const clvNoiseBandWith = clvWith.n_with_close > 0
     ? Number((100 / Math.sqrt(clvWith.n_with_close)).toFixed(4)) : null;
 
+  // Forward-mode snapshot coverage diagnostics — explicit so an early
+  // / empty result is interpretable. Sourced from the same coverage
+  // helper the pre-flight uses, plus the per-run set of snapshot dates
+  // actually consumed (intersect of [from..to] with available snapshots).
+  let snapshotCoverage = null;
+  if (forwardHonest) {
+    const cov = q.getPlayerBaserunningTrailingSnapshotCoverage.get() || {};
+    const used = Array.from(snapshotDatesUsed).sort();
+    snapshotCoverage = {
+      n_snapshot_days_total:    cov.n_snapshot_days || 0,
+      first_snapshot_date:      cov.first_snapshot_date || null,
+      last_snapshot_date:       cov.last_snapshot_date  || null,
+      n_snapshot_days_used:     used.length,
+      first_snapshot_date_used: used[0] || null,
+      last_snapshot_date_used:  used[used.length - 1] || null,
+      games_skipped_no_snapshot: gamesSkippedNoSnapshot,
+      note: 'n_snapshot_days_total = all daily snapshots ever captured. n_snapshot_days_used = distinct snapshot dates this run actually consumed (one per unique game_date in window with a snapshot at-or-before it). games_skipped_no_snapshot counts games in [from..to] earlier than the first snapshot — pure forward attrition, NOT a model failure.',
+    };
+  }
+
   // Coverage block changes shape by level.
   const baserunning_coverage = level === 'team' ? {
     season,
@@ -715,9 +830,13 @@ function runBaserunningBacktest(opts) {
     season,
     level,
     window,
-    bsr_source_table: window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning',
+    mode: forwardHonest ? 'forward_honest' : 'hindsight',
+    bsr_source_table: forwardHonest ? 'player_baserunning_trailing_snapshot (as-of game_date)' : (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning'),
     trailing_window: playerWindowMeta,
-    total_players_with_bsr: playerBsrById ? playerBsrById.size : 0,
+    snapshot_coverage: snapshotCoverage,
+    total_players_with_bsr: forwardHonest
+      ? null  // varies by date — see snapshot_coverage
+      : (playerBsrById ? playerBsrById.size : 0),
     lineup_slots_total:     lineupSlotsTotal,
     lineup_slots_resolved:  lineupSlotsResolved,
     lineup_slots_with_bsr:  lineupSlotsWithBsr,
@@ -728,21 +847,35 @@ function runBaserunningBacktest(opts) {
     unique_players_used:    playersUsed.size,
     avg_games_per_team_denominator: avgGamesPerTeam != null ? Number(avgGamesPerTeam.toFixed(2)) : null,
     denominator_source: 'sum_of_9_starters_BsR / game_log.completed-games (team\'s real games). Units match team-level.',
-    note: 'Per-game lineup BsR = Σ(starters\' ' + (window === 'trailing' ? 'trailing-1yr' : 'YTD season') + ' BsR) / team_games_played. Resolved slots with no row in ' + (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning') + ' contribute 0 (neutral). Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).',
+    note: forwardHonest
+      ? 'Per-game lineup BsR = Σ(starters\' trailing-1yr BsR AS OF game_date) / team_games_played. Each game reads the latest player_baserunning_trailing_snapshot row whose snapshot_date <= game_date — never future BsR applied to past games. Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).'
+      : 'Per-game lineup BsR = Σ(starters\' ' + (window === 'trailing' ? 'trailing-1yr' : 'YTD season') + ' BsR) / team_games_played. Resolved slots with no row in ' + (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning') + ' contribute 0 (neutral). Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).',
   };
 
   const out = {
-    bias_warning: window === 'trailing'
-      ? 'HINDSIGHT BIASED — DIRECTION-ONLY. Trailing-1yr cumulative BsR (window dates in baserunning_coverage.trailing_window) applied retroactively to games in [from..to]. The trailing window is a better true-talent estimate than YTD (~2x sample) but still hindsight when applied to early-window games. Forward-honest path waits on snapshot accumulation.'
-      : 'HINDSIGHT BIASED — DIRECTION-ONLY. Season-cumulative BsR applied retroactively (look-ahead). Forward-honest version awaits ~30d of *_baserunning_snapshot accumulation.',
+    bias_warning: forwardHonest
+      ? 'FORWARD-HONEST. Each game scored with player BsR AS OF game_date from player_baserunning_trailing_snapshot — never future BsR applied to past games. Games earlier than the first snapshot are skipped (see baserunning_coverage.snapshot_coverage.games_skipped_no_snapshot). This is the only baserunning variant whose CLV is a clean forward measurement.'
+      : window === 'trailing'
+        ? 'HINDSIGHT BIASED — DIRECTION-ONLY. Trailing-1yr cumulative BsR (window dates in baserunning_coverage.trailing_window) applied retroactively to games in [from..to]. The trailing window is a better true-talent estimate than YTD (~2x sample) but still hindsight when applied to early-window games. Forward-honest path: pass forwardHonest=true (player+trailing only) once snapshot accumulation begins.'
+        : 'HINDSIGHT BIASED — DIRECTION-ONLY. Season-cumulative BsR applied retroactively (look-ahead). Forward-honest version awaits ~30d of *_baserunning_snapshot accumulation.',
+    forward_honest_expectation: forwardHonest
+      ? 'NOT a 30-day verdict. Baserunning nudges only ~4 bets across the emit threshold per ~20, so the forward BET count grows slowly. CLV likely needs 60-90 days of forward data before it clears its noise band. Set the clock, don\'t watch it. Verdict bar: forward ACCURACY holds AND forward CLV turns positive on adequate bet sample. Weight CLV heaviest, accuracy second, ROI last (near-useless until bet count is large). MEASUREMENT ONLY — this output is NOT wired to live scoring.'
+      : null,
+    requested_forward_honest_but_unsupported: (forwardHonestRequested && !forwardHonest)
+      ? 'forwardHonest=true ignored: forward mode is implemented only for level=player + window=trailing. Other variants run in hindsight mode.'
+      : undefined,
     scope_note: 'ML-side only. Per-team BsR/game added to each team\'s projected runs (own baserunning helps own offense). estTot and totals untouched.',
     level,
     bsr_window: level === 'player' ? window : null,
+    mode: level === 'player' && window === 'trailing'
+      ? (forwardHonest ? 'forward_honest' : 'hindsight')
+      : 'hindsight',
     window: { from: fromDate, to: toDate },
     games_considered: gamesConsidered,
     games_scored: gamesScored,
     games_suppressed: suppressed,
     games_skipped_missing_bsr: gamesMissingBsr,
+    games_skipped_no_snapshot: forwardHonest ? gamesSkippedNoSnapshot : undefined,
     missing_teams: Array.from(missingTeams).sort(),
     baserunning_coverage,
     accuracy: {
