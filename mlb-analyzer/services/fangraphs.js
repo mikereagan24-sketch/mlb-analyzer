@@ -604,11 +604,20 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
         mlbam_id,
         name: (r.PlayerName || r.PlayerNameRoute || r.Name || '').toString().trim() || null,
         bsr: 0, ubr: 0, wsb: 0, wgdp: 0, sb: 0, cs: 0, g: 0,
+        stint_count: 0,
         _bsrHas: false, _ubrHas: false, _wsbHas: false, _wgdpHas: false,
         _sbHas: false, _csHas: false, _gHas: false,
       };
       accByMlbam.set(mlbam_id, agg);
     }
+    // Track stints. Each raw FG row for the same xMLBAMID = one
+    // team-stint within the window. Multi-team players (Devers "2
+    // Tms") arrive as two raw rows and aggregate to one output row
+    // with stint_count=2. Backtest surfaces how many lineup slots
+    // are affected by the multi-stint look-ahead caveat (the player
+    // gets full-window BsR regardless of which team's lineup he
+    // appeared in on a given day).
+    agg.stint_count++;
     const bsr  = num(r.BaseRunning);
     const ubr  = num(r.UBR);
     const wsb  = num(r.wBsR);
@@ -628,7 +637,9 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
     console.warn('[fg-player-baserunning-trailing] skipped ' + skippedNoId + ' row(s) with no xMLBAMID');
   }
   const out = [];
+  let nMultiTeam = 0;
   for (const agg of accByMlbam.values()) {
+    if (agg.stint_count > 1) nMultiTeam++;
     out.push({
       mlbam_id: agg.mlbam_id,
       name:     agg.name,
@@ -639,11 +650,12 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
       sb:   agg._sbHas   ? agg.sb   : null,
       cs:   agg._csHas   ? agg.cs   : null,
       g:    agg._gHas    ? agg.g    : null,
+      stint_count: agg.stint_count,
     });
   }
   console.log('[fg-player-baserunning-trailing] SUCCESS (' + out.length
     + ' unique players, raw rows=' + rows.length
-    + ', stints-merged=' + (rows.length - out.length - skippedNoId)
+    + ', multi-team players=' + nMultiTeam
     + ', window=' + startdate + '..' + enddate + ')');
   return out;
 }

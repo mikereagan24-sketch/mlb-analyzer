@@ -305,7 +305,9 @@ function runBaserunningBacktest(opts) {
 
   let bsrRows = null;
   let playerBsrById = null;
-  let playerWindowMeta = null;   // for trailing mode response
+  let playerWindowMeta = null;            // for trailing mode response
+  let playerStintCountById = null;        // trailing only: mlb_id → stint count
+  let multiTeamPlayersInPull = 0;          // trailing only: # players w/ stint_count > 1
 
   if (level === 'team') {
     bsrRows = q.getTeamBaserunning.all(season);
@@ -362,12 +364,23 @@ function runBaserunningBacktest(opts) {
       };
     }
     playerBsrById = new Map();
+    // Multi-team stint tracking. Players with stint_count > 1 had
+    // their BsR aggregated across two team-stints by xMLBAMID — a
+    // small look-ahead since the lineup gets full-window BsR
+    // regardless of which team's lineup he appeared in. Tracked so
+    // the coverage block surfaces how many lineup slots are affected.
+    playerStintCountById = new Map();
+    let nMultiTeamInPull = 0;
     for (const r of playerRows) {
       if (r.bsr == null) continue;
       const id = Number(r.mlbam_id);
       if (!Number.isFinite(id) || id <= 0) continue;
       playerBsrById.set(id, Number(r.bsr));
+      const sc = (r.stint_count != null) ? Number(r.stint_count) : 1;
+      playerStintCountById.set(id, sc);
+      if (sc > 1) nMultiTeamInPull++;
     }
+    multiTeamPlayersInPull = nMultiTeamInPull;
     // Surface the actual trailing window (from one of the persisted
     // rows) so the response is honest about what data ran.
     const sample = playerRows[0];
@@ -481,7 +494,14 @@ function runBaserunningBacktest(opts) {
   // Player-level slot-resolution counters (only meaningful in player
   // mode; harmless extras when team mode runs).
   let lineupSlotsTotal = 0, lineupSlotsResolved = 0, lineupSlotsWithBsr = 0;
+  // Multi-team stint exposure (trailing mode only). Tracks how many
+  // lineup slots' players had BsR aggregated across >1 team-stint
+  // within the trailing window — those slots inherit a small look-
+  // ahead since the player's full-window BsR is used regardless of
+  // which team's lineup he appeared in on a given day.
+  let lineupSlotsMultiTeam = 0;
   const playersUsed = new Set();
+  const multiTeamPlayersUsed = new Set();
 
   // Lineup-sum-of-starters BsR-per-game (player mode). Returns null if
   // the lineup is empty / team has no games_played / no slot resolves.
@@ -500,12 +520,20 @@ function runBaserunningBacktest(opts) {
       const mlbId = resolveBacktestMlbId(team, p.name);
       if (!mlbId) continue;
       lineupSlotsResolved++;
-      const bsr = playerBsrById.get(Number(mlbId));
+      const idNum = Number(mlbId);
+      const bsr = playerBsrById.get(idNum);
       if (bsr != null) {
         sum += bsr;
         lineupSlotsWithBsr++;
-        playersUsed.add(Number(mlbId));
+        playersUsed.add(idNum);
         anyResolved = true;
+        if (playerStintCountById) {
+          const sc = playerStintCountById.get(idNum);
+          if (sc != null && sc > 1) {
+            lineupSlotsMultiTeam++;
+            multiTeamPlayersUsed.add(idNum);
+          }
+        }
       }
     }
     if (!anyResolved) return null;
@@ -673,13 +701,27 @@ function runBaserunningBacktest(opts) {
       ? Number((100 * lineupSlotsWithBsr / lineupSlotsTotal).toFixed(2)) : null,
     unique_players_used:    playersUsed.size,
     avg_games_per_team_denominator: avgGamesPerTeam != null ? Number(avgGamesPerTeam.toFixed(2)) : null,
+    // Multi-team stint exposure (trailing mode only; YTD has one
+    // contiguous in-progress season, no traded-player splits to
+    // aggregate). Surfaces how many lineup slots inherit the small
+    // look-ahead from xMLBAMID aggregation across team-stints.
+    multi_team_stints: window === 'trailing' ? {
+      players_in_pull:         multiTeamPlayersInPull,
+      pct_of_players_in_pull:  playerBsrById && playerBsrById.size > 0
+        ? Number((100 * multiTeamPlayersInPull / playerBsrById.size).toFixed(2)) : null,
+      lineup_slots:            lineupSlotsMultiTeam,
+      pct_of_lineup_slots_with_bsr: lineupSlotsWithBsr > 0
+        ? Number((100 * lineupSlotsMultiTeam / lineupSlotsWithBsr).toFixed(2)) : null,
+      unique_multi_team_players_used: multiTeamPlayersUsed.size,
+      note: 'Traded players (Devers "2 Tms") had >1 raw FG row aggregated by xMLBAMID into one full-window total. Lineup scoring uses the full-window value regardless of which team the slot belonged to that day — second-order look-ahead inside the already-flagged hindsight bias. Per-stint correction deferred to forward-honest version IF v1 shows life.',
+    } : null,
     denominator_source: 'sum_of_9_starters_BsR / game_log.completed-games (team\'s real games). Units match team-level.',
     note: 'Per-game lineup BsR = Σ(starters\' ' + (window === 'trailing' ? 'trailing-1yr' : 'YTD season') + ' BsR) / team_games_played. Resolved slots with no row in ' + (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning') + ' contribute 0 (neutral). Slot resolution comes from resolveBacktestMlbId (active 26-man ∪ season fullSeason).',
   };
 
   const out = {
     bias_warning: window === 'trailing'
-      ? 'HINDSIGHT BIASED — DIRECTION-ONLY. Trailing-1yr cumulative BsR (window dates in baserunning_coverage.trailing_window) applied retroactively to games in [from..to]. The trailing window is a better true-talent estimate than YTD (~2x sample) but still hindsight when applied to early-window games. Forward-honest path waits on snapshot accumulation.'
+      ? 'HINDSIGHT BIASED — DIRECTION-ONLY. Trailing-1yr cumulative BsR (window dates in baserunning_coverage.trailing_window) applied retroactively to games in [from..to]. The trailing window is a better true-talent estimate than YTD (~2x sample) but still hindsight when applied to early-window games. ALSO — multi-team players (traded mid-window) had BsR aggregated across stints by xMLBAMID into one full-window talent estimate; lineups inherit that full-window value regardless of which team the player was on that day. Acceptable for lineup scoring (BsR is context-free individual skill, full sample = better talent estimate) but small look-ahead, second-order inside the hindsight bias. See baserunning_coverage.multi_team_stints for slot exposure. Per-stint correction deferred to forward-honest path IF v1 shows life. Forward-honest snapshot accumulation also still pending.'
       : 'HINDSIGHT BIASED — DIRECTION-ONLY. Season-cumulative BsR applied retroactively (look-ahead). Forward-honest version awaits ~30d of *_baserunning_snapshot accumulation.',
     scope_note: 'ML-side only. Per-team BsR/game added to each team\'s projected runs (own baserunning helps own offense). estTot and totals untouched.',
     level,
