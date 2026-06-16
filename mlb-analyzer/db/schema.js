@@ -496,6 +496,37 @@ db.exec(`
     PRIMARY KEY (snapshot_date, season, mlbam_id)
   );
   CREATE INDEX IF NOT EXISTS idx_player_baserunning_snapshot_date ON player_baserunning_snapshot(snapshot_date);
+  -- Trailing-window player baserunning (~365-day rolling, NOT YTD).
+  -- YTD-season=2026 returned ~70 games per player — too noisy for a
+  -- per-player true-talent estimate. Trailing-1yr ≈ full-season sample,
+  -- aggregated across mid-season trade splits (Devers "2 Tms" lands as
+  -- one row). FG probe confirmed the custom date range honors the
+  -- window (top-10 G = 126-162, BsR ~8-10).
+  --
+  -- Single rolling window at a time. window_startdate / window_enddate
+  -- columns name the period the row's values cover so the operator
+  -- (and backtest readers) can see what data is loaded without
+  -- joining a separate metadata table. Each refresh clears the table
+  -- and re-inserts under the new window — small (~700 rows) and
+  -- intentionally not snapshotted for v1.
+  --
+  -- Forward-honest path is the existing player_baserunning_snapshot
+  -- table (YTD-season snapshots). Trailing-snapshot equivalent
+  -- deferred until v1 shows life.
+  CREATE TABLE IF NOT EXISTS player_baserunning_trailing (
+    mlbam_id INTEGER PRIMARY KEY,
+    name TEXT,
+    bsr REAL,
+    ubr REAL,
+    wsb REAL,
+    wgdp REAL,
+    sb INTEGER,
+    cs INTEGER,
+    g INTEGER,
+    window_startdate TEXT,
+    window_enddate TEXT,
+    refreshed_at TEXT
+  );
   -- Kalshi MLB spread ladder (KXMLBSPREAD series). One row per
   -- (game_date, game_id, spread_team, spread_line) — each Kalshi
   -- game exposes ~10-12 spread markets (1.5 through 9.5 in 1-run
@@ -2360,6 +2391,47 @@ q.snapshotPlayerBaserunning = (snapshotDate, season, rows) => {
 q.getPlayerBaserunning = db.prepare(
   "SELECT season, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, refreshed_at "
   + "FROM player_baserunning WHERE season=?"
+);
+
+// Trailing-window player BsR. Single rolling window at a time;
+// runPlayerBaserunningTrailingJob clears the table then re-inserts.
+q._clearPlayerBaserunningTrailing = db.prepare("DELETE FROM player_baserunning_trailing");
+q._insertPlayerBaserunningTrailing = db.prepare(
+  "INSERT OR REPLACE INTO player_baserunning_trailing "
+  + "(mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  + " window_startdate, window_enddate, refreshed_at) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+q.replacePlayerBaserunningTrailing = (rows, startdate, enddate, refreshedAt) => {
+  const tx = db.transaction((rs, sd, ed, t) => {
+    q._clearPlayerBaserunningTrailing.run();
+    for (const r of rs) {
+      if (r == null || r.mlbam_id == null) continue;
+      q._insertPlayerBaserunningTrailing.run(
+        Math.round(Number(r.mlbam_id)),
+        r.name || null,
+        r.bsr  == null ? null : Number(r.bsr),
+        r.ubr  == null ? null : Number(r.ubr),
+        r.wsb  == null ? null : Number(r.wsb),
+        r.wgdp == null ? null : Number(r.wgdp),
+        r.sb   == null ? null : Math.round(Number(r.sb)),
+        r.cs   == null ? null : Math.round(Number(r.cs)),
+        r.g    == null ? null : Math.round(Number(r.g)),
+        sd, ed, t);
+    }
+  });
+  tx(rows, startdate, enddate, refreshedAt);
+};
+q.getPlayerBaserunningTrailing = db.prepare(
+  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  + "       window_startdate, window_enddate, refreshed_at "
+  + "FROM player_baserunning_trailing"
+);
+q.getPlayerBaserunningTrailingWindow = db.prepare(
+  "SELECT window_startdate, window_enddate, MAX(refreshed_at) AS refreshed_at, "
+  + "       COUNT(*) AS n_rows, "
+  + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr "
+  + "FROM player_baserunning_trailing"
 );
 
 // ------------------------------------------------------------------
