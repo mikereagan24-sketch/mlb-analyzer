@@ -525,6 +525,7 @@ db.exec(`
     sb INTEGER,
     cs INTEGER,
     g INTEGER,
+    stint_count INTEGER,        -- 1 = single team over window; >1 = multi-team
     window_startdate TEXT,
     window_enddate TEXT,
     refreshed_at TEXT
@@ -1034,6 +1035,10 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN game_pk INTEGER"); } catch(e) {}
 // updateLineup statement; preserved across subsequent (projected or
 // confirmed) updates so we can later diff the original projection
 // against the eventual confirmed state.
+// stint_count was added to player_baserunning_trailing after the
+// initial trailing ingest shipped (71d117b). Idempotent ALTER for any
+// DB that already created the table without the column.
+try { db.exec("ALTER TABLE player_baserunning_trailing ADD COLUMN stint_count INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_lineup_json TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_lineup_json TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_sp TEXT"); } catch(e) {}
@@ -2432,9 +2437,9 @@ q.getPlayerBaserunning = db.prepare(
 q._clearPlayerBaserunningTrailing = db.prepare("DELETE FROM player_baserunning_trailing");
 q._insertPlayerBaserunningTrailing = db.prepare(
   "INSERT OR REPLACE INTO player_baserunning_trailing "
-  + "(mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  + "(mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, stint_count, "
   + " window_startdate, window_enddate, refreshed_at) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 q.replacePlayerBaserunningTrailing = (rows, startdate, enddate, refreshedAt) => {
   const tx = db.transaction((rs, sd, ed, t) => {
@@ -2451,20 +2456,22 @@ q.replacePlayerBaserunningTrailing = (rows, startdate, enddate, refreshedAt) => 
         r.sb   == null ? null : Math.round(Number(r.sb)),
         r.cs   == null ? null : Math.round(Number(r.cs)),
         r.g    == null ? null : Math.round(Number(r.g)),
+        r.stint_count == null ? null : Math.round(Number(r.stint_count)),
         sd, ed, t);
     }
   });
   tx(rows, startdate, enddate, refreshedAt);
 };
 q.getPlayerBaserunningTrailing = db.prepare(
-  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, stint_count, "
   + "       window_startdate, window_enddate, refreshed_at "
   + "FROM player_baserunning_trailing"
 );
 q.getPlayerBaserunningTrailingWindow = db.prepare(
   "SELECT window_startdate, window_enddate, MAX(refreshed_at) AS refreshed_at, "
   + "       COUNT(*) AS n_rows, "
-  + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr "
+  + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr, "
+  + "       SUM(CASE WHEN stint_count > 1 THEN 1 ELSE 0 END) AS n_multi_team "
   + "FROM player_baserunning_trailing"
 );
 
