@@ -256,8 +256,25 @@ function lookupMorningMlPrices(gameDate, gameId) {
 // Aggregation helpers.
 // ============================================================
 
+// ML PnL helpers — same shape as services/frv-backtest.js so the
+// pnl/roi block here is directly comparable. wagered varies by line:
+// favorites stake |line| to win 100; dogs stake 100 to win line.
+function americanProfit(ml) {
+  if (typeof ml !== 'number' || !Number.isFinite(ml) || ml === 0) return 0;
+  return ml > 0 ? ml : (100 * 100) / Math.abs(ml);
+}
+function mlWageredFor(ml) {
+  if (typeof ml !== 'number' || !Number.isFinite(ml) || ml === 0) return 0;
+  return ml > 0 ? (10000 / ml) : Math.abs(ml);
+}
+
 function newClvAgg() {
-  return { n_bets: 0, n_with_close: 0, sumClv: 0, sumAbsClv: 0, nPositive: 0, n_no_close: 0 };
+  return {
+    n_bets: 0, n_with_close: 0, sumClv: 0, sumAbsClv: 0, nPositive: 0, n_no_close: 0,
+    // PnL/ROI accumulators — graded from final scores in the game loop.
+    // MLB ML is push-free (no tied finals), so wins + losses == n_graded.
+    wins: 0, losses: 0, pnl: 0, wagered: 0, n_graded: 0,
+  };
 }
 
 function projectClv(a) {
@@ -268,6 +285,19 @@ function projectClv(a) {
     n_no_close:    a.n_no_close,
     avg_clv_pp:    a.n_with_close > 0 ? Number((a.sumClv / a.n_with_close).toFixed(4)) : null,
     pct_positive:  a.n_with_close > 0 ? Number((100 * a.nPositive / a.n_with_close).toFixed(2)) : null,
+  };
+}
+
+function projectPnl(a) {
+  if (!a.n_bets) return { n_bets: 0, n_graded: 0, wins: 0, losses: 0, pnl: 0, wagered: 0, roi_pct: null };
+  return {
+    n_bets:   a.n_bets,
+    n_graded: a.n_graded,
+    wins:     a.wins,
+    losses:   a.losses,
+    pnl:      Number(a.pnl.toFixed(4)),
+    wagered:  Number(a.wagered.toFixed(4)),
+    roi_pct:  a.wagered > 0 ? Number((100 * a.pnl / a.wagered).toFixed(4)) : null,
   };
 }
 
@@ -584,20 +614,44 @@ function runBaserunningBacktest(opts) {
     function tallyClv(agg, sideRes) {
       if (!sideRes.side) return null;
       agg.n_bets++;
+      // ---- PnL grading (independent of close lookup) ----
+      // MLB ML is push-free; ties don't happen in finals. Grade off
+      // gameRow.home_score/away_score and accumulate at the same
+      // wagered convention as services/frv-backtest.js.
+      const home = Number(gameRow.home_score);
+      const away = Number(gameRow.away_score);
+      let outcome = null, profit = 0, wagered = 0;
+      if (Number.isFinite(home) && Number.isFinite(away) && home !== away) {
+        const homeWon = home > away;
+        const win = (sideRes.side === 'home' && homeWon) || (sideRes.side === 'away' && !homeWon);
+        profit  = win ? americanProfit(sideRes.market_ml) : -mlWageredFor(sideRes.market_ml);
+        wagered = mlWageredFor(sideRes.market_ml);
+        if (wagered > 0) {
+          agg.n_graded++;
+          agg.pnl     += profit;
+          agg.wagered += wagered;
+          if (win) agg.wins++; else agg.losses++;
+          outcome = win ? 'win' : 'loss';
+        }
+      }
+      // ---- CLV path ----
       const close = lookupClosePrice(gameRow.game_date, gameRow.game_id, sideRes.side);
-      if (!close) { agg.n_no_close++; return { side: sideRes.side, edge: sideRes.edge, price_ml: sideRes.market_ml, close: null, clv: null }; }
+      if (!close) {
+        agg.n_no_close++;
+        return { side: sideRes.side, edge: sideRes.edge, price_ml: sideRes.market_ml, close: null, clv: null, outcome, pnl: outcome ? Number(profit.toFixed(4)) : null };
+      }
       const myImpl    = impliedP(sideRes.market_ml);
       const closeImpl = impliedP(close.price_ml);
       if (!Number.isFinite(myImpl) || !Number.isFinite(closeImpl)) {
         agg.n_no_close++;
-        return { side: sideRes.side, edge: sideRes.edge, price_ml: sideRes.market_ml, close: close.price_ml, clv: null };
+        return { side: sideRes.side, edge: sideRes.edge, price_ml: sideRes.market_ml, close: close.price_ml, clv: null, outcome, pnl: outcome ? Number(profit.toFixed(4)) : null };
       }
       const clv = (closeImpl - myImpl) * 100;
       agg.n_with_close++;
       agg.sumClv += clv;
       agg.sumAbsClv += Math.abs(clv);
       if (clv > 0) agg.nPositive++;
-      return { side: sideRes.side, edge: sideRes.edge, price_ml: sideRes.market_ml, close: close.price_ml, clv: Number(clv.toFixed(4)), close_source: close.source };
+      return { side: sideRes.side, edge: sideRes.edge, price_ml: sideRes.market_ml, close: close.price_ml, clv: Number(clv.toFixed(4)), close_source: close.source, outcome, pnl: outcome ? Number(profit.toFixed(4)) : null };
     }
     const playWithout = tallyClv(clvWithout, sideWithout);
     const playWith    = tallyClv(clvWith,    sideWith);
@@ -711,7 +765,20 @@ function runBaserunningBacktest(opts) {
       bet_set_diff: { same_side: both, without_only: withoutOnly, with_only: withOnly, side_flipped: sideFlipped },
       interpretation: 'CLV diff between configs is driven by bet-set composition shifts (BsR flips a few marginal selections). With BsR margin typically ±0.05–0.15 runs/game, most games keep the same signaled side; CLV-with vs CLV-without will be close unless BsR is concentrated on tipping cases.',
     },
-    disposition_note: 'JUDGE ON: (a) accuracy delta vs its SE band; (b) CLV delta vs its noise band. If both are inside noise, BsR stays OFF (same disposition as FRV). Small clean positive on either metric earns a forward-snapshot follow-up — NOT a wire-to-prod.',
+    pnl: (function () {
+      const pnlWithout = projectPnl(clvWithout);
+      const pnlWith    = projectPnl(clvWith);
+      const dRoi = (pnlWithout.roi_pct != null && pnlWith.roi_pct != null)
+        ? Number((pnlWith.roi_pct - pnlWithout.roi_pct).toFixed(4)) : null;
+      return {
+        without: pnlWithout,
+        with:    pnlWith,
+        delta_roi_pp: dRoi,
+        grading: 'ML; push-free (MLB finals don\'t tie). Wagered = |line| for favorites, 10000/line for dogs (stake-to-win-100), matching services/frv-backtest.js wageredFor.',
+        interpretation: 'CORROBORATING CONTEXT ONLY — not a gate. At n~20 bets the ROI standard error is huge (a single -200 favorite loss = -200 / 100 wagered swings ROI by several pp). Use this to disambiguate when accuracy and CLV point opposite directions; do NOT promote BsR on a ROI swing alone.',
+      };
+    })(),
+    disposition_note: 'JUDGE ON: (a) accuracy delta vs its SE band; (b) CLV delta vs its noise band. If both are inside noise, BsR stays OFF (same disposition as FRV). Small clean positive on either metric earns a forward-snapshot follow-up — NOT a wire-to-prod. The pnl block (with/without ROI + delta) is CORROBORATING CONTEXT ONLY — at n~20 the ROI sampling error swamps the signal, so a flattering ROI swing does NOT override a flat/negative accuracy+CLV verdict. ROI is most useful when accuracy and CLV disagree (e.g. trailing-1yr where accuracy improved but CLV worsened): a clean ROI lift in the same direction as accuracy is mild evidence the accuracy gain is real; a clean ROI drop alongside CLV reinforces the CLV verdict.',
   };
   if (includeDetail) out.plays = plays;
   return out;
