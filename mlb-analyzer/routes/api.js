@@ -2368,6 +2368,279 @@ router.post('/admin/refresh/player-baserunning', requireAdminToken, async (req, 
   }
 });
 
+// Trailing-1yr FG probe (read-only). Hits the FG player leaderboard
+// with a custom startdate/enddate spanning across the season boundary
+// (default: trailing 365 days from today, e.g. 2025-06-15..2026-06-14)
+// to verify the response carries BaseRunning the same way the
+// season-aligned pull does.
+//
+// Verification gates (the operator reads these in the response):
+//   - HTTP 200 + JSON shape with rows[].BaseRunning populated
+//   - season=YYYY in the URL — does FG override startdate/enddate to
+//     just the listed season, or honor the custom range?
+//   - Sample of top 10 rows sorted by BaseRunning so we can eyeball
+//     whether the values look like trailing-1yr (≈ full-season magnitude
+//     for healthy regulars) or still capped at YTD (~70 games worth)
+//
+// If trailing data looks right we'll build the full ingest + table;
+// if FG only returns the season-aligned slice, we'll need to fetch
+// each season separately and combine.
+router.get('/admin/player-bsr-trailing-probe', requireAdminToken, async (req, res) => {
+  try {
+    const today = new Date();
+    const oneYearAgo = new Date(today);
+    oneYearAgo.setFullYear(today.getFullYear() - 1);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    const startdate = req.query.startdate || fmt(oneYearAgo);
+    const enddate   = req.query.enddate   || fmt(today);
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRe.test(startdate) || !dateRe.test(enddate)) {
+      return res.status(400).json({ error: 'startdate / enddate must be YYYY-MM-DD' });
+    }
+
+    // Need FG cookie — same setting the projection / team-BsR scrapes
+    // already use.
+    const cookieRow = q.getSetting.get('fangraphs_session_cookie');
+    const cookieValue = cookieRow && cookieRow.value ? String(cookieRow.value).trim() : '';
+    if (!cookieValue) {
+      return res.status(503).json({
+        error: 'fangraphs_session_cookie not configured — paste via Model tab first',
+      });
+    }
+
+    // season param is the END year — FG may use this to gate the
+    // result-set even when startdate/enddate ask for a wider range.
+    // That asymmetry is exactly what the probe is checking.
+    const endYear = Number(enddate.slice(0, 4));
+    const startYear = Number(startdate.slice(0, 4));
+    const url = 'https://www.fangraphs.com/api/leaders/major-league/data'
+      + '?age='
+      + '&pos=all'
+      + '&stats=bat'
+      + '&lg=all'
+      + '&qual=0'
+      + '&season='   + endYear
+      + '&season1='  + startYear
+      + '&startdate=' + startdate
+      + '&enddate='   + enddate
+      + '&month=0'
+      + '&hand='
+      + '&team=0'
+      + '&pageitems=2000'
+      + '&pagenum=1'
+      + '&ind=1'
+      + '&rost=0'
+      + '&players=0'
+      + '&type=8'
+      + '&postseason='
+      + '&sortdir=default'
+      + '&sortstat=WAR';
+
+    const fetch = require('node-fetch');
+    const COOKIE_NAME = 'wordpress_logged_in_0cae6f5cb929d209043cb97f8c2eee44';
+    const headers = {
+      'Cookie': COOKIE_NAME + '=' + cookieValue,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer': 'https://www.fangraphs.com/leaders/splits-leaderboards',
+      'Origin': 'https://www.fangraphs.com',
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+
+    const resp = await fetch(url, { headers });
+    const status = resp.status;
+    if (!resp.ok) {
+      const respDiag = {};
+      for (const h of ['cf-ray', 'server', 'content-type', 'x-amz-cf-id', 'cf-cache-status']) {
+        const v = resp.headers.get(h);
+        if (v) respDiag[h] = v;
+      }
+      return res.json({ url, status, response_headers: respDiag, error: 'non-200' });
+    }
+    const text = await resp.text();
+    let body;
+    try { body = JSON.parse(text); }
+    catch (e) { return res.json({ url, status, error: 'non-JSON (first 200): ' + text.slice(0, 200) }); }
+    const rows = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : null);
+    if (!rows || !rows.length) {
+      return res.json({ url, status, error: 'zero rows', top_level_keys: Object.keys(body || {}) });
+    }
+
+    // Sanity probe: sort by BaseRunning DESC (raw, no aggregation),
+    // return top 10 + bottom 5 + a few sentinel-name rows so the
+    // operator can eyeball whether the values look trailing-1yr-sized
+    // or still YTD-sized.
+    const withBsr = rows
+      .filter(r => r.BaseRunning != null && r.BaseRunning !== '')
+      .map(r => ({
+        name: r.PlayerName || r.PlayerNameRoute || r.Name,
+        team: r.TeamNameAbb || r.TeamName,
+        mlbam_id: r.xMLBAMID,
+        BaseRunning: Number(r.BaseRunning),
+        G: r.G != null ? Number(r.G) : null,
+        SB: r.SB != null ? Number(r.SB) : null,
+        startdate_param: r.startdate,
+        enddate_param: r.enddate,
+      }))
+      .sort((a, b) => (b.BaseRunning || 0) - (a.BaseRunning || 0));
+
+    res.json({
+      url,
+      status,
+      params: { startdate, enddate, season: endYear, season1: startYear },
+      row_count_raw: rows.length,
+      row_count_with_bsr: withBsr.length,
+      row_0_keys: Object.keys(rows[0] || {}).slice(0, 60),
+      top_10_by_BaseRunning: withBsr.slice(0, 10),
+      bottom_5_by_BaseRunning: withBsr.slice(-5),
+      verification_notes: [
+        'CHECK 1: row_count_with_bsr should be in the hundreds (~700 for a full season window, ~400-500 for trailing 1yr depending on roster churn).',
+        'CHECK 2: top_10 G (games) values — if they\'re in the 130-160 range, the window pulled the full trailing year. If 60-80, FG ignored startdate/enddate and returned YTD only.',
+        'CHECK 3: top names should be elite runners (Witt, De La Cruz, Acuña pre-IL, Carroll, Doyle) with BaseRunning values around 8-12 for the full trailing year vs 4-6 for YTD-only.',
+        'CHECK 4: row_0_keys should still include BaseRunning, UBR, wBsR, GDPRuns, SB, CS, G, xMLBAMID, PlayerName, TeamNameAbb. If any are missing, the type=8 view doesn\'t carry those over a custom range and we need a different type code.',
+      ],
+    });
+  } catch (e) {
+    console.error('[admin/player-bsr-trailing-probe] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Player-BsR residual diagnostic (read-only). For each team, compares
+// team_baserunning.bsr (FG team=0,ts aggregate) to Σ(team's POS roster
+// players' bsr from player_baserunning). The residual is the non-
+// starter / bench / pinch-runner contribution the 9-starter lineup sum
+// structurally misses. Decides whether the player-level backtest needs
+// a bench-residual blend term.
+//
+// CAVEAT: team_rosters_season returns everyone who's been on a team
+// this season (fullSeason), so a mid-season-traded player appears on
+// BOTH teams' rosters. Summing player_baserunning's aggregated-
+// across-stints bsr against either team's roster double-counts the
+// traded player's other-team contribution. League-wide mean partially
+// averages out the bias; per-team residuals for teams with active
+// trade-window swaps are noisy. For a clean per-team residual we'd
+// need per-team-stint player BsR from FG (one row per player per
+// team, no aggregation) — flagged as follow-up if the league mean
+// turns out load-bearing.
+router.get('/admin/player-bsr-residual', requireAdminToken, (req, res) => {
+  try {
+    const season = req.query.season ? Number(req.query.season) : new Date().getFullYear();
+
+    // Team BsR map
+    const teamBsrRows = db.prepare(
+      "SELECT team, bsr FROM team_baserunning WHERE season=? AND bsr IS NOT NULL"
+    ).all(season);
+    if (!teamBsrRows.length) {
+      return res.json({
+        season,
+        error: 'team_baserunning empty for season ' + season + ' — seed via POST /admin/refresh/baserunning first',
+      });
+    }
+    const teamBsrMap = new Map();
+    for (const r of teamBsrRows) teamBsrMap.set(r.team, Number(r.bsr));
+
+    // Player BsR map
+    const playerBsrRows = db.prepare(
+      "SELECT mlbam_id, bsr FROM player_baserunning WHERE season=? AND bsr IS NOT NULL"
+    ).all(season);
+    if (!playerBsrRows.length) {
+      return res.json({
+        season,
+        error: 'player_baserunning empty for season ' + season + ' — seed via POST /admin/refresh/player-baserunning first',
+      });
+    }
+    const playerBsrMap = new Map();
+    for (const r of playerBsrRows) playerBsrMap.set(Number(r.mlbam_id), Number(r.bsr));
+
+    // Season roster — POS players per team. Mid-season trades show up
+    // in both teams' rosters (caveat above).
+    const rosters = db.prepare(
+      "SELECT team, mlb_id FROM team_rosters_season WHERE role='POS' AND mlb_id IS NOT NULL"
+    ).all();
+    if (!rosters.length) {
+      return res.json({
+        season,
+        error: 'team_rosters_season empty — seed via POST /admin/refresh/season-rosters first',
+      });
+    }
+
+    const playerSumByTeam = new Map();
+    const playerCountByTeam = new Map();
+    for (const r of rosters) {
+      const id = Number(r.mlb_id);
+      const bsr = playerBsrMap.get(id);
+      if (bsr == null) continue;
+      playerSumByTeam.set(r.team, (playerSumByTeam.get(r.team) || 0) + bsr);
+      playerCountByTeam.set(r.team, (playerCountByTeam.get(r.team) || 0) + 1);
+    }
+
+    const perTeam = [];
+    let sumAbsTeamBsr = 0, sumAbsResidual = 0;
+    for (const [team, tBsr] of teamBsrMap) {
+      const sumPlayers = playerSumByTeam.get(team) || 0;
+      const residual = tBsr - sumPlayers;
+      const denom = Math.abs(tBsr);
+      const residualPct = denom > 0.001 ? Number((100 * Math.abs(residual) / denom).toFixed(2)) : null;
+      perTeam.push({
+        team,
+        team_bsr: Number(tBsr.toFixed(3)),
+        sum_players_bsr: Number(sumPlayers.toFixed(3)),
+        residual: Number(residual.toFixed(3)),
+        residual_pct_of_team: residualPct,
+        players_summed: playerCountByTeam.get(team) || 0,
+      });
+      sumAbsTeamBsr += Math.abs(tBsr);
+      sumAbsResidual += Math.abs(residual);
+    }
+    perTeam.sort((a, b) => Math.abs(b.residual) - Math.abs(a.residual));
+
+    // Robust league-wide stat: total |residual| / total |team_BsR|.
+    // Less sensitive to per-team trade-window noise than averaging
+    // per-team percentages.
+    const leagueWideAbsResidualPct = sumAbsTeamBsr > 0
+      ? Number((100 * sumAbsResidual / sumAbsTeamBsr).toFixed(2)) : null;
+
+    // Signed mean (does sum_of_players systematically UNDER or OVER
+    // count team total? Negative mean = players sum > team total =
+    // double-counting from traded players. Positive mean = team total >
+    // players sum = genuine non-starter residual.)
+    const signedResiduals = perTeam.map(r => r.residual);
+    const meanSignedResidual = signedResiduals.length
+      ? Number((signedResiduals.reduce((s, x) => s + x, 0) / signedResiduals.length).toFixed(3))
+      : null;
+    const sortedSigned = signedResiduals.slice().sort((a, b) => a - b);
+    const medianSignedResidual = sortedSigned.length
+      ? Number(sortedSigned[Math.floor(sortedSigned.length / 2)].toFixed(3))
+      : null;
+
+    res.json({
+      season,
+      distribution: {
+        n_teams: perTeam.length,
+        league_wide_abs_residual_pct: leagueWideAbsResidualPct,
+        mean_signed_residual: meanSignedResidual,
+        median_signed_residual: medianSignedResidual,
+        mean_per_team_abs_residual_pct: perTeam
+          .filter(r => r.residual_pct_of_team != null)
+          .reduce((s, r) => s + r.residual_pct_of_team, 0) / Math.max(1, perTeam.length),
+        gate: 'league_wide_abs_residual_pct ≤ 5% = lineup-sum-alone is fine, skip blend. 15-25% = residual is load-bearing, blend matters. >25% = trade-window double-counting dominating — need per-stint BsR.',
+      },
+      by_team: perTeam,
+      caveats: [
+        'Mid-season-traded players appear on BOTH teams\' season rosters (fullSeason captures team history). Their player_baserunning bsr is aggregated-across-stints, so summing it against either team\'s roster double-counts the other team\'s portion.',
+        'A NEGATIVE mean_signed_residual is a tell that this double-counting dominates (players sum exceeds team total league-wide).',
+        'A POSITIVE mean_signed_residual is the clean read — players sum systematically UNDER-counts team total = there\'s a real bench/non-starter contribution the 9-starter sum misses.',
+        'For a per-team stint-clean residual, would need to fetch per-team-stint BsR from FG (no xMLBAMID aggregation). Flagged as follow-up if league_wide_abs_residual_pct is load-bearing.',
+      ],
+    });
+  } catch (e) {
+    console.error('[admin/player-bsr-residual] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Read-back diagnostic: direct SELECT from team_baserunning so the
 // operator can confirm the seed actually committed without running
 // the full backtest. Surfaces row counts, distinct seasons, and
