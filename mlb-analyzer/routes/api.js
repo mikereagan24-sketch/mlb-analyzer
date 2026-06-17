@@ -2458,6 +2458,35 @@ router.post('/admin/refresh/baserunning', requireAdminToken, async (req, res) =>
   }
 });
 
+// CLV stats (read-only). Aggregates graded bet_signals by market,
+// timing (day-before vs same-day), and date. Returns headline CLV +
+// per-bucket noise band, a daily time series for trend visibility,
+// Kalshi-first source detection per pick, and a forward-honest
+// baserunning with/without CLV hook (empty until snapshot data
+// accumulates).
+//
+// GET /api/admin/clv-stats?from=YYYY-MM-DD&to=YYYY-MM-DD
+//   Optional: ?no_source=1 skips per-pick source detection (faster
+//   for very wide windows; default does the detection capped at 1000
+//   picks).
+router.get('/admin/clv-stats', requireAdminToken, (req, res) => {
+  try {
+    const from = req.query.from;
+    const to   = req.query.to;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !dateRe.test(from)) return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    if (!to   || !dateRe.test(to))   return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    if (from > to) return res.status(400).json({ error: 'from must be <= to' });
+    const includeSourceDetection = !(req.query.no_source === '1' || req.query.no_source === 'true');
+    const { buildClvStats } = require('../services/clv-stats');
+    const out = buildClvStats({ from, to, includeSourceDetection });
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/clv-stats] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Manual trigger for runSeasonRosterJob — backtest-only roster pull
 // (statsapi rosterType=fullSeason). Same pattern as
 // /admin/refresh/baserunning so the operator can seed immediately

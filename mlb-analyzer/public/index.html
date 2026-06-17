@@ -258,6 +258,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="tab active" onclick="sw('games')">Today's Games</button>
 <button class="tab" onclick="sw('matchups')">Matchups</button>
 <button class="tab" onclick="sw('backtest');loadBacktest()">Backtest</button>
+<button class="tab" onclick="sw('clv')">CLV</button>
 <button class="tab" onclick="sw('data')">Data Import</button>
 <button class="tab" onclick="sw('model')">Model</button>
 </div>
@@ -288,6 +289,17 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div id="sec-matchups" class="sec">
 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:1rem" id="mu-selector"></div>
 <div id="dq-matchup"></div><div id="mu-content" class="card"></div>
+</div>
+
+<!-- CLV TAB -->
+<div id="sec-clv" class="sec">
+<div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
+  <label style="font-size:11px;color:var(--text2)">From <input type="date" id="clv-from" style="width:140px"></label>
+  <label style="font-size:11px;color:var(--text2)">To <input type="date" id="clv-to" style="width:140px"></label>
+  <button class="btn btn-primary btn-sm" onclick="loadClvTab()">Load CLV</button>
+  <span id="clv-status" style="font-size:11px;color:var(--text2)"></span>
+</div>
+<div id="clv-content" class="card"><div class="notice">Pick a date range and click Load CLV.</div></div>
 </div>
 
 <!-- ANALYSIS -->
@@ -750,6 +762,34 @@ function changeAdminToken(){
   if(entered === null) return; // cancelled — leave existing alone
   if(entered === ''){ clearAdminToken(); return; }
   localStorage.setItem('mlb_admin_token', entered);
+}
+
+// Admin-token-aware GET. Same retry pattern as adminPost — handles
+// rotated tokens without wedging. Used by read-only admin endpoints
+// (e.g. /admin/clv-stats) that gate behind X-Admin-Token.
+async function adminGet(path){
+  async function doGet(token){
+    const headers = {'Content-Type':'application/json', 'X-Admin-Token': token};
+    if(_appPassword) headers['x-app-password'] = _appPassword;
+    return fetch('/api'+path, {headers});
+  }
+  let token = getAdminToken(false);
+  if(!token) throw new Error('Admin token required');
+  let r = await doGet(token);
+  if(r.status === 401){
+    clearAdminToken();
+    token = getAdminToken(true);
+    if(!token) throw new Error('Admin token required');
+    r = await doGet(token);
+  }
+  let body = null;
+  try { body = await r.json(); } catch(_) {}
+  if(!r.ok){
+    const err = new Error('API '+path+' → '+r.status);
+    err.status = r.status; err.body = body;
+    throw err;
+  }
+  return body;
 }
 
 // Admin-token-aware POST. One automatic retry: if the first attempt 401s,
@@ -1753,6 +1793,156 @@ async function rerunModel(gameId){
   }catch(e){alert('Rerun error: '+e.message);}
 }
 
+// ───────── CLV TAB ─────────────────────────────────────────────
+// Reads GET /api/admin/clv-stats and renders headline + market /
+// timing breakdowns + per-day time series + forward-honest BsR
+// with/without hook (currently empty — accumulating). All numbers
+// shown alongside their n and noise band so a thin sample reads as
+// thin. Day-before timing is the live positive signal per prior
+// handoff context (+1.44pp CLV) — surfaced explicitly in the
+// timing breakdown.
+function _clvDefaultRange(){
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(to.getDate() - 30);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { from: fmt(from), to: fmt(to) };
+}
+async function loadClvTab(){
+  const fromEl = document.getElementById('clv-from');
+  const toEl   = document.getElementById('clv-to');
+  if (!fromEl.value || !toEl.value) {
+    const d = _clvDefaultRange();
+    if (!fromEl.value) fromEl.value = d.from;
+    if (!toEl.value)   toEl.value   = d.to;
+  }
+  const from = fromEl.value, to = toEl.value;
+  const status = document.getElementById('clv-status');
+  const content = document.getElementById('clv-content');
+  status.textContent = 'Loading ' + from + ' .. ' + to + ' …';
+  content.innerHTML = '<div class="notice"><span class="spinner"></span>Loading CLV…</div>';
+  try {
+    const data = await adminGet('/admin/clv-stats?from=' + from + '&to=' + to);
+    status.textContent = 'Loaded ' + from + ' .. ' + to;
+    content.innerHTML = renderClvTab(data);
+  } catch (e) {
+    status.textContent = 'Error';
+    content.innerHTML = '<div class="notice err">CLV load error: ' + (e.message || e) + '</div>';
+  }
+}
+function _fmtClv(v){ if (v == null) return '—'; return (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v).toFixed(2); }
+function _fmtPct(v){ if (v == null) return '—'; return v.toFixed(1) + '%'; }
+function _bandCell(avg, n, band){
+  if (avg == null) return '<span style="color:var(--text3)">— (n=' + (n||0) + ')</span>';
+  // Inside-noise styling — thin sample reads as thin.
+  const inside = band != null && Math.abs(avg) <= band;
+  const color = inside ? 'color:var(--text3)' : (avg >= 0 ? 'color:var(--green)' : 'color:var(--red)');
+  return '<span style="' + color + ';font-weight:500">' + _fmtClv(avg) + 'pp</span>'
+    + '<span style="color:var(--text3);font-size:10px"> (n=' + n + ', ±' + (band != null ? band.toFixed(2) : '?') + ')</span>';
+}
+function renderClvTab(d){
+  if (!d) return '<div class="notice err">empty CLV payload</div>';
+  const o = d.overall || {};
+  const headline = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:12px 14px;margin-bottom:12px">'
+    + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Headline CLV</div>'
+    + '<div style="font-size:18px;font-weight:500;margin-bottom:2px">' + _bandCell(o.avg_clv_pp, o.n_with_clv, o.noise_band_pp) + '</div>'
+    + '<div style="font-size:11px;color:var(--text3)">pct positive: ' + _fmtPct(o.pct_positive) + ' · wins/losses/pushes: ' + (o.wins||0) + '/' + (o.losses||0) + '/' + (o.pushes||0) + ' · pnl: ' + (o.pnl != null ? o.pnl.toFixed(2) : '—') + '</div>'
+    + '<div style="font-size:10px;color:var(--text3);margin-top:6px;font-style:italic">' + (d.interpretation || '') + '</div>'
+    + '</div>';
+  const mk = d.by_market || {};
+  const bm = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+    + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">By market</div>'
+    + '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:var(--text2)"><th style="text-align:left">market</th><th style="text-align:right">avg CLV</th><th style="text-align:right">n</th><th style="text-align:right">w/l/p</th><th style="text-align:right">pnl</th></tr></thead><tbody>'
+    + ['ml', 'total', 'spread', 'other'].filter(k => mk[k] && mk[k].n_picks > 0).map(k => {
+      const m = mk[k];
+      return '<tr><td>' + k + '</td>'
+        + '<td style="text-align:right">' + _bandCell(m.avg_clv_pp, m.n_with_clv, m.noise_band_pp) + '</td>'
+        + '<td style="text-align:right">' + m.n_picks + '</td>'
+        + '<td style="text-align:right">' + m.wins + '/' + m.losses + '/' + m.pushes + '</td>'
+        + '<td style="text-align:right">' + (m.pnl != null ? m.pnl.toFixed(2) : '—') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+  const t = d.by_timing || {};
+  const bt = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+    + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">By lock timing <span style="color:var(--text3);font-style:italic">(' + (t.timing_basis || '') + ')</span></div>'
+    + '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:var(--text2)"><th style="text-align:left">timing</th><th style="text-align:right">avg CLV</th><th style="text-align:right">n</th><th style="text-align:right">w/l/p</th><th style="text-align:right">pnl</th></tr></thead><tbody>'
+    + ['day_before', 'same_day', 'unknown'].filter(k => t[k] && t[k].n_picks > 0).map(k => {
+      const r = t[k];
+      const label = k === 'day_before' ? 'day-before' : k.replace('_', '-');
+      return '<tr><td>' + label + '</td>'
+        + '<td style="text-align:right">' + _bandCell(r.avg_clv_pp, r.n_with_clv, r.noise_band_pp) + '</td>'
+        + '<td style="text-align:right">' + r.n_picks + '</td>'
+        + '<td style="text-align:right">' + r.wins + '/' + r.losses + '/' + r.pushes + '</td>'
+        + '<td style="text-align:right">' + (r.pnl != null ? r.pnl.toFixed(2) : '—') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+  // Time series — simple inline SVG sparkline-style chart of cumulative
+  // avg CLV. Always shows the trend; n labels every point so a turn is
+  // visible.
+  const ts = d.time_series || [];
+  let chart = '';
+  if (ts.length) {
+    const W = 600, H = 120, pad = 30;
+    const vals = ts.map(x => x.cumulative_avg_clv_pp).filter(v => v != null);
+    if (vals.length) {
+      const min = Math.min(0, ...vals), max = Math.max(0, ...vals);
+      const range = (max - min) || 1;
+      const xStep = (W - 2 * pad) / Math.max(1, ts.length - 1);
+      const y0 = H - pad - ((0 - min) / range) * (H - 2 * pad);
+      const pts = ts.map((p, i) => {
+        const v = p.cumulative_avg_clv_pp != null ? p.cumulative_avg_clv_pp : 0;
+        const x = pad + i * xStep;
+        const y = H - pad - ((v - min) / range) * (H - 2 * pad);
+        return [x, y];
+      });
+      const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+      chart = '<svg width="' + W + '" height="' + H + '" style="background:rgba(0,0,0,0.02);border-radius:4px">'
+        + '<line x1="' + pad + '" y1="' + y0.toFixed(1) + '" x2="' + (W - pad) + '" y2="' + y0.toFixed(1) + '" stroke="rgba(150,150,150,0.5)" stroke-dasharray="2 3"/>'
+        + '<text x="' + (W - pad + 2) + '" y="' + (y0 + 3).toFixed(1) + '" font-size="9" fill="var(--text3)">0</text>'
+        + '<text x="' + pad + '" y="14" font-size="10" fill="var(--text2)">cumulative avg CLV (pp), window ' + ts[0].date + '..' + ts[ts.length - 1].date + '</text>'
+        + '<path d="' + path + '" fill="none" stroke="var(--blue,#3b82f6)" stroke-width="1.5"/>'
+        + pts.map(p => '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="2" fill="var(--blue,#3b82f6)"/>').join('')
+        + '</svg>';
+    }
+  }
+  const timeSeriesBlock = ts.length
+    ? '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+      + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Time series — cumulative CLV</div>'
+      + chart
+      + '</div>'
+    : '';
+  // Closing-line source detection block — surfaces the Kalshi-first
+  // labeling for the picks that ran through the lookup.
+  const src = d.closing_line_source;
+  const srcBlock = src ? '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+    + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Closing-line source <span style="color:var(--text3);font-style:italic">(' + src.precedence + ')</span></div>'
+    + '<div style="font-size:11px">checked: <strong>' + src.detected_picks + '</strong> picks · '
+    + Object.entries(src.counts).map(([k, v]) => k + ': ' + v).join(' · ')
+    + '</div></div>'
+    : '';
+  // BsR with/without hook — empty for now (snapshot clock starts at zero).
+  const bw = d.bsr_with_without || {};
+  let bwBlock;
+  if (bw.empty) {
+    bwBlock = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+      + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Forward-honest BsR (with / without)</div>'
+      + '<div style="font-size:11px;color:var(--text3);font-style:italic">' + (bw.status_note || bw.reason || 'accumulating') + '</div>'
+      + '</div>';
+  } else if (bw && bw.without) {
+    const wo = bw.without, wi = bw.with;
+    bwBlock = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+      + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Forward-honest BsR (with / without) — ML, morning lock vs gametime close</div>'
+      + '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:var(--text2)"><th style="text-align:left">config</th><th style="text-align:right">avg CLV</th><th style="text-align:right">n</th><th style="text-align:right">% pos</th></tr></thead><tbody>'
+      + '<tr><td>without BsR</td><td style="text-align:right">' + _bandCell(wo.avg_clv_pp, wo.n_with_close, wo.noise_band_pp) + '</td><td style="text-align:right">' + (wo.n_bets || 0) + '</td><td style="text-align:right">' + _fmtPct(wo.pct_positive) + '</td></tr>'
+      + '<tr><td>with BsR</td><td style="text-align:right">' + _bandCell(wi.avg_clv_pp, wi.n_with_close, wi.noise_band_pp) + '</td><td style="text-align:right">' + (wi.n_bets || 0) + '</td><td style="text-align:right">' + _fmtPct(wi.pct_positive) + '</td></tr>'
+      + '</tbody></table>'
+      + (bw.status_note ? '<div style="font-size:10px;color:var(--text3);margin-top:6px;font-style:italic">' + bw.status_note + '</div>' : '')
+      + '</div>';
+  } else {
+    bwBlock = '';
+  }
+  return headline + bm + bt + timeSeriesBlock + srcBlock + bwBlock
+    + '<div style="font-size:10px;color:var(--text3);margin-top:8px">' + (d.description || '') + '</div>';
+}
+
 function sw(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.getAttribute('onclick')==="sw('"+name+"')"));
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('active',s.id==='sec-'+name));
@@ -1760,6 +1950,7 @@ function sw(name){
   if(name==='model')loadSettings();
   if(name==='data')refreshPitIPTable();
   if(name==='matchups'&&muSelectedGame)renderMatchupGame(muSelectedGame);
+  if(name==='clv')loadClvTab();
 }
 
 // --- Pitcher IP projections UI ---
