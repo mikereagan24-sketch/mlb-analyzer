@@ -525,6 +525,8 @@ db.exec(`
     sb INTEGER,
     cs INTEGER,
     g INTEGER,
+    pa INTEGER,                 -- plate appearances (denominator for per-PA BsR rate)
+    ab INTEGER,                 -- at-bats (captured for completeness; PA is the canonical baserunning-opp denom)
     stint_count INTEGER,        -- 1 = single team over window; >1 = multi-team
     window_startdate TEXT,
     window_enddate TEXT,
@@ -556,6 +558,8 @@ db.exec(`
     sb INTEGER,
     cs INTEGER,
     g INTEGER,
+    pa INTEGER,                 -- denominator for the pa_weighted construction
+    ab INTEGER,
     window_startdate TEXT,
     window_enddate TEXT,
     PRIMARY KEY (snapshot_date, mlbam_id)
@@ -1039,6 +1043,12 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN game_pk INTEGER"); } catch(e) {}
 // initial trailing ingest shipped (71d117b). Idempotent ALTER for any
 // DB that already created the table without the column.
 try { db.exec("ALTER TABLE player_baserunning_trailing ADD COLUMN stint_count INTEGER"); } catch(e) {}
+// pa / ab added later for the PA-weighted lineup-BsR construction
+// (per-PA rate × lineup-slot PA weight). Idempotent ALTER, same pattern.
+try { db.exec("ALTER TABLE player_baserunning_trailing ADD COLUMN pa INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE player_baserunning_trailing ADD COLUMN ab INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE player_baserunning_trailing_snapshot ADD COLUMN pa INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE player_baserunning_trailing_snapshot ADD COLUMN ab INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_lineup_json TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_home_lineup_json TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN proj_away_sp TEXT"); } catch(e) {}
@@ -2437,9 +2447,9 @@ q.getPlayerBaserunning = db.prepare(
 q._clearPlayerBaserunningTrailing = db.prepare("DELETE FROM player_baserunning_trailing");
 q._insertPlayerBaserunningTrailing = db.prepare(
   "INSERT OR REPLACE INTO player_baserunning_trailing "
-  + "(mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, stint_count, "
+  + "(mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, pa, ab, stint_count, "
   + " window_startdate, window_enddate, refreshed_at) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 q.replacePlayerBaserunningTrailing = (rows, startdate, enddate, refreshedAt) => {
   const tx = db.transaction((rs, sd, ed, t) => {
@@ -2456,6 +2466,8 @@ q.replacePlayerBaserunningTrailing = (rows, startdate, enddate, refreshedAt) => 
         r.sb   == null ? null : Math.round(Number(r.sb)),
         r.cs   == null ? null : Math.round(Number(r.cs)),
         r.g    == null ? null : Math.round(Number(r.g)),
+        r.pa   == null ? null : Math.round(Number(r.pa)),
+        r.ab   == null ? null : Math.round(Number(r.ab)),
         r.stint_count == null ? null : Math.round(Number(r.stint_count)),
         sd, ed, t);
     }
@@ -2463,7 +2475,7 @@ q.replacePlayerBaserunningTrailing = (rows, startdate, enddate, refreshedAt) => 
   tx(rows, startdate, enddate, refreshedAt);
 };
 q.getPlayerBaserunningTrailing = db.prepare(
-  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, stint_count, "
+  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, pa, ab, stint_count, "
   + "       window_startdate, window_enddate, refreshed_at "
   + "FROM player_baserunning_trailing"
 );
@@ -2471,6 +2483,7 @@ q.getPlayerBaserunningTrailingWindow = db.prepare(
   "SELECT window_startdate, window_enddate, MAX(refreshed_at) AS refreshed_at, "
   + "       COUNT(*) AS n_rows, "
   + "       SUM(CASE WHEN bsr IS NOT NULL THEN 1 ELSE 0 END) AS n_with_bsr, "
+  + "       SUM(CASE WHEN pa IS NOT NULL AND pa > 0 THEN 1 ELSE 0 END) AS n_with_pa, "
   + "       SUM(CASE WHEN stint_count > 1 THEN 1 ELSE 0 END) AS n_multi_team "
   + "FROM player_baserunning_trailing"
 );
@@ -2485,9 +2498,9 @@ q._snapPlayerBaserunningTrailingClearDate = db.prepare(
 );
 q._snapPlayerBaserunningTrailingInsert = db.prepare(
   "INSERT OR REPLACE INTO player_baserunning_trailing_snapshot "
-  + "(snapshot_date, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  + "(snapshot_date, mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, pa, ab, "
   + " window_startdate, window_enddate) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 q.snapshotPlayerBaserunningTrailing = (snapshotDate, rows, windowStart, windowEnd) => {
   const tx = db.transaction((d, rs, ws, we) => {
@@ -2504,6 +2517,8 @@ q.snapshotPlayerBaserunningTrailing = (snapshotDate, rows, windowStart, windowEn
         r.sb   == null ? null : Math.round(Number(r.sb)),
         r.cs   == null ? null : Math.round(Number(r.cs)),
         r.g    == null ? null : Math.round(Number(r.g)),
+        r.pa   == null ? null : Math.round(Number(r.pa)),
+        r.ab   == null ? null : Math.round(Number(r.ab)),
         ws || null, we || null);
     }
   });
@@ -2515,7 +2530,7 @@ q.snapshotPlayerBaserunningTrailing = (snapshotDate, rows, windowStart, windowEn
 // data. Returns one row per (mlbam_id) — the per-player BsR that was
 // known at end-of-day on snapshot_date.
 q.getPlayerBaserunningTrailingAsOf = db.prepare(
-  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, "
+  "SELECT mlbam_id, name, bsr, ubr, wsb, wgdp, sb, cs, g, pa, ab, "
   + "       window_startdate, window_enddate, snapshot_date "
   + "FROM player_baserunning_trailing_snapshot "
   + "WHERE snapshot_date = ( "

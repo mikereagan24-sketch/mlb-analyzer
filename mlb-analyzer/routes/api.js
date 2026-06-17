@@ -2431,6 +2431,17 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
 // .forward_honest_expectation for the verdict bar (NOT a 30-day
 // verdict — CLV typically needs 60-90 days; ROI is near-useless until
 // bet count is large). Measurement only — NOT wired to live scoring.
+//
+// CONSTRUCTION — ?construction=current|pt_neutral|pa_weighted (player-
+// level only; ignored for team mode). Swaps the per-side lineup-BsR
+// formula while holding the rest of the harness identical so the
+// three arms are directly comparable:
+//   current      Σ(starter_bsr) / team_games_played  (default; same as live display)
+//   pt_neutral   Σ(starter_bsr / starter_trailing_G)
+//   pa_weighted  Σ((starter_bsr / starter_PA) × PA_WEIGHTS[slot])
+// pa_weighted requires a refresh after this branch deploys so the
+// trailing scrape captures PA — the response surfaces a clear pre-
+// flight error otherwise.
 router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
   try {
     const from = req.query.from;
@@ -2443,9 +2454,10 @@ router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
     const level = req.query.level === 'player' ? 'player' : 'team';
     const window = req.query.window === 'trailing' ? 'trailing' : 'ytd';
     const forwardHonest = req.query.forwardHonest === 'true' || req.query.forwardHonest === '1';
+    const construction = (req.query.construction || '').toString().toLowerCase() || undefined;
 
     const { runBaserunningBacktest } = require('../services/baserunning-backtest');
-    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest });
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest, construction });
     res.json(out);
   } catch (e) {
     console.error('[admin/baserunning-backtest] error:', e);

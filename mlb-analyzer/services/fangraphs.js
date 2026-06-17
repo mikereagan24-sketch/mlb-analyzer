@@ -603,10 +603,10 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
       agg = {
         mlbam_id,
         name: (r.PlayerName || r.PlayerNameRoute || r.Name || '').toString().trim() || null,
-        bsr: 0, ubr: 0, wsb: 0, wgdp: 0, sb: 0, cs: 0, g: 0,
+        bsr: 0, ubr: 0, wsb: 0, wgdp: 0, sb: 0, cs: 0, g: 0, pa: 0, ab: 0,
         stint_count: 0,
         _bsrHas: false, _ubrHas: false, _wsbHas: false, _wgdpHas: false,
-        _sbHas: false, _csHas: false, _gHas: false,
+        _sbHas: false, _csHas: false, _gHas: false, _paHas: false, _abHas: false,
       };
       accByMlbam.set(mlbam_id, agg);
     }
@@ -624,6 +624,11 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
     const sb   = num(r.SB);
     const cs   = num(r.CS);
     const g    = num(r.G);
+    // PA + AB for the per-PA BsR rate (pa_weighted construction).
+    // FG type=8 leaderboard row carries `PA` and `AB`; sum across
+    // stints the same way bsr/g aggregate.
+    const pa   = num(r.PA);
+    const ab   = num(r.AB);
     if (bsr  != null) { agg.bsr  += bsr;  agg._bsrHas  = true; }
     if (ubr  != null) { agg.ubr  += ubr;  agg._ubrHas  = true; }
     if (wsb  != null) { agg.wsb  += wsb;  agg._wsbHas  = true; }
@@ -631,6 +636,8 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
     if (sb   != null) { agg.sb   += sb;   agg._sbHas   = true; }
     if (cs   != null) { agg.cs   += cs;   agg._csHas   = true; }
     if (g    != null) { agg.g    += g;    agg._gHas    = true; }
+    if (pa   != null) { agg.pa   += pa;   agg._paHas   = true; }
+    if (ab   != null) { agg.ab   += ab;   agg._abHas   = true; }
   }
   if (skippedNoId) {
     console.warn('[fg-player-baserunning-trailing] skipped ' + skippedNoId + ' row(s) with no xMLBAMID');
@@ -649,6 +656,8 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
       sb:   agg._sbHas   ? agg.sb   : null,
       cs:   agg._csHas   ? agg.cs   : null,
       g:    agg._gHas    ? agg.g    : null,
+      pa:   agg._paHas   ? agg.pa   : null,
+      ab:   agg._abHas   ? agg.ab   : null,
       stint_count: agg.stint_count,
     });
   }
