@@ -612,45 +612,29 @@ function runBaserunningBacktest(opts) {
     return { snapshotDate: sd, map: playerBsrByDate.get(sd) };
   }
 
-  // Lineup-sum-of-starters BsR-per-game (player mode). Returns null if
-  // the lineup is empty / team has no games_played / no slot resolves.
-  // Resolved slots without a player_baserunning row contribute 0
-  // (neutral baserunner) — common for September call-ups with no
-  // season total yet. In forward-honest mode `bsrMap` is the as-of
-  // snapshot map for this game's date; otherwise it's the static
-  // pre-loaded map (passed in for both paths so the function has no
-  // implicit dependency on outer state).
+  // Lineup-sum-of-starters BsR-per-game (player mode). Thin wrapper
+  // around services/baserunning-util.computeLineupBsRPerGame so the
+  // matchup-tab display and the backtest share one implementation.
+  // The wrapper hides the closure dependencies (gamesByTeam, the
+  // backtest's name-based resolver, stint map) and accumulates the
+  // per-call slot counters into the backtest's outer accumulators.
+  // Returns the per_game number (or null) — the rest of the per-call
+  // accounting is rolled into the counters.
+  const bsrUtil = require('./baserunning-util');
+  const resolveLineupSlotForBacktest = (team, p) => (p && p.name) ? resolveBacktestMlbId(team, p.name) : null;
   function computePlayerLineupBsRPerGame(team, lineupJson, bsrMap) {
-    if (!bsrMap) return null;
-    const realG = gamesByTeam.get(team);
-    if (!realG || realG <= 0) return null;
-    const lineup = tryParse(lineupJson) || [];
-    if (!lineup.length) return null;
-    let sum = 0, anyResolved = false;
-    for (const p of lineup) {
-      if (!p || !p.name) continue;
-      lineupSlotsTotal++;
-      const mlbId = resolveBacktestMlbId(team, p.name);
-      if (!mlbId) continue;
-      lineupSlotsResolved++;
-      const idNum = Number(mlbId);
-      const bsr = bsrMap.get(idNum);
-      if (bsr != null) {
-        sum += bsr;
-        lineupSlotsWithBsr++;
-        playersUsed.add(idNum);
-        anyResolved = true;
-        if (playerStintCountById) {
-          const sc = playerStintCountById.get(idNum);
-          if (sc != null && sc > 1) {
-            lineupSlotsMultiTeam++;
-            multiTeamPlayersUsed.add(idNum);
-          }
-        }
-      }
-    }
-    if (!anyResolved) return null;
-    return sum / realG;
+    const res = bsrUtil.computeLineupBsRPerGame({
+      team, lineupJson, bsrMap, gamesByTeam,
+      resolveId: resolveLineupSlotForBacktest,
+      stintCountById: playerStintCountById,
+    });
+    lineupSlotsTotal     += res.slots_total;
+    lineupSlotsResolved  += res.slots_resolved;
+    lineupSlotsWithBsr   += res.slots_with_bsr;
+    lineupSlotsMultiTeam += res.slots_multi_team;
+    for (const id of res.player_ids)           playersUsed.add(id);
+    for (const id of res.multi_team_player_ids) multiTeamPlayersUsed.add(id);
+    return res.per_game;
   }
 
   for (const gameRow of games) {

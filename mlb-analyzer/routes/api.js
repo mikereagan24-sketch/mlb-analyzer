@@ -556,6 +556,46 @@ router.get('/games/:date', (req, res) => {
     // processGameSignals's catcher-framing block.
     const { applyCatcherFramingDelta } = require('../services/model');
     const _framingSettings = getSettings();
+    // Lineup-BsR display block (feat/matchup-lineup-bsr-display).
+    // Read-only context for the matchup tab — NEVER applied to the
+    // emitted bet line. Math comes from services/baserunning-util so
+    // it stays in lockstep with the trailing backtest harness.
+    //
+    // Two pre-loads outside the per-game loop:
+    //   1. trailing-1yr BsR map (current rows from player_baserunning_trailing)
+    //   2. team→completed-games map (same query the backtest uses, from game_log)
+    // Both are date-of-request snapshots; cheap to query, reused across
+    // every game in the slate.
+    const bsrUtil = require('../services/baserunning-util');
+    let _bsrMaps = null, _gamesByTeam = null, _trailingMeta = null, _trailingErr = null;
+    try {
+      const trailingRows = q.getPlayerBaserunningTrailing
+        ? q.getPlayerBaserunningTrailing.all()
+        : [];
+      if (trailingRows && trailingRows.length) {
+        _bsrMaps = bsrUtil.buildBsrMaps(trailingRows);
+        const sample = trailingRows.find(r => r.window_startdate || r.window_enddate) || trailingRows[0];
+        if (sample) {
+          _trailingMeta = {
+            startdate:     sample.window_startdate || null,
+            enddate:       sample.window_enddate   || null,
+            refreshed_at:  sample.refreshed_at     || null,
+            players_with_bsr: _bsrMaps.bsrMap.size,
+          };
+        }
+        const completedRows = db.prepare(
+          "SELECT game_id FROM game_log "
+          + "WHERE game_date <= ? AND away_score IS NOT NULL AND home_score IS NOT NULL"
+        ).all(date);
+        _gamesByTeam = bsrUtil.gamesByTeamFromRows(completedRows);
+      } else {
+        _trailingErr = 'player_baserunning_trailing not seeded — POST /admin/refresh/player-baserunning-trailing first';
+      }
+    } catch (e) {
+      _trailingErr = 'bsr preload failed: ' + e.message;
+      console.warn('[api/games] lineup-bsr preload failed (non-fatal): ' + e.message);
+    }
+    const resolveLineupSlotByMlbId = (team, p) => (p && p.mlb_id != null) ? Number(p.mlb_id) : null;
     const result = games.map(g => {
       const awayLU = tryParse(g.away_lineup_json);
       const homeLU = tryParse(g.home_lineup_json);
@@ -664,6 +704,75 @@ router.get('/games/:date', (req, res) => {
         // framing nets to a higher projected total.
         net_total_runs_delta: netTotalRunsDelta,
       };
+      // Lineup-BsR display block (DISPLAY ONLY — never affects the
+      // bet line, the model, or any emitted price). Per-side trailing-
+      // 1yr lineup-sum / team_games_played, plus the per-starter
+      // breakdown and a small "traded mid-window" marker on any player
+      // with stint_count > 1. If no trailing BsR is loaded or both
+      // lineups are empty, surface a status string instead of a
+      // misleading 0.
+      if (!_bsrMaps || !_gamesByTeam) {
+        out.lineup_bsr = {
+          status: 'unavailable',
+          reason: _trailingErr || 'trailing-1yr BsR not loaded',
+          display_only_note: 'Lineup BsR is a matchup-tab display only. It does NOT change the model line or emitted bet — wiring to scoring is gated on forward-CLV confirmation.',
+        };
+      } else {
+        const awayEmpty = !Array.isArray(awayLU) || awayLU.length === 0;
+        const homeEmpty = !Array.isArray(homeLU) || homeLU.length === 0;
+        const awayRes = awayEmpty ? null : bsrUtil.computeLineupBsRPerGame({
+          team: g.away_team, lineupJson: awayLU,
+          bsrMap: _bsrMaps.bsrMap, gamesByTeam: _gamesByTeam,
+          resolveId: resolveLineupSlotByMlbId,
+          stintCountById: _bsrMaps.stintCountById,
+        });
+        const homeRes = homeEmpty ? null : bsrUtil.computeLineupBsRPerGame({
+          team: g.home_team, lineupJson: homeLU,
+          bsrMap: _bsrMaps.bsrMap, gamesByTeam: _gamesByTeam,
+          resolveId: resolveLineupSlotByMlbId,
+          stintCountById: _bsrMaps.stintCountById,
+        });
+        const sidePayload = (res) => res == null ? null : {
+          per_game:        res.per_game != null ? Number(res.per_game.toFixed(4)) : null,
+          sum_bsr:         Number(res.sum_bsr.toFixed(3)),
+          games_played:    res.games_played,
+          slots_total:     res.slots_total,
+          slots_resolved:  res.slots_resolved,
+          slots_with_bsr:  res.slots_with_bsr,
+          slots_multi_team: res.slots_multi_team,
+          starters: res.breakdown.map(b => ({
+            slot:        b.slot,
+            name:        b.name,
+            mlbam_id:    b.mlbam_id,
+            bsr:         b.bsr != null ? Number(b.bsr.toFixed(3)) : null,
+            resolved:    b.resolved,
+            has_bsr:     b.has_bsr,
+            multi_team:  b.multi_team,
+          })),
+        };
+        const awayPg = awayRes && awayRes.per_game != null ? awayRes.per_game : null;
+        const homePg = homeRes && homeRes.per_game != null ? homeRes.per_game : null;
+        let net = null, beneficiary = null;
+        if (awayPg != null && homePg != null) {
+          net = homePg - awayPg;
+          if (Math.abs(net) < 1e-9) { beneficiary = null; }
+          else { beneficiary = net > 0 ? g.home_team : g.away_team; }
+        }
+        const status = (awayEmpty && homeEmpty) ? 'both_lineups_pending'
+                     : awayEmpty ? 'away_lineup_pending'
+                     : homeEmpty ? 'home_lineup_pending'
+                     : 'ok';
+        out.lineup_bsr = {
+          status,
+          data_source: 'player_baserunning_trailing',
+          trailing_window: _trailingMeta,
+          units_note: 'runs per game (signed). DISPLAY ONLY — not added to the model line or bet emission.',
+          away: sidePayload(awayRes),
+          home: sidePayload(homeRes),
+          net_home_minus_away: net != null ? Number(net.toFixed(4)) : null,
+          beneficiary_team:    beneficiary,
+        };
+      }
       // Only attach when the thresholds passed above. Omitting the
       // field entirely (rather than setting null) keeps the slate
       // payload smaller and lets the UI test with `g.empirical_spreads`.
