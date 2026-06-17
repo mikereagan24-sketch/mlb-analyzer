@@ -2385,6 +2385,186 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
   }
 });
 
+// Baserunning trailing-1yr trace (read-only diagnostic). Answers the
+// pre-deploy question for the matchup-tab BsR display: is the trailing
+// table populated, does the resolver hit, and is the resolved id a
+// key in the BsR map the display builds from
+// player_baserunning_trailing.
+//
+// GET /api/admin/baserunning-trailing-trace
+//   ?date=YYYY-MM-DD   (required — slate date for the matchup lookup)
+//   ?game_id=...       (optional — full game_id, e.g. AWAY-HOME-T-N)
+//   ?away_team=TEX     (optional — alt to game_id; first game found
+//                       matching away_team gets traced)
+//   ?home_team=DET     (optional — same idea on the home side)
+//
+// Returns:
+//   trailing_table: { row_count, with_bsr_count, with_stint_count_set,
+//                     window, sample_top_5_by_bsr }
+//   resolver_inputs: count of team_rosters + team_rosters_season rows
+//     for the two teams (so an empty roster is visible as the cause
+//     when resolution fails)
+//   matchup: { game_id, away_team, home_team, away_starters, home_starters }
+//   each starter: { slot, name_in_lineup, mlb_id_in_lineup, resolved_mlb_id,
+//                   bsr_lookup: { found, bsr, stint_count, name_in_bsr_table } }
+//
+// No writes. No scoring touched. No model changes.
+router.get('/admin/baserunning-trailing-trace', requireAdminToken, (req, res) => {
+  try {
+    const date = (req.query.date || '').toString().trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    const gameIdParam = (req.query.game_id || '').toString().trim();
+    const awayTeamHint = (req.query.away_team || '').toString().trim().toUpperCase();
+    const homeTeamHint = (req.query.home_team || '').toString().trim().toUpperCase();
+
+    // -------- trailing table snapshot --------
+    let rowCount = 0, withBsrCount = 0, withStintCount = 0;
+    let window = null, sampleTop5 = [];
+    try {
+      rowCount = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing").get().n;
+      withBsrCount = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing WHERE bsr IS NOT NULL").get().n;
+      withStintCount = db.prepare("SELECT COUNT(*) AS n FROM player_baserunning_trailing WHERE stint_count IS NOT NULL").get().n;
+      const meta = db.prepare(
+        "SELECT window_startdate, window_enddate, MAX(refreshed_at) AS refreshed_at "
+        + "FROM player_baserunning_trailing LIMIT 1"
+      ).get() || {};
+      window = { startdate: meta.window_startdate || null, enddate: meta.window_enddate || null, refreshed_at: meta.refreshed_at || null };
+      sampleTop5 = db.prepare(
+        "SELECT mlbam_id, name, bsr, g, stint_count "
+        + "FROM player_baserunning_trailing WHERE bsr IS NOT NULL "
+        + "ORDER BY bsr DESC LIMIT 5"
+      ).all();
+    } catch (e) { /* table missing — leave defaults */ }
+
+    // -------- locate the matchup row --------
+    let gameRow = null;
+    if (gameIdParam) {
+      gameRow = db.prepare(
+        "SELECT game_id, game_date, away_team, home_team, away_lineup_json, home_lineup_json "
+        + "FROM game_log WHERE game_date=? AND game_id=?"
+      ).get(date, gameIdParam);
+    } else if (awayTeamHint || homeTeamHint) {
+      const params = [date];
+      let where = "game_date=?";
+      if (awayTeamHint) { where += " AND UPPER(away_team)=?"; params.push(awayTeamHint); }
+      if (homeTeamHint) { where += " AND UPPER(home_team)=?"; params.push(homeTeamHint); }
+      gameRow = db.prepare(
+        "SELECT game_id, game_date, away_team, home_team, away_lineup_json, home_lineup_json "
+        + "FROM game_log WHERE " + where + " LIMIT 1"
+      ).get(...params);
+    } else {
+      // No matchup hint — surface a list of game_ids on the date so
+      // the operator can pick one.
+      const games = db.prepare(
+        "SELECT game_id, away_team, home_team FROM game_log WHERE game_date=? ORDER BY game_id"
+      ).all(date);
+      return res.json({
+        trailing_table: { row_count: rowCount, with_bsr_count: withBsrCount, with_stint_count_set: withStintCount, window, sample_top_5_by_bsr: sampleTop5 },
+        note: 'No game_id / team specified. Pass ?game_id=… or ?away_team=… ?home_team=… to trace a matchup.',
+        games_on_date: games,
+      });
+    }
+    if (!gameRow) return res.status(404).json({ error: 'no game found for date=' + date + ' with that game_id / team hint' });
+
+    // -------- per-starter trace --------
+    const { resolveBacktestMlbId } = require('../services/jobs');
+    const tryParse = (s) => { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } };
+    const lookupBsrById = db.prepare(
+      "SELECT mlbam_id, name, bsr, stint_count FROM player_baserunning_trailing WHERE mlbam_id=?"
+    );
+    function traceSide(team, lineupJson) {
+      const lineup = tryParse(lineupJson) || [];
+      // Roster row counts for diagnostic context.
+      let activeRosterCount = 0, seasonRosterCount = 0;
+      try {
+        activeRosterCount = db.prepare("SELECT COUNT(*) AS n FROM team_rosters WHERE team=? AND role='POS'").get(team).n;
+      } catch (e) {}
+      try {
+        seasonRosterCount = db.prepare("SELECT COUNT(*) AS n FROM team_rosters_season WHERE team=? AND role='POS'").get(team).n;
+      } catch (e) {}
+      const starters = lineup.map((p, i) => {
+        const nameInLineup = p && p.name ? p.name : null;
+        const mlbIdInLineup = p && p.mlb_id != null ? Number(p.mlb_id) : null;
+        let resolvedMlbId = null, resolverError = null;
+        try {
+          if (nameInLineup) resolvedMlbId = resolveBacktestMlbId(team, nameInLineup);
+        } catch (e) { resolverError = e.message; }
+        // BsR lookup: try the resolver's id first; fall back to the
+        // lineup's mlb_id if the resolver didn't return one. Surface
+        // both so an id-mismatch failure is visible.
+        let bsrLookup = { found: false, bsr: null, stint_count: null, name_in_bsr_table: null, id_used: null };
+        const tryIds = [];
+        if (resolvedMlbId != null) tryIds.push({ id: resolvedMlbId, source: 'resolver' });
+        if (mlbIdInLineup != null && (resolvedMlbId == null || Number(resolvedMlbId) !== mlbIdInLineup)) {
+          tryIds.push({ id: mlbIdInLineup, source: 'lineup_json' });
+        }
+        for (const t of tryIds) {
+          const row = lookupBsrById.get(Math.round(Number(t.id)));
+          if (row) {
+            bsrLookup = {
+              found: true,
+              bsr: row.bsr,
+              stint_count: row.stint_count,
+              name_in_bsr_table: row.name,
+              id_used: t.id,
+              id_source: t.source,
+            };
+            break;
+          }
+          // Track miss but keep trying next id.
+          bsrLookup.tried_ids = (bsrLookup.tried_ids || []).concat({ id: t.id, source: t.source });
+        }
+        return {
+          slot: i + 1,
+          name_in_lineup: nameInLineup,
+          mlb_id_in_lineup: mlbIdInLineup,
+          resolved_mlb_id: resolvedMlbId,
+          resolver_error: resolverError,
+          resolver_matches_lineup_id: resolvedMlbId != null && mlbIdInLineup != null
+            && Number(resolvedMlbId) === mlbIdInLineup,
+          bsr_lookup: bsrLookup,
+        };
+      });
+      const totalSlots = starters.length;
+      const resolvedSlots = starters.filter(s => s.resolved_mlb_id != null).length;
+      const bsrFoundSlots = starters.filter(s => s.bsr_lookup.found).length;
+      return {
+        team,
+        active_roster_pos_count: activeRosterCount,
+        season_roster_pos_count: seasonRosterCount,
+        lineup_slots_total: totalSlots,
+        resolved_slots: resolvedSlots,
+        bsr_found_slots: bsrFoundSlots,
+        starters,
+      };
+    }
+
+    const awayTrace = traceSide(gameRow.away_team, gameRow.away_lineup_json);
+    const homeTrace = traceSide(gameRow.home_team, gameRow.home_lineup_json);
+
+    return res.json({
+      trailing_table: {
+        row_count: rowCount,
+        with_bsr_count: withBsrCount,
+        with_stint_count_set: withStintCount,
+        window,
+        sample_top_5_by_bsr: sampleTop5,
+      },
+      matchup: {
+        game_date: gameRow.game_date,
+        game_id: gameRow.game_id,
+        away_team: gameRow.away_team,
+        home_team: gameRow.home_team,
+        away: awayTrace,
+        home: homeTrace,
+      },
+    });
+  } catch (e) {
+    console.error('[admin/baserunning-trailing-trace] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Baserunning hindsight backtest (read-only, no writes, no settings).
 // GET /api/admin/baserunning-backtest?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
 //
