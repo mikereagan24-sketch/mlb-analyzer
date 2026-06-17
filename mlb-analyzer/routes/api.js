@@ -567,6 +567,7 @@ router.get('/games/:date', (req, res) => {
     // Both are date-of-request snapshots; cheap to query, reused across
     // every game in the slate.
     const bsrUtil = require('../services/baserunning-util');
+    const _jobs = require('../services/jobs');
     let _bsrMaps = null, _gamesByTeam = null, _trailingMeta = null, _trailingErr = null;
     try {
       const trailingRows = q.getPlayerBaserunningTrailing
@@ -595,7 +596,16 @@ router.get('/games/:date', (req, res) => {
       _trailingErr = 'bsr preload failed: ' + e.message;
       console.warn('[api/games] lineup-bsr preload failed (non-fatal): ' + e.message);
     }
-    const resolveLineupSlotByMlbId = (team, p) => (p && p.mlb_id != null) ? Number(p.mlb_id) : null;
+    // Lineup-slot resolver. /api/games/:date lineup JSON carries
+    // {name, hand, pos} per starter — NO mlb_id field — so the live
+    // display cannot key the BsR map off lineup ids. Use the same
+    // name-based resolver the backtest uses (active 26-man ∪ season
+    // fullSeason), so the matchup and backtest share one id surface.
+    // Without this fix every slot hit !Number.isFinite(idNum) and the
+    // display read 0/9 with BsR despite a fully-seeded trailing table.
+    const resolveLineupSlotByName = (team, p) => (p && p.name)
+      ? _jobs.resolveBacktestMlbId(team, p.name)
+      : null;
     const result = games.map(g => {
       const awayLU = tryParse(g.away_lineup_json);
       const homeLU = tryParse(g.home_lineup_json);
@@ -723,13 +733,13 @@ router.get('/games/:date', (req, res) => {
         const awayRes = awayEmpty ? null : bsrUtil.computeLineupBsRPerGame({
           team: g.away_team, lineupJson: awayLU,
           bsrMap: _bsrMaps.bsrMap, gamesByTeam: _gamesByTeam,
-          resolveId: resolveLineupSlotByMlbId,
+          resolveId: resolveLineupSlotByName,
           stintCountById: _bsrMaps.stintCountById,
         });
         const homeRes = homeEmpty ? null : bsrUtil.computeLineupBsRPerGame({
           team: g.home_team, lineupJson: homeLU,
           bsrMap: _bsrMaps.bsrMap, gamesByTeam: _gamesByTeam,
-          resolveId: resolveLineupSlotByMlbId,
+          resolveId: resolveLineupSlotByName,
           stintCountById: _bsrMaps.stintCountById,
         });
         const sidePayload = (res) => res == null ? null : {
