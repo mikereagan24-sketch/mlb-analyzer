@@ -336,19 +336,48 @@ function runBaserunningBacktest(opts) {
   // in baserunning_coverage so an early/empty result is interpretable.
   // No other variant supports forward mode (team/YTD snapshot tables
   // exist but are not wired here — out of scope for this build).
+  //
+  // CONSTRUCTION switch (player-level only) — which per-side lineup-
+  // BsR formula to use:
+  //   'current'     (default) — Σ(starter_bsr) / team_games_played
+  //                              (same as live matchup display)
+  //   'pt_neutral'             — Σ(starter_bsr / starter_trailing_G)
+  //                              per-game, playing-time-neutral
+  //   'pa_weighted'            — Σ((starter_bsr / starter_PA) * paWeights[slot])
+  //                              per-PA rate × empirical PA-share weight
+  // All other harness pieces (games considered, model run, accuracy
+  // accumulators, CLV / PnL bookkeeping) are identical across
+  // constructions — only the per-side compute swaps. paWeights come
+  // from settings.PA_WEIGHTS (app_settings 'pa_weights'); same
+  // weights the model already uses for batter wOBA blending so the
+  // two sites share one source of truth.
   const level = opts.level === 'player' ? 'player' : 'team';
   const window = opts.window === 'trailing' ? 'trailing' : 'ytd';
   const forwardHonestRequested = !!opts.forwardHonest;
   const forwardHonest = forwardHonestRequested && level === 'player' && window === 'trailing';
+  const construction = (level === 'player' && opts.construction)
+    ? String(opts.construction).toLowerCase()
+    : 'current';
+  if (!['current', 'pt_neutral', 'pa_weighted'].includes(construction)) {
+    return { bias_warning: 'invalid construction: ' + construction
+      + '; supported: current | pt_neutral | pa_weighted (player-level only)' };
+  }
   const { resolveBacktestMlbId } = jobs;
 
   const season = Number(fromDate.slice(0, 4));
 
   let bsrRows = null;
   let playerBsrById = null;
+  let playerGById   = null;               // trailing only: mlb_id → player_trailing_G (for pt_neutral / pa_weighted denoms)
+  let playerPaById  = null;               // trailing only: mlb_id → player_trailing_PA (for pa_weighted)
   let playerWindowMeta = null;            // for trailing mode response
   let playerStintCountById = null;        // trailing only: mlb_id → stint count
   let multiTeamPlayersInPull = 0;         // trailing only: # players w/ stint_count > 1
+  // Lineup-slot PA weights for the pa_weighted construction. Pulled
+  // from settings so the backtest and the model share one source of
+  // truth. Defaults handled inside the util if absent.
+  const paWeights = (Array.isArray(baseSettings.PA_WEIGHTS) && baseSettings.PA_WEIGHTS.length === 9)
+    ? baseSettings.PA_WEIGHTS : null;
 
   if (level === 'team') {
     bsrRows = q.getTeamBaserunning.all(season);
@@ -406,6 +435,8 @@ function runBaserunningBacktest(opts) {
       };
     }
     playerBsrById = new Map();
+    playerGById   = new Map();
+    playerPaById  = new Map();
     // Multi-team stint tracking. Players with stint_count > 1 had
     // their BsR aggregated across two team-stints by xMLBAMID — a
     // small look-ahead: the lineup gets the full-window value
@@ -413,14 +444,30 @@ function runBaserunningBacktest(opts) {
     // the coverage block can quantify the slot exposure (and we can
     // calibrate the -0.0131 trailing-1yr accuracy delta against it).
     playerStintCountById = new Map();
+    let nWithPa = 0;
     for (const r of playerRows) {
       if (r.bsr == null) continue;
       const id = Number(r.mlbam_id);
       if (!Number.isFinite(id) || id <= 0) continue;
       playerBsrById.set(id, Number(r.bsr));
+      if (r.g  != null) playerGById.set(id, Number(r.g));
+      if (r.pa != null) { playerPaById.set(id, Number(r.pa)); nWithPa++; }
       const sc = (r.stint_count != null) ? Number(r.stint_count) : 1;
       playerStintCountById.set(id, sc);
       if (sc > 1) multiTeamPlayersInPull++;
+    }
+    // Construction-specific pre-flight: the pa_weighted arm needs PA
+    // populated on the trailing rows. If a fresh DB hasn't run a
+    // refresh since the PA column was added, surface that explicitly
+    // rather than silently producing per_game=null on every game.
+    if (construction === 'pa_weighted' && nWithPa === 0) {
+      return {
+        bias_warning: 'pa_weighted construction requested but player_baserunning_trailing has no PA populated. Run POST /admin/refresh/player-baserunning-trailing once after this branch deploys so the trailing scrape captures PA, then re-run.',
+        window: { from: fromDate, to: toDate },
+        level, window, construction,
+        players_with_bsr: playerBsrById.size,
+        players_with_pa: 0,
+      };
     }
     // Surface the actual trailing window (from one of the persisted
     // rows) so the response is honest about what data ran.
@@ -569,36 +616,36 @@ function runBaserunningBacktest(opts) {
   const playersUsed = new Set();
   const multiTeamPlayersUsed = new Set();
 
-  // Forward-mode per-date BsR map cache. Each entry is the as-of
-  // snapshot Map at the date the snapshot was actually taken (the
-  // resolved snapshot_date, not the game_date — many games map to the
-  // same snapshot row). Tracks which snapshot dates the run consumed
-  // so coverage diagnostics are exact.
-  const playerBsrByDate = new Map();      // key: snapshot_date → Map(mlbam_id → bsr)
+  // Forward-mode per-date map cache. Each (snapshot_date) key holds
+  // bsrMap / gById / paById / stintCountById for that snapshot row
+  // set — all three constructions read from the same date's data.
+  const mapsByDate = new Map();             // key: snapshot_date → {bsrMap, gById, paById, stintCountById}
   const snapshotDateByGameDate = new Map(); // key: game_date → snapshot_date (or null)
   const snapshotDatesUsed = new Set();
   let gamesSkippedNoSnapshot = 0;
-  function getPlayerBsrMapForGame(gameDate) {
+  function getPlayerBsrMapsForGame(gameDate) {
     if (snapshotDateByGameDate.has(gameDate)) {
       const sd = snapshotDateByGameDate.get(gameDate);
-      return { snapshotDate: sd, map: sd ? playerBsrByDate.get(sd) : null };
+      return sd ? mapsByDate.get(sd) : null;
     }
     const rows = q.getPlayerBaserunningTrailingAsOf.all(gameDate);
     if (!rows || !rows.length) {
       snapshotDateByGameDate.set(gameDate, null);
-      return { snapshotDate: null, map: null };
+      return null;
     }
     const sd = rows[0].snapshot_date;
     snapshotDateByGameDate.set(gameDate, sd);
-    if (!playerBsrByDate.has(sd)) {
-      const m = new Map();
+    if (!mapsByDate.has(sd)) {
+      const bsrMap = new Map(), gById = new Map(), paById = new Map(), stintCountById = new Map();
       for (const r of rows) {
-        if (r.bsr == null) continue;
         const id = Number(r.mlbam_id);
         if (!Number.isFinite(id) || id <= 0) continue;
-        m.set(id, Number(r.bsr));
+        if (r.bsr != null) bsrMap.set(id, Number(r.bsr));
+        if (r.g   != null) gById.set(id, Number(r.g));
+        if (r.pa  != null) paById.set(id, Number(r.pa));
+        if (r.stint_count != null) stintCountById.set(id, Number(r.stint_count));
       }
-      playerBsrByDate.set(sd, m);
+      mapsByDate.set(sd, { bsrMap, gById, paById, stintCountById });
       // Snapshot window meta — captured the first time a snapshot
       // is consumed. window_startdate/enddate vary across snapshot
       // dates (rolling), so this records the most-recently-used.
@@ -609,25 +656,45 @@ function runBaserunningBacktest(opts) {
       };
     }
     snapshotDatesUsed.add(sd);
-    return { snapshotDate: sd, map: playerBsrByDate.get(sd) };
+    return mapsByDate.get(sd);
   }
 
   // Lineup-sum-of-starters BsR-per-game (player mode). Thin wrapper
-  // around services/baserunning-util.computeLineupBsRPerGame so the
-  // matchup-tab display and the backtest share one implementation.
-  // The wrapper hides the closure dependencies (gamesByTeam, the
-  // backtest's name-based resolver, stint map) and accumulates the
+  // around services/baserunning-util that dispatches on `construction`
+  // — 'current' goes through the existing computeLineupBsRPerGame so
+  // the matchup-tab display and the backtest's default path remain
+  // in lockstep; 'pt_neutral' and 'pa_weighted' go through the
+  // sibling functions added for this measurement build. Accumulates
   // per-call slot counters into the backtest's outer accumulators.
-  // Returns the per_game number (or null) — the rest of the per-call
-  // accounting is rolled into the counters.
+  // Returns the per_game number (or null).
   const bsrUtil = require('./baserunning-util');
   const resolveLineupSlotForBacktest = (team, p) => (p && p.name) ? resolveBacktestMlbId(team, p.name) : null;
-  function computePlayerLineupBsRPerGame(team, lineupJson, bsrMap) {
-    const res = bsrUtil.computeLineupBsRPerGame({
-      team, lineupJson, bsrMap, gamesByTeam,
-      resolveId: resolveLineupSlotForBacktest,
-      stintCountById: playerStintCountById,
-    });
+  function computePlayerLineupBsRPerGame(team, lineupJson, maps) {
+    const bsrMap = maps && maps.bsrMap;
+    const gById  = maps && maps.gById;
+    const paById = maps && maps.paById;
+    const stintCountByIdLocal = (maps && maps.stintCountById) || playerStintCountById;
+    let res;
+    if (construction === 'pt_neutral') {
+      res = bsrUtil.computeLineupBsRPerGamePtNeutral({
+        team, lineupJson, bsrMap, gById,
+        resolveId: resolveLineupSlotForBacktest,
+        stintCountById: stintCountByIdLocal,
+      });
+    } else if (construction === 'pa_weighted') {
+      res = bsrUtil.computeLineupBsRPerGamePaWeighted({
+        team, lineupJson, bsrMap, paById,
+        resolveId: resolveLineupSlotForBacktest,
+        stintCountById: stintCountByIdLocal,
+        paWeights,
+      });
+    } else {
+      res = bsrUtil.computeLineupBsRPerGame({
+        team, lineupJson, bsrMap, gamesByTeam,
+        resolveId: resolveLineupSlotForBacktest,
+        stintCountById: stintCountByIdLocal,
+      });
+    }
     lineupSlotsTotal     += res.slots_total;
     lineupSlotsResolved  += res.slots_resolved;
     lineupSlotsWithBsr   += res.slots_with_bsr;
@@ -642,25 +709,30 @@ function runBaserunningBacktest(opts) {
     const parts = (gameRow.game_id || '').split('-');
     const awayTeam = (parts[0] || '').toUpperCase();
     const homeTeam = (parts[1] || '').toUpperCase();
-    // Pick the BsR map for this game. Hindsight modes use the
-    // pre-loaded `playerBsrById`; forward mode resolves the as-of
-    // snapshot for game_date. Games with no snapshot at-or-before
-    // their date are skipped before model scoring.
-    let bsrMapForGame = playerBsrById;
+    // Pick the per-id maps for this game. Hindsight modes use the
+    // pre-loaded outer maps; forward mode resolves the as-of snapshot
+    // for game_date (returns null for games earlier than the first
+    // snapshot, which are then skipped before model scoring).
+    let mapsForGame = {
+      bsrMap: playerBsrById,
+      gById:  playerGById,
+      paById: playerPaById,
+      stintCountById: playerStintCountById,
+    };
     if (forwardHonest) {
-      const got = getPlayerBsrMapForGame(gameRow.game_date);
-      if (!got.map) {
+      const got = getPlayerBsrMapsForGame(gameRow.game_date);
+      if (!got || !got.bsrMap) {
         gamesSkippedNoSnapshot++;
         continue;
       }
-      bsrMapForGame = got.map;
+      mapsForGame = got;
     }
     const awayBsRPerGame = level === 'team'
       ? bsrByTeam.get(awayTeam)
-      : computePlayerLineupBsRPerGame(awayTeam, gameRow.away_lineup_json, bsrMapForGame);
+      : computePlayerLineupBsRPerGame(awayTeam, gameRow.away_lineup_json, mapsForGame);
     const homeBsRPerGame = level === 'team'
       ? bsrByTeam.get(homeTeam)
-      : computePlayerLineupBsRPerGame(homeTeam, gameRow.home_lineup_json, bsrMapForGame);
+      : computePlayerLineupBsRPerGame(homeTeam, gameRow.home_lineup_json, mapsForGame);
     if (awayBsRPerGame == null || homeBsRPerGame == null) {
       gamesMissingBsr++;
       if (awayBsRPerGame == null) missingTeams.add(awayTeam);
@@ -895,6 +967,14 @@ function runBaserunningBacktest(opts) {
     scope_note: 'ML-side only. Per-team BsR/game added to each team\'s projected runs (own baserunning helps own offense). estTot and totals untouched.',
     level,
     bsr_window: level === 'player' ? window : null,
+    construction: level === 'player' ? construction : null,
+    construction_note: level !== 'player' ? null : (
+      construction === 'current'     ? 'Σ(starter_bsr) / team_games_played — same as live matchup display'
+      : construction === 'pt_neutral' ? 'Σ(starter_bsr / starter_trailing_G) — per-game, PT-neutral'
+      : construction === 'pa_weighted' ? 'Σ((starter_bsr / starter_PA) × PA_WEIGHTS[slot]) — per-PA rate × empirical PA-share weight; weights from settings.PA_WEIGHTS'
+      : null
+    ),
+    pa_weights_used: construction === 'pa_weighted' ? (paWeights || require('./baserunning-util').DEFAULT_PA_WEIGHTS) : undefined,
     mode: level === 'player' && window === 'trailing'
       ? (forwardHonest ? 'forward_honest' : 'hindsight')
       : 'hindsight',
