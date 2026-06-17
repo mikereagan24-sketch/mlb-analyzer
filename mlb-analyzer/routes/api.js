@@ -2395,6 +2395,46 @@ router.get('/admin/under-selection-diagnostic', requireAdminToken, (req, res) =>
   }
 });
 
+// Measurement read — return player_baserunning_trailing rows by id list.
+// One-off support for the PT-neutral denominator side-by-side (matchup-
+// tab BsR denominator analysis): given a matchup's starter mlb_ids,
+// fetch each player's trailing bsr / g / stint_count so a client-side
+// script can compute Σ(bsr/G) alongside the current Σbsr/team_G
+// displayed by the live path.
+//
+// GET /admin/player-bsr-trailing/by-ids?ids=1,2,3
+// Read-only. No writes. No live compute path touched. Sibling
+// diagnostic to /admin/resolver-trace.
+router.get('/admin/player-bsr-trailing/by-ids', requireAdminToken, (req, res) => {
+  try {
+    const idsParam = (req.query.ids || '').toString().trim();
+    if (!idsParam) return res.status(400).json({ error: 'ids (comma-separated) required' });
+    const ids = idsParam.split(',')
+      .map(s => Math.round(Number(s.trim())))
+      .filter(n => Number.isFinite(n) && n > 0);
+    if (!ids.length) return res.status(400).json({ error: 'no valid ids' });
+    // Cap at 50 ids per request — keeps the IN(?, ?, …) prepare cheap
+    // and bounds the response size. 18 (one matchup) is the normal use.
+    if (ids.length > 50) return res.status(400).json({ error: 'max 50 ids per request' });
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = db.prepare(
+      "SELECT mlbam_id, name, bsr, g, stint_count, "
+      + "       window_startdate, window_enddate "
+      + "FROM player_baserunning_trailing "
+      + "WHERE mlbam_id IN (" + placeholders + ")"
+    ).all(...ids);
+    res.json({
+      ids_requested: ids,
+      found_count: rows.length,
+      missing_ids: ids.filter(id => !rows.some(r => Number(r.mlbam_id) === id)),
+      rows,
+    });
+  } catch (e) {
+    console.error('[admin/player-bsr-trailing/by-ids] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Baserunning hindsight backtest (read-only, no writes, no settings).
 // GET /api/admin/baserunning-backtest?from=YYYY-MM-DD&to=YYYY-MM-DD[&detail=true]
 //
