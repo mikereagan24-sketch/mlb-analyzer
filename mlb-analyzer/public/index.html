@@ -1605,6 +1605,7 @@ async function renderMatchupGame(id){
     +renderModelOutput(g)
     +renderLineupDiff(g)
     +renderFramingImpact(g)
+    +renderLineupBsr(g)
     +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
     +'<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(\'' +gid+ '\')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(\'' +gid+ '\')">Rerun Model</button></div>';
 }
@@ -1667,6 +1668,79 @@ function renderFramingImpact(g){
     + sideRow('away', g.away_team, fi.away.catcher_name, fi.away.state, fi.away.delta_runs_on_home, g.home_team)
     + sideRow('home', g.home_team, fi.home.catcher_name, fi.home.state, fi.home.delta_runs_on_away, g.away_team)
     + netLine
+    + '</div>';
+}
+
+// Lineup BsR display (feat/matchup-lineup-bsr-display). Per-side
+// trailing-1yr lineup-sum / team_games_played from
+// services/baserunning-util — same math the trailing backtest uses.
+// DISPLAY ONLY: this block does NOT change the model line or the
+// emitted bet. The label says so explicitly so it doesn't read as a
+// scoring input.
+function renderLineupBsr(g){
+  if (!g || !g.lineup_bsr) return '';
+  const lb = g.lineup_bsr;
+  const noteLine = '<div style="font-size:10px;color:var(--text3);margin-top:4px;font-style:italic">context only — not added to the model line or bet</div>';
+  if (lb.status === 'unavailable') {
+    return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
+      + '<div style="font-size:10px;color:var(--text2);margin-bottom:2px">Lineup baserunning (trailing 1yr)</div>'
+      + '<div style="font-size:11px;color:var(--text3)">' + (lb.reason || 'unavailable') + '</div>'
+      + noteLine + '</div>';
+  }
+  const fmtSigned = (v) => v == null ? '—' : ((v >= 0 ? '+' : '−') + Math.abs(v).toFixed(3));
+  const sideHeader = (teamCode, side, isAwayPending, isHomePending) => {
+    const pending = (side === 'away' ? isAwayPending : isHomePending);
+    if (pending) return '<div style="font-size:11px"><strong>' + teamCode + '</strong>: <span style="color:var(--text3)">lineup pending</span></div>';
+    if (!lb[side]) return '<div style="font-size:11px"><strong>' + teamCode + '</strong>: <span style="color:var(--text3)">no data</span></div>';
+    const s = lb[side];
+    const slotsTxt = s.slots_resolved + '/' + (s.slots_total || 9) + ' slots'
+      + (s.slots_with_bsr < s.slots_resolved ? ', ' + s.slots_with_bsr + ' w/ BsR' : '');
+    const stintTxt = s.slots_multi_team > 0 ? ' · <span style="color:var(--yellow)" title="players with multi-team trailing-1yr aggregation">' + s.slots_multi_team + ' multi-team</span>' : '';
+    return '<div style="font-size:11px"><strong>' + teamCode + '</strong>: '
+      + '<span style="font-weight:500">' + fmtSigned(s.per_game) + ' runs/game</span> '
+      + '<span style="color:var(--text3)">(sum ' + fmtSigned(s.sum_bsr) + ', ' + s.games_played + ' team G; ' + slotsTxt + stintTxt + ')</span>'
+      + '</div>';
+  };
+  const awayPending = lb.status === 'away_lineup_pending' || lb.status === 'both_lineups_pending';
+  const homePending = lb.status === 'home_lineup_pending' || lb.status === 'both_lineups_pending';
+  let netLine = '';
+  if (lb.net_home_minus_away != null && lb.beneficiary_team) {
+    const mag = Math.abs(lb.net_home_minus_away).toFixed(3);
+    netLine = '<div style="font-size:11px;color:var(--text2);margin-top:4px">net BsR edge: <strong>' + lb.beneficiary_team + ' +' + mag + ' runs/game</strong></div>';
+  } else if (lb.net_home_minus_away === 0) {
+    netLine = '<div style="font-size:11px;color:var(--text3);margin-top:4px">net BsR edge: 0 (balanced)</div>';
+  }
+  // Collapsible breakdown — closed by default; mirrors framing's tight
+  // footprint above the lineup tables.
+  const starterRow = (b) => {
+    const bsrTxt = b.has_bsr ? fmtSigned(b.bsr)
+      : (b.resolved ? '<span style="color:var(--text3)">no BsR</span>'
+                     : '<span style="color:var(--text3)">unresolved</span>');
+    const flag = b.multi_team ? ' <span style="color:var(--yellow)" title="multi-team in trailing-1yr window — BsR is xMLBAMID-aggregated across stints">●</span>' : '';
+    return '<tr><td style="text-align:right;color:var(--text3);font-size:10px">' + b.slot + '</td>'
+      + '<td style="font-size:10px">' + (b.name || '—') + flag + '</td>'
+      + '<td style="text-align:right;font-size:10px">' + bsrTxt + '</td></tr>';
+  };
+  const sideTable = (label, side) => {
+    const s = lb[side];
+    if (!s || !s.starters || !s.starters.length) return '';
+    return '<div><div style="font-size:10px;color:var(--text2);margin-bottom:2px">' + label + '</div>'
+      + '<table style="width:100%;border-collapse:collapse"><tbody>' + s.starters.map(starterRow).join('') + '</tbody></table></div>';
+  };
+  const breakdown = ((lb.away && lb.away.starters) || (lb.home && lb.home.starters))
+    ? '<details style="margin-top:6px"><summary style="font-size:10px;color:var(--text2);cursor:pointer">per-starter breakdown</summary>'
+      + '<div class="grid-2" style="gap:12px;margin-top:6px">' + sideTable(g.away_team, 'away') + sideTable(g.home_team, 'home') + '</div></details>'
+    : '';
+  const winMeta = (lb.trailing_window && (lb.trailing_window.startdate || lb.trailing_window.enddate))
+    ? '<span style="color:var(--text3)"> window ' + (lb.trailing_window.startdate || '?') + '..' + (lb.trailing_window.enddate || '?') + '</span>'
+    : '';
+  return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
+    + '<div style="font-size:10px;color:var(--text2);margin-bottom:4px">Lineup baserunning (trailing 1yr)' + winMeta + '</div>'
+    + sideHeader(g.away_team, 'away', awayPending, homePending)
+    + sideHeader(g.home_team, 'home', awayPending, homePending)
+    + netLine
+    + breakdown
+    + noteLine
     + '</div>';
 }
 
