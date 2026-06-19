@@ -2265,8 +2265,21 @@ async function runWeatherJob(date) {
         const precip = _precip;
         const windFactor = calcWindFactor(dir, speed, park);
         const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
-        let roofStatus = 'open', roofMult = 1;
-        if (park.roofType === 'retractable') {
+        let roofStatus = 'open', roofMult = 1, roofConfidence = 'estimated';
+        // An announced roof status (from the D-backs roof-page ingest, or any
+        // authoritative post-game source) is ground truth and must not be
+        // overwritten by the config heuristic. The retractable config below is
+        // currently inert (no park carries roofType), so absent an announced
+        // value this falls through to 'open' as before — behavior-preserving
+        // for every park except those the ingest has populated.
+        const announcedRoof = (game.roof_confidence === 'announced' || game.roof_confidence === 'actual')
+          ? (game.roof_status || '').toLowerCase()
+          : '';
+        if (announcedRoof === 'open' || announcedRoof === 'closed' || announcedRoof === 'partial') {
+          roofStatus = announcedRoof;
+          roofConfidence = game.roof_confidence;
+          roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
+        } else if (park.roofType === 'retractable') {
           let closed = false;
           if (park.defaultClosed) closed = !(temp < park.tempClose && precip < park.precipClose);
           else if (park.closedBehavior === 'rain_only') closed = precip >= park.precipClose;
@@ -2280,10 +2293,10 @@ async function runWeatherJob(date) {
         const effWind = windFactor * roofMult;
         const effTemp = roofStatus === 'closed' ? 0 : tempAdj * roofMult;
         if (q.updateWindData) {
-          q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
+          q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, roofConfidence, date, game.game_id);
         } else {
           db.prepare("UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now') WHERE game_date=? AND game_id=?")
-            .run(speed, dir, effWind, temp, effTemp, roofStatus, 'estimated', date, game.game_id);
+            .run(speed, dir, effWind, temp, effTemp, roofStatus, roofConfidence, date, game.game_id);
         }
         const latestRow = q.getGameById.get(date, game.game_id);
         if (latestRow) processGameSignals(latestRow, wobaIdx, settings);
