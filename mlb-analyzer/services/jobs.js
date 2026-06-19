@@ -2211,6 +2211,26 @@ async function runWeatherJob(date) {
     // weatherless until runLineupJob's next cycle.
     await ensureScheduleBootstrap(date);
 
+    // D-backs roof-status ingest. MUST run before the games-read below
+    // so the announced roof_status / roof_confidence is in-DB when this
+    // job reads each Chase game. Wrapped in its own try/catch so a
+    // roof-scrape failure can NEVER overwrite a known-good announced
+    // value or block the weather job. The ingest itself is also
+    // internally safety-guarded (returns a summary on failure, throws
+    // nothing).
+    try {
+      const { runRoofStatusIngest } = require('./roof-ari');
+      const roofRes = await runRoofStatusIngest(date);
+      if (roofRes && (roofRes.errors || []).length) {
+        console.warn('[weather] roof-ari ingest reported errors: '
+          + roofRes.errors.join(', ') + ' (weather job continues)');
+      }
+    } catch (e) {
+      // Defensive — should never hit since runRoofStatusIngest catches
+      // internally, but if it does, log and continue.
+      console.warn('[weather] roof-ari ingest crashed (non-fatal, weather continues): ' + e.message);
+    }
+
     const games = q.getGamesByDate.all(date);
     if (!games.length) {
       console.log('[weather] no games for '+date);
