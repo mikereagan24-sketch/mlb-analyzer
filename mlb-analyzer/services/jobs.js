@@ -2211,13 +2211,22 @@ async function runWeatherJob(date) {
     // weatherless until runLineupJob's next cycle.
     await ensureScheduleBootstrap(date);
 
-    // D-backs roof-status ingest. MUST run before the games-read below
-    // so the announced roof_status / roof_confidence is in-DB when this
-    // job reads each Chase game. Wrapped in its own try/catch so a
-    // roof-scrape failure can NEVER overwrite a known-good announced
-    // value or block the weather job. The ingest itself is also
-    // internally safety-guarded (returns a summary on failure, throws
-    // nothing).
+    // Roof-status pipeline (two independent stages — each in its own
+    // try/catch so a failure in one never blocks the other or the
+    // weather job). Both run BEFORE the games-read below so any new
+    // announced/actual status is in-DB by the time this job reads
+    // each game's row.
+    //
+    // 1) D-backs forward scraper — writes roof_confidence='announced'
+    //    for the next homestand at Chase.
+    // 2) Universal post-game corrector — for completed games at any of
+    //    the 7 roofed parks, reads statsapi's gameData.weather.condition
+    //    and writes roof_confidence='actual'. Self-heals any wrong
+    //    forward prior or announced value once the game is final.
+    //
+    // Precedence enforced downstream in fetchAndApply: actual > announced
+    // > prior (estimated). The corrector never DOWNGRADES — it only
+    // writes 'actual' for completed games with populated conditions.
     try {
       const { runRoofStatusIngest } = require('./roof-ari');
       const roofRes = await runRoofStatusIngest(date);
@@ -2226,9 +2235,17 @@ async function runWeatherJob(date) {
           + roofRes.errors.join(', ') + ' (weather job continues)');
       }
     } catch (e) {
-      // Defensive — should never hit since runRoofStatusIngest catches
-      // internally, but if it does, log and continue.
       console.warn('[weather] roof-ari ingest crashed (non-fatal, weather continues): ' + e.message);
+    }
+    try {
+      const { runRoofStatusCorrect } = require('./roof-correct');
+      const corrRes = await runRoofStatusCorrect({ runDate: date });
+      if (corrRes && (corrRes.errors || []).length) {
+        console.warn('[weather] roof-correct reported errors: '
+          + corrRes.errors.join(', ') + ' (weather job continues)');
+      }
+    } catch (e) {
+      console.warn('[weather] roof-correct crashed (non-fatal, weather continues): ' + e.message);
     }
 
     const games = q.getGamesByDate.all(date);
@@ -2238,6 +2255,7 @@ async function runWeatherJob(date) {
       return { success: true, updated: 0, date: date, note: 'no games' };
     }
     const { calcWindFactor, PARKS } = require('./weather');
+    const { rollForwardPrior, isSealedDome } = require('./roof-prior');
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
     const month = new Date(date).getMonth() + 1;
@@ -2286,12 +2304,22 @@ async function runWeatherJob(date) {
         const windFactor = calcWindFactor(dir, speed, park);
         const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
         let roofStatus = 'open', roofMult = 1, roofConfidence = 'estimated';
-        // An announced roof status (from the D-backs roof-page ingest, or any
-        // authoritative post-game source) is ground truth and must not be
-        // overwritten by the config heuristic. The retractable config below is
-        // currently inert (no park carries roofType), so absent an announced
-        // value this falls through to 'open' as before — behavior-preserving
-        // for every park except those the ingest has populated.
+        // Resolution precedence (highest wins): actual > announced > prior
+        // (estimated) > config heuristic > default-open.
+        //
+        //   actual    — written by services/roof-correct.js from statsapi
+        //               gameData.weather.condition for completed games.
+        //               Ground truth; never overwritten.
+        //   announced — written by services/roof-ari.js (D-backs forward
+        //               scraper) for the next homestand at Chase.
+        //   prior     — services/roof-prior.rollForwardPrior(venue_id, date):
+        //               per-park empirical defaults (HOU/TEX/MIA/TOR/MIL/SEA)
+        //               for pre-game scoring before announced/actual lands.
+        //               Stored at roof_confidence='estimated' so a later
+        //               announced or actual wins.
+        //   config    — the inert retractable config below; no park
+        //               carries roofType, so this branch is dead today
+        //               but kept as the documented fallback path.
         const announcedRoof = (game.roof_confidence === 'announced' || game.roof_confidence === 'actual')
           ? (game.roof_status || '').toLowerCase()
           : '';
@@ -2299,19 +2327,43 @@ async function runWeatherJob(date) {
           roofStatus = announcedRoof;
           roofConfidence = game.roof_confidence;
           roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
-        } else if (park.roofType === 'retractable') {
-          let closed = false;
-          if (park.defaultClosed) closed = !(temp < park.tempClose && precip < park.precipClose);
-          else if (park.closedBehavior === 'rain_only') closed = precip >= park.precipClose;
-          else if (park.aprilDefault === 'closed' && month <= 4) closed = !(temp >= park.tempClose && precip < park.precipClose);
-          else if (park.closedBehavior === 'hot') closed = temp >= park.tempClose || precip >= park.precipClose;
-          else closed = temp < park.tempClose || precip >= park.precipClose;
-          roofStatus = closed ? 'closed' : 'open';
-          if (park.partialEnclosure && closed) roofStatus = 'partial';
-          roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
+        } else {
+          // Forward-prior fallback. rollForwardPrior returns null for
+          // venues without a rule (ARI venue 15 included — it expects
+          // the scraper above; default-open is the preserved old
+          // behavior if the scrape failed). For the other 6 roofed
+          // venues, the prior is the per-park empirical default.
+          const prior = rollForwardPrior(game.venue_id, date);
+          if (prior && (prior.status === 'open' || prior.status === 'closed')) {
+            roofStatus = prior.status;
+            roofConfidence = prior.confidence || 'estimated';
+            roofMult = roofStatus === 'closed' ? 0 : 1;
+          } else if (park.roofType === 'retractable') {
+            let closed = false;
+            if (park.defaultClosed) closed = !(temp < park.tempClose && precip < park.precipClose);
+            else if (park.closedBehavior === 'rain_only') closed = precip >= park.precipClose;
+            else if (park.aprilDefault === 'closed' && month <= 4) closed = !(temp >= park.tempClose && precip < park.precipClose);
+            else if (park.closedBehavior === 'hot') closed = temp >= park.tempClose || precip >= park.precipClose;
+            else closed = temp < park.tempClose || precip >= park.precipClose;
+            roofStatus = closed ? 'closed' : 'open';
+            if (park.partialEnclosure && closed) roofStatus = 'partial';
+            roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
+          }
         }
-        const effWind = windFactor * roofMult;
-        const effTemp = roofStatus === 'closed' ? 0 : tempAdj * roofMult;
+        // Weather neutralization on CLOSED roofs is gated on the park
+        // being a true sealed dome (SEALED_DOME_VENUE_IDS in
+        // services/roof-prior.js). Six of the seven retractables are
+        // sealed — statsapi shows wind=0 / controlled temp when
+        // closed, so effWind / effTemp must be zeroed. SEA (680) is
+        // the verified exception: its roof covers but doesn't enclose,
+        // so closed SEA games still report real wind (e.g. 12 mph In
+        // From LF) and outside-matching temps. At SEA, record the
+        // closed status but keep the reported weather applied.
+        // Partial-enclosure parks keep the 0.5 multiplier from the
+        // config branch.
+        const sealedClosed = roofStatus === 'closed' && isSealedDome(game.venue_id);
+        const effWind = sealedClosed ? 0 : windFactor * roofMult;
+        const effTemp = sealedClosed ? 0 : tempAdj * roofMult;
         if (q.updateWindData) {
           q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, roofConfidence, date, game.game_id);
         } else {
