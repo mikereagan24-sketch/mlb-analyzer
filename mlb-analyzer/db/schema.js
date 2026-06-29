@@ -1146,6 +1146,15 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_proj_ip REAL"); } catch(e
 // bullpen-sourced fallback for the opener slot.
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_forecast_ip REAL"); } catch(e) {}
+// n_priors columns — count of clean current-season starts behind the
+// forecast. Used by computeSpPitWeightFromForecast to apply a graduated
+// confidence haircut on the SP weight: 0 priors → low-conf target
+// (default 0.62), linear ramp to full forecast weight at ≥ N priors
+// (default 3). Without these, a first-start-of-season pitcher gets
+// SP_PIT_WEIGHT (0.80) — backwards from the design intent that
+// low-confidence starters cede to the bullpen.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_forecast_n_priors INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_forecast_n_priors INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bulk_forecast_ip REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bulk_forecast_ip REAL"); } catch(e) {}
 // Opener forecasts: F4 forecast IP for the named opener pitcher in
@@ -1735,6 +1744,7 @@ const q = {
       bulk_guy_away_announced, bulk_guy_home_announced,
       away_sp_proj_ip, home_sp_proj_ip,
       away_sp_forecast_ip, home_sp_forecast_ip,
+      away_sp_forecast_n_priors, home_sp_forecast_n_priors,
       away_bulk_forecast_ip, home_bulk_forecast_ip,
       away_opener_forecast_ip, home_opener_forecast_ip,
       market_away_ml, market_home_ml, market_total, park_factor,
@@ -1748,6 +1758,7 @@ const q = {
       @bulk_guy_away_announced, @bulk_guy_home_announced,
       @away_sp_proj_ip, @home_sp_proj_ip,
       @away_sp_forecast_ip, @home_sp_forecast_ip,
+      @away_sp_forecast_n_priors, @home_sp_forecast_n_priors,
       @away_bulk_forecast_ip, @home_bulk_forecast_ip,
       @away_opener_forecast_ip, @home_opener_forecast_ip,
       @market_away_ml, @market_home_ml, @market_total, @park_factor,
@@ -1786,6 +1797,8 @@ const q = {
       -- null and must not wipe the lineup-job's value.
       away_sp_forecast_ip = COALESCE(excluded.away_sp_forecast_ip, game_log.away_sp_forecast_ip),
       home_sp_forecast_ip = COALESCE(excluded.home_sp_forecast_ip, game_log.home_sp_forecast_ip),
+      away_sp_forecast_n_priors = COALESCE(excluded.away_sp_forecast_n_priors, game_log.away_sp_forecast_n_priors),
+      home_sp_forecast_n_priors = COALESCE(excluded.home_sp_forecast_n_priors, game_log.home_sp_forecast_n_priors),
       away_bulk_forecast_ip = COALESCE(excluded.away_bulk_forecast_ip, game_log.away_bulk_forecast_ip),
       home_bulk_forecast_ip = COALESCE(excluded.home_bulk_forecast_ip, game_log.home_bulk_forecast_ip),
       -- Opener forecasts: same COALESCE pattern. Populated only by

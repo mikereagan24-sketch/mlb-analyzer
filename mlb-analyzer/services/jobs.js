@@ -1040,6 +1040,8 @@ async function ensureScheduleBootstrap(dateStr) {
       // COALESCE pattern as proj_ip — bootstrap never writes these.
       away_sp_forecast_ip: null,
       home_sp_forecast_ip: null,
+      away_sp_forecast_n_priors: null,
+      home_sp_forecast_n_priors: null,
       away_bulk_forecast_ip: null,
       home_bulk_forecast_ip: null,
       away_opener_forecast_ip: null,
@@ -1149,6 +1151,8 @@ async function runLineupJob(dateStr) {
           // F4 forecast IP also left to the lineup-job pass.
           away_sp_forecast_ip: null,
           home_sp_forecast_ip: null,
+          away_sp_forecast_n_priors: null,
+          home_sp_forecast_n_priors: null,
           away_bulk_forecast_ip: null,
           home_bulk_forecast_ip: null,
           away_opener_forecast_ip: null,
@@ -1299,22 +1303,32 @@ async function runLineupJob(dateStr) {
       // duplicate roster row anyway).
       if (!rosterByNorm.has(key)) rosterByNorm.set(key, row.mlb_id);
     }
+    // Returns an object so the writer can persist both the forecast IP
+    // and the count of clean priors behind it (needed by the SP-weight
+    // confidence haircut in services/model.js
+    // computeSpPitWeightFromForecast). Returns null when truly no info.
+    //
+    // Semantics:
+    //   - pitcher not in roster / source='fallback' → null. Persist
+    //     null and let runModel fall through to SP_PIT_WEIGHT (0.80) —
+    //     same as pre-haircut behavior; this case is structurally
+    //     "we don't even know who's pitching."
+    //   - source='league_only' → { forecast: f0_league, n_priors: 0 }.
+    //     Pre-fix this returned null and the no-priors case landed at
+    //     0.80; now we persist 0 priors so the haircut targets the
+    //     low-confidence weight (~0.62) instead.
+    //   - source='shrinkage' → { forecast, n_priors: total_clean_priors }.
+    //     The graduated haircut ramps weight from low-conf back to the
+    //     forecast-driven weight as n_priors grows.
     const forecastForPitcher = (pitcherName, team, role) => {
       if (!pitcherName || !team) return null;
-      // 1. Exact match (fast path, unchanged behavior for clean names).
       let mlbId = null;
       const r = rosterLookup.get(team, pitcherName);
       if (r) mlbId = r.mlb_id;
-      // 2. Normalized-name fallback for diacritics / casing.
       if (mlbId == null) {
         const key = team + ':' + normName(pitcherName);
         if (rosterByNorm.has(key)) mlbId = rosterByNorm.get(key);
       }
-      // 3. Still unresolved -> return null immediately. Pre-fix the code
-      // fell through to forecastSpIP, which produced source='league_only'
-      // (~5.45 IP) for an unknown mlbId; the existing gate only filtered
-      // 'fallback' so the baseline leaked through as a real value.
-      // The honest semantic for "pitcher not in roster" is null.
       if (mlbId == null) return null;
       const out = forecastSpIP({
         index: spStartIndex,
@@ -1323,14 +1337,17 @@ async function runLineupJob(dateStr) {
         settings,
         role: role || 'start',
       });
-      // Only persist non-fallback values. league_only and shrinkage both
-      // produce defensible numbers (the pitcher IS in the roster — we
-      // just lack recent priors); fallback (no index data at all) is
-      // a degenerate hardcoded 5.25 with no informational content.
-      console.log('[forecast-for-pitcher] name=' + pitcherName + ' team=' + team + ' role=' + (role || 'start') + ' mlbId=' + mlbId + ' source=' + out.source + ' forecast=' + (out.forecast != null ? out.forecast.toFixed(4) : 'null'));
-      if (out.source === 'fallback' || out.source === 'league_only') return null;
-      return out.forecast;
+      console.log('[forecast-for-pitcher] name=' + pitcherName + ' team=' + team + ' role=' + (role || 'start') + ' mlbId=' + mlbId + ' source=' + out.source + ' forecast=' + (out.forecast != null ? out.forecast.toFixed(4) : 'null') + ' n_priors=' + ((out.components && out.components.total_clean_priors) || 0));
+      if (out.source === 'fallback') return null;
+      // league_only persists with n_priors=0 (low-conf haircut target);
+      // shrinkage persists with its actual prior count.
+      const nPriors = (out.components && out.components.total_clean_priors) || 0;
+      return { forecast: out.forecast, n_priors: nPriors };
     };
+    // Back-compat unwrappers for the bulk/opener writes that don't need
+    // n_priors (only the SP slot consumes the haircut today).
+    const forecastIp     = (n, t, r) => { const v = forecastForPitcher(n, t, r); return v ? v.forecast : null; };
+    const forecastNPriors = (n, t, r) => { const v = forecastForPitcher(n, t, r); return v ? v.n_priors : null; };
     // updateLineup also writes the proj_* snapshot columns wrapped in
     // COALESCE so the FIRST non-empty projected write wins and subsequent
     // updates (still projected, or transitioned to confirmed) preserve the
@@ -1661,12 +1678,22 @@ async function runLineupJob(dateStr) {
         // forecast column stays null and the model's existing bullpen-
         // sourced fallback for the opener slot continues to apply.
         // Diagnostic only in this PR; PR 4 wires consumption.
-        away_sp_forecast_ip: forecastForPitcher(
+        away_sp_forecast_ip: forecastIp(
           writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
           g.away_team,
           'start'
         ),
-        home_sp_forecast_ip: forecastForPitcher(
+        home_sp_forecast_ip: forecastIp(
+          writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
+          g.home_team,
+          'start'
+        ),
+        away_sp_forecast_n_priors: forecastNPriors(
+          writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
+          g.away_team,
+          'start'
+        ),
+        home_sp_forecast_n_priors: forecastNPriors(
           writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
           g.home_team,
           'start'
@@ -1683,14 +1710,14 @@ async function runLineupJob(dateStr) {
         // game_log). model.js's buildOpenerOpts reads game.bulk_guy_away
         // (the inferred column) — so the bulk forecast must populate
         // whenever that's set, not only when RotoWire announces.
-        away_bulk_forecast_ip: forecastForPitcher(
+        away_bulk_forecast_ip: forecastIp(
           (g.away_bulk_announced && g.away_bulk_announced.name)
             || existingRow?.bulk_guy_away
             || null,
           g.away_team,
           'bulk'
         ),
-        home_bulk_forecast_ip: forecastForPitcher(
+        home_bulk_forecast_ip: forecastIp(
           (g.home_bulk_announced && g.home_bulk_announced.name)
             || existingRow?.bulk_guy_home
             || null,
@@ -1705,12 +1732,12 @@ async function runLineupJob(dateStr) {
         // Spencer Miles). Architecturally cleaner to pre-compute for every
         // SP since the per-game cost is one F4 lookup and the column sits
         // unused on non-opener games (where the standard model handles them).
-        away_opener_forecast_ip: forecastForPitcher(
+        away_opener_forecast_ip: forecastIp(
           writeAwaySp || existingRow?.away_sp || (g.away_sp && g.away_sp.name) || null,
           g.away_team,
           'opener'
         ),
-        home_opener_forecast_ip: forecastForPitcher(
+        home_opener_forecast_ip: forecastIp(
           writeHomeSp || existingRow?.home_sp || (g.home_sp && g.home_sp.name) || null,
           g.home_team,
           'opener'

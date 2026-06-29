@@ -629,8 +629,15 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   // compute SP weight. Symmetric for HOME batters.
   const awayFc = game.away_sp_forecast_ip != null ? parseFloat(game.away_sp_forecast_ip) : null;
   const homeFc = game.home_sp_forecast_ip != null ? parseFloat(game.home_sp_forecast_ip) : null;
-  const awaySpPitW = computeSpPitWeightFromForecast(awayFc, settings) ?? SP_PIT_WEIGHT;
-  const homeSpPitW = computeSpPitWeightFromForecast(homeFc, settings) ?? SP_PIT_WEIGHT;
+  // n_priors columns are written by services/jobs.js forecastForPitcher
+  // alongside forecast_ip. Null on legacy rows written before this branch
+  // deployed — computeSpPitWeightFromForecast treats null as "no haircut
+  // info" and returns the pre-haircut weight, preserving prior behavior
+  // for backfill. Forward writes always populate both.
+  const awayNP = game.away_sp_forecast_n_priors != null ? parseInt(game.away_sp_forecast_n_priors, 10) : null;
+  const homeNP = game.home_sp_forecast_n_priors != null ? parseInt(game.home_sp_forecast_n_priors, 10) : null;
+  const awaySpPitW = computeSpPitWeightFromForecast(awayFc, settings, awayNP) ?? SP_PIT_WEIGHT;
+  const homeSpPitW = computeSpPitWeightFromForecast(homeFc, settings, homeNP) ?? SP_PIT_WEIGHT;
   const awayRelPitW = 1 - awaySpPitW;
   const homeRelPitW = 1 - homeSpPitW;
   // Legacy single-value pair retained for any diagnostic code paths that
@@ -1012,6 +1019,42 @@ const FORECAST_FALLBACK_IP_DEFAULT = 5.25;
 const FORECAST_OPENER_BASELINE_IP_DEFAULT = 1.35;
 const FORECAST_BULK_BASELINE_IP_DEFAULT   = 5.40;
 
+// Confidence-haircut defaults. Per the product-owner spec: when a starter
+// has few clean current-season priors (first start back, returning from
+// injury), our confidence in the SP forecast is low and the model should
+// CEDE more weight to the bullpen rather than handing the starter the
+// full known-starter premium. Below the full-confidence prior count
+// (default 3), the SP weight is pulled toward SP_FORECAST_LOW_CONF_TARGET
+// (default 0.62 — meaningfully below the 0.75 anchor but still above the
+// literal expected share ~0.57). Linear ramp between 0 priors and N
+// priors so 1 / 2 starts already partially restore confidence.
+const SP_FORECAST_LOW_CONF_TARGET_DEFAULT  = 0.62;
+const SP_FORECAST_FULL_CONF_PRIORS_DEFAULT = 3;
+
+// Short-leash pattern defaults (Fix 3). The base anomaly filter excludes
+// starts under (ANOM_P pitches AND ANOM_IP innings). For most pitchers
+// this correctly removes an isolated injury exit. But a genuine short-
+// leash starter whose outings are consistently short (e.g. 2.0 / 2.3 /
+// 6.0 / 2.3) loses most of his record to the filter and falls back to
+// the league baseline — exactly the wrong answer for "this guy goes 3
+// innings every time." When a meaningful fraction of a pitcher's recent
+// non-first-of-season starts are short, stop treating them as
+// anomalies — the short outings ARE the data.
+//
+// Tuning notes:
+//   * SHORT_IP_THRESHOLD = 4.0 matches the anomaly IP threshold (4)
+//     plus a small buffer; short-leash patterns concentrate well below
+//     4 IP per the test pitchers.
+//   * FRACTION_THRESHOLD = 0.4 means 40% of recent starts must be short
+//     to flip — tested against the 3 short-leash test pitchers (≥50%
+//     short each) and an ace with one fluky short start (≤10%).
+//   * MIN_STARTS = 3 prevents over-trigger on a tiny early-season
+//     sample (e.g. a pitcher with 2 starts both short — that's still
+//     statistically thin; the graduated low-conf haircut handles it).
+const SP_FORECAST_SHORT_IP_THRESHOLD_DEFAULT       = 4.0;
+const SP_FORECAST_PATTERN_FRACTION_THRESHOLD_DEFAULT = 0.4;
+const SP_FORECAST_PATTERN_MIN_STARTS_DEFAULT       = 3;
+
 // PR 4: anchored mapping from per-game forecast IP to per-game SP pitching
 // weight. League-mean SP forecast (5.5 IP) maps to the existing fixed
 // 0.80 weight (no change for average pitchers). Slope of 0.07/IP means
@@ -1029,7 +1072,19 @@ const FORECAST_BULK_BASELINE_IP_DEFAULT   = 5.40;
 //
 // Returns null when forecastIp is null/undefined — caller falls back to
 // fixed SP_PIT_WEIGHT, preserving v3 behavior for games with no forecast.
-function computeSpPitWeightFromForecast(forecastIp, settings) {
+//
+// `nPriors` (optional) is the count of clean current-season starts
+// behind the forecast. When supplied AND below the full-confidence
+// threshold, the returned weight is pulled toward
+// SP_FORECAST_LOW_CONF_TARGET (default 0.62) so a low-information
+// starter cedes to the bullpen instead of inheriting the full
+// known-starter premium. Linear ramp:
+//   nPriors = 0          → fully pulled to target (0.62)
+//   nPriors = FULL/2     → halfway between target and forecast weight
+//   nPriors ≥ FULL (3)   → no haircut, forecast weight unchanged
+// When nPriors is null/undefined, behavior is back-compat-identical to
+// the pre-haircut function.
+function computeSpPitWeightFromForecast(forecastIp, settings, nPriors) {
   if (forecastIp == null) return null;
   const anchor = parseFloat(settings?.FORECAST_WEIGHT_ANCHOR_IP) || 5.5;
   const baseVal = parseFloat(settings?.FORECAST_WEIGHT_ANCHOR_VALUE) || 0.75;
@@ -1038,7 +1093,18 @@ function computeSpPitWeightFromForecast(forecastIp, settings) {
   const minW = parseFloat(settings?.FORECAST_WEIGHT_MIN) || 0.50;
   const maxW = parseFloat(settings?.FORECAST_WEIGHT_MAX) || 0.95;
   const raw = baseVal + (forecastIp - anchor) * slopeUsed;
-  return Math.max(minW, Math.min(maxW, raw));
+  const forecastWeight = Math.max(minW, Math.min(maxW, raw));
+  if (nPriors == null) return forecastWeight;
+  const target = parseFloat(settings?.SP_FORECAST_LOW_CONF_TARGET);
+  const targetUsed = (target === target) ? target : SP_FORECAST_LOW_CONF_TARGET_DEFAULT;
+  const fullN = parseInt(settings?.SP_FORECAST_FULL_CONF_PRIORS, 10)
+    || SP_FORECAST_FULL_CONF_PRIORS_DEFAULT;
+  const n = Math.max(0, Math.min(fullN, Number(nPriors) || 0));
+  // Confidence fraction: 0 → all target; 1 → all forecast weight.
+  const conf = fullN > 0 ? n / fullN : 1;
+  const haircut = targetUsed + (forecastWeight - targetUsed) * conf;
+  // Clamp to the same range so a low forecast doesn't punch through min.
+  return Math.max(minW, Math.min(maxW, haircut));
 }
 
 // Opener-slot weight from F4 forecast IP. Anchored so a typical opener
@@ -1162,16 +1228,83 @@ function buildSpStartIndex(db, settings) {
       ip: r.innings_pitched,
       pitches: r.pitches_thrown,
       outing_type: r.outing_type || (isStart ? 'start' : 'relief'),
+      is_start: isStart,
+      // Pre-pattern-detection flags. is_anomaly may be flipped to false
+      // in the second pass below if the pitcher has a short-leash
+      // pattern. is_anomaly_base / is_first_of_season are preserved as
+      // provenance so a downstream reader can see why a start WAS
+      // initially anomaly-tagged.
+      is_anomaly_base: isAnomalyBase,
       is_anomaly: isAnomaly,
-      // Provenance for the debug endpoint — lets the reader see WHY a
-      // start was filtered (was it a short outing, or just a season opener?).
       is_first_of_season: isFirstStartOfSeason,
+      short_leash_pattern: false,
     };
     if (!byPitcher[r.pitcher_mlb_id]) byPitcher[r.pitcher_mlb_id] = [];
     byPitcher[r.pitcher_mlb_id].push(start);
-    // Only starts contribute to the league baseline. Relief outings would
-    // collapse the baseline toward ~1 IP and destroy starter forecasts.
-    if (!isAnomaly && isStart) cleanByDate.push({ date: r.game_date, ip: r.innings_pitched });
+  }
+
+  // ---- Fix 3: short-leash pattern detection ----
+  // Re-examine each pitcher's recent (trailing N) starts. If a meaningful
+  // fraction are "short" (IP < SHORT_IP_THRESHOLD), un-flag the
+  // anomaly-base starts in that window so the pitcher's forecast
+  // reflects short-leash reality instead of falling back to league
+  // baseline. Looks at TRAILING N starts (matches the forecast window
+  // size) so a role change mid-season is correctly classified — a guy
+  // who used to be an ace but is currently a 3-IP bullpen-game starter
+  // gets the short-leash treatment based on his current cluster.
+  //
+  // First-start-of-season is preserved as anomalous separately — that's
+  // a signal-thinness concern handled by the confidence haircut, not a
+  // short-outing concern.
+  const SHORT_IP = parseFloat(settings.SP_FORECAST_SHORT_IP_THRESHOLD)
+    || SP_FORECAST_SHORT_IP_THRESHOLD_DEFAULT;
+  const PATTERN_FRAC = parseFloat(settings.SP_FORECAST_PATTERN_FRACTION_THRESHOLD)
+    || SP_FORECAST_PATTERN_FRACTION_THRESHOLD_DEFAULT;
+  const PATTERN_MIN = parseInt(settings.SP_FORECAST_PATTERN_MIN_STARTS, 10)
+    || SP_FORECAST_PATTERN_MIN_STARTS_DEFAULT;
+  // Pattern detection looks at the same trailing window as the forecast
+  // (FORECAST_TRAILING_N) — keeps the two in step.
+  const PATTERN_N = parseInt(settings.FORECAST_TRAILING_N, 10) || FORECAST_TRAILING_N_DEFAULT;
+  for (const pid of Object.keys(byPitcher)) {
+    const starts = byPitcher[pid];
+    // Collect this pitcher's start-rows in date order (rows are already
+    // date-sorted by SQL). Skip relief and first-of-season — neither
+    // counts toward the pattern signal.
+    const startsOnly = [];
+    for (const s of starts) {
+      if (!s.is_start) continue;
+      if (s.is_first_of_season) continue;
+      startsOnly.push(s);
+    }
+    if (startsOnly.length < PATTERN_MIN) continue;
+    // Trailing N starts. If trailing N < MIN, that's a tiny sample and
+    // pattern detection shouldn't fire.
+    const recent = startsOnly.slice(-PATTERN_N);
+    if (recent.length < PATTERN_MIN) continue;
+    const shortRecent = recent.filter(s => s.ip < SHORT_IP);
+    const frac = shortRecent.length / recent.length;
+    if (frac < PATTERN_FRAC) continue;
+    // Pattern matched — flip anomaly-base starts back to clean, only
+    // within the trailing window (older starts keep their original
+    // tagging so seasons-prior history doesn't get retro-classified).
+    for (const s of recent) {
+      if (s.is_anomaly_base && !s.is_first_of_season) {
+        s.is_anomaly = false;
+        s.short_leash_pattern = true;
+      }
+    }
+  }
+
+  // League baseline build (uses the FINAL is_anomaly value post-pattern
+  // detection). Short-leash short outings now contribute to the league
+  // baseline correctly — a small downward pull, dominated by the ~700
+  // normal starts per month.
+  for (const pid of Object.keys(byPitcher)) {
+    for (const s of byPitcher[pid]) {
+      if (!s.is_anomaly && s.is_start) {
+        cleanByDate.push({ date: s.game_date, ip: s.ip });
+      }
+    }
   }
 
   // Build league baseline cache: for each unique date that has a clean
