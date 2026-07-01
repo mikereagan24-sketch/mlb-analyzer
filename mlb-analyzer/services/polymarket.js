@@ -70,43 +70,68 @@ const TAG_SLUG_MLB = 'mlb';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
-// Polymarket slug → game_log 3-letter abbr. VERIFY against a live
-// Gamma response — the entries below are anchored to common slug
-// conventions but need eyeball confirmation. Missing slugs show up
-// as "unresolved" in the CLI, which is the intended catch.
+// Poly's own team abbreviations (from event.teams[].abbreviation) →
+// game_log 3-letter abbr. Verified against live Gamma events on
+// 2026-07-01: Poly uses 'oak' for Athletics (game_log 'ath'), 'wsh'
+// for Nationals (game_log 'was'). All others match game_log directly.
+// Pass through unchanged when Poly's abbr already matches game_log
+// (default — no map entry needed).
+const POLY_ABBR_TO_GAMELOG = {
+  oak: 'ath',
+  wsh: 'was',
+  // Defensive entries in case Poly changes:
+  ath: 'ath',
+  tbr: 'tb',
+  kcr: 'kc',
+  sdp: 'sd',
+  sfg: 'sf',
+  chw: 'cws',
+  aoa: 'ath',
+  laz: 'laa',
+};
+
+function normalizePolyAbbr(polyAbbr) {
+  if (!polyAbbr) return null;
+  const k = String(polyAbbr).toLowerCase();
+  return POLY_ABBR_TO_GAMELOG[k] || k;
+}
+
+// Legacy full-team-slug → abbr map, kept only as a fallback for events
+// that lack the `teams` array. Any missing slug surfaces as
+// unresolved so the operator sees the gap.
 const POLY_SLUG_TO_ABBR = {
-  'arizona-diamondbacks':   'ARI',
-  'atlanta-braves':         'ATL',
-  'baltimore-orioles':      'BAL',
-  'boston-red-sox':         'BOS',
-  'chicago-cubs':           'CHC',
-  'chicago-white-sox':      'CWS',
-  'cincinnati-reds':        'CIN',
-  'cleveland-guardians':    'CLE',
-  'colorado-rockies':       'COL',
-  'detroit-tigers':         'DET',
-  'houston-astros':         'HOU',
-  'kansas-city-royals':     'KC',
-  'los-angeles-angels':     'LAA',
-  'los-angeles-dodgers':    'LAD',
-  'miami-marlins':          'MIA',
-  'milwaukee-brewers':      'MIL',
-  'minnesota-twins':        'MIN',
-  'new-york-mets':          'NYM',
-  'new-york-yankees':       'NYY',
-  'athletics':              'ATH',
-  'oakland-athletics':      'ATH',
-  'philadelphia-phillies':  'PHI',
-  'pittsburgh-pirates':     'PIT',
-  'san-diego-padres':       'SD',
-  'san-francisco-giants':   'SF',
-  'seattle-mariners':       'SEA',
-  'st-louis-cardinals':     'STL',
-  'saint-louis-cardinals':  'STL',
-  'tampa-bay-rays':         'TB',
-  'texas-rangers':          'TEX',
-  'toronto-blue-jays':      'TOR',
-  'washington-nationals':   'WAS',
+  'arizona-diamondbacks':   'ari',
+  'atlanta-braves':         'atl',
+  'baltimore-orioles':      'bal',
+  'boston-red-sox':         'bos',
+  'chicago-cubs':           'chc',
+  'chicago-white-sox':      'cws',
+  'cincinnati-reds':        'cin',
+  'cleveland-guardians':    'cle',
+  'colorado-rockies':       'col',
+  'detroit-tigers':         'det',
+  'houston-astros':         'hou',
+  'kansas-city-royals':     'kc',
+  'los-angeles-angels':     'laa',
+  'los-angeles-dodgers':    'lad',
+  'miami-marlins':          'mia',
+  'milwaukee-brewers':      'mil',
+  'minnesota-twins':        'min',
+  'new-york-mets':          'nym',
+  'new-york-yankees':       'nyy',
+  'athletics':              'ath',
+  'oakland-athletics':      'ath',
+  'philadelphia-phillies':  'phi',
+  'pittsburgh-pirates':     'pit',
+  'san-diego-padres':       'sd',
+  'san-francisco-giants':   'sf',
+  'seattle-mariners':       'sea',
+  'st-louis-cardinals':     'stl',
+  'saint-louis-cardinals':  'stl',
+  'tampa-bay-rays':         'tb',
+  'texas-rangers':          'tex',
+  'toronto-blue-jays':      'tor',
+  'washington-nationals':   'was',
 };
 
 // game_id shape matches services/kalshi.buildGameId — {away}-{home}
@@ -178,50 +203,54 @@ async function fetchJson(url, opts) {
   throw lastErr || new Error('unknown fetch failure');
 }
 
-// Gamma: list MLB events for the given date (ET).
+// Gamma: list MLB events whose UNDERLYING GAME plays on the target
+// ET date. The critical distinction — Poly's Gamma has TWO date
+// concepts on events:
+//   startDate      — when the MARKET was created (weeks earlier for
+//                    scheduled series). USELESS for finding today's
+//                    game.
+//   markets[*].gameStartTime — when the underlying GAME plays. This
+//                    is what we filter on.
+// Slug convention also carries the game date: `mlb-{away}-{home}-{YYYY-MM-DD}`
+// verified against 14 live events on 2026-07-01. Slug matching is
+// belt-and-suspenders alongside the gameStartTime filter.
 //
-// Filters:
-//   - tag_slug=mlb                MLB only
-//   - closed=false                drops resolved markets
-//   - start_date_min / _max       narrow to games starting on the
-//                                 target date (ET). The endpoint's
-//                                 default sort surfaces high-volume
-//                                 historical futures first, which
-//                                 drowns today's per-game events;
-//                                 the date-range filter is what
-//                                 makes today's slate discoverable.
-//                                 CRITICAL — verified empirically:
-//                                 without this filter Poly returns
-//                                 futures/awards and stale per-game
-//                                 events, no today matches.
-// Poly game-event titles come in three flavors for the SAME matchup:
-//     "Team A vs. Team B"                            ← game-winner ML
-//     "Team A vs. Team B - First 5 Innings Winner"   ← derivative
-//     "Team A vs. Team B - Player Props"             ← derivative
-// The moneyline (Stage 1's target) is the SHORT-title event; consumer
-// filters out the "- <suffix>" events downstream in extractSidesFromEvent
-// / gameEventOnly.
+// PREVIOUS BUG (Stage 1 v1): filter used event.startDate. On a game
+// scheduled July 8 whose Poly market was created July 1, the event
+// showed startDate=2026-07-01 with startTime=2026-07-08. The v1 code
+// picked THAT event for July 1, landed on its placeholder $55 book,
+// and returned 0.02/0.98 nonsense. Fixed by filtering on
+// markets[0].gameStartTime.
+//
+// Also: Poly per-game events for TODAY come with liquidity in the
+// $500K–$900K range. Placeholder future events are ~$55. If the
+// discovered candidates all show <$200, we've almost certainly hit
+// a placeholder and should surface that in the CLI as a red flag.
 async function gammaListMlbEvents(dateYYYYMMDD) {
-  // Widen the window ± 1 day around dateYYYYMMDD to cover ET/UTC skew:
-  // a late-ET game rolls into next-UTC-day, and a game "starting"
-  // 2026-06-30 in ET may be timestamped 2026-07-01 UTC. Post-filter
-  // to ET-anchored date below.
-  const startMin = dateYYYYMMDD || null;
-  const startMax = dateYYYYMMDD
-    ? addDays(dateYYYYMMDD, 2)   // 2 = today + tomorrow, covers ET-late games
-    : null;
   const url = POLY_BASE.gamma
     + '/events?tag_slug=' + encodeURIComponent(TAG_SLUG_MLB)
-    + '&closed=false&limit=200'
-    + (startMin ? '&start_date_min=' + startMin : '')
-    + (startMax ? '&start_date_max=' + startMax : '');
+    + '&closed=false&limit=500';
   const data = await fetchJson(url);
   const events = Array.isArray(data) ? data : (data && data.events) || [];
   if (!dateYYYYMMDD) return events;
-  return events.filter(e => {
-    if (!e || !e.startDate) return false;
-    return isoToDateEt(e.startDate) === dateYYYYMMDD;
-  });
+  return events.filter(e => matchesGameDate(e, dateYYYYMMDD));
+}
+
+// True if the event's underlying game plays on dateYYYYMMDD (ET).
+// Precedence:
+//   1. markets[0].gameStartTime — authoritative (UTC timestamp).
+//   2. event.startTime          — usually same as m[0].gameStartTime.
+//   3. slug regex `mlb-*-*-YYYY-MM-DD` — fallback for events with no
+//      gameStartTime populated yet.
+function matchesGameDate(evt, targetDate) {
+  if (!evt) return false;
+  const m0 = (evt.markets && evt.markets[0]) || null;
+  const t = (m0 && m0.gameStartTime) || evt.startTime || null;
+  if (t) return isoToDateEt(t) === targetDate;
+  // Fallback: slug carries the date as the last dashed segment.
+  const slug = String(evt.slug || '');
+  const m = slug.match(/-(\d{4}-\d{2}-\d{2})$/);
+  return !!(m && m[1] === targetDate);
 }
 
 function addDays(dateStr, days) {
@@ -230,16 +259,13 @@ function addDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
-// Is this event the game-winner ("Team A vs. Team B" — no suffix)?
-// Poly posts three markets for the same matchup with distinct titles;
-// only the un-suffixed one is the moneyline we want at Stage 1.
-function isGameWinnerEvent(evt) {
-  if (!evt || !evt.title) return false;
-  const t = String(evt.title);
-  if (!/ vs\.? /.test(t)) return false;
-  // Reject titles ending in " - Something" (derivative markets).
-  if (/ - /.test(t)) return false;
-  return true;
+// Is this event a Poly per-game event (not a future series / award)?
+// A per-game event's slug has the `mlb-{away}-{home}-{YYYY-MM-DD}`
+// shape (verified against all 14 live per-game slugs on 2026-07-01).
+// Award/futures events use different slug shapes.
+function isPerGameEvent(evt) {
+  if (!evt || !evt.slug) return false;
+  return /^mlb-[a-z]+-[a-z]+-\d{4}-\d{2}-\d{2}$/.test(String(evt.slug));
 }
 
 // Given a Gamma event, extract the away/home slug pair. Poly's events
@@ -252,49 +278,84 @@ function isGameWinnerEvent(evt) {
 //   used as a fallback.
 function extractSidesFromEvent(evt) {
   if (!evt || !evt.markets || !evt.markets.length) return null;
-  // Pick the head-to-head moneyline market. A single event carries
-  // multiple markets — moneyline, first-inning-run, spreads, etc.
-  // The moneyline is the one whose outcomes are BOTH team names (NOT
-  // Yes/No, NOT Over/Under). Empirically observed on Poly's MLB
-  // events (e.g. MIL vs STL 2026-06-30):
-  //   markets[0] = 'Will there be a run scored in the first inning?'
-  //                outcomes = ['Yes', 'No']
-  //   markets[1] = 'Milwaukee Brewers vs. St. Louis Cardinals'
-  //                outcomes = ['Milwaukee Brewers', 'St. Louis Cardinals']
-  // Original `find(o.length===2)` picked markets[0] and produced
-  // the "Yes"/"No" slug-resolution failure. Explicit filter:
-  const nonTeamOutcomes = new Set(['yes', 'no', 'over', 'under']);
-  const mkt = evt.markets.find(m => {
-    const o = safeParseJsonMaybe(m && m.outcomes);
-    if (!Array.isArray(o) || o.length !== 2) return false;
-    // Both outcomes must NOT be Yes/No/Over/Under
-    return !o.some(x => nonTeamOutcomes.has(String(x).toLowerCase()));
-  });
+  // Pick the moneyline market by Poly's own `sportsMarketType='moneyline'`
+  // tag. Verified against 2026-07-01 LAD@OAK — the ML market has
+  //   sportsMarketType='moneyline', outcomes=['Los Angeles Dodgers',
+  //   'Athletics'], prices=['0.615','0.385'], liquidityClob=172729
+  // sitting alongside spreads (`baseball_team_first_five_spread`),
+  // NRFI (`nrfi`), and totals — each with their own type tag. This is
+  // the definitive market picker; the old outcome-name heuristic
+  // (reject Yes/No/Over/Under) misfired on placeholder events and
+  // occasionally landed on a spread with team-name outcomes.
+  //
+  // Fallback (for events lacking sportsMarketType) reuses the old
+  // team-name-outcomes heuristic. Never fires on today's live events;
+  // kept only for defensive parity with earlier code.
+  let mkt = evt.markets.find(m => (m && m.sportsMarketType) === 'moneyline');
+  if (!mkt) {
+    const nonTeamOutcomes = new Set(['yes', 'no', 'over', 'under']);
+    mkt = evt.markets.find(m => {
+      const o = safeParseJsonMaybe(m && m.outcomes);
+      if (!Array.isArray(o) || o.length !== 2) return false;
+      return !o.some(x => nonTeamOutcomes.has(String(x).toLowerCase()));
+    });
+  }
   if (!mkt) return null;
   const outcomes = safeParseJsonMaybe(mkt.outcomes);
   const prices   = safeParseJsonMaybe(mkt.outcomePrices);
   const tokens   = safeParseJsonMaybe(mkt.clobTokenIds);
   if (!Array.isArray(outcomes) || outcomes.length !== 2) return null;
 
-  // Poly convention (empirically): outcomes[0] is the away team,
-  // outcomes[1] is the home team on same-day event pages. Confirm on
-  // eyeball — the CLI prints both sides in event-order + asserts
-  // away vs home via slug lookup below.
-  const awayName = outcomes[0], homeName = outcomes[1];
-  const away = resolveTeamSlug(awayName);
-  const home = resolveTeamSlug(homeName);
+  // AUTHORITATIVE side assignment: use event.teams which carries
+  //   [{abbreviation:'lad', ordering:'away'}, {abbreviation:'oak',
+  //    ordering:'home'}]
+  // This is Poly's own source of truth for which team is home/away
+  // and avoids fragile outcome-name → abbr string matching.
+  // Fallback (event.teams absent): resolveTeamSlug on outcome names,
+  // and assume outcomes[0]=away, outcomes[1]=home per Poly convention.
+  let awayAbbr = null, homeAbbr = null, awayName = null, homeName = null;
+  let awayIdx = 0, homeIdx = 1;
+  const teams = Array.isArray(evt.teams) ? evt.teams : null;
+  if (teams && teams.length === 2) {
+    const t0 = teams[0], t1 = teams[1];
+    const away = t0.ordering === 'away' ? t0 : t1;
+    const home = t0.ordering === 'home' ? t0 : t1;
+    awayAbbr = normalizePolyAbbr(away && away.abbreviation);
+    homeAbbr = normalizePolyAbbr(home && home.abbreviation);
+    awayName = (away && away.name) || null;
+    homeName = (home && home.name) || null;
+    // Match outcome index by team name so token assignment is
+    // correct even if Poly ever reorders the outcomes array.
+    const findIdx = (name) => {
+      if (!name) return -1;
+      const lc = String(name).toLowerCase();
+      return outcomes.findIndex(o => String(o).toLowerCase() === lc);
+    };
+    const iA = findIdx(awayName);
+    const iH = findIdx(homeName);
+    if (iA >= 0 && iH >= 0 && iA !== iH) { awayIdx = iA; homeIdx = iH; }
+  } else {
+    // Fallback: parse outcome names.
+    awayName = outcomes[0]; homeName = outcomes[1];
+    awayAbbr = resolveTeamSlug(awayName);
+    homeAbbr = resolveTeamSlug(homeName);
+  }
+
   return {
     event_id: evt.id || evt.slug || null,
     title: evt.title || null,
     start_date_iso: evt.startDate || null,
-    away_name: awayName, away_abbr: away,
-    home_name: homeName, home_abbr: home,
-    away_token_id: tokens && tokens[0] || null,
-    home_token_id: tokens && tokens[1] || null,
-    away_price_str: prices && prices[0] || null,   // Gamma-cached, may be stale
-    home_price_str: prices && prices[1] || null,
+    game_start_time_iso: (mkt && mkt.gameStartTime) || evt.startTime || null,
+    away_name: awayName, away_abbr: awayAbbr,
+    home_name: homeName, home_abbr: homeAbbr,
+    away_token_id: tokens && tokens[awayIdx] || null,
+    home_token_id: tokens && tokens[homeIdx] || null,
+    away_price_str: prices && prices[awayIdx] || null,
+    home_price_str: prices && prices[homeIdx] || null,
     market_condition_id: mkt.conditionId || null,
     market_question: mkt.question || null,
+    market_liquidity_clob: mkt.liquidityClob != null ? Number(mkt.liquidityClob) : null,
+    event_liquidity_clob: evt.liquidityClob != null ? Number(evt.liquidityClob) : null,
   };
 }
 
@@ -414,15 +475,30 @@ async function getPolymarketMlbLines(date, opts) {
   const includeUnmatched = !!(opts && opts.includeUnmatched);
 
   const events = await gammaListMlbEvents(date);
-  const out = [];
+  // Dedupe by game_id, prefer higher-liquidity event. Poly may keep a
+  // placeholder future event live alongside today's real event — the
+  // placeholder has liquidity in the low $ (e.g. $55), the real event
+  // has $500K+. Picking the higher-liquidity event keeps us on the
+  // one traders are actually using.
+  const bestPerGid = new Map();
+  const candidates = [];
   for (const evt of events) {
-    // Filter to game-winner events. Derivative markets ("First 5",
-    // "Player Props") come back with the same team pair in their
-    // title but a suffix that isGameWinnerEvent rejects.
-    if (!isGameWinnerEvent(evt)) continue;
+    if (!isPerGameEvent(evt)) continue;
     const sides = extractSidesFromEvent(evt);
     if (!sides) continue;
     if (!includeUnmatched && (!sides.away_abbr || !sides.home_abbr)) continue;
+    const gid = (sides.away_abbr && sides.home_abbr)
+      ? buildGameId(sides.away_abbr, sides.home_abbr) : null;
+    const liq = sides.event_liquidity_clob != null ? sides.event_liquidity_clob : 0;
+    const prev = gid ? bestPerGid.get(gid) : null;
+    if (!prev || liq > prev.liq) {
+      bestPerGid.set(gid, { sides, liq, evt });
+    }
+  }
+  for (const { sides } of bestPerGid.values()) candidates.push(sides);
+
+  const out = [];
+  for (const sides of candidates) {
 
     // Fetch both books in parallel — Poly's /book is fast enough that
     // two sequential calls per game would add ~200-400ms per slate.
@@ -444,6 +520,7 @@ async function getPolymarketMlbLines(date, opts) {
       event_id: sides.event_id,
       event_title: sides.title,
       event_start_iso: sides.start_date_iso,
+      game_start_time_iso: sides.game_start_time_iso,
       away: {
         token_id: sides.away_token_id,
         top_ask: awayTop,
@@ -468,6 +545,8 @@ async function getPolymarketMlbLines(date, opts) {
       },
       market_condition_id: sides.market_condition_id,
       market_question: sides.market_question,
+      market_liquidity_clob: sides.market_liquidity_clob,
+      event_liquidity_clob: sides.event_liquidity_clob,
       // Diagnostic — surfaces slug-resolution failures for eyeball fix.
       _unresolved: {
         away_name: !sides.away_abbr ? sides.away_name : null,
@@ -546,27 +625,33 @@ if (require.main === module) {
       return;
     }
 
-    console.log('Polymarket MLB moneylines for ' + date + ' (top-of-book)');
+    console.log('Polymarket MLB moneylines for ' + date + ' (top-of-book, ML market)');
     try {
       const rows = await getPolymarketMlbLines(date, { includeUnmatched: true });
       if (!rows.length) { console.log('(no markets matched)'); return; }
-      console.log(['game_id', 'away_ml', 'home_ml', 'away bid/ask', 'home bid/ask', 'spread%', 'event_title'].join('\t'));
+      console.log(['game_id       ', 'away_ml', 'home_ml',
+        'away bid/ask (mid)', 'home bid/ask (mid)', 'evt_liq  ', 'ml_liq   ', 'game_start_ET', 'event_title'].join('  '));
       for (const r of rows) {
         const aAsk = r.away && r.away.top_ask;
         const aBid = r.away && r.away.top_bid;
         const hAsk = r.home && r.home.top_ask;
         const hBid = r.home && r.home.top_bid;
-        const spreadPct = (aAsk && aBid)
-          ? ((aAsk.price - aBid.price) * 100).toFixed(0) + '%' : '-';
+        const midA = (aAsk && aBid) ? ((aAsk.price + aBid.price) / 2).toFixed(3) : '-';
+        const midH = (hAsk && hBid) ? ((hAsk.price + hBid.price) / 2).toFixed(3) : '-';
+        const startEt = r.game_start_time_iso ? new Date(r.game_start_time_iso)
+          .toLocaleString('en-US', { timeZone: 'America/New_York',
+            hour: '2-digit', minute: '2-digit', month: '2-digit', day: '2-digit' }) : '-';
         console.log([
-          r.game_id || '(unresolved)',
-          r.away && r.away.ask_ml != null ? r.away.ask_ml : '-',
-          r.home && r.home.ask_ml != null ? r.home.ask_ml : '-',
-          (aBid ? aBid.price.toFixed(2) : '-') + '/' + (aAsk ? aAsk.price.toFixed(2) : '-'),
-          (hBid ? hBid.price.toFixed(2) : '-') + '/' + (hAsk ? hAsk.price.toFixed(2) : '-'),
-          spreadPct,
+          (r.game_id || '(unresolved)').padEnd(14),
+          String(r.away && r.away.ask_ml != null ? r.away.ask_ml : '-').padStart(7),
+          String(r.home && r.home.ask_ml != null ? r.home.ask_ml : '-').padStart(7),
+          ((aBid ? aBid.price.toFixed(2) : '-') + '/' + (aAsk ? aAsk.price.toFixed(2) : '-') + '(' + midA + ')').padStart(18),
+          ((hBid ? hBid.price.toFixed(2) : '-') + '/' + (hAsk ? hAsk.price.toFixed(2) : '-') + '(' + midH + ')').padStart(18),
+          String(r.event_liquidity_clob != null ? Math.round(r.event_liquidity_clob) : '-').padStart(9),
+          String(r.market_liquidity_clob != null ? Math.round(r.market_liquidity_clob) : '-').padStart(9),
+          startEt.padStart(13),
           r.event_title || '',
-        ].join('\t'));
+        ].join('  '));
         if (r._unresolved && (r._unresolved.away_name || r._unresolved.home_name)) {
           console.log('  ↳ UNRESOLVED SLUGS: away=' + (r._unresolved.away_name || '')
             + ' home=' + (r._unresolved.home_name || ''));
