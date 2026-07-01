@@ -2887,6 +2887,73 @@ router.get('/admin/team-baserunning/peek', requireAdminToken, (req, res) => {
 //   resolve_rate_pct >= 90  → green-light player-BsR build
 //   resolve_rate_pct <  80  → stop; player-level too contaminated
 //   80-90                   → discuss
+// Polymarket vs Kalshi at-size odds comparison (Stage 3 display feed).
+//
+// Wraps services/odds-comparison.runComparison behind a 60s in-memory
+// cache keyed on (date, stake). Cache TTL keeps the matchup view snappy
+// during a browsing session without hammering Poly/Kalshi — each full
+// run pulls ~14 games × 2 sides of orderbooks (~5-10s) and the numbers
+// are only useful to the eyeball for a few seconds anyway.
+//
+// GET /api/admin/odds-comparison?date=YYYY-MM-DD&stake=100
+// Response shape (see services/odds-comparison.runComparison):
+//   { window: { date, stake_usd }, rows: [{game_id, poly, kalshi, winner, ...}], fetched_at, cached }
+//
+// SAFETY: any failure inside runComparison returns { rows: [], error: '...' }
+// with HTTP 200 so the matchup UI can gracefully show "comparison
+// unavailable" per-side rather than a broken page. Never throws to the
+// route handler.
+const _oddsComparisonCache = new Map();  // key = date + '|' + stake → { at, data }
+const ODDS_COMPARISON_TTL_MS = 60 * 1000;
+router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
+  try {
+    const date = req.query.date;
+    const stake = Number(req.query.stake) || 100;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!date || !dateRe.test(date)) return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    if (!(stake > 0)) return res.status(400).json({ error: 'stake must be > 0' });
+
+    const key = date + '|' + stake;
+    const cached = _oddsComparisonCache.get(key);
+    const now = Date.now();
+    if (cached && (now - cached.at) < ODDS_COMPARISON_TTL_MS) {
+      return res.json(Object.assign({}, cached.data, {
+        cached: true, cached_age_ms: now - cached.at,
+      }));
+    }
+
+    let data;
+    try {
+      const { runComparison } = require('../services/odds-comparison');
+      data = await runComparison(date, { stakeUsd: stake });
+      data.fetched_at = new Date().toISOString();
+    } catch (e) {
+      // Total failure — still return a shaped response so the UI's
+      // per-game null path handles it (never blocks the matchup page).
+      console.warn('[admin/odds-comparison] runComparison failed: ' + e.message);
+      return res.json({
+        window: { date, stake_usd: stake },
+        rows: [], error: e.message,
+        fetched_at: new Date().toISOString(),
+        cached: false,
+      });
+    }
+    _oddsComparisonCache.set(key, { at: now, data });
+    // Trim cache if it grows unbounded — should never happen with per-day
+    // TTL but defensive against long-running processes.
+    if (_oddsComparisonCache.size > 32) {
+      const oldest = [..._oddsComparisonCache.entries()]
+        .sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) _oddsComparisonCache.delete(oldest[0]);
+    }
+    res.json(Object.assign({}, data, { cached: false }));
+  } catch (e) {
+    console.error('[admin/odds-comparison] error:', e);
+    // 200 so the UI can render "unavailable" instead of erroring out.
+    res.status(200).json({ rows: [], error: e.message });
+  }
+});
+
 router.get('/admin/lineup-coverage', requireAdminToken, (req, res) => {
   try {
     const from = req.query.from;

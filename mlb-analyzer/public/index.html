@@ -1646,8 +1646,14 @@ async function renderMatchupGame(id){
     +renderLineupDiff(g)
     +renderFramingImpact(g)
     +renderLineupBsr(g)
+    +renderPolyKalshiOdds(g)
     +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
     +'<div style="margin-top:10px;display:flex;gap:8px"><button class="btn btn-primary btn-sm" onclick="analyzeGame(\'' +gid+ '\')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="rerunModel(\'' +gid+ '\')">Rerun Model</button></div>';
+
+  // Kick off odds-comparison fetch asynchronously — non-blocking. The
+  // renderPolyKalshiOdds placeholder shows a spinner; loadOddsComparison
+  // rewrites the placeholder in place when the data arrives.
+  loadOddsComparison(g.game_id, date, _oddsCompStake);
 }
 
 // Catcher-framing impact block (feat/matchups-framing-impact).
@@ -1782,6 +1788,124 @@ function renderLineupBsr(g){
     + breakdown
     + noteLine
     + '</div>';
+}
+
+// ────────── Polymarket vs Kalshi at-size odds comparison (Stage 3) ──────────
+// Display-only surface for the already-verified Stage 2 engine (services/
+// odds-comparison.runComparison). Fetches the whole-slate comparison
+// per (date, stake) with a 60s server-side cache and per-tab client-side
+// cache, then plucks the row matching the current game.
+//
+// Reliability guards match roof/BsR block: any failure shows "unavailable"
+// — never blocks the matchup page or throws.
+let _oddsCompStake = 100;
+const _oddsCompCache = {};   // key = date + '|' + stake → { rows, fetched_at, error }
+
+function renderPolyKalshiOdds(g){
+  // Placeholder shell — actual content painted by loadOddsComparison
+  // once the fetch resolves. Renders synchronously with the rest of
+  // the matchup so the layout doesn't jump when data arrives.
+  return '<div id="pk-odds-'+g.game_id+'" style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
+    + '<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px">'
+    +   '<div style="font-size:10px;color:var(--text2)">Poly vs Kalshi at-size odds</div>'
+    +   '<span style="font-size:10px;color:var(--text3)">stake $</span>'
+    +   '<input id="pk-stake-'+g.game_id+'" type="number" value="'+_oddsCompStake+'" min="1" max="10000" step="10" style="width:60px;font-size:11px;padding:1px 4px;border:1px solid var(--border,#ccc);border-radius:3px" '
+    +     'onchange="onPolyKalshiStakeChange(\''+g.game_id+'\', this.value)">'
+    +   '<span id="pk-status-'+g.game_id+'" style="font-size:10px;color:var(--text3);margin-left:auto"><span class="spinner"></span> loading…</span>'
+    + '</div>'
+    + '<div id="pk-body-'+g.game_id+'" style="font-size:11px;color:var(--text3)">…</div>'
+    + '<div style="font-size:10px;color:var(--text3);margin-top:6px;font-style:italic">at-size net American after depth walk + fees; display only, not wired to bet identification</div>'
+    + '</div>';
+}
+
+function onPolyKalshiStakeChange(gameId, val){
+  const v = Math.max(1, Math.min(10000, Math.round(Number(val) || 100)));
+  _oddsCompStake = v;
+  const date = document.getElementById('games-date').value || todayStr();
+  loadOddsComparison(gameId, date, v);
+}
+
+async function loadOddsComparison(gameId, date, stake){
+  const key = date + '|' + stake;
+  const body = document.getElementById('pk-body-' + gameId);
+  const status = document.getElementById('pk-status-' + gameId);
+  if (!body || !status) return;
+  status.innerHTML = '<span class="spinner"></span> loading…';
+  let data = _oddsCompCache[key];
+  try {
+    if (!data) {
+      data = await adminGet('/admin/odds-comparison?date=' + encodeURIComponent(date)
+        + '&stake=' + encodeURIComponent(stake));
+      _oddsCompCache[key] = data;
+    }
+    const row = (data.rows || []).find(r => r.game_id === gameId);
+    if (data.error && !row) {
+      status.textContent = 'error';
+      body.innerHTML = '<span style="color:var(--text3)">comparison unavailable — ' + escapeHtml(data.error) + '</span>';
+      return;
+    }
+    if (!row) {
+      status.textContent = 'no match';
+      body.innerHTML = '<span style="color:var(--text3)">no comparison row for this game (Poly may not have posted this matchup yet)</span>';
+      return;
+    }
+    status.innerHTML = (data.cached ? '<span title="server cache hit">cached</span>' : 'fresh')
+      + ' · stake $' + stake;
+    body.innerHTML = renderPolyKalshiOddsBody(row, stake);
+  } catch (e) {
+    status.textContent = 'error';
+    body.innerHTML = '<span style="color:var(--text3)">fetch failed — ' + escapeHtml((e && e.message) || 'unknown') + '</span>';
+  }
+}
+
+function renderPolyKalshiOddsBody(row, stake){
+  // Row shape from services/odds-comparison. Each side (away/home) has
+  // poly + kalshi entries with { top_ask_ml, net_american, avg_fill_price,
+  // slippage_pp, fee_usd, partial, market_ticker }. Compare net_american:
+  // higher = better for the bettor.
+  const sideName = (which) => which === 'away' ? row.away_team : row.home_team;
+  const fmtML = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + v;
+  const cell = (src, prefix) => {
+    if (!src) return '<span style="color:var(--text3)">'+prefix+' unavailable</span>';
+    const partialFlag = src.partial ? ' <span style="color:var(--yellow)" title="partial fill: book depth < stake">⚠partial</span>' : '';
+    const slippage = src.slippage_pp != null && Math.abs(src.slippage_pp) > 0.01
+      ? ' <span style="color:var(--text3)" title="slippage from top-of-book">Δ'+src.slippage_pp.toFixed(1)+'pp</span>'
+      : '';
+    return '<span style="font-weight:600">'+fmtML(src.net_american)+'</span>'
+      + '<span style="color:var(--text3);margin-left:4px">(top '+fmtML(src.top_ask_ml)+', fee $'+src.fee_usd+')</span>'
+      + slippage + partialFlag;
+  };
+  const winnerBadge = (winner, src) => {
+    if (!winner || winner === 'tie') return '';
+    if (winner === src) return ' <span style="background:var(--green-bg,#dcfce7);color:var(--green,#16a34a);font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;letter-spacing:.5px">BEST</span>';
+    return '';
+  };
+  const sideRow = (which) => {
+    const teamAbbr = sideName(which);
+    const poly = row.poly && row.poly[which];
+    const kal  = row.kalshi && row.kalshi[which];
+    const winner = row.winner && row.winner[which];
+    return '<tr>'
+      + '<td style="padding:2px 8px 2px 0;font-weight:500">'+escapeHtml(teamAbbr)+'</td>'
+      + '<td style="padding:2px 8px">Poly '+cell(poly, 'Poly')+winnerBadge(winner, 'poly')+'</td>'
+      + '<td style="padding:2px 0">Kalshi '+cell(kal,  'Kalshi')+winnerBadge(winner, 'kalshi')+'</td>'
+      + '</tr>';
+  };
+  const tie = (which) => row.winner && row.winner[which] === 'tie'
+    ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+which+' tied at net American</div>'
+    : '';
+  return '<table style="width:100%;border-collapse:collapse"><tbody>'
+    + sideRow('away')
+    + sideRow('home')
+    + '</tbody></table>'
+    + tie('away') + tie('home');
+}
+
+// Minimal escapeHtml; used only inside the odds block. If a global one
+// exists it's fine to duplicate — this is contained.
+function escapeHtml(s){
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
 async function rerunModel(gameId){
