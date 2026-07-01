@@ -449,6 +449,152 @@ function topOfBookBid(book) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// STAGE 2 — depth walk + fees
+// ────────────────────────────────────────────────────────────────────
+//
+// walkAsksForFill(book, stakeUsd) — walks the (already-normalized,
+// best-first) ask side of the book, consuming size level by level,
+// until stakeUsd of USD notional has been committed. Returns:
+//   {
+//     filled_usd:      total USD committed across levels (== stakeUsd
+//                      when fully filled; less than stakeUsd on partial
+//                      due to book depletion)
+//     shares_bought:   sum of shares acquired across levels
+//     avg_price:       filled_usd / shares_bought  (the REAL taker
+//                      average — the "true at-size price")
+//     top_ask_price:   book[0].price (headline)
+//     slippage_pp:     (avg_price - top_ask_price) * 100  (positive =
+//                      worse than headline)
+//     levels_consumed: [{price, size_shares, usd}, ...]
+//     partial:         true when book couldn't cover stakeUsd
+//   }
+// Returns null if the ask side is empty.
+//
+// CRITICAL: This function assumes book.asks is sorted BEST-FIRST
+// (ascending price). Stage 1's clobBook() normalization guarantees
+// this — walking a Poly raw-ordered array (which is descending) would
+// price against the WORST asks first and produce plausible-looking
+// nonsense. clobBook() was audited on 2026-07-01 in the Stage 1 fix.
+function walkAsksForFill(book, stakeUsd) {
+  if (!book || !Array.isArray(book.asks) || !book.asks.length) return null;
+  if (!Number.isFinite(stakeUsd) || stakeUsd <= 0) return null;
+  const levels = [];
+  let remainingUsd = stakeUsd;
+  let sharesTotal = 0;
+  for (const lvl of book.asks) {
+    if (remainingUsd <= 0) break;
+    const price = Number(lvl.price);
+    const sizeShares = Number(lvl.size);
+    if (!(price > 0) || !(price < 1) || !(sizeShares > 0)) continue;
+    const levelUsd = price * sizeShares;
+    if (levelUsd >= remainingUsd) {
+      // Partial consumption of this level: buy exactly enough shares
+      // to hit remainingUsd.
+      const sharesTaken = remainingUsd / price;
+      levels.push({ price, size_shares: sharesTaken, usd: remainingUsd, full_level: false });
+      sharesTotal += sharesTaken;
+      remainingUsd = 0;
+      break;
+    }
+    // Consume the whole level and continue.
+    levels.push({ price, size_shares: sharesShares(sizeShares), usd: levelUsd, full_level: true });
+    sharesTotal += sizeShares;
+    remainingUsd -= levelUsd;
+  }
+  const filledUsd = stakeUsd - Math.max(0, remainingUsd);
+  const avg = sharesTotal > 0 ? filledUsd / sharesTotal : null;
+  const top = Number(book.asks[0].price);
+  // NB: DO NOT round shares_bought / avg_price into the output —
+  // rounded values ripple into polyTakerFee's ceil-to-cent boundary
+  // and can push a $2.56 fee to $2.57 (verified on BAL slip). Callers
+  // should format for display; math must consume raw values.
+  return {
+    filled_usd:      filledUsd,
+    shares_bought:   sharesTotal,
+    avg_price:       avg,
+    top_ask_price:   top,
+    slippage_pp:     avg != null ? (avg - top) * 100 : null,
+    levels_consumed: levels,
+    partial:         remainingUsd > 1e-6,
+  };
+}
+// Cheap identity — kept to make the intent of the "share size" arg
+// explicit in walkAsksForFill and defend against a future off-by-one.
+function sharesShares(x) { return x; }
+
+// Polymarket taker fee — BACK-SOLVED from a verified BAL slip.
+//
+// Live /fee-rate endpoint (clob.polymarket.com/fee-rate?token_id=X)
+// returns `base_fee: 1000` uniformly across every MLB token probed on
+// 2026-07-01. Poly's public docs don't publish a formula converting
+// that constant to the actual charged fee. Rather than guess, we use
+// the empirically-solved coefficient:
+//
+//   verified BAL slip: $100 stake at C=$0.56  →  178.5714... shares,
+//                      $2.56 taker fee
+//   Because stake / price = shares, price × shares == stake == $100.
+//   Therefore  coef × C × (1-C) × N == coef × 100 × (1-C) == 2.56
+//   ⇒  coef = 2.56 / 44 = 0.05818181818...  (exact recurring)
+//   This ONLY holds when using the exact share count 100/0.56, not
+//   the brief's rounded 178.57 (which was where an earlier version of
+//   this constant drifted by 4e-6 and pushed the ceil-to-cent from
+//   $2.56 to $2.57).
+//
+// The C×(1-C) shape matches Kalshi's fee shape (peaks at $0.50 tickets,
+// tapers to 0 at price extremes). Same rounding convention: ceil-to-cent
+// on the TOTAL order (not per-share).
+//
+// If Poly changes fees, this coefficient WILL drift. The `polyFetchBaseFee`
+// helper below persists the API value alongside the computed fee so a
+// future slip mismatch is visible in the log — we can re-solve then.
+const POLY_TAKER_FEE_COEF = 2.56 / 44;   // = 0.05818181818...
+
+function polyTakerFeeRate(price) {
+  const C = Number(price);
+  if (!Number.isFinite(C) || C <= 0 || C >= 1) return 0;
+  return POLY_TAKER_FEE_COEF * C * (1 - C);
+}
+function polyTakerFee(price, shares) {
+  const C = Number(price);
+  const N = Number(shares);
+  if (!Number.isFinite(C) || C <= 0 || C >= 1) return 0;
+  if (!Number.isFinite(N) || N <= 0) return 0;
+  const raw = POLY_TAKER_FEE_COEF * C * (1 - C) * N;
+  // Cent-ceil via integer arithmetic — same rounding convention as
+  // Kalshi (kalshi.js:302). Guards against float drift near .999999.
+  return Math.ceil(raw * 100 - 1e-9) / 100;
+}
+
+// Fetch Poly's /fee-rate. Persist raw response for observability. Not
+// used to compute the fee (see coefficient note above) — returned so
+// callers can log it and flag divergence if the API ever exposes a
+// working formula.
+async function polyFetchBaseFee(tokenId, side) {
+  if (!tokenId) return null;
+  const s = side === 'SELL' ? 'SELL' : 'BUY';
+  const url = POLY_BASE.clob + '/fee-rate?token_id=' + encodeURIComponent(tokenId) + '&side=' + s;
+  try {
+    const data = await fetchJson(url);
+    return data && Number.isFinite(Number(data.base_fee)) ? Number(data.base_fee) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Convert an at-size average price (with fee added) to American odds.
+// Includes an intermediate "effective probability" the taker locked
+// in, since owner reads American.
+function fillToAmerican(avgFillPrice, feeUsd, filledUsd) {
+  if (!(avgFillPrice > 0.001 && avgFillPrice < 0.999)) return null;
+  if (!(filledUsd > 0)) return null;
+  // Effective per-share cost with fee amortized across the fill.
+  const shares = filledUsd / avgFillPrice;
+  const feePerShare = shares > 0 ? feeUsd / shares : 0;
+  const effP = Math.min(0.9999, Math.max(0.0001, avgFillPrice + feePerShare));
+  return { eff_price: effP, ml: priceToAmerican(effP) };
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────
 
@@ -559,6 +705,14 @@ async function getPolymarketMlbLines(date, opts) {
 
 module.exports = {
   getPolymarketMlbLines,
+  // Stage 2 depth walk + fees + book fetch
+  clobBook,
+  walkAsksForFill,
+  polyTakerFee,
+  polyTakerFeeRate,
+  polyFetchBaseFee,
+  fillToAmerican,
+  POLY_TAKER_FEE_COEF,
   // Exported for testing / Stage 2 wiring
   _internal: {
     POLY_BASE,
@@ -566,10 +720,11 @@ module.exports = {
     resolveTeamSlug,
     priceToAmerican,
     buildGameId,
-    clobBook,
     topOfBookAsk,
+    topOfBookBid,
     gammaListMlbEvents,
     extractSidesFromEvent,
+    isPerGameEvent,
   },
 };
 
