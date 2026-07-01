@@ -2912,8 +2912,37 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
     if (!date || !dateRe.test(date)) return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
     if (!(stake > 0)) return res.status(400).json({ error: 'stake must be > 0' });
+    // Optional filter for Stage 3b slate-card use: comma-separated
+    // game_ids limits the per-game orderbook fetches to the games the
+    // owner actually needs (those with emitted signals). Bounded set
+    // per slate; cache key includes the sorted set so different filter
+    // shapes don't clobber each other.
+    const gameIdsCsv = (req.query.game_ids || '').toString().trim();
+    const gameIds = gameIdsCsv
+      ? gameIdsCsv.split(',').map(s => s.trim()).filter(Boolean).sort()
+      : null;
+    // Per-game totals lines: `?total_lines=game_id:line,game_id:line`.
+    // e.g. `total_lines=lad-ath:8.5,cin-mil:9.0`. When present, engine
+    // depth-walks the specified strike on both venues per game and
+    // attaches row.totals_priced with the {matched, over, under}
+    // shape. Malformed / empty ignored.
+    const totalLinesCsv = (req.query.total_lines || '').toString().trim();
+    const totalRequests = {};
+    if (totalLinesCsv) {
+      for (const pair of totalLinesCsv.split(',')) {
+        const [gid, lineStr] = pair.split(':');
+        if (!gid || !lineStr) continue;
+        const line = Number(lineStr);
+        if (!Number.isFinite(line)) continue;
+        totalRequests[gid.trim()] = line;
+      }
+    }
+    const totalReqKey = Object.keys(totalRequests).length
+      ? Object.entries(totalRequests).sort().map(([k, v]) => k + ':' + v).join(',')
+      : 'none';
 
-    const key = date + '|' + stake;
+    const key = date + '|' + stake + '|' + (gameIds ? gameIds.join(',') : 'all')
+      + '|totals:' + totalReqKey;
     const cached = _oddsComparisonCache.get(key);
     const now = Date.now();
     if (cached && (now - cached.at) < ODDS_COMPARISON_TTL_MS) {
@@ -2925,7 +2954,11 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
     let data;
     try {
       const { runComparison } = require('../services/odds-comparison');
-      data = await runComparison(date, { stakeUsd: stake });
+      data = await runComparison(date, {
+        stakeUsd: stake,
+        gameIds: gameIds || undefined,
+        totalRequests: Object.keys(totalRequests).length ? totalRequests : undefined,
+      });
       data.fetched_at = new Date().toISOString();
     } catch (e) {
       // Total failure — still return a shaped response so the UI's

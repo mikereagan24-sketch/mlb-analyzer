@@ -959,10 +959,23 @@ function kalshiWalkAsksForFill(asks, stakeUsd) {
   };
 }
 
+// Build the Kalshi market ticker for a specific totals rung. Pattern
+// verified against KXMLBTOTAL-26JUL012140LADATH-{N} on 2026-07-01:
+//   N = round(strike + 0.5) — e.g. strike 8.5 → -9, 9.5 → -10, 11.5 → -12.
+// Kalshi appends `-N` to the KXMLBTOTAL event ticker to identify the
+// specific rung. This helper is what services/odds-comparison uses to
+// depth-walk a chosen totals strike (over/under buy).
+function kalshiTotalsRungTicker(eventTicker, strike) {
+  if (!eventTicker || !Number.isFinite(Number(strike))) return null;
+  const n = Math.round(Number(strike) + 0.5);
+  return eventTicker + '-' + n;
+}
+
 module.exports = {
   getKalshiMlbLines,
   getKalshiMlbTotals,
   getKalshiMlbSpreads,
+  kalshiTotalsRungTicker,
   // Taker-fee helpers. kalshiTakerFee returns the dollars Kalshi will
   // actually debit (ceil-to-cent total); kalshiTakerFeeRate returns the
   // smooth per-contract rate for edge math.

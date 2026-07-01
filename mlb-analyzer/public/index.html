@@ -76,6 +76,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .gsp{font-size:11px;color:var(--text2);margin-bottom:5px}
 .godds{display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12px}
 .gml{font-weight:500}.gtot{color:var(--text2)}
+/* Stage 3b — per-play venue flags on slate cards */
+.gcard-play-venue{display:flex;flex-direction:column;gap:2px;margin:4px 0 2px}
+.pv-line{font-size:11px;padding:2px 6px;border-radius:3px;line-height:1.35}
+.pv-poly  {background:rgba(74,144,226,0.10);color:#4a90e2;border-left:3px solid #4a90e2}
+.pv-kalshi{background:rgba(46,204,113,0.10);color:#2ecc71;border-left:3px solid #2ecc71}
+.pv-tie   {background:rgba(150,150,150,0.10);color:var(--text2);border-left:3px solid #999}
+.pv-partial{background:rgba(230,190,80,0.10);color:#c99b1a;border-left:3px solid #e6be50}
+.pv-note  {color:var(--text3);font-style:italic}
+.pv-none  {color:var(--text3)}
 .gactions{display:flex;gap:6px;margin-top:8px}
 .gcard-btn{flex:1;padding:7px 8px;font-size:11px;font-weight:500;border:none;border-radius:var(--r-md);cursor:pointer;font-family:inherit}
 .ga-analyze{background:var(--navy);color:#fff}
@@ -1251,6 +1260,10 @@ function renderGameGrid(games,date){
       })() : '')+'</div>'+
       '<div class="godds"'+(oddsStyle?' style="'+oddsStyle+'"':'')+'>'+(_isNeverLoaded(oddsQ)?'<span class="gml" title="odds never loaded">—</span><span class="gtot">—</span><span class="gml">—</span>':'<span class="gml">'+fmtML(g.market_away_ml)+'</span><span class="gtot">'+fmtTotalsBlock(g)+'</span><span class="gml">'+fmtML(g.market_home_ml)+'</span>')+oddsBadge+'</div>'+
       (g.odds_flagged?'<div style="background:rgba(220,40,40,0.15);border:1px solid #cc3333;color:#ff6666;font-size:10px;font-weight:600;padding:3px 6px;margin:3px 0;border-radius:3px;text-align:center">⚠ ODDS FLAG: '+(g.odds_flag_reason||'unknown')+'</div>':'')+
+      // Stage 3b anchor — per-signal venue flag lines paint here
+      // after the async odds-comparison fetch. Empty by default; only
+      // fills for games with ≥1 emitted signal. See renderPlayVenueFlags().
+      (!g.is_postponed && sigs.length ? '<div class="gcard-play-venue" id="gcpv-'+g.game_id+'"></div>' : '')+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">▶ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
@@ -1297,6 +1310,162 @@ function renderGameGrid(games,date){
       (!g.is_postponed&&g.model_away_ml?renderGameResult(g):'')+
       '</div></div>';
   }).join('');
+
+  // Stage 3b — paint per-play venue flags on cards that have ≥1 signal.
+  // Runs AFTER innerHTML so the anchors exist. Fire-and-forget; a
+  // failure never blocks the slate render.
+  try { renderPlayVenueFlags(games, date); } catch (e) {
+    console.warn('[play-venue-flags] failed: ' + (e && e.message));
+  }
+}
+
+// Stage 3b — per-play venue flag on slate cards.
+//
+// Scoped to games that have ≥1 emitted signal. For each such signal,
+// paints a compact line inside that game's #gcpv-<game_id> anchor
+// indicating which venue (Poly or Kalshi) offers the better at-size
+// net American odds for THAT signal's side. Reuses the Stage 2
+// engine (services/odds-comparison) via /admin/odds-comparison,
+// game_ids-filtered so the backend only walks orderbooks for the
+// games that matter.
+//
+// Totals (over/under signals): the engine prices the requested O/U
+// strike on both venues when total_lines=game_id:line is passed.
+// Collected per-game from any Total signal's market_line so the
+// backend depth-walks the actual strike the signal is betting.
+//
+// Reliability: any fetch failure logs and moves on — the slate is
+// fully functional even with no venue flags painted.
+async function renderPlayVenueFlags(games, date){
+  const gamesWithSignals = (games || []).filter(g =>
+    !g.is_postponed && (g.signals || []).length > 0);
+  if (!gamesWithSignals.length) return;
+  const gameIds = gamesWithSignals.map(g => g.game_id);
+  // Collect Total signals' market_line so the engine prices the exact
+  // strike the signal is playing. One line per game (Total signals
+  // for the same game share the strike). Falls back to g.market_total
+  // if the signal doesn't carry one.
+  const totalLinesParts = [];
+  for (const g of gamesWithSignals) {
+    const totSig = (g.signals || []).find(s =>
+      String(s.signal_type || '').toLowerCase() === 'total');
+    if (!totSig) continue;
+    const line = Number(totSig.market_line != null ? totSig.market_line : g.market_total);
+    if (!Number.isFinite(line)) continue;
+    totalLinesParts.push(g.game_id + ':' + line);
+  }
+  const totalLinesParam = totalLinesParts.length
+    ? '&total_lines=' + encodeURIComponent(totalLinesParts.join(','))
+    : '';
+  let data;
+  try {
+    data = await adminGet('/admin/odds-comparison?date=' + encodeURIComponent(date)
+      + '&stake=100&game_ids=' + encodeURIComponent(gameIds.join(','))
+      + totalLinesParam);
+  } catch (e) {
+    // Whole slate fetch failed — every anchor gets an honest "unavailable"
+    // line, no game loses its play display.
+    for (const g of gamesWithSignals) {
+      const el = document.getElementById('gcpv-' + g.game_id);
+      if (el) el.innerHTML = '<div class="pv-line pv-none">venue comparison unavailable</div>';
+    }
+    return;
+  }
+  const byGid = {};
+  for (const r of (data.rows || [])) byGid[r.game_id] = r;
+  for (const g of gamesWithSignals) {
+    const el = document.getElementById('gcpv-' + g.game_id);
+    if (!el) continue;
+    const row = byGid[g.game_id];
+    el.innerHTML = (g.signals || []).map(s => playVenueLineFor(s, row, g)).join('');
+  }
+}
+
+function playVenueLineFor(sig, row, g){
+  const type = String(sig.signal_type || '').toUpperCase();
+  const side = String(sig.signal_side || '').toLowerCase();
+  const sideLabel = (type === 'ML')
+    ? ((side === 'away' ? g.away_team : g.home_team) + ' ML')
+    : (side === 'over' ? 'Over ' + (g.market_total != null ? g.market_total : '?') :
+       side === 'under' ? 'Under ' + (g.market_total != null ? g.market_total : '?') :
+       (side + ' ' + type));
+  const fmt = (v) => v == null ? '—' : (v >= 0 ? '+' : '') + v;
+
+  // Totals branch — use row.totals_priced when present.
+  if (type === 'TOTAL') {
+    if (!row) {
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable</div>';
+    }
+    const tp = row.totals_priced;
+    if (!tp) {
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue posted this total</div>';
+    }
+    const bucket = tp[side];
+    if (!bucket) {
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': ' + side + ' not priced</div>';
+    }
+    // Flag closest-strike mismatch honestly on each venue.
+    const mPoly = tp.matched && tp.matched.poly;
+    const mKal  = tp.matched && tp.matched.kalshi;
+    const polyFlag = (mPoly && mPoly.exact === false) ? ' (closest ' + mPoly.strike + ')' : '';
+    const kalFlag  = (mKal  && mKal.exact  === false) ? ' (closest ' + mKal.strike  + ')' : '';
+    const poly = bucket.poly, kal = bucket.kalshi, winner = bucket.winner;
+    if (!poly && !kal) {
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue priced this side</div>';
+    }
+    if (!poly) {
+      return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
+        + ': Kalshi ' + fmt(kal.net_american) + kalFlag + ' — bet Kalshi (Poly unavailable)</div>';
+    }
+    if (!kal) {
+      return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
+        + ': Poly ' + fmt(poly.net_american) + polyFlag + ' — bet Poly (Kalshi unavailable)</div>';
+    }
+    const pn = poly.net_american, kn = kal.net_american;
+    if (winner === 'poly') {
+      return '<div class="pv-line pv-poly">▶ ' + escapeHtml(sideLabel)
+        + ': <b>Poly ' + fmt(pn) + polyFlag + '</b> (Kalshi ' + fmt(kn) + kalFlag + ') — bet Poly</div>';
+    }
+    if (winner === 'kalshi') {
+      return '<div class="pv-line pv-kalshi">▶ ' + escapeHtml(sideLabel)
+        + ': <b>Kalshi ' + fmt(kn) + kalFlag + '</b> (Poly ' + fmt(pn) + polyFlag + ') — bet Kalshi</div>';
+    }
+    return '<div class="pv-line pv-tie">▶ ' + escapeHtml(sideLabel)
+      + ': tied at ' + fmt(pn) + polyFlag + kalFlag + ' — either venue</div>';
+  }
+
+  // ML branch (existing behavior).
+  if (type !== 'ML') {
+    return '<div class="pv-line pv-note">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable for this market</div>';
+  }
+  if (!row) {
+    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable</div>';
+  }
+  const poly = row.poly && row.poly[side];
+  const kal  = row.kalshi && row.kalshi[side];
+  const winner = row.winner && row.winner[side];
+  if (!poly && !kal) {
+    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue priced this side</div>';
+  }
+  if (!poly) {
+    return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
+      + ': Kalshi ' + fmt(kal.net_american) + ' — bet Kalshi (Poly unavailable)</div>';
+  }
+  if (!kal) {
+    return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
+      + ': Poly ' + fmt(poly.net_american) + ' — bet Poly (Kalshi unavailable)</div>';
+  }
+  const pn = poly.net_american, kn = kal.net_american;
+  if (winner === 'poly') {
+    return '<div class="pv-line pv-poly">▶ ' + escapeHtml(sideLabel)
+      + ': <b>Poly ' + fmt(pn) + '</b> (Kalshi ' + fmt(kn) + ') — bet Poly</div>';
+  }
+  if (winner === 'kalshi') {
+    return '<div class="pv-line pv-kalshi">▶ ' + escapeHtml(sideLabel)
+      + ': <b>Kalshi ' + fmt(kn) + '</b> (Poly ' + fmt(pn) + ') — bet Kalshi</div>';
+  }
+  return '<div class="pv-line pv-tie">▶ ' + escapeHtml(sideLabel)
+    + ': tied at ' + fmt(pn) + ' — either venue</div>';
 }
 
 function renderGameResult(g){
@@ -1653,7 +1822,7 @@ async function renderMatchupGame(id){
   // Kick off odds-comparison fetch asynchronously — non-blocking. The
   // renderPolyKalshiOdds placeholder shows a spinner; loadOddsComparison
   // rewrites the placeholder in place when the data arrives.
-  loadOddsComparison(g.game_id, date, _oddsCompStake);
+  loadOddsComparison(g.game_id, date, _oddsCompStake, g.market_total);
 }
 
 // Catcher-framing impact block (feat/matchups-framing-impact).
@@ -1804,7 +1973,10 @@ const _oddsCompCache = {};   // key = date + '|' + stake → { rows, fetched_at,
 function renderPolyKalshiOdds(g){
   // Placeholder shell — actual content painted by loadOddsComparison
   // once the fetch resolves. Renders synchronously with the rest of
-  // the matchup so the layout doesn't jump when data arrives.
+  // the matchup so the layout doesn't jump when data arrives. The
+  // pk-body carries data-total so onPolyKalshiStakeChange can request
+  // the same totals strike after a stake edit.
+  const totalAttr = (g.market_total != null) ? (' data-total="'+g.market_total+'"') : '';
   return '<div id="pk-odds-'+g.game_id+'" style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
     + '<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px">'
     +   '<div style="font-size:10px;color:var(--text2)">Poly vs Kalshi at-size odds</div>'
@@ -1813,7 +1985,7 @@ function renderPolyKalshiOdds(g){
     +     'onchange="onPolyKalshiStakeChange(\''+g.game_id+'\', this.value)">'
     +   '<span id="pk-status-'+g.game_id+'" style="font-size:10px;color:var(--text3);margin-left:auto"><span class="spinner"></span> loading…</span>'
     + '</div>'
-    + '<div id="pk-body-'+g.game_id+'" style="font-size:11px;color:var(--text3)">…</div>'
+    + '<div id="pk-body-'+g.game_id+'"'+totalAttr+' style="font-size:11px;color:var(--text3)">…</div>'
     + '<div style="font-size:10px;color:var(--text3);margin-top:6px;font-style:italic">at-size net American after depth walk + fees; display only, not wired to bet identification</div>'
     + '</div>';
 }
@@ -1822,11 +1994,15 @@ function onPolyKalshiStakeChange(gameId, val){
   const v = Math.max(1, Math.min(10000, Math.round(Number(val) || 100)));
   _oddsCompStake = v;
   const date = document.getElementById('games-date').value || todayStr();
-  loadOddsComparison(gameId, date, v);
+  const body = document.getElementById('pk-body-' + gameId);
+  const marketTotal = body && body.dataset && body.dataset.total ? Number(body.dataset.total) : null;
+  loadOddsComparison(gameId, date, v, marketTotal);
 }
 
-async function loadOddsComparison(gameId, date, stake){
-  const key = date + '|' + stake;
+async function loadOddsComparison(gameId, date, stake, marketTotal){
+  const totalLine = Number.isFinite(Number(marketTotal)) ? Number(marketTotal) : null;
+  const totalKeyPart = totalLine != null ? '|t=' + gameId + ':' + totalLine : '';
+  const key = date + '|' + stake + totalKeyPart;
   const body = document.getElementById('pk-body-' + gameId);
   const status = document.getElementById('pk-status-' + gameId);
   if (!body || !status) return;
@@ -1834,8 +2010,11 @@ async function loadOddsComparison(gameId, date, stake){
   let data = _oddsCompCache[key];
   try {
     if (!data) {
+      const totalParam = totalLine != null
+        ? '&total_lines=' + encodeURIComponent(gameId + ':' + totalLine)
+        : '';
       data = await adminGet('/admin/odds-comparison?date=' + encodeURIComponent(date)
-        + '&stake=' + encodeURIComponent(stake));
+        + '&stake=' + encodeURIComponent(stake) + totalParam);
       _oddsCompCache[key] = data;
     }
     const row = (data.rows || []).find(r => r.game_id === gameId);
@@ -1894,11 +2073,53 @@ function renderPolyKalshiOddsBody(row, stake){
   const tie = (which) => row.winner && row.winner[which] === 'tie'
     ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+which+' tied at net American</div>'
     : '';
+
+  // Totals block — appears when the endpoint priced a totals line for
+  // this game (loadOddsComparison passes g.market_total in total_lines).
+  // row.totals_priced shape: { line_requested, matched:{poly,kalshi},
+  // over:{poly,kalshi,winner}, under:{poly,kalshi,winner} }. Matched-
+  // strike mismatches vs the requested line are flagged per venue so
+  // "closest 10.5" reads honestly against a 10.0 request.
+  const tp = row.totals_priced;
+  let totalsBlock = '';
+  if (tp) {
+    const mPoly = tp.matched && tp.matched.poly;
+    const mKal  = tp.matched && tp.matched.kalshi;
+    const polyFlag = (mPoly && mPoly.exact === false)
+      ? ' <span style="color:var(--yellow)" title="closest Poly strike vs requested '+tp.line_requested+'">closest '+mPoly.strike+'</span>'
+      : '';
+    const kalFlag = (mKal && mKal.exact === false)
+      ? ' <span style="color:var(--yellow)" title="closest Kalshi strike vs requested '+tp.line_requested+'">closest '+mKal.strike+'</span>'
+      : '';
+    const totRow = (which) => {
+      const bucket = tp[which];
+      if (!bucket) return '';
+      const label = which === 'over' ? 'Over ' : 'Under ';
+      const strikeTxt = tp.line_requested;
+      const poly = bucket.poly, kal = bucket.kalshi, winner = bucket.winner;
+      return '<tr>'
+        + '<td style="padding:2px 8px 2px 0;font-weight:500">'+escapeHtml(label + strikeTxt)+'</td>'
+        + '<td style="padding:2px 8px">Poly '+cell(poly, 'Poly')+winnerBadge(winner, 'poly')+polyFlag+'</td>'
+        + '<td style="padding:2px 0">Kalshi '+cell(kal, 'Kalshi')+winnerBadge(winner, 'kalshi')+kalFlag+'</td>'
+        + '</tr>';
+    };
+    const totTie = (which) => tp[which] && tp[which].winner === 'tie'
+      ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+which+' tied at net American</div>'
+      : '';
+    totalsBlock = '<div style="font-size:10px;color:var(--text2);margin-top:8px">Totals · O/U '+tp.line_requested+'</div>'
+      + '<table style="width:100%;border-collapse:collapse"><tbody>'
+      + totRow('over')
+      + totRow('under')
+      + '</tbody></table>'
+      + totTie('over') + totTie('under');
+  }
+
   return '<table style="width:100%;border-collapse:collapse"><tbody>'
     + sideRow('away')
     + sideRow('home')
     + '</tbody></table>'
-    + tie('away') + tie('home');
+    + tie('away') + tie('home')
+    + totalsBlock;
 }
 
 // Minimal escapeHtml; used only inside the odds block. If a global one

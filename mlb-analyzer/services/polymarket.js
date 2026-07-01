@@ -276,6 +276,50 @@ function isPerGameEvent(evt) {
 //                     clobTokenIds: '["token_a","token_b"]', ... } ]
 //   Sometimes the event title itself contains "Team A vs Team B" —
 //   used as a fallback.
+// Extract Poly totals ladder from an event. Returns array of
+//   { strike, over_token, under_token, over_price_str, under_price_str,
+//     market_liquidity_clob }
+// One entry per O/U strike present. Filters to sportsMarketType='totals'
+// (the FULL-GAME total). The Poly per-game event also carries
+// `baseball_team_first_five_total` for 1st-5 O/U — DISTINCT market
+// class, intentionally excluded here.
+//
+// Question text pattern verified against LAD-OAK 2026-07-01:
+//   "Los Angeles Dodgers vs. Athletics: O/U 9.5"
+// Strike parsed by regex from the trailing " O/U X.X" segment. Order
+// of ["Over","Under"] outcomes verified — same convention across all
+// Poly totals markets sampled.
+function extractTotalsFromEvent(evt) {
+  if (!evt || !Array.isArray(evt.markets)) return [];
+  const out = [];
+  for (const m of evt.markets) {
+    if (m.sportsMarketType !== 'totals') continue;
+    const q = String(m.question || '');
+    const sm = q.match(/O\/U\s+([\d]+(?:\.\d+)?)/i);
+    if (!sm) continue;
+    const strike = parseFloat(sm[1]);
+    if (!Number.isFinite(strike)) continue;
+    const outcomes = safeParseJsonMaybe(m.outcomes);
+    const tokens   = safeParseJsonMaybe(m.clobTokenIds);
+    const prices   = safeParseJsonMaybe(m.outcomePrices);
+    if (!Array.isArray(outcomes) || outcomes.length !== 2) continue;
+    // Confirm ordering — over first, under second. Guard defensively.
+    let overIdx = 0, underIdx = 1;
+    if (String(outcomes[0]).toLowerCase() === 'under') { overIdx = 1; underIdx = 0; }
+    out.push({
+      strike,
+      over_token:  tokens && tokens[overIdx]  || null,
+      under_token: tokens && tokens[underIdx] || null,
+      over_price_str:  prices && prices[overIdx]  || null,
+      under_price_str: prices && prices[underIdx] || null,
+      market_liquidity_clob: m.liquidityClob != null ? Number(m.liquidityClob) : null,
+      market_question: q,
+    });
+  }
+  out.sort((a, b) => a.strike - b.strike);
+  return out;
+}
+
 function extractSidesFromEvent(evt) {
   if (!evt || !evt.markets || !evt.markets.length) return null;
   // Pick the moneyline market by Poly's own `sportsMarketType='moneyline'`
@@ -638,6 +682,10 @@ async function getPolymarketMlbLines(date, opts) {
     const liq = sides.event_liquidity_clob != null ? sides.event_liquidity_clob : 0;
     const prev = gid ? bestPerGid.get(gid) : null;
     if (!prev || liq > prev.liq) {
+      // Also pull the totals ladder while we have the event in hand
+      // — top-of-book only; per-strike orderbook fetch is deferred to
+      // priceTotal() when the caller actually wants to depth-walk.
+      sides.totals_ladder = extractTotalsFromEvent(evt);
       bestPerGid.set(gid, { sides, liq, evt });
     }
   }
@@ -693,6 +741,13 @@ async function getPolymarketMlbLines(date, opts) {
       market_question: sides.market_question,
       market_liquidity_clob: sides.market_liquidity_clob,
       event_liquidity_clob: sides.event_liquidity_clob,
+      // Full-game totals ladder for this event. Empty array when Poly
+      // hasn't posted totals for the game (rare — usually appears
+      // alongside the moneyline). Per-strike: {strike, over_token,
+      // under_token, over_price_str, under_price_str,
+      // market_liquidity_clob, market_question}. Books are NOT fetched
+      // here; priceTotal() calls clobBook() per strike when needed.
+      totals_ladder: sides.totals_ladder || [],
       // Diagnostic — surfaces slug-resolution failures for eyeball fix.
       _unresolved: {
         away_name: !sides.away_abbr ? sides.away_name : null,
@@ -724,6 +779,7 @@ module.exports = {
     topOfBookBid,
     gammaListMlbEvents,
     extractSidesFromEvent,
+    extractTotalsFromEvent,
     isPerGameEvent,
   },
 };
