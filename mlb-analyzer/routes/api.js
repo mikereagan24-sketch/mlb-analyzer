@@ -2912,8 +2912,17 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
     if (!date || !dateRe.test(date)) return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
     if (!(stake > 0)) return res.status(400).json({ error: 'stake must be > 0' });
+    // Optional filter for Stage 3b slate-card use: comma-separated
+    // game_ids limits the per-game orderbook fetches to the games the
+    // owner actually needs (those with emitted signals). Bounded set
+    // per slate; cache key includes the sorted set so different filter
+    // shapes don't clobber each other.
+    const gameIdsCsv = (req.query.game_ids || '').toString().trim();
+    const gameIds = gameIdsCsv
+      ? gameIdsCsv.split(',').map(s => s.trim()).filter(Boolean).sort()
+      : null;
 
-    const key = date + '|' + stake;
+    const key = date + '|' + stake + '|' + (gameIds ? gameIds.join(',') : 'all');
     const cached = _oddsComparisonCache.get(key);
     const now = Date.now();
     if (cached && (now - cached.at) < ODDS_COMPARISON_TTL_MS) {
@@ -2925,7 +2934,10 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
     let data;
     try {
       const { runComparison } = require('../services/odds-comparison');
-      data = await runComparison(date, { stakeUsd: stake });
+      data = await runComparison(date, {
+        stakeUsd: stake,
+        gameIds: gameIds || undefined,
+      });
       data.fetched_at = new Date().toISOString();
     } catch (e) {
       // Total failure — still return a shaped response so the UI's

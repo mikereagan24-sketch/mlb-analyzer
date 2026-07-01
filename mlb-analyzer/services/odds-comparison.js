@@ -148,19 +148,35 @@ async function runComparison(dateYYYYMMDD, opts) {
     };
   }
 
+  // Optional filter — Stage 3b calls the endpoint with a small
+  // subset of game_ids (the ones with emitted signals). Poly + Kalshi
+  // slate pulls above are one-shot anyway (a single Gamma call and a
+  // single KXMLBGAME paginate), so the cost saving is in the per-game
+  // orderbook fetches (Poly /book × 2 sides + Kalshi /orderbook × 2
+  // sides per game). Filtering here skips those.
+  const filterSet = opts && Array.isArray(opts.gameIds) && opts.gameIds.length
+    ? new Set(opts.gameIds) : null;
+
   const rows = [];
   let done = 0;
-  for (const p of polyRows) {
+  const candidates = filterSet
+    ? polyRows.filter(p => p.game_id && filterSet.has(p.game_id))
+    : polyRows;
+  for (const p of candidates) {
     if (!p.game_id) continue;
     const kmatch = kalsByGid[p.game_id] || null;
     const candidate = Object.assign({}, p, { _kalshi: kmatch });
-    progress({ step: 'price_game', msg: p.game_id + ' (' + (done + 1) + '/' + polyRows.length + ')' });
+    progress({ step: 'price_game', msg: p.game_id + ' (' + (done + 1) + '/' + candidates.length + ')' });
     const row = await priceGame(candidate, stakeUsd);
     rows.push(row);
     done++;
   }
   progress({ step: 'done', msg: 'priced ' + rows.length + ' games' });
-  return { window: { date: dateYYYYMMDD, stake_usd: stakeUsd }, rows };
+  return {
+    window: { date: dateYYYYMMDD, stake_usd: stakeUsd },
+    rows,
+    filter_applied: filterSet ? { game_ids: [...filterSet] } : null,
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────
