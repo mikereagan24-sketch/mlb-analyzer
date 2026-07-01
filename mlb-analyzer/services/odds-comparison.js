@@ -14,6 +14,7 @@ const poly   = require('./polymarket');
 const kalshi = require('./kalshi');
 
 const DEFAULT_STAKE_USD = 100;
+const STRIKE_TOL = 1e-6;  // exact strike-match tolerance
 
 // One-side pricing: given a normalized best-first ask book, a stake,
 // and a taker-fee function, return the at-size fill + fee-adjusted
@@ -104,26 +105,156 @@ async function priceGame(gameCandidate, stakeUsd) {
   return out;
 }
 
+// Pick the strike on a ladder closest to `target`. Returns
+//   { strike, exact: bool, entry }
+// where `entry` is the ladder object at that strike. Ladder must be
+// sorted ascending by strike. Returns null if empty.
+function pickClosestStrike(ladder, target) {
+  if (!Array.isArray(ladder) || !ladder.length) return null;
+  let best = ladder[0];
+  let bestDist = Math.abs(best.strike - target);
+  for (const r of ladder) {
+    const d = Math.abs(r.strike - target);
+    if (d < bestDist) { best = r; bestDist = d; }
+  }
+  return { strike: best.strike, exact: Math.abs(best.strike - target) < STRIKE_TOL, entry: best };
+}
+
+// Price ONE totals line on both venues at stakeUsd, on BOTH sides
+// (over + under). Called out from priceGame() only when the caller
+// explicitly requests a totals line for this game — the per-strike
+// orderbook fetches are the expensive part, so this stays opt-in.
+//
+// Strike matching: exact match preferred on each venue. If a venue
+// only has neighboring strikes, uses the closest and flags
+// `matched.exact_{venue}: false` so the caller can render "closest
+// strike X.X" honestly.
+//
+// Returns null if neither venue has a totals ladder for this game.
+// Otherwise:
+//   {
+//     line_requested: number,
+//     matched: {
+//       poly:   { strike, exact } | null,
+//       kalshi: { strike, exact, event_ticker } | null,
+//     },
+//     over:  { poly: <sideOut>|null, kalshi: <sideOut>|null, winner: 'poly'|'kalshi'|'tie'|null },
+//     under: { same shape },
+//   }
+async function priceTotal(gameRow, line, stakeUsd) {
+  const polyLadder = gameRow.totals_ladder || [];
+  const kalTotals  = gameRow._kalshi && gameRow._kalshi.totals;   // { event_ticker, ladder }
+  const kalLadder  = (kalTotals && kalTotals.ladder) || [];
+  if (!polyLadder.length && !kalLadder.length) return null;
+
+  const polyMatch = pickClosestStrike(polyLadder, line);
+  const kalMatch  = pickClosestStrike(kalLadder,  line);
+
+  const out = {
+    line_requested: line,
+    matched: {
+      poly:   polyMatch ? { strike: polyMatch.strike, exact: polyMatch.exact } : null,
+      kalshi: kalMatch  ? { strike: kalMatch.strike,  exact: kalMatch.exact,
+                            event_ticker: kalTotals && kalTotals.event_ticker } : null,
+    },
+    over:  { poly: null, kalshi: null, winner: null },
+    under: { poly: null, kalshi: null, winner: null },
+  };
+
+  // ── Poly side ──
+  if (polyMatch) {
+    const entry = polyMatch.entry;
+    try {
+      const [overBook, underBook] = await Promise.all([
+        poly.clobBook(entry.over_token),
+        poly.clobBook(entry.under_token),
+      ]);
+      if (overBook) {
+        out.over.poly = priceAtSize(poly.walkAsksForFill, overBook, stakeUsd, poly.polyTakerFee);
+      }
+      if (underBook) {
+        out.under.poly = priceAtSize(poly.walkAsksForFill, underBook, stakeUsd, poly.polyTakerFee);
+      }
+    } catch (e) { /* leave nulls; caller handles */ }
+  }
+
+  // ── Kalshi side ──
+  if (kalMatch && kalTotals && kalTotals.event_ticker) {
+    const ticker = kalshi.kalshiTotalsRungTicker(kalTotals.event_ticker, kalMatch.strike);
+    if (ticker) {
+      try {
+        const ob = await kalshi.fetchKalshiOrderbook(ticker);
+        if (ob) {
+          // On a KXMLBTOTAL rung, YES = over, NO = under. To BUY OVER
+          // as a taker, cross the NO bids → yes_asks derived view is
+          // exactly what we need. To BUY UNDER, cross YES bids →
+          // no_asks derived view. Depth walk is symmetric.
+          if (ob.yes_asks && ob.yes_asks.length) {
+            out.over.kalshi = priceAtSize(kalshi.kalshiWalkAsksForFill,
+              ob.yes_asks, stakeUsd, kalshi.kalshiTakerFee);
+            if (out.over.kalshi) out.over.kalshi.market_ticker = ticker;
+          }
+          if (ob.no_asks && ob.no_asks.length) {
+            out.under.kalshi = priceAtSize(kalshi.kalshiWalkAsksForFill,
+              ob.no_asks, stakeUsd, kalshi.kalshiTakerFee);
+            if (out.under.kalshi) out.under.kalshi.market_ticker = ticker;
+          }
+        }
+      } catch (e) { /* leave nulls */ }
+    }
+  }
+
+  // Winner per side — higher net American == better for the bettor.
+  for (const s of ['over', 'under']) {
+    const p = out[s].poly && out[s].poly.net_american;
+    const k = out[s].kalshi && out[s].kalshi.net_american;
+    if (p == null || k == null) continue;
+    if (Math.abs(p - k) < 1e-6) out[s].winner = 'tie';
+    else out[s].winner = (p > k) ? 'poly' : 'kalshi';
+  }
+  return out;
+}
+
 // Top-level: pull Poly slate + Kalshi slate, join on game_id, price
 // every game at stakeUsd. Returns [comparisonRow].
 async function runComparison(dateYYYYMMDD, opts) {
   const stakeUsd = (opts && opts.stakeUsd) || DEFAULT_STAKE_USD;
   const progress = (opts && opts.onProgress) || (() => {});
+  // Per-game totals lines to price. Map keyed by game_id, value = line
+  // (number). When empty/null, totals pricing is skipped entirely
+  // (Stage 2's original ML-only behavior).
+  const totalRequests = new Map();
+  if (opts && opts.totalRequests) {
+    for (const [gid, line] of Object.entries(opts.totalRequests)) {
+      const n = Number(line);
+      if (Number.isFinite(n)) totalRequests.set(gid, n);
+    }
+  }
+
   progress({ step: 'pull_poly', msg: 'fetching Poly MLB events + books' });
   const polyRows = await poly.getPolymarketMlbLines(dateYYYYMMDD);
-  progress({ step: 'pull_poly_done', msg: 'poly rows: ' + polyRows.length });
+  progress({ step: 'pull_poly_done', msg: 'poly rows: ' + polyRows.length
+    + '  (with totals ladder: ' + polyRows.filter(r => (r.totals_ladder || []).length).length + ')' });
 
-  progress({ step: 'pull_kalshi', msg: 'fetching Kalshi MLB lines' });
+  progress({ step: 'pull_kalshi', msg: 'fetching Kalshi MLB lines + totals' });
   let kalsRows = [];
+  let kalsTotals = [];
   try {
     // includeLive:true so a game that's just started still gets compared
-    // — the depth walk is honest either way.
-    kalsRows = await require('./kalshi').getKalshiMlbLines(dateYYYYMMDD,
-      { includeLive: true });
+    // — the depth walk is honest either way. Pull totals in parallel;
+    // needed only when totalRequests is non-empty but the pull is one
+    // slate-level call, cheap.
+    [kalsRows, kalsTotals] = await Promise.all([
+      kalshi.getKalshiMlbLines(dateYYYYMMDD, { includeLive: true }),
+      totalRequests.size
+        ? kalshi.getKalshiMlbTotals(dateYYYYMMDD, { includeLive: true })
+        : Promise.resolve([]),
+    ]);
   } catch (e) {
     progress({ step: 'pull_kalshi_err', msg: e.message });
   }
-  progress({ step: 'pull_kalshi_done', msg: 'kalshi rows: ' + kalsRows.length });
+  progress({ step: 'pull_kalshi_done', msg: 'kalshi ML rows: ' + kalsRows.length
+    + '  totals rows: ' + kalsTotals.length });
 
   // Kalshi ticker per side is inferable from the event_ticker:
   // KXMLBGAME-26JUL041335MINNYY has market tickers -MIN (away) and
@@ -147,6 +278,27 @@ async function runComparison(dateYYYYMMDD, opts) {
       home_ticker: ev + '-' + homeSuffix,
     };
   }
+  // Attach Kalshi totals ladder to the same _kalshi bag by game_id.
+  const kalsTotByGid = {};
+  for (const k of kalsTotals) {
+    if (!k.game_id) continue;
+    kalsTotByGid[k.game_id] = {
+      event_ticker: k.event_ticker,
+      ladder: (k.ladder || []).map(r => ({
+        strike:            r.strike,
+        over_ask_dollars:  r.over_ask,
+        under_ask_dollars: r.under_ask,
+      })),
+    };
+  }
+  for (const gid of Object.keys(kalsByGid)) {
+    if (kalsTotByGid[gid]) kalsByGid[gid].totals = kalsTotByGid[gid];
+  }
+  // Also carry Kalshi totals for game_ids that have totals but no ML —
+  // rare but the ladder itself is still useful for the priceGame stub.
+  for (const gid of Object.keys(kalsTotByGid)) {
+    if (!kalsByGid[gid]) kalsByGid[gid] = { totals: kalsTotByGid[gid] };
+  }
 
   // Optional filter — Stage 3b calls the endpoint with a small
   // subset of game_ids (the ones with emitted signals). Poly + Kalshi
@@ -168,6 +320,27 @@ async function runComparison(dateYYYYMMDD, opts) {
     const candidate = Object.assign({}, p, { _kalshi: kmatch });
     progress({ step: 'price_game', msg: p.game_id + ' (' + (done + 1) + '/' + candidates.length + ')' });
     const row = await priceGame(candidate, stakeUsd);
+    // Optional totals pricing — driven by totalRequests. Only fires
+    // for games explicitly requested by the caller (Stage 3b passes
+    // signal.market_line; Stage 3 matchup block passes g.market_total).
+    // Attaches row.totals_priced with the {matched, over, under}
+    // shape from priceTotal(); on failure attaches null so callers
+    // render an honest empty state.
+    const line = totalRequests.get(p.game_id);
+    if (line != null) {
+      try {
+        row.totals_priced = await priceTotal(candidate, line, stakeUsd);
+      } catch (e) {
+        row.totals_priced = null;
+        row._totals_error = e.message;
+      }
+    }
+    // Compact totals ladders on the response for the client to know
+    // what strikes are available if it wants to pick a different one.
+    row.totals_ladder_summary = {
+      poly:   (p.totals_ladder || []).map(x => x.strike),
+      kalshi: (kmatch && kmatch.totals && kmatch.totals.ladder || []).map(x => x.strike),
+    };
     rows.push(row);
     done++;
   }
@@ -176,6 +349,8 @@ async function runComparison(dateYYYYMMDD, opts) {
     window: { date: dateYYYYMMDD, stake_usd: stakeUsd },
     rows,
     filter_applied: filterSet ? { game_ids: [...filterSet] } : null,
+    total_requests_applied: totalRequests.size
+      ? Object.fromEntries(totalRequests) : null,
   };
 }
 
@@ -189,7 +364,7 @@ function priceToAmerican(p) {
   return p >= 0.5 ? -Math.round(100 * p / (1 - p)) : Math.round(100 * (1 - p) / p);
 }
 
-module.exports = { runComparison, priceGame, priceAtSize };
+module.exports = { runComparison, priceGame, priceAtSize, priceTotal, pickClosestStrike };
 
 // CLI: `node services/odds-comparison.js [YYYY-MM-DD] [stake_usd]`
 if (require.main === module) {
