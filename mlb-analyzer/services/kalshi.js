@@ -859,6 +859,106 @@ async function getKalshiMlbSpreads(date, opts) {
   return results;
 }
 
+// ────────────────────────────────────────────────────────────────────
+// STAGE 2 — orderbook depth fetch + depth-walk taker fill
+// ────────────────────────────────────────────────────────────────────
+//
+// Kalshi's /markets/{ticker}/orderbook returns:
+//   { orderbook_fp: {
+//       yes_dollars: [[price_str, size_str], ...]   ASC by price
+//       no_dollars:  [[price_str, size_str], ...]   ASC by price
+//   }}
+// The `yes_dollars` array is the BID book on YES contracts — offers
+// people have posted to buy YES at each price. Its LAST entry is the
+// highest YES-bid (matches market.yes_bid_dollars). Verified against
+// KXMLBGAME-26JUL041335MINNYY-NYY on 2026-07-01:
+//   market: yes_bid=0.42 no_bid=0.36 → yes_ask=0.64 no_ask=0.58
+//   yes_dollars last entry: ['0.42', 150]   ← matches yes_bid
+//   no_dollars  last entry: ['0.36', 650]   ← matches no_bid
+//
+// To BUY YES as a taker (owner wants to bet the team represented by
+// this market's YES contract), Kalshi crosses the NO-bid book: every
+// NO bid at price P is equivalent to someone selling YES at price
+// (1 - P). Walk `no_dollars` from HIGHEST no_bid downward — this
+// gives the LOWEST equivalent yes-ask first. Size in shares matches.
+//
+// Fetch returns the arrays sorted BEST-FIRST for both sides so
+// downstream code doesn't have to remember the raw asc-by-price
+// convention. yesAsksAsBook and noAsksAsBook are the derived-ask
+// views (fill prices from crossing the opposite-side bids).
+async function fetchKalshiOrderbook(marketTicker) {
+  if (!marketTicker) return null;
+  const url = KALSHI_URL.replace(/\/markets$/, '') + '/markets/'
+    + encodeURIComponent(marketTicker) + '/orderbook?depth=100';
+  try {
+    // Use global fetch (Node 20+) — matches the rest of this module.
+    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const ob = (data && data.orderbook_fp) || {};
+    const yesBidsRaw = ob.yes_dollars || [];
+    const noBidsRaw  = ob.no_dollars  || [];
+    // Normalize + best-first (descending price).
+    const norm = (arr) => arr
+      .map(([p, s]) => ({ price: parseFloat(p), size: parseFloat(s) }))
+      .filter(x => Number.isFinite(x.price) && Number.isFinite(x.size) && x.size > 0)
+      .sort((a, b) => b.price - a.price);
+    const yesBids = norm(yesBidsRaw);
+    const noBids  = norm(noBidsRaw);
+    // Derived-ask views. Best (lowest) fill = highest opposite bid.
+    const yesAsks = noBids.map(x => ({ price: 1 - x.price, size: x.size }));   // ascending price by construction
+    const noAsks  = yesBids.map(x => ({ price: 1 - x.price, size: x.size }));
+    return {
+      yes_bids: yesBids, no_bids: noBids,
+      yes_asks: yesAsks, no_asks: noAsks,
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Depth walk against a best-first ask book. Same shape as
+// services/polymarket.walkAsksForFill so a caller comparing the two
+// venues at the same stake gets apples-to-apples output.
+function kalshiWalkAsksForFill(asks, stakeUsd) {
+  if (!Array.isArray(asks) || !asks.length) return null;
+  if (!Number.isFinite(stakeUsd) || stakeUsd <= 0) return null;
+  const levels = [];
+  let remainingUsd = stakeUsd;
+  let sharesTotal = 0;
+  for (const lvl of asks) {
+    if (remainingUsd <= 0) break;
+    const price = Number(lvl.price);
+    const sizeShares = Number(lvl.size);
+    if (!(price > 0) || !(price < 1) || !(sizeShares > 0)) continue;
+    const levelUsd = price * sizeShares;
+    if (levelUsd >= remainingUsd) {
+      const sharesTaken = remainingUsd / price;
+      levels.push({ price, size_shares: sharesTaken, usd: remainingUsd, full_level: false });
+      sharesTotal += sharesTaken;
+      remainingUsd = 0;
+      break;
+    }
+    levels.push({ price, size_shares: sizeShares, usd: levelUsd, full_level: true });
+    sharesTotal += sizeShares;
+    remainingUsd -= levelUsd;
+  }
+  const filledUsd = stakeUsd - Math.max(0, remainingUsd);
+  const avg = sharesTotal > 0 ? filledUsd / sharesTotal : null;
+  const top = Number(asks[0].price);
+  // Same precision guard as services/polymarket.walkAsksForFill —
+  // rounding shares here would push cent-ceil fees off by a penny.
+  return {
+    filled_usd:      filledUsd,
+    shares_bought:   sharesTotal,
+    avg_price:       avg,
+    top_ask_price:   top,
+    slippage_pp:     avg != null ? (avg - top) * 100 : null,
+    levels_consumed: levels,
+    partial:         remainingUsd > 1e-6,
+  };
+}
+
 module.exports = {
   getKalshiMlbLines,
   getKalshiMlbTotals,
@@ -868,6 +968,9 @@ module.exports = {
   // smooth per-contract rate for edge math.
   kalshiTakerFee,
   kalshiTakerFeeRate,
+  // Stage 2 depth
+  fetchKalshiOrderbook,
+  kalshiWalkAsksForFill,
   // Exported for unit-testing / inspection. Not part of the stable surface.
   _internal: {
     parseEventTicker,
