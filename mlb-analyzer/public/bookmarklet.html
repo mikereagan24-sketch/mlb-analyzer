@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MLB Analyzer — FG Actuals Bookmarklet</title>
+<title>MLB Analyzer — FG Daily Sync</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   :root { color-scheme: light dark; }
@@ -41,38 +41,38 @@
 </head>
 <body>
 
-<h1>FG Actuals Bookmarklet</h1>
-<p class="lede">One-click upload of the four split-leaderboard CSVs from FanGraphs to mlb-analyzer.</p>
+<h1>FG Daily Sync</h1>
+<p class="lede">One click on a logged-in FanGraphs page updates wOBA projections, wOBA actuals, and RosterResource pitcher roles.</p>
 
 <h2>Install</h2>
 <p>Drag this link to your bookmarks bar:</p>
 <div class="drag-row">
-  <a id="bm" class="drag" href="#">📊 Upload FG Actuals</a>
+  <a id="bm" class="drag" href="#">📊 FG Daily Sync</a>
 </div>
 <p class="muted">(If the link doesn't drag, right-click it → "Bookmark Link…".)</p>
 
 <h2>How to use</h2>
 <ol>
-  <li>Open any <a href="https://www.fangraphs.com/" target="_blank" rel="noopener">fangraphs.com</a> page.</li>
+  <li>Open <a href="https://www.fangraphs.com/" target="_blank" rel="noopener">fangraphs.com</a> and confirm you're logged in (paid Member).</li>
   <li>Click the bookmark.</li>
-  <li>A small overlay appears in the top-right of the FanGraphs tab and walks through the four splits. Each takes 5–10 seconds.</li>
-  <li>When all four finish, hit <em>Close</em> on the overlay. Your mlb-analyzer actuals are up to date.</li>
+  <li>A small overlay appears in the top-right of the FanGraphs tab and works through three sections: <strong>projections</strong> (4 requests, fast), <strong>actuals</strong> (4 requests, fast), <strong>roles</strong> (30 requests, sequential with a small pause between each — total ~1–2 min).</li>
+  <li>Sections update independently — a broken roles fetch does not block projections/actuals landing (and vice versa).</li>
+  <li>When all three finish, hit <em>Close</em> on the overlay.</li>
 </ol>
 
 <h2>What it does</h2>
 <ul>
-  <li>Opens four hidden iframes on the FanGraphs tab, one per split (bat vs LHP/RHP, pit vs LHB/RHB).</li>
-  <li>Each iframe renders the splits leaderboard page, which client-side generates an <code>&lt;a download&gt;</code> with a <code>data:</code>-URL CSV.</li>
-  <li>The bookmarklet decodes each CSV and POSTs it as <code>multipart/form-data</code> to <code>mlb-analyzer.onrender.com/api/upload/&lt;data-key&gt;</code>.</li>
-  <li>Failures on one split (timeout, upload error) are shown in the overlay but don't block the other three.</li>
-  <li>Uses <code>groupBy=career</code> and a rolling 2-year window ending yesterday (so players who split time across seasons aggregate into one row rather than one-per-season, and today's in-progress games are excluded).</li>
+  <li><strong>Projections</strong>: fetches the four Steamer RoS split JSONs (bat vs L/R, pit vs L/R) from FanGraphs' internal <code>/api/projections</code> endpoint, converts server-side to the CSV shape the manual upload uses, ingests into the same wOBA table.</li>
+  <li><strong>Actuals</strong>: fetches the four two-year split leaderboards (bat vs L/R, pit vs L/R) from FanGraphs' internal <code>/api/leaders/splits/splits-leaders</code> endpoint, ingests the same way.</li>
+  <li><strong>Roles</strong>: fetches all 30 RosterResource depth-chart pages sequentially (1.5s between each, human-scale), parses the SP1–SP5 / CL / SU# / MID / IL rows out of the SSR HTML, POSTs a single JSON payload to <code>/api/upload/rr-roles</code>. Server crosswalks each FG player to <code>mlb_id</code> via name + team lookup against <code>team_rosters</code> and upserts <code>pitcher_fg_role</code> with <code>source='rr_sync'</code>.</li>
 </ul>
 
 <h2>Caveats</h2>
 <ul>
   <li>The bookmarklet refuses to run on any page that isn't <code>fangraphs.com</code> (it alerts and exits).</li>
-  <li>FanGraphs must render the Export link client-side. If the site ships a CSP that blocks inline JS on that page or wraps the leaderboards in an iframe-busting header, the bookmarklet will time out with <em>no Export link</em> — in which case fall back to the manual refresh button on the Model tab.</li>
-  <li>Logged-in / logged-out: the splits leaderboard CSVs render the same for both, so this works without a FanGraphs Member session. The upload target is always the production host; edit the <code>API</code> constant in the source below to point at a local dev server if needed.</li>
+  <li>Requires a logged-in FanGraphs Member session. Without it, projections and actuals will return empty or 403.</li>
+  <li>Runs once daily. Do not schedule or auto-fire — the roles section touches FG 30 times sequentially, which is fine as a human-scale daily press, not as a background loop.</li>
+  <li>The upload target is <code>mlb-analyzer.onrender.com</code>. Edit the <code>APP</code> constant in the source below if pointing at a dev server.</li>
 </ul>
 
 <details>
@@ -89,52 +89,110 @@ function bookmarklet() {
     alert('MLB Analyzer bookmarklet: open a fangraphs.com page first, then click the bookmark.');
     return;
   }
-  var API = 'https://mlb-analyzer.onrender.com/api/upload/';
-  function fmt(d) {
-    var y = d.getFullYear();
-    var m = String(d.getMonth() + 1).padStart(2, '0');
-    var dd = String(d.getDate()).padStart(2, '0');
-    return y + '-' + m + '-' + dd;
-  }
-  var todayDate = new Date();
-  var endDateObj = new Date(todayDate); endDateObj.setDate(endDateObj.getDate() - 1);
-  var startDateObj = new Date(endDateObj); startDateObj.setFullYear(startDateObj.getFullYear() - 2); startDateObj.setDate(startDateObj.getDate() + 1);
-  var startDateStr = fmt(startDateObj);
-  var endDateStr = fmt(endDateObj);
-  var SPECS = [
-    { key: 'pit-act-rhb', splitArr: 6, pos: 'P', sg: 1, label: 'Pit vs RHB' },
-    { key: 'pit-act-lhb', splitArr: 5, pos: 'P', sg: 1, label: 'Pit vs LHB' },
-    { key: 'bat-act-rhp', splitArr: 2, pos: 'B', sg: 2, label: 'Bat vs RHP' },
-    { key: 'bat-act-lhp', splitArr: 1, pos: 'B', sg: 2, label: 'Bat vs LHP' }
+  var APP = 'https://mlb-analyzer.onrender.com';
+  var FG_JSON_URL = APP + '/api/upload/fg-json/';
+  var ROLES_URL = APP + '/api/upload/rr-roles';
+
+  // ── FG endpoint specs ────────────────────────────────────────────────
+  var PROJ_SPECS = [
+    { key: 'bat-proj-lhp', type: 'rsteamer_vl_0',   stats: 'bat' },
+    { key: 'bat-proj-rhp', type: 'rsteamer_vr_0',   stats: 'bat' },
+    { key: 'pit-proj-lhb', type: 'rsteamer_vl_p_1', stats: 'pit' },
+    { key: 'pit-proj-rhb', type: 'rsteamer_vr_p_1', stats: 'pit' },
   ];
-  function buildUrl(s) {
-    return 'https://www.fangraphs.com/leaders/splits-leaderboards'
-      + '?splitArr=' + s.splitArr
-      + '&autoPt=true&splitTeams=false&statType=player'
-      + '&statgroup=' + s.sg
-      + '&startDate=' + startDateStr + '&endDate=' + endDateStr
-      + '&position=' + s.pos
-      + '&sort=22,1&splitArrPitch=&players=&filter='
-      + '&groupBy=career'
-      + '&wxTemperature=&wxPressure=&wxAirDensity=&wxElevation=&wxWindSpeed=';
+  // Actuals payload — see services/fangraphs.js fetchActualSplit for the
+  // canonical shape. strType is STRING '2' for pitchers, NUMBER 1 for
+  // batters (verified against FG's own frontend — swapping breaks the
+  // pitcher response). strAutoPt 'false' matches what the browser
+  // bookmarklet historically sent.
+  function actualsBody(splitCode, position) {
+    var end = new Date();
+    var start = new Date(end); start.setFullYear(end.getFullYear() - 2);
+    var iso = function(d) { return d.toISOString().slice(0, 10); };
+    return {
+      strSplitArr: [splitCode], strGroup: 'season', strPosition: position,
+      strType: position === 'P' ? '2' : 1,
+      strStartDate: iso(start), strEndDate: iso(end),
+      strSplitTeams: false, dctFilters: [], strStatType: 'player',
+      strAutoPt: 'false', arrPlayerId: [], strPlayerId: 'all', strSplitArrPitch: [],
+      arrWxTemperature: [], arrWxPressure: [], arrWxAirDensity: [],
+      arrWxElevation: [], arrWxWindSpeed: [],
+    };
   }
+  var ACT_SPECS = [
+    { key: 'bat-act-lhp', split: 1, pos: 'B' },
+    { key: 'bat-act-rhp', split: 2, pos: 'B' },
+    { key: 'pit-act-lhb', split: 5, pos: 'P' },
+    { key: 'pit-act-rhb', split: 6, pos: 'P' },
+  ];
+  // Team abbr → RosterResource URL slug. MUST match the health check's
+  // FG_TEAM_SLUGS keys (services/fangraphs-roles.js:TEAM_SLUGS) or the
+  // "missing team" list on the server will misreport coverage.
+  var TEAM_SLUGS = {
+    LAA:'angels', HOU:'astros', ATH:'athletics', TOR:'blue-jays', ATL:'braves',
+    MIL:'brewers', STL:'cardinals', CHC:'cubs', ARI:'diamondbacks', LAD:'dodgers',
+    SF:'giants', CLE:'guardians', SEA:'mariners', MIA:'marlins', NYM:'mets',
+    WAS:'nationals', BAL:'orioles', SD:'padres', PHI:'phillies', PIT:'pirates',
+    TEX:'rangers', TB:'rays', BOS:'red-sox', CIN:'reds', COL:'rockies',
+    KC:'royals', DET:'tigers', MIN:'twins', CWS:'white-sox', NYY:'yankees',
+  };
+  var TEAM_ABBRS = Object.keys(TEAM_SLUGS);
+
+  // ── Overlay ─────────────────────────────────────────────────────────
   var overlay = document.createElement('div');
   overlay.setAttribute('data-mlb-analyzer-overlay', '1');
-  overlay.style.cssText = 'position:fixed;top:16px;right:16px;background:#1e1e2e;color:#fff;padding:14px 16px;border-radius:8px;font:13px/1.45 -apple-system,system-ui,sans-serif;z-index:2147483647;box-shadow:0 4px 22px rgba(0,0,0,0.45);min-width:280px;max-width:360px';
-  overlay.innerHTML = '<div style="font-weight:600;margin-bottom:8px">MLB Analyzer — Upload Actuals</div><div id="mlb-an-status"></div>';
+  overlay.style.cssText = 'position:fixed;top:16px;right:16px;background:#1e1e2e;color:#fff;padding:14px 16px;border-radius:8px;font:13px/1.45 -apple-system,system-ui,sans-serif;z-index:2147483647;box-shadow:0 4px 22px rgba(0,0,0,0.45);min-width:320px;max-width:400px';
+  overlay.innerHTML = '<div style="font-weight:600;margin-bottom:8px">MLB Analyzer — FG Daily Sync</div>'
+    + '<div id="mlb-an-sec-proj" style="margin:4px 0"></div>'
+    + '<div id="mlb-an-sec-act"  style="margin:4px 0"></div>'
+    + '<div id="mlb-an-sec-roles" style="margin:4px 0"></div>';
   document.body.appendChild(overlay);
-  var statusEl = overlay.querySelector('#mlb-an-status');
-  var results = SPECS.map(function(){ return { msg: '…', done: false, ok: null }; });
-  function render() {
-    statusEl.innerHTML = SPECS.map(function(s, i) {
-      var r = results[i];
-      var dot = r.done ? (r.ok ? '✓' : '✗') : '•';
-      var color = r.done ? (r.ok ? '#4ade80' : '#f87171') : '#9ca3af';
-      return '<div style="margin:2px 0"><span style="display:inline-block;width:14px;color:' + color + '">' + dot + '</span>'
-        + '<span style="color:#9ca3af">' + s.label + ' <code style="background:#2a2a3a;padding:1px 4px;border-radius:2px;font-size:11px">' + s.key + '</code></span> '
-        + '<span>' + r.msg + '</span></div>';
-    }).join('');
+  function setSection(id, html) {
+    var el = overlay.querySelector('#mlb-an-sec-' + id);
+    if (el) el.innerHTML = html;
   }
+  function sectionLine(label, state, detail) {
+    var dot = state === 'ok' ? '✓' : state === 'err' ? '✗' : state === 'work' ? '•' : '·';
+    var color = state === 'ok' ? '#4ade80' : state === 'err' ? '#f87171' : state === 'work' ? '#60a5fa' : '#9ca3af';
+    return '<span style="display:inline-block;width:14px;color:' + color + '">' + dot + '</span>'
+      + '<span style="color:#9ca3af">' + label + '</span> '
+      + '<span>' + (detail || '') + '</span>';
+  }
+  var sectionState = {
+    proj:  { done: 0, ok: 0, err: 0 },
+    act:   { done: 0, ok: 0, err: 0 },
+    roles: { fetched: 0, ok: 0, err: 0, applied: null, known: null, missing: 0, uploadState: null, uploadError: null },
+  };
+  function renderProj() {
+    var s = sectionState.proj;
+    var st = s.done < PROJ_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
+    setSection('proj', sectionLine('projections',
+      st, s.done + '/' + PROJ_SPECS.length + ' fetched'
+        + (s.err ? ' (' + s.err + ' err)' : '')));
+  }
+  function renderAct() {
+    var s = sectionState.act;
+    var st = s.done < ACT_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
+    setSection('act', sectionLine('actuals',
+      st, s.done + '/' + ACT_SPECS.length + ' fetched'
+        + (s.err ? ' (' + s.err + ' err)' : '')));
+  }
+  function renderRoles() {
+    var s = sectionState.roles;
+    var st = 'idle';
+    var detail = 'waiting';
+    if (s.uploadState === 'ok') { st = 'ok'; detail = s.applied + '/' + s.known + ' pitchers applied'; }
+    else if (s.uploadState === 'err') { st = 'err'; detail = 'upload failed: ' + s.uploadError; }
+    else if (s.fetched < TEAM_ABBRS.length) {
+      st = 'work'; detail = s.fetched + '/' + TEAM_ABBRS.length + ' teams'
+        + (s.err ? ' (' + s.err + ' err)' : '');
+    } else if (s.uploadState === 'work') {
+      st = 'work'; detail = 'uploading ' + s.ok + '/' + TEAM_ABBRS.length + ' teams to app…';
+    }
+    setSection('roles', sectionLine('roles', st, detail));
+  }
+  renderProj(); renderAct(); renderRoles();
+
   function finalize() {
     if (overlay.querySelector('button')) return;
     var btn = document.createElement('button');
@@ -143,72 +201,176 @@ function bookmarklet() {
     btn.onclick = function() { overlay.remove(); };
     overlay.appendChild(btn);
   }
-  function finishOne(i, ok, msg) {
-    if (results[i].done) return;
-    results[i] = { msg: msg, ok: ok, done: true };
-    render();
-    if (results.every(function(r) { return r.done; })) finalize();
-  }
-  render();
-  SPECS.forEach(function(spec, i) {
-    var iframe = document.createElement('iframe');
-    iframe.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:1280px;height:900px;border:0';
-    iframe.src = buildUrl(spec);
-    document.body.appendChild(iframe);
-    var timeout = setTimeout(function() {
-      finishOne(i, false, 'timeout (no Export link in 30s)');
-      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-    }, 30000);
-    var poll = setInterval(function() {
-      var doc;
-      try { doc = iframe.contentDocument; } catch (e) { return; }
-      if (!doc || !doc.body) return;
-      var anchors = doc.querySelectorAll('a[download][href^="data:"]');
-      var link = null;
-      for (var j = 0; j < anchors.length; j++) {
-        var name = anchors[j].getAttribute('download') || '';
-        if (/\.csv$/i.test(name)) { link = anchors[j]; break; }
-      }
-      if (!link) return;
-      clearInterval(poll);
-      clearTimeout(timeout);
-      var href = link.getAttribute('href') || '';
-      var m = href.match(/^data:([^,]*),(.*)$/);
-      if (!m) {
-        finishOne(i, false, 'could not parse data URL');
-        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-        return;
-      }
-      var meta = m[1], payload = m[2], csv;
-      try {
-        csv = /;base64/i.test(meta) ? atob(payload) : decodeURIComponent(payload);
-      } catch (e) {
-        finishOne(i, false, 'decode failed: ' + e.message);
-        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-        return;
-      }
-      var fd = new FormData();
-      fd.append('file', new Blob([csv], { type: 'text/csv' }), spec.key + '.csv');
-      fetch(API + spec.key, { method: 'POST', body: fd })
-        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
-        .then(function(x) {
-          if (x.status >= 200 && x.status < 300 && x.body && x.body.success) {
-            finishOne(i, true, x.body.rows + ' rows uploaded');
-          } else {
-            finishOne(i, false, 'upload error: ' + ((x.body && x.body.error) || ('HTTP ' + x.status)));
-          }
+
+  // ── Projections ─────────────────────────────────────────────────────
+  function runProjections() {
+    return Promise.all(PROJ_SPECS.map(function(spec) {
+      var url = '/api/projections?type=' + encodeURIComponent(spec.type)
+        + '&stats=' + encodeURIComponent(spec.stats)
+        + '&pos=all&team=0&players=0&lg=all&download=1';
+      return fetch(url, { credentials: 'include' })
+        .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
         })
-        .catch(function(e) { finishOne(i, false, 'network: ' + e.message); })
-        .then(function() { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); });
-    }, 500);
-  });
+        .then(function(rows) {
+          if (!Array.isArray(rows) || !rows.length) throw new Error('empty response');
+          return fetch(FG_JSON_URL + spec.key, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rows: rows }),
+          }).then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); });
+        })
+        .then(function(x) {
+          sectionState.proj.done++;
+          if (x.ok && x.body && x.body.success) sectionState.proj.ok++;
+          else { sectionState.proj.err++; console.warn('[fg-sync] proj ' + spec.key + ' upload failed', x.body); }
+          renderProj();
+        })
+        .catch(function(e) {
+          sectionState.proj.done++; sectionState.proj.err++;
+          console.warn('[fg-sync] proj ' + spec.key + ' failed: ' + e.message);
+          renderProj();
+        });
+    }));
+  }
+
+  // ── Actuals ─────────────────────────────────────────────────────────
+  function runActuals() {
+    return Promise.all(ACT_SPECS.map(function(spec) {
+      return fetch('/api/leaders/splits/splits-leaders', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify(actualsBody(spec.split, spec.pos)),
+      })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(j) {
+        if (!j || !Array.isArray(j.data) || !j.data.length) throw new Error('empty data array');
+        return fetch(FG_JSON_URL + spec.key, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: j.data }),
+        }).then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); });
+      })
+      .then(function(x) {
+        sectionState.act.done++;
+        if (x.ok && x.body && x.body.success) sectionState.act.ok++;
+        else { sectionState.act.err++; console.warn('[fg-sync] act ' + spec.key + ' upload failed', x.body); }
+        renderAct();
+      })
+      .catch(function(e) {
+        sectionState.act.done++; sectionState.act.err++;
+        console.warn('[fg-sync] act ' + spec.key + ' failed: ' + e.message);
+        renderAct();
+      });
+    }));
+  }
+
+  // ── Roles (RosterResource) ──────────────────────────────────────────
+  // Parse SSR HTML for a single team's depth-chart page. Mirrors
+  // services/fangraphs-roles.js parseDepthChartHtml — walks every <tr>,
+  // treats a row as a pitcher row when its 2nd <td> is 'SP' or 'RP' and
+  // the row contains an anchor with a player name. Also captures IL-15
+  // and IL-60 rows (role_detail carries the 'IL-15'/'IL-60' tag; role
+  // family stays SP/RP based on which IL list the row is inside — the
+  // page groups IL rows under section headers, we surface family from
+  // the col-1 detail token instead ('SP*' → SP; anything else → RP).
+  function parseTeamRoles(html) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var trs = doc.querySelectorAll('tr');
+    var out = [];
+    for (var i = 0; i < trs.length; i++) {
+      var cells = trs[i].querySelectorAll('td');
+      if (cells.length < 4) continue;
+      var roleDetail = (cells[0].textContent || '').trim();
+      var roleFamily = (cells[1].textContent || '').trim();
+      // Accept IL rows too — col-1 is 'SP' or 'RP' on non-IL sections,
+      // and 'IL-15'/'IL-60' or blank on IL sections. Fall back to
+      // detail-string heuristic when col-1 isn't SP/RP.
+      var family = null;
+      if (roleFamily === 'SP' || roleFamily === 'RP') family = roleFamily;
+      else if (/^SP/i.test(roleDetail)) family = 'SP';
+      else if (/^(CL|SU|MID|LR|RP)/i.test(roleDetail)) family = 'RP';
+      else continue;
+      var link = trs[i].querySelector('a');
+      if (!link) continue;
+      var name = (link.textContent || '').trim();
+      if (!name) continue;
+      // FG playerId embedded in the link href: /players/{slug}/{id}/...
+      var href = link.getAttribute('href') || '';
+      var idMatch = href.match(/\/players\/[^\/]+\/([^\/?#]+)/);
+      var fgId = idMatch ? idMatch[1] : null;
+      // If the detail token is a bare 'SP'/'RP' (some sections use it),
+      // fold into detail; keep whatever FG actually rendered otherwise.
+      var detail = roleDetail || family;
+      out.push({ name: name, role: family, role_detail: detail, fg_player_id: fgId });
+    }
+    return out;
+  }
+
+  function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+
+  function runRoles() {
+    var teamsPayload = [];
+    var promise = Promise.resolve();
+    TEAM_ABBRS.forEach(function(team, idx) {
+      promise = promise.then(function() {
+        var url = 'https://www.fangraphs.com/roster-resource/depth-charts/' + TEAM_SLUGS[team];
+        return fetch(url, { credentials: 'include' })
+          .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+          .then(function(html) {
+            var players = parseTeamRoles(html);
+            teamsPayload.push({ team: team, players: players });
+            sectionState.roles.fetched++;
+            renderRoles();
+          })
+          .catch(function(e) {
+            sectionState.roles.fetched++;
+            sectionState.roles.err++;
+            teamsPayload.push({ team: team, players: [], fetch_error: e.message });
+            console.warn('[fg-sync] roles ' + team + ' failed: ' + e.message);
+            renderRoles();
+          })
+          .then(function() { return idx < TEAM_ABBRS.length - 1 ? sleep(1500) : null; });
+      });
+    });
+    return promise.then(function() {
+      sectionState.roles.uploadState = 'work';
+      renderRoles();
+      return fetch(ROLES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fetched_at: new Date().toISOString(), teams: teamsPayload }),
+      })
+      .then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); })
+      .then(function(x) {
+        if (x.ok && x.body && x.body.success) {
+          sectionState.roles.uploadState = 'ok';
+          sectionState.roles.applied = x.body.pitchers_applied;
+          sectionState.roles.known = x.body.pitchers_known;
+          sectionState.roles.missing = (x.body.teams_missing || []).length;
+        } else {
+          sectionState.roles.uploadState = 'err';
+          sectionState.roles.uploadError = (x.body && x.body.error) || ('HTTP status');
+        }
+        renderRoles();
+      })
+      .catch(function(e) {
+        sectionState.roles.uploadState = 'err';
+        sectionState.roles.uploadError = e.message;
+        renderRoles();
+      });
+    });
+  }
+
+  // Fire all three sections in parallel; roles is the long pole. Each
+  // section is fully self-contained — a failure in one does not block
+  // the others.
+  Promise.all([runProjections(), runActuals(), runRoles()]).then(finalize);
 }
 
 // Build the javascript: href. Wrap with ()() so the function fires on click,
-// strip line indentation (safe — every statement ends with ; or a block
-// terminator, no continuation-line semicolon-insertion traps), and
-// encodeURIComponent so special chars survive being pasted into an href
-// attribute (Chrome URL-decodes javascript: URLs before evaluating).
+// strip line indentation, and encodeURIComponent so special chars survive.
 var readableSrc = '(' + bookmarklet.toString() + ')()';
 var compactSrc = readableSrc.replace(/\n[ \t]+/g, '\n');
 document.getElementById('bm').href = 'javascript:' + encodeURIComponent(compactSrc);

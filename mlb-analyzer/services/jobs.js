@@ -4,8 +4,6 @@ const cron = require('node-cron');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
-const { fetchAllTeamRoles } = require('./fangraphs-roles');
-const { fuzzyLookup } = require('../utils/names');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
@@ -4842,85 +4840,20 @@ function resolveBacktestMlbId(team, lineupName) {
   return null;
 }
 
-// Pulls FanGraphs RosterResource depth charts for all 30 teams, matches
-// FG names against the freshly-pulled team_rosters (so we can join name →
-// mlb_id), writes pitcher_fg_role keyed by mlb_id, and updates the
-// team_rosters.role column for matched pitchers UNLESS a manual override
-// exists for that mlb_id (override is reapplied in runRosterJob phase 3).
+// REPLACED 2026-07-02 by the FG Daily Sync bookmarklet + /api/upload/rr-roles.
+// FanGraphs blocked server-side RosterResource fetches with HTTP 403 in
+// ~2026-06-03; the paid-member workflow now pushes RR JSON same-origin
+// from the owner's logged-in browser through the bookmarklet.
 //
-// Idempotent — safe to re-run. Standalone callable via /api/jobs/fg-roles
-// for manual triggers, but normally chained inside runRosterJob.
+// Kept as a no-op stub so:
+//   - the existing runRosterJob chain (Phase 2 call) stops throwing daily
+//   - the /api/jobs/fg-roles manual trigger returns a clear message
+//   - services/fangraphs-roles.js is still importable (TEAM_SLUGS is used
+//     by the health check)
 async function runFangraphsRolesJob() {
-  console.log('[fg-roles] Starting RosterResource fetch for all 30 teams...');
-  let fgData;
-  try {
-    fgData = await fetchAllTeamRoles();
-  } catch (e) {
-    console.error('[fg-roles] fetchAllTeamRoles threw: ' + e.message);
-    return { success: false, error: e.message };
-  }
-
-  let teamsSucceeded = 0, teamsFailed = 0, totalApplied = 0, totalKnown = 0;
-  for (const [team, data] of fgData) {
-    if (!data) { teamsFailed++; continue; }
-    teamsSucceeded++;
-
-    // Build a normalized lookup table from FG names → role for this team.
-    // Keyed on normName(player) so accents / case differences match. The
-    // fuzzyLookup helper from utils/names already handles suffix variants
-    // (Jr / Sr / III) and abbreviated first names ("L. McCullers").
-    const fgKeyMap = {};
-    const fgFull = [];
-    for (const s of data.starters) {
-      fgKeyMap[s.name_norm] = { role: s.role, role_detail: s.role_detail, name: s.name };
-      fgFull.push(s);
-    }
-    for (const r of data.relievers) {
-      fgKeyMap[r.name_norm] = { role: r.role, role_detail: r.role_detail, name: r.name };
-      fgFull.push(r);
-    }
-
-    const ourPitchers = db.prepare(
-      "SELECT player_name, mlb_id FROM team_rosters WHERE team=? AND role IN ('SP','RP')"
-    ).all(team);
-    totalKnown += ourPitchers.length;
-
-    let appliedThis = 0;
-    for (const p of ourPitchers) {
-      if (p.mlb_id == null) continue;
-      const match = fuzzyLookup(fgKeyMap, p.player_name, team);
-      if (!match) continue;
-      // CL collapses to RP for the binary team_rosters.role column;
-      // pitcher_fg_role keeps the full tag for debugging.
-      const collapsedRole = match.role === 'SP' ? 'SP' : 'RP';
-      q.upsertPitcherFgRole.run(
-        p.mlb_id, p.player_name, team, match.role, match.role_detail || null
-      );
-      // Update team_rosters.role unless an override exists for this mlb_id
-      // (overrides win and are also re-applied in runRosterJob phase 3 — the
-      // skip here is just to avoid log noise from a no-op overwrite).
-      const ovr = q.getRoleOverride.get(p.mlb_id);
-      if (!ovr) {
-        db.prepare("UPDATE team_rosters SET role=? WHERE mlb_id=?").run(collapsedRole, p.mlb_id);
-      }
-      appliedThis++;
-    }
-    totalApplied += appliedThis;
-    console.log('[fg-roles] ' + team + ': '
-      + data.starters.length + ' SP, ' + data.relievers.length + ' RP fetched, '
-      + 'role applied to ' + appliedThis + '/' + ourPitchers.length + ' known pitchers');
-  }
-
-  console.log('[fg-roles] Done — '
-    + teamsSucceeded + '/' + (teamsSucceeded + teamsFailed) + ' teams succeeded, '
-    + 'role applied to ' + totalApplied + '/' + totalKnown + ' known pitchers');
-  return {
-    success: teamsSucceeded > 0,
-    teams_succeeded: teamsSucceeded,
-    teams_failed: teamsFailed,
-    pitchers_applied: totalApplied,
-    pitchers_known: totalKnown,
-  };
+  const msg = 'replaced by FG Daily Sync bookmarklet (POST /api/upload/rr-roles)';
+  console.log('[fg-roles] SKIP: ' + msg);
+  return { success: true, skipped: true, replaced_by: 'fg-daily-sync', message: msg };
 }
 
 // Defensive trigger: refresh rosters only when the most recent team_rosters
