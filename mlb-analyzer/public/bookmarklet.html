@@ -159,39 +159,65 @@ function bookmarklet() {
       + '<span>' + (detail || '') + '</span>';
   }
   var sectionState = {
-    proj:  { done: 0, ok: 0, err: 0 },
-    act:   { done: 0, ok: 0, err: 0 },
-    roles: { fetched: 0, ok: 0, err: 0, applied: null, known: null, missing: 0, uploadState: null, uploadError: null },
+    proj:  { done: 0, ok: 0, err: 0, lastErr: null },
+    act:   { done: 0, ok: 0, err: 0, lastErr: null },
+    roles: { fetched: 0, fetchErr: 0, uploaded: 0, uploadErr: 0, applied: 0, known: 0, lastErr: null, phase: 'fetch' },
   };
+  function errSuffix(lastErr) {
+    return lastErr ? ' — last err: ' + lastErr : '';
+  }
   function renderProj() {
     var s = sectionState.proj;
     var st = s.done < PROJ_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
     setSection('proj', sectionLine('projections',
-      st, s.done + '/' + PROJ_SPECS.length + ' fetched'
-        + (s.err ? ' (' + s.err + ' err)' : '')));
+      st, s.done + '/' + PROJ_SPECS.length + ' uploaded'
+        + (s.err ? ' (' + s.err + ' err' + errSuffix(s.lastErr) + ')' : '')));
   }
   function renderAct() {
     var s = sectionState.act;
     var st = s.done < ACT_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
     setSection('act', sectionLine('actuals',
-      st, s.done + '/' + ACT_SPECS.length + ' fetched'
-        + (s.err ? ' (' + s.err + ' err)' : '')));
+      st, s.done + '/' + ACT_SPECS.length + ' uploaded'
+        + (s.err ? ' (' + s.err + ' err' + errSuffix(s.lastErr) + ')' : '')));
   }
   function renderRoles() {
     var s = sectionState.roles;
-    var st = 'idle';
-    var detail = 'waiting';
-    if (s.uploadState === 'ok') { st = 'ok'; detail = s.applied + '/' + s.known + ' pitchers applied'; }
-    else if (s.uploadState === 'err') { st = 'err'; detail = 'upload failed: ' + s.uploadError; }
-    else if (s.fetched < TEAM_ABBRS.length) {
-      st = 'work'; detail = s.fetched + '/' + TEAM_ABBRS.length + ' teams'
-        + (s.err ? ' (' + s.err + ' err)' : '');
-    } else if (s.uploadState === 'work') {
-      st = 'work'; detail = 'uploading ' + s.ok + '/' + TEAM_ABBRS.length + ' teams to app…';
+    var total = TEAM_ABBRS.length;
+    var st, detail;
+    if (s.phase === 'fetch') {
+      st = 'work';
+      detail = 'fetching ' + s.fetched + '/' + total
+        + (s.fetchErr ? ' (' + s.fetchErr + ' err' + errSuffix(s.lastErr) + ')' : '');
+    } else if (s.phase === 'upload') {
+      st = 'work';
+      detail = 'uploading ' + s.uploaded + '/' + total
+        + (s.uploadErr ? ' (' + s.uploadErr + ' err' + errSuffix(s.lastErr) + ')' : '');
+    } else { // 'done'
+      var totalErr = s.fetchErr + s.uploadErr;
+      st = totalErr === 0 ? 'ok' : (s.uploaded > 0 ? 'ok' : 'err');
+      detail = s.applied + ' pitchers applied across ' + s.uploaded + '/' + total + ' teams'
+        + (totalErr ? ' (' + totalErr + ' err' + errSuffix(s.lastErr) + ')' : '');
     }
     setSection('roles', sectionLine('roles', st, detail));
   }
   renderProj(); renderAct(); renderRoles();
+
+  // Extract a compact HTTP error message from a fetch response — pulls
+  // body.error if the server sent JSON, else the status text, so the
+  // overlay shows *why* a POST failed instead of a bare 'err'.
+  function extractHttpError(status, body) {
+    if (body && typeof body === 'object' && body.error) return 'HTTP ' + status + ': ' + String(body.error).slice(0, 120);
+    if (typeof body === 'string' && body) return 'HTTP ' + status + ': ' + body.slice(0, 120);
+    return 'HTTP ' + status;
+  }
+  function safeReadBody(response) {
+    // Try JSON first (our app endpoints return JSON), fall back to text
+    // on parse failure. Never throws — always returns { body, isJson }.
+    return response.text().then(function(t) {
+      try { return { body: JSON.parse(t), isJson: true }; }
+      catch (e) { return { body: t, isJson: false }; }
+    });
+  }
 
   function finalize() {
     if (overlay.querySelector('button')) return;
@@ -203,6 +229,15 @@ function bookmarklet() {
   }
 
   // ── Projections ─────────────────────────────────────────────────────
+  // Each spec: FG same-origin GET → app cross-origin POST. Both stages
+  // capture HTTP status + body.error onto sectionState.proj.lastErr so
+  // the overlay reveals *why* a section is red (this is why the last
+  // live run couldn't be diagnosed from the overlay alone).
+  function recordProjErr(spec, msg) {
+    sectionState.proj.err++;
+    sectionState.proj.lastErr = spec.key + ' — ' + msg;
+    console.warn('[fg-sync] proj ' + spec.key + ' failed: ' + msg);
+  }
   function runProjections() {
     return Promise.all(PROJ_SPECS.map(function(spec) {
       var url = '/api/projections?type=' + encodeURIComponent(spec.type)
@@ -210,32 +245,39 @@ function bookmarklet() {
         + '&pos=all&team=0&players=0&lg=all&download=1';
       return fetch(url, { credentials: 'include' })
         .then(function(r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
+          if (!r.ok) throw new Error('FG fetch HTTP ' + r.status);
           return r.json();
         })
         .then(function(rows) {
-          if (!Array.isArray(rows) || !rows.length) throw new Error('empty response');
+          if (!Array.isArray(rows) || !rows.length) throw new Error('FG empty response');
           return fetch(FG_JSON_URL + spec.key, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rows: rows }),
-          }).then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); });
+          }).then(function(r) {
+            return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
+          });
         })
         .then(function(x) {
           sectionState.proj.done++;
           if (x.ok && x.body && x.body.success) sectionState.proj.ok++;
-          else { sectionState.proj.err++; console.warn('[fg-sync] proj ' + spec.key + ' upload failed', x.body); }
+          else recordProjErr(spec, extractHttpError(x.status, x.body));
           renderProj();
         })
         .catch(function(e) {
-          sectionState.proj.done++; sectionState.proj.err++;
-          console.warn('[fg-sync] proj ' + spec.key + ' failed: ' + e.message);
+          sectionState.proj.done++;
+          recordProjErr(spec, e.message);
           renderProj();
         });
     }));
   }
 
   // ── Actuals ─────────────────────────────────────────────────────────
+  function recordActErr(spec, msg) {
+    sectionState.act.err++;
+    sectionState.act.lastErr = spec.key + ' — ' + msg;
+    console.warn('[fg-sync] act ' + spec.key + ' failed: ' + msg);
+  }
   function runActuals() {
     return Promise.all(ACT_SPECS.map(function(spec) {
       return fetch('/api/leaders/splits/splits-leaders', {
@@ -243,24 +285,26 @@ function bookmarklet() {
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify(actualsBody(spec.split, spec.pos)),
       })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(r) { if (!r.ok) throw new Error('FG fetch HTTP ' + r.status); return r.json(); })
       .then(function(j) {
-        if (!j || !Array.isArray(j.data) || !j.data.length) throw new Error('empty data array');
+        if (!j || !Array.isArray(j.data) || !j.data.length) throw new Error('FG empty data array');
         return fetch(FG_JSON_URL + spec.key, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ rows: j.data }),
-        }).then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); });
+        }).then(function(r) {
+          return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
+        });
       })
       .then(function(x) {
         sectionState.act.done++;
         if (x.ok && x.body && x.body.success) sectionState.act.ok++;
-        else { sectionState.act.err++; console.warn('[fg-sync] act ' + spec.key + ' upload failed', x.body); }
+        else recordActErr(spec, extractHttpError(x.status, x.body));
         renderAct();
       })
       .catch(function(e) {
-        sectionState.act.done++; sectionState.act.err++;
-        console.warn('[fg-sync] act ' + spec.key + ' failed: ' + e.message);
+        sectionState.act.done++;
+        recordActErr(spec, e.message);
         renderAct();
       });
     }));
@@ -310,56 +354,86 @@ function bookmarklet() {
 
   function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
+  // Roles run: for each team, fetch FG → immediately POST that team's
+  // players to the app. Per-team chunking means:
+  //   - real progress ("uploading 17/30" instead of one big upload at
+  //     the end)
+  //   - per-team error isolation (one team's fetch or upload failing
+  //     doesn't lose the other 29)
+  //   - each POST body is small (a single team's ~15-25 pitchers,
+  //     well under any body-size limit)
+  // The fetched_at ISO on each POST is the moment THAT team was pulled
+  // — the server timestamps rows at upsert time either way, but this
+  // is honest about the fact that team pulls span ~1 minute of clock.
   function runRoles() {
-    var teamsPayload = [];
-    var promise = Promise.resolve();
+    var teamsFetched = [];  // { team, players } after FG fetch + parse
+    // Phase 1 — sequential fetches with a 1.5s pause between each.
+    var fetchChain = Promise.resolve();
     TEAM_ABBRS.forEach(function(team, idx) {
-      promise = promise.then(function() {
+      fetchChain = fetchChain.then(function() {
         var url = 'https://www.fangraphs.com/roster-resource/depth-charts/' + TEAM_SLUGS[team];
         return fetch(url, { credentials: 'include' })
-          .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+          .then(function(r) { if (!r.ok) throw new Error('FG HTTP ' + r.status); return r.text(); })
           .then(function(html) {
             var players = parseTeamRoles(html);
-            teamsPayload.push({ team: team, players: players });
+            teamsFetched.push({ team: team, players: players });
             sectionState.roles.fetched++;
             renderRoles();
           })
           .catch(function(e) {
             sectionState.roles.fetched++;
-            sectionState.roles.err++;
-            teamsPayload.push({ team: team, players: [], fetch_error: e.message });
-            console.warn('[fg-sync] roles ' + team + ' failed: ' + e.message);
+            sectionState.roles.fetchErr++;
+            sectionState.roles.lastErr = team + ' fetch — ' + e.message;
+            console.warn('[fg-sync] roles ' + team + ' fetch failed: ' + e.message);
             renderRoles();
           })
           .then(function() { return idx < TEAM_ABBRS.length - 1 ? sleep(1500) : null; });
       });
     });
-    return promise.then(function() {
-      sectionState.roles.uploadState = 'work';
+    // Phase 2 — sequential per-team POSTs to the app. One team per POST
+    // means small payloads AND real progress ("uploading N/30 teams").
+    return fetchChain.then(function() {
+      sectionState.roles.phase = 'upload';
       renderRoles();
-      return fetch(ROLES_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fetched_at: new Date().toISOString(), teams: teamsPayload }),
-      })
-      .then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); })
-      .then(function(x) {
-        if (x.ok && x.body && x.body.success) {
-          sectionState.roles.uploadState = 'ok';
-          sectionState.roles.applied = x.body.pitchers_applied;
-          sectionState.roles.known = x.body.pitchers_known;
-          sectionState.roles.missing = (x.body.teams_missing || []).length;
-        } else {
-          sectionState.roles.uploadState = 'err';
-          sectionState.roles.uploadError = (x.body && x.body.error) || ('HTTP status');
-        }
-        renderRoles();
-      })
-      .catch(function(e) {
-        sectionState.roles.uploadState = 'err';
-        sectionState.roles.uploadError = e.message;
-        renderRoles();
+      var uploadChain = Promise.resolve();
+      teamsFetched.forEach(function(t) {
+        uploadChain = uploadChain.then(function() {
+          return fetch(ROLES_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fetched_at: new Date().toISOString(),
+              teams: [{ team: t.team, players: t.players }],
+            }),
+          })
+          .then(function(r) {
+            return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
+          })
+          .then(function(x) {
+            sectionState.roles.uploaded++;
+            if (x.ok && x.body && x.body.success) {
+              sectionState.roles.applied += (x.body.pitchers_applied || 0);
+              sectionState.roles.known   += (x.body.pitchers_known   || 0);
+            } else {
+              sectionState.roles.uploadErr++;
+              sectionState.roles.lastErr = t.team + ' upload — ' + extractHttpError(x.status, x.body);
+              console.warn('[fg-sync] roles ' + t.team + ' upload failed: ' + sectionState.roles.lastErr);
+            }
+            renderRoles();
+          })
+          .catch(function(e) {
+            sectionState.roles.uploaded++;
+            sectionState.roles.uploadErr++;
+            sectionState.roles.lastErr = t.team + ' upload — ' + e.message;
+            console.warn('[fg-sync] roles ' + t.team + ' upload threw: ' + e.message);
+            renderRoles();
+          });
+        });
       });
+      return uploadChain;
+    }).then(function() {
+      sectionState.roles.phase = 'done';
+      renderRoles();
     });
   }
 
