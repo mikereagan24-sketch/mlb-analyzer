@@ -63,8 +63,8 @@
 <h2>What it does</h2>
 <ul>
   <li><strong>Projections</strong>: fetches the four Steamer RoS split JSONs (bat vs L/R, pit vs L/R) from FanGraphs' internal <code>/api/projections</code> endpoint, converts server-side to the CSV shape the manual upload uses, ingests into the same wOBA table.</li>
-  <li><strong>Actuals</strong>: fetches the four two-year split leaderboards (bat vs L/R, pit vs L/R) from FanGraphs' internal <code>/api/leaders/splits/splits-leaders</code> endpoint, ingests the same way.</li>
-  <li><strong>Roles</strong>: fetches all 30 RosterResource depth-chart pages sequentially (1.5s between each, human-scale), parses the SP1–SP5 / CL / SU# / MID / IL rows out of the SSR HTML, POSTs a single JSON payload to <code>/api/upload/rr-roles</code>. Server crosswalks each FG player to <code>mlb_id</code> via name + team lookup against <code>team_rosters</code> and upserts <code>pitcher_fg_role</code> with <code>source='rr_sync'</code>.</li>
+  <li><strong>Actuals</strong>: opens four hidden iframes on the <code>/leaders/splits-leaderboards</code> page (bat vs L/R, pit vs L/R); each renders a client-side <code>&lt;a download&gt;</code> data: URL CSV that the bookmarklet decodes and POSTs as multipart to <code>/api/upload/:key</code>. Same proven path the pre-Daily-Sync FG Actuals bookmarklet used.</li>
+  <li><strong>Roles</strong>: fetches all 30 RosterResource depth-chart pages sequentially (1.5s between each, human-scale), parses the SP1–SP5 / CL / SU# / MID / IL rows out of the SSR HTML, POSTs one team per call to <code>/api/upload/rr-roles</code> (30 sequential POSTs with real "uploading N/30" progress + per-team error isolation). Server crosswalks each FG player to <code>mlb_id</code> via name + team lookup against <code>team_rosters</code> and upserts <code>pitcher_fg_role</code> with <code>source='rr_sync'</code>.</li>
 </ul>
 
 <h2>Caveats</h2>
@@ -90,8 +90,9 @@ function bookmarklet() {
     return;
   }
   var APP = 'https://mlb-analyzer.onrender.com';
-  var FG_JSON_URL = APP + '/api/upload/fg-json/';
-  var ROLES_URL = APP + '/api/upload/rr-roles';
+  var FG_JSON_URL = APP + '/api/upload/fg-json/';        // projections
+  var UPLOAD_CSV_URL = APP + '/api/upload/';              // actuals (multipart CSV)
+  var ROLES_URL = APP + '/api/upload/rr-roles';           // roles JSON
 
   // ── FG endpoint specs ────────────────────────────────────────────────
   var PROJ_SPECS = [
@@ -100,31 +101,43 @@ function bookmarklet() {
     { key: 'pit-proj-lhb', type: 'rsteamer_vl_p_1', stats: 'pit' },
     { key: 'pit-proj-rhb', type: 'rsteamer_vr_p_1', stats: 'pit' },
   ];
-  // Actuals payload — see services/fangraphs.js fetchActualSplit for the
-  // canonical shape. strType is STRING '2' for pitchers, NUMBER 1 for
-  // batters (verified against FG's own frontend — swapping breaks the
-  // pitcher response). strAutoPt 'false' matches what the browser
-  // bookmarklet historically sent.
-  function actualsBody(splitCode, position) {
-    var end = new Date();
-    var start = new Date(end); start.setFullYear(end.getFullYear() - 2);
-    var iso = function(d) { return d.toISOString().slice(0, 10); };
-    return {
-      strSplitArr: [splitCode], strGroup: 'season', strPosition: position,
-      strType: position === 'P' ? '2' : 1,
-      strStartDate: iso(start), strEndDate: iso(end),
-      strSplitTeams: false, dctFilters: [], strStatType: 'player',
-      strAutoPt: 'false', arrPlayerId: [], strPlayerId: 'all', strSplitArrPitch: [],
-      arrWxTemperature: [], arrWxPressure: [], arrWxAirDensity: [],
-      arrWxElevation: [], arrWxWindSpeed: [],
-    };
-  }
+  // Actuals — iframe path, matching the pre-Daily-Sync bookmarklet that
+  // worked reliably in production. The direct JSON API POST
+  // (/api/leaders/splits/splits-leaders) that the first Daily Sync draft
+  // used returned unpredictable / empty responses from a browser session
+  // depending on which FG page the user was on when the bookmarklet
+  // fired — the server-side path in services/fangraphs.js works because
+  // it sends explicit Referer/Origin/UA that a browser can't override.
+  //
+  // The iframe path sidesteps that entirely: FG's own frontend fetches
+  // the API, renders a client-side <a download> data:URL CSV, we decode
+  // it and POST multipart to the existing /api/upload/:key route (the
+  // same route the manual drop-zone uses). Slower (~5-10s per split due
+  // to iframe render), but proven.
   var ACT_SPECS = [
-    { key: 'bat-act-lhp', split: 1, pos: 'B' },
-    { key: 'bat-act-rhp', split: 2, pos: 'B' },
-    { key: 'pit-act-lhb', split: 5, pos: 'P' },
-    { key: 'pit-act-rhb', split: 6, pos: 'P' },
+    { key: 'pit-act-rhb', split: 6, pos: 'P', sg: 1, label: 'Pit vs RHB' },
+    { key: 'pit-act-lhb', split: 5, pos: 'P', sg: 1, label: 'Pit vs LHB' },
+    { key: 'bat-act-rhp', split: 2, pos: 'B', sg: 2, label: 'Bat vs RHP' },
+    { key: 'bat-act-lhp', split: 1, pos: 'B', sg: 2, label: 'Bat vs LHP' },
   ];
+  function fmtDate(d) {
+    return d.getFullYear() + '-'
+      + String(d.getMonth() + 1).padStart(2, '0') + '-'
+      + String(d.getDate()).padStart(2, '0');
+  }
+  function buildActualsIframeUrl(spec) {
+    var end = new Date(); end.setDate(end.getDate() - 1);
+    var start = new Date(end); start.setFullYear(start.getFullYear() - 2); start.setDate(start.getDate() + 1);
+    return 'https://www.fangraphs.com/leaders/splits-leaderboards'
+      + '?splitArr=' + spec.split
+      + '&autoPt=true&splitTeams=false&statType=player'
+      + '&statgroup=' + spec.sg
+      + '&startDate=' + fmtDate(start) + '&endDate=' + fmtDate(end)
+      + '&position=' + spec.pos
+      + '&sort=22,1&splitArrPitch=&players=&filter='
+      + '&groupBy=career'
+      + '&wxTemperature=&wxPressure=&wxAirDensity=&wxElevation=&wxWindSpeed=';
+  }
   // Team abbr → RosterResource URL slug. MUST match the health check's
   // FG_TEAM_SLUGS keys (services/fangraphs-roles.js:TEAM_SLUGS) or the
   // "missing team" list on the server will misreport coverage.
@@ -141,7 +154,7 @@ function bookmarklet() {
   // ── Overlay ─────────────────────────────────────────────────────────
   var overlay = document.createElement('div');
   overlay.setAttribute('data-mlb-analyzer-overlay', '1');
-  overlay.style.cssText = 'position:fixed;top:16px;right:16px;background:#1e1e2e;color:#fff;padding:14px 16px;border-radius:8px;font:13px/1.45 -apple-system,system-ui,sans-serif;z-index:2147483647;box-shadow:0 4px 22px rgba(0,0,0,0.45);min-width:320px;max-width:400px';
+  overlay.style.cssText = 'position:fixed;top:16px;right:16px;background:#1e1e2e;color:#fff;padding:14px 16px;border-radius:8px;font:13px/1.45 -apple-system,system-ui,sans-serif;z-index:2147483647;box-shadow:0 4px 22px rgba(0,0,0,0.45);min-width:340px;max-width:460px;word-break:break-word';
   overlay.innerHTML = '<div style="font-weight:600;margin-bottom:8px">MLB Analyzer — FG Daily Sync</div>'
     + '<div id="mlb-an-sec-proj" style="margin:4px 0"></div>'
     + '<div id="mlb-an-sec-act"  style="margin:4px 0"></div>'
@@ -151,34 +164,42 @@ function bookmarklet() {
     var el = overlay.querySelector('#mlb-an-sec-' + id);
     if (el) el.innerHTML = html;
   }
-  function sectionLine(label, state, detail) {
+  // Overlay section markup: summary line + a second word-wrap line for
+  // the last error message. Previous version inlined lastErr as a suffix
+  // that got clipped by the overlay's max-width — this run's actuals
+  // failure went undiagnosed because "4 err — last err: bat-act-lhp — HTTP
+  // 400: ..." fell off the right edge with no wrap. Separate line +
+  // break-word makes it visible.
+  function sectionLine(label, state, detail, errLine) {
     var dot = state === 'ok' ? '✓' : state === 'err' ? '✗' : state === 'work' ? '•' : '·';
     var color = state === 'ok' ? '#4ade80' : state === 'err' ? '#f87171' : state === 'work' ? '#60a5fa' : '#9ca3af';
-    return '<span style="display:inline-block;width:14px;color:' + color + '">' + dot + '</span>'
+    var summary = '<div>'
+      + '<span style="display:inline-block;width:14px;color:' + color + '">' + dot + '</span>'
       + '<span style="color:#9ca3af">' + label + '</span> '
-      + '<span>' + (detail || '') + '</span>';
+      + '<span>' + (detail || '') + '</span>'
+      + '</div>';
+    var err = errLine
+      ? '<div style="margin-left:14px;color:#fca5a5;font-size:11px;word-break:break-word;line-height:1.35" title="' + esc(errLine) + '">' + esc(errLine) + '</div>'
+      : '';
+    return summary + err;
   }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   var sectionState = {
     proj:  { done: 0, ok: 0, err: 0, lastErr: null },
     act:   { done: 0, ok: 0, err: 0, lastErr: null },
     roles: { fetched: 0, fetchErr: 0, uploaded: 0, uploadErr: 0, applied: 0, known: 0, lastErr: null, phase: 'fetch' },
   };
-  function errSuffix(lastErr) {
-    return lastErr ? ' — last err: ' + lastErr : '';
-  }
   function renderProj() {
     var s = sectionState.proj;
     var st = s.done < PROJ_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
-    setSection('proj', sectionLine('projections',
-      st, s.done + '/' + PROJ_SPECS.length + ' uploaded'
-        + (s.err ? ' (' + s.err + ' err' + errSuffix(s.lastErr) + ')' : '')));
+    var detail = s.done + '/' + PROJ_SPECS.length + ' uploaded' + (s.err ? ' (' + s.err + ' err)' : '');
+    setSection('proj', sectionLine('projections', st, detail, s.lastErr));
   }
   function renderAct() {
     var s = sectionState.act;
     var st = s.done < ACT_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
-    setSection('act', sectionLine('actuals',
-      st, s.done + '/' + ACT_SPECS.length + ' uploaded'
-        + (s.err ? ' (' + s.err + ' err' + errSuffix(s.lastErr) + ')' : '')));
+    var detail = s.done + '/' + ACT_SPECS.length + ' uploaded' + (s.err ? ' (' + s.err + ' err)' : '');
+    setSection('act', sectionLine('actuals', st, detail, s.lastErr));
   }
   function renderRoles() {
     var s = sectionState.roles;
@@ -186,19 +207,17 @@ function bookmarklet() {
     var st, detail;
     if (s.phase === 'fetch') {
       st = 'work';
-      detail = 'fetching ' + s.fetched + '/' + total
-        + (s.fetchErr ? ' (' + s.fetchErr + ' err' + errSuffix(s.lastErr) + ')' : '');
+      detail = 'fetching ' + s.fetched + '/' + total + (s.fetchErr ? ' (' + s.fetchErr + ' err)' : '');
     } else if (s.phase === 'upload') {
       st = 'work';
-      detail = 'uploading ' + s.uploaded + '/' + total
-        + (s.uploadErr ? ' (' + s.uploadErr + ' err' + errSuffix(s.lastErr) + ')' : '');
+      detail = 'uploading ' + s.uploaded + '/' + total + (s.uploadErr ? ' (' + s.uploadErr + ' err)' : '');
     } else { // 'done'
       var totalErr = s.fetchErr + s.uploadErr;
       st = totalErr === 0 ? 'ok' : (s.uploaded > 0 ? 'ok' : 'err');
       detail = s.applied + ' pitchers applied across ' + s.uploaded + '/' + total + ' teams'
-        + (totalErr ? ' (' + totalErr + ' err' + errSuffix(s.lastErr) + ')' : '');
+        + (totalErr ? ' (' + totalErr + ' err)' : '');
     }
-    setSection('roles', sectionLine('roles', st, detail));
+    setSection('roles', sectionLine('roles', st, detail, s.lastErr));
   }
   renderProj(); renderAct(); renderRoles();
 
@@ -272,42 +291,87 @@ function bookmarklet() {
     }));
   }
 
-  // ── Actuals ─────────────────────────────────────────────────────────
+  // ── Actuals (iframe path — see ACT_SPECS comment for why) ───────────
   function recordActErr(spec, msg) {
     sectionState.act.err++;
     sectionState.act.lastErr = spec.key + ' — ' + msg;
     console.warn('[fg-sync] act ' + spec.key + ' failed: ' + msg);
   }
+  function finishAct(spec, ok, msg) {
+    sectionState.act.done++;
+    if (ok) { sectionState.act.ok++; console.log('[fg-sync] act ' + spec.key + ' ok: ' + msg); }
+    else recordActErr(spec, msg);
+    renderAct();
+  }
+  function runOneActual(spec) {
+    return new Promise(function(resolve) {
+      var iframe = document.createElement('iframe');
+      iframe.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:1280px;height:900px;border:0';
+      iframe.src = buildActualsIframeUrl(spec);
+      document.body.appendChild(iframe);
+      var timeout = setTimeout(function() {
+        finishAct(spec, false, 'timeout — no CSV export link within 45s (FG page may have blocked the iframe or failed to render)');
+        try { iframe.parentNode && iframe.parentNode.removeChild(iframe); } catch (e) {}
+        resolve();
+      }, 45000);
+      var poll = setInterval(function() {
+        var doc;
+        try { doc = iframe.contentDocument; } catch (e) { return; }
+        if (!doc || !doc.body) return;
+        var anchors = doc.querySelectorAll('a[download][href^="data:"]');
+        var link = null;
+        for (var j = 0; j < anchors.length; j++) {
+          var nm = anchors[j].getAttribute('download') || '';
+          if (/\.csv$/i.test(nm)) { link = anchors[j]; break; }
+        }
+        if (!link) return;
+        clearInterval(poll);
+        clearTimeout(timeout);
+        var href = link.getAttribute('href') || '';
+        var m = href.match(/^data:([^,]*),(.*)$/);
+        if (!m) {
+          finishAct(spec, false, 'could not parse data: URL from FG iframe');
+          try { iframe.parentNode && iframe.parentNode.removeChild(iframe); } catch (e) {}
+          resolve();
+          return;
+        }
+        var meta = m[1], payload = m[2], csv;
+        try {
+          csv = /;base64/i.test(meta) ? atob(payload) : decodeURIComponent(payload);
+        } catch (e) {
+          finishAct(spec, false, 'CSV decode failed: ' + e.message);
+          try { iframe.parentNode && iframe.parentNode.removeChild(iframe); } catch (e2) {}
+          resolve();
+          return;
+        }
+        var fd = new FormData();
+        fd.append('file', new Blob([csv], { type: 'text/csv' }), spec.key + '.csv');
+        fetch(UPLOAD_CSV_URL + spec.key, { method: 'POST', body: fd })
+          .then(function(r) {
+            return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
+          })
+          .then(function(x) {
+            if (x.ok && x.body && x.body.success) {
+              finishAct(spec, true, x.body.rows + ' rows uploaded');
+            } else {
+              finishAct(spec, false, extractHttpError(x.status, x.body));
+            }
+          })
+          .catch(function(e) { finishAct(spec, false, 'app POST — ' + e.message); })
+          .then(function() {
+            try { iframe.parentNode && iframe.parentNode.removeChild(iframe); } catch (e) {}
+            resolve();
+          });
+      }, 500);
+    });
+  }
   function runActuals() {
-    return Promise.all(ACT_SPECS.map(function(spec) {
-      return fetch('/api/leaders/splits/splits-leaders', {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        body: JSON.stringify(actualsBody(spec.split, spec.pos)),
-      })
-      .then(function(r) { if (!r.ok) throw new Error('FG fetch HTTP ' + r.status); return r.json(); })
-      .then(function(j) {
-        if (!j || !Array.isArray(j.data) || !j.data.length) throw new Error('FG empty data array');
-        return fetch(FG_JSON_URL + spec.key, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rows: j.data }),
-        }).then(function(r) {
-          return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
-        });
-      })
-      .then(function(x) {
-        sectionState.act.done++;
-        if (x.ok && x.body && x.body.success) sectionState.act.ok++;
-        else recordActErr(spec, extractHttpError(x.status, x.body));
-        renderAct();
-      })
-      .catch(function(e) {
-        sectionState.act.done++;
-        recordActErr(spec, e.message);
-        renderAct();
-      });
-    }));
+    // Sequential — 4 concurrent iframes on FG spikes CPU + occasionally
+    // triggers rate limits. One at a time still finishes in ~30-40s and
+    // is well within human patience for a once-daily job.
+    return ACT_SPECS.reduce(function(p, spec) {
+      return p.then(function() { return runOneActual(spec); });
+    }, Promise.resolve());
   }
 
   // ── Roles (RosterResource) ──────────────────────────────────────────
