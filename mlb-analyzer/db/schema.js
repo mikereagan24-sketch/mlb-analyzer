@@ -2037,9 +2037,12 @@ q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,positio
 q.getPositionPlayers = db.prepare("SELECT player_name, mlb_id, position FROM team_rosters WHERE team=? AND role='POS'");
 
 // pitcher_fg_role + pitcher_role_override prepared statements.
+// source is now an explicit bind param (was hardcoded 'fangraphs' when the
+// dead server-side scraper was the only writer). The FG Daily Sync
+// bookmarklet passes 'rr_sync' so downstream readers can tell the two apart.
 q.upsertPitcherFgRole = db.prepare(
   "INSERT INTO pitcher_fg_role (mlb_id, player_name, team, role, role_detail, role_at, source) " +
-  "VALUES (?, ?, ?, ?, ?, datetime('now'), 'fangraphs') " +
+  "VALUES (?, ?, ?, ?, ?, datetime('now'), ?) " +
   "ON CONFLICT(mlb_id) DO UPDATE SET " +
   "  player_name=excluded.player_name, team=excluded.team, role=excluded.role, " +
   "  role_detail=excluded.role_detail, role_at=excluded.role_at, source=excluded.source"

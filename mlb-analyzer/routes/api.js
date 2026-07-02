@@ -241,6 +241,142 @@ function ingestWobaCSV(key, csvText, filename) {
   return rows.length;
 }
 
+// FG Daily Sync — wOBA slot (projections + actuals) accepting raw FG JSON.
+// The bookmarklet fetches https://www.fangraphs.com/api/projections and
+// https://www.fangraphs.com/api/leaders/splits/splits-leaders same-origin
+// (member session cookie carried automatically), POSTs the raw response
+// array here. Server converts to the same CSV shape the manual upload
+// takes, then funnels through ingestWobaCSV so the parse + snapshot +
+// upload_log logic stays single-sourced.
+//
+// key: one of the 8 slots bat-proj-lhp / bat-proj-rhp / pit-proj-lhb /
+// pit-proj-rhb / bat-act-lhp / bat-act-rhp / pit-act-lhb / pit-act-rhb.
+//
+// REGISTERED BEFORE /upload/:key so the more-specific routes match first —
+// otherwise Express would treat 'fg-json' / 'rr-roles' as :key values and
+// run multer on a JSON body (returning "No file uploaded").
+router.post('/upload/fg-json/:key', express.json({ limit: '10mb' }), (req, res) => {
+  try {
+    const key = req.params.key;
+    const validKeys = ['bat-proj-lhp','bat-proj-rhp','pit-proj-lhb','pit-proj-rhb',
+                       'bat-act-lhp','bat-act-rhp','pit-act-lhb','pit-act-rhb'];
+    if (!validKeys.includes(key)) return res.status(400).json({ error: 'invalid key: ' + key });
+    const body = req.body || {};
+    const rowsIn = Array.isArray(body.rows) ? body.rows : (Array.isArray(body.data) ? body.data : null);
+    if (!rowsIn) return res.status(400).json({ error: 'expected { rows: [] } or { data: [] } in JSON body' });
+    if (!rowsIn.length) return res.status(400).json({ error: 'empty rows array' });
+    const isProj = key.includes('-proj-');
+    const isPit  = key.startsWith('pit');
+    const { jsonToProjectionCsv, jsonToCsv } = require('../services/fangraphs');
+    const csv = isProj
+      ? jsonToProjectionCsv(rowsIn, isPit ? 'pit' : 'bat')
+      : jsonToCsv(rowsIn);
+    const inserted = ingestWobaCSV(key, csv, key + '.csv');
+    res.json({ success: true, key, rows: inserted, source_rows: rowsIn.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// FG Daily Sync — RosterResource roles slot.
+// Bookmarklet fetches per-team depth-chart pages same-origin (30 fetches,
+// small delay between each) and POSTs a JSON payload. Body shape:
+//   {
+//     fetched_at: ISO string,
+//     teams: [
+//       { team: 'TOR', players: [
+//           { name, role, role_detail, fg_player_id?, thr? }, ...
+//         ] }, ...
+//     ]
+//   }
+// Server matches each player by (name+team) → team_rosters.mlb_id via the
+// same fuzzyLookup path the dead server-side scraper used, then upserts
+// to pitcher_fg_role with source='rr_sync'. team_rosters.role is updated
+// on match (respecting pitcher_role_override, same as the dead scraper).
+//
+// Per-team failures don't block other teams; returns per-team + total
+// counts so the bookmarklet's overlay can render honest coverage.
+router.post('/upload/rr-roles', express.json({ limit: '2mb' }), (req, res) => {
+  try {
+    const body = req.body || {};
+    const teams = Array.isArray(body.teams) ? body.teams : null;
+    if (!teams || !teams.length) return res.status(400).json({ error: 'expected non-empty teams array' });
+    const { fuzzyLookup } = require('../utils/names');
+    const perTeam = [];
+    let totalApplied = 0, totalKnown = 0, teamsWithData = 0;
+    const listedTeams = new Set();
+    for (const teamRow of teams) {
+      const team = teamRow && teamRow.team ? String(teamRow.team).trim().toUpperCase() : null;
+      const players = teamRow && Array.isArray(teamRow.players) ? teamRow.players : [];
+      if (!team) {
+        perTeam.push({ team: null, error: 'no team abbr' });
+        continue;
+      }
+      listedTeams.add(team);
+      if (!players.length) {
+        perTeam.push({ team, players_in: 0, applied: 0, known: 0, note: 'no players in payload' });
+        continue;
+      }
+      teamsWithData++;
+      // Build normalized name → { role, role_detail, name } map.
+      // Roles come in as SP/RP/CL/SU#/MID/etc. — normalize to family
+      // (SP or RP) for the team_rosters.role column, keep the detail
+      // string for pitcher_fg_role.role_detail. IL-15/IL-60 rows are
+      // included so injured pitchers still show up in the table (role
+      // family follows the list type; role_detail carries 'IL-15' etc).
+      const keyMap = {};
+      for (const p of players) {
+        if (!p || !p.name) continue;
+        const detail = String(p.role_detail || p.role || '').trim();
+        // role_family: prefer explicit p.role if it's SP/RP/CL; else
+        // infer from detail ('SP*' → SP; else RP/CL/IL → RP family).
+        let roleFamily = String(p.role || '').trim().toUpperCase();
+        if (!['SP','RP','CL'].includes(roleFamily)) {
+          roleFamily = /^SP/i.test(detail) ? 'SP' : 'RP';
+        }
+        const tag = roleFamily === 'CL' ? 'CL' : roleFamily;
+        keyMap[normName(p.name)] = { role: tag, role_detail: detail || null, name: p.name };
+      }
+      const ourPitchers = db.prepare(
+        "SELECT player_name, mlb_id FROM team_rosters WHERE team=? AND role IN ('SP','RP')"
+      ).all(team);
+      totalKnown += ourPitchers.length;
+      let appliedThis = 0, unmatched = 0;
+      for (const p of ourPitchers) {
+        if (p.mlb_id == null) continue;
+        const match = fuzzyLookup(keyMap, p.player_name, team);
+        if (!match) { unmatched++; continue; }
+        const collapsedRole = match.role === 'SP' ? 'SP' : 'RP';
+        q.upsertPitcherFgRole.run(
+          p.mlb_id, p.player_name, team, match.role, match.role_detail || null, 'rr_sync'
+        );
+        const ovr = q.getRoleOverride.get(p.mlb_id);
+        if (!ovr) {
+          db.prepare("UPDATE team_rosters SET role=? WHERE mlb_id=?").run(collapsedRole, p.mlb_id);
+        }
+        appliedThis++;
+      }
+      totalApplied += appliedThis;
+      perTeam.push({ team, players_in: players.length, applied: appliedThis, known: ourPitchers.length, unmatched });
+    }
+    q.logUpload.run('rr-roles', 'fg-daily-sync', totalApplied);
+    res.json({
+      success: true,
+      teams_reported: teamsWithData,
+      teams_missing: Object.keys(FG_TEAM_SLUGS).filter(t => !listedTeams.has(t)),
+      pitchers_applied: totalApplied,
+      pitchers_known: totalKnown,
+      fetched_at: body.fetched_at || null,
+      per_team: perTeam,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual CSV upload (Data Import UI drop-zone). Kept as the fallback path
+// even after FG Daily Sync — the owner can still drop a CSV if the
+// bookmarklet ever fails on a given day.
 router.post('/upload/:key?', upload.single('file'), (req, res) => {
 // Prevent browser caching on all API responses
 router.use((req, res, next) => {
@@ -5903,74 +6039,80 @@ router.get('/health/:date', (req, res) => {
     }
 
     // ---- check 9: fg_roles_fresh ----
-    // FanGraphs RosterResource overlay drives SP/RP classification (PR
-    // adding services/fangraphs-roles.js). pass = all 30 teams have a
-    // pitcher_fg_role row updated within 48h; warn = some are stale or
-    // missing; fail = nothing fresh anywhere (cron / fetch is broken).
+    // FanGraphs RosterResource overlay drives SP/RP classification. The
+    // server-side scraper (services/fangraphs-roles.js) is dead: FG
+    // blocked it with HTTP 403 in ~2026-06-03. The paid-member workflow
+    // is now the FG Daily Sync bookmarklet, run once daily from a
+    // logged-in browser session, pushing to /api/upload/rr-roles.
+    //
+    // Thresholds retuned for daily-manual reality (was 48h fail):
+    //   pass  = every team within 3 days
+    //   warn  = some team 3–7 days stale (owner should run the sync soon)
+    //   fail  = any team >7 days stale, OR nothing ever populated
+    // The fix message is always "run FG Daily Sync" — that's the button.
     {
       const rows = q.fgRoleFreshnessByTeam.all();
       const nowMs = Date.now();
-      const cutoffMs = nowMs - 48 * 60 * 60 * 1000;
-      const teamFreshness = {};
-      const teamLastMs = {}; // per-team parsed last_at timestamp; used to sort stale teams oldest-first
+      const passCutoffMs = nowMs - 3 * 24 * 60 * 60 * 1000;   // 3d
+      const warnCutoffMs = nowMs - 7 * 24 * 60 * 60 * 1000;   // 7d
+      const teamLastMs = {}; // per-team parsed last_at timestamp
       for (const r of rows) {
         const norm = (r.last_at || '').indexOf('T') === -1
           ? (r.last_at || '').replace(' ', 'T') + 'Z'
           : r.last_at;
         const t = Date.parse(norm);
-        teamFreshness[r.team] = !isNaN(t) && t >= cutoffMs;
         teamLastMs[r.team] = isNaN(t) ? null : t;
       }
-      const known = Object.keys(teamFreshness);
-      const fresh = known.filter(t => teamFreshness[t]).length;
       // FG_TEAM_SLUGS keys are the uppercase MLB abbreviations the
-      // fangraphs-roles module writes into pitcher_fg_role.team. Reused
-      // here so the "missing team" calculation stays consistent with
-      // what the cron actually attempts to fetch — when the slug map
-      // grows or shrinks, this check follows automatically.
+      // scraper wrote into pitcher_fg_role.team. Reused here so the
+      // "missing team" calculation stays consistent with the sync's
+      // expected coverage — when the slug map grows/shrinks, this
+      // check follows.
       const expectedTeams = Object.keys(FG_TEAM_SLUGS);
       const expected = expectedTeams.length; // 30 for current MLB
-      // Stale: team has rows but the latest is older than the 48h cutoff.
-      // Missing entirely: team is in expectedTeams but never appeared in
-      // pitcher_fg_role at all. These are different failure modes — one
-      // is "fetch ran but the result is old", the other is "this team
-      // has never been ingested" (e.g. persistent CF block on its slug).
-      const staleTeams = known
-        .filter(t => teamFreshness[t] === false)
-        .sort((a, b) => (teamLastMs[a] || 0) - (teamLastMs[b] || 0)); // oldest first
+      const known = Object.keys(teamLastMs);
       const knownSet = new Set(known);
       const missingTeams = expectedTeams.filter(t => !knownSet.has(t));
-      // Format an age-since timestamp the same way other checks do —
-      // "Nh" under 48h, "Nd" otherwise. Returns '?' when unparseable.
+      const passTeams = known.filter(t => teamLastMs[t] != null && teamLastMs[t] >= passCutoffMs);
+      const warnTeams = known.filter(t => teamLastMs[t] != null
+        && teamLastMs[t] < passCutoffMs && teamLastMs[t] >= warnCutoffMs);
+      const failTeams = known.filter(t => teamLastMs[t] == null || teamLastMs[t] < warnCutoffMs)
+        .sort((a, b) => (teamLastMs[a] || 0) - (teamLastMs[b] || 0)); // oldest first
+      // Format an age-since timestamp: "Nh" under 48h, "Nd" otherwise.
       const fmtAge = (ms) => {
-        if (ms == null) return '?';
+        if (ms == null) return 'never';
         const ageMs = nowMs - ms;
         if (ageMs < 0) return '0h';
         const h = Math.round(ageMs / 3600000);
         if (h < 48) return h + 'h';
         return Math.round(ageMs / 86400000) + 'd';
       };
+      const fixHint = 'Fix: run FG Daily Sync (bookmarklet on fangraphs.com).';
       let status, message;
       if (known.length === 0) {
         status = 'fail';
-        message = 'fg_roles never populated — runFangraphsRolesJob has not produced any data';
-      } else if (fresh === 0) {
+        message = 'fg_roles never populated. ' + fixHint;
+      } else if (failTeams.length > 0 || missingTeams.length > 0) {
         status = 'fail';
-        message = 'fg_roles all stale (oldest team last fetched > 48h ago across ' + known.length + ' team(s))';
-      } else if (fresh < expected) {
-        status = 'warn';
-        const staleHead = staleTeams.slice(0, 5)
-          .map(t => t + '(' + fmtAge(teamLastMs[t]) + ')')
-          .join(', ');
-        const staleOverflow = staleTeams.length > 5 ? ' +' + (staleTeams.length - 5) + ' more' : '';
         const parts = [];
-        parts.push('fg_roles partial: ' + fresh + '/' + expected + ' teams fresh within 48h');
-        if (staleTeams.length) parts.push('Stale: ' + staleHead + staleOverflow);
+        parts.push('fg_roles stale: ' + passTeams.length + '/' + expected + ' teams within 3d');
+        if (failTeams.length) {
+          const head = failTeams.slice(0, 5).map(t => t + '(' + fmtAge(teamLastMs[t]) + ')').join(', ');
+          const overflow = failTeams.length > 5 ? ' +' + (failTeams.length - 5) + ' more' : '';
+          parts.push('>7d stale: ' + head + overflow);
+        }
         if (missingTeams.length) parts.push('Missing entirely: ' + missingTeams.join(', '));
+        parts.push(fixHint);
         message = parts.join('. ');
+      } else if (warnTeams.length > 0) {
+        status = 'warn';
+        const head = warnTeams.slice(0, 5).map(t => t + '(' + fmtAge(teamLastMs[t]) + ')').join(', ');
+        const overflow = warnTeams.length > 5 ? ' +' + (warnTeams.length - 5) + ' more' : '';
+        message = 'fg_roles aging: ' + passTeams.length + '/' + expected + ' fresh within 3d, '
+          + warnTeams.length + ' team(s) 3–7d stale (' + head + overflow + '). ' + fixHint;
       } else {
         status = 'pass';
-        message = 'fg_roles fresh: all ' + expected + ' teams updated within 48h';
+        message = 'fg_roles fresh: all ' + expected + ' teams updated within 3d';
       }
       checks.push({ id: 'fg_roles_fresh', status, severity: 'warn', message });
     }

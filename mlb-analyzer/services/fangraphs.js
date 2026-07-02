@@ -668,4 +668,4 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
   return out;
 }
 
-module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing };
+module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
