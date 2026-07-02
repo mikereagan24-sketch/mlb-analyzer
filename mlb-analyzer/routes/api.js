@@ -255,7 +255,10 @@ function ingestWobaCSV(key, csvText, filename) {
 // REGISTERED BEFORE /upload/:key so the more-specific routes match first —
 // otherwise Express would treat 'fg-json' / 'rr-roles' as :key values and
 // run multer on a JSON body (returning "No file uploaded").
-router.post('/upload/fg-json/:key', express.json({ limit: '10mb' }), (req, res) => {
+// Body-size limit is set app-level in server.js (25mb) — no route-level
+// override needed, and any override here would be a no-op since the
+// app-level parser has already read/rejected the body by this point.
+router.post('/upload/fg-json/:key', (req, res) => {
   try {
     const key = req.params.key;
     const validKeys = ['bat-proj-lhp','bat-proj-rhp','pit-proj-lhb','pit-proj-rhb',
@@ -296,7 +299,7 @@ router.post('/upload/fg-json/:key', express.json({ limit: '10mb' }), (req, res) 
 //
 // Per-team failures don't block other teams; returns per-team + total
 // counts so the bookmarklet's overlay can render honest coverage.
-router.post('/upload/rr-roles', express.json({ limit: '2mb' }), (req, res) => {
+router.post('/upload/rr-roles', (req, res) => {
   try {
     const body = req.body || {};
     const teams = Array.isArray(body.teams) ? body.teams : null;

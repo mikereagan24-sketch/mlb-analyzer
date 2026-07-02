@@ -62,7 +62,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+// JSON body limit — default is 100kb which 413s on the FG Daily Sync
+// projection/actuals JSON POSTs (~1–5MB per split) and the RR roles
+// payload (30 teams). The app is public + admin-token-gated for writes
+// — no external abuse concern. 25mb comfortably covers all current
+// bookmarklet payloads with headroom.
+app.use(express.json({ limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
   lastModified: false,
