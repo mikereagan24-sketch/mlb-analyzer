@@ -93,8 +93,39 @@ function neutralizeWoba(rawWoba, wobaParkFactor) {
   return rawWoba / denom;
 }
 
+// PA/TBF-weighted park factor for multi-team players
+// (fix/park-neutral-stint-weighted). teamMap is a Map<team_abbr,
+// weight> — for batters, weight is games in that team's lineup; for
+// pitchers, TBF summed across appearances for that team. Returns
+// null when the player is single-team (Map.size <= 1) or when there
+// is no stint data, letting the caller fall back to the current-team
+// factor (v1 behavior — documented in resolveNeutralizationFactor).
+//
+// Formula: sum(weight_i * parkFactor(team_i)) / sum(weight_i).
+// Standard PA-weighted average — matches the audit fix's math.
+// Example: 200 PA at COL (1.10) + 100 PA at LAD (1.00) →
+//   (200*1.10 + 100*1.00) / 300 = 1.0667
+// That's between the two extremes, correctly reflecting that ~2/3
+// of the actuals sample came from the extreme park.
+function computeStintWeightedFactor(teamMap) {
+  if (!teamMap || typeof teamMap.entries !== 'function') return null;
+  if (teamMap.size <= 1) return null;   // single-team: caller falls back
+  let sumWeighted = 0;
+  let sumWeights = 0;
+  for (const [team, weight] of teamMap.entries()) {
+    const w = Number(weight);
+    if (!Number.isFinite(w) || w <= 0) continue;
+    const f = getWobaParkFactor(team);
+    sumWeighted += w * f;
+    sumWeights  += w;
+  }
+  if (sumWeights <= 0) return null;
+  return sumWeighted / sumWeights;
+}
+
 module.exports = {
   WOBA_PARK_FACTORS,
   getWobaParkFactor,
   neutralizeWoba,
+  computeStintWeightedFactor,
 };
