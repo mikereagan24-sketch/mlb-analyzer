@@ -238,9 +238,20 @@ function buildClvStats(opts) {
     });
     // Populated path: bt.clv is present; snapshot_coverage is on the
     // backtest response's baserunning_coverage sub-object.
+    //
+    // NOTE on field-name inconsistency in baserunning-backtest.js: the
+    // pre-flight empty-path shape uses `n_snapshot_days` (line ~501)
+    // while the populated main-path shape uses `n_snapshot_days_total`
+    // (line ~892). Read both — the `_total` form wins when present,
+    // else fall back to `n_snapshot_days` for the pre-flight shape.
+    // Pre-fix this mismatch was silently returning 0 on production
+    // even with ~17 snapshot days accumulated, while first_snapshot_date
+    // + games_scored came through correctly.
     if (bt && bt.clv && bt.baserunning_coverage) {
       const cov = bt.baserunning_coverage.snapshot_coverage || {};
-      const daysAccumulated = cov.n_snapshot_days || 0;
+      const daysAccumulated = (cov.n_snapshot_days_total != null)
+        ? cov.n_snapshot_days_total
+        : (cov.n_snapshot_days || 0);
       const gateMet = daysAccumulated >= DAYS_TARGET;
       bsrWithWithout = {
         without:            bt.clv.without,
