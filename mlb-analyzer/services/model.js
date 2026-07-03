@@ -45,7 +45,8 @@ const VENUE_ID_OVERRIDES = {
 
 const { normName, fuzzyLookup } = require('../utils/names');
 const { pickVenueOverride } = require('./scraper');
-const { getWobaParkFactor, neutralizeWoba } = require('./park-factors-woba');
+const { getWobaParkFactor, neutralizeWoba, computeStintWeightedFactor } = require('./park-factors-woba');
+const stintCache = require('./stint-cache');
 
 // Park-neutralization (feat/park-neutral-inputs, revised 2026-07-03).
 // Applied inside blendWoba ONLY to the actuals term of the proj/act
@@ -94,14 +95,31 @@ function blendWoba(proj, act, minSample, wProj, wAct, wobaParkFactor) {
 // Resolve the wOBA-scale park factor for a player's team when the
 // neutralization toggle is on; returns null otherwise (blend then
 // treats null as "no adjustment", byte-identical to pre-PR path).
-function resolveNeutralizationFactor(teamHint, settings) {
+//
+// opts (optional, fix/park-neutral-stint-weighted):
+//   { playerName: string, isPitcher: boolean }
+// When provided, the stint cache is consulted first. Multi-team
+// players (games/TBF split across ≥2 teams this season) get a
+// PA-weighted (batter) or TBF-weighted (pitcher) blend of each
+// stint's park factor — matches the audit tradeoff v1 called out.
+// Single-team players + missing/unavailable stint data fall back to
+// the current-team factor, so behavior for the vast majority of
+// players is byte-identical to pre-fix.
+function resolveNeutralizationFactor(teamHint, settings, opts) {
   if (!settings || !settings.PARK_NEUTRAL_INPUTS_ENABLED) return null;
+  if (opts && opts.playerName) {
+    const teamMap = opts.isPitcher
+      ? stintCache.getPitcherStintMap(opts.playerName)
+      : stintCache.getBatterStintMap(opts.playerName);
+    const weighted = computeStintWeightedFactor(teamMap);
+    if (weighted != null) return weighted;
+  }
   return getWobaParkFactor(teamHint);
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) {
   if (minPA == null) minPA = 60;
-  const pf = resolveNeutralizationFactor(teamHint, settings);
+  const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: false });
   const bL = blendWoba(
     fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
     fuzzyLookup(idx['bat-act-lhp'], name, teamHint),
@@ -159,7 +177,7 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) 
 
 function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings) {
   if (minBF == null) minBF = 100;
-  const pf = resolveNeutralizationFactor(teamHint, settings);
+  const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: true });
   const bL = blendWoba(
     fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
     fuzzyLookup(idx['pit-act-lhb'], name, teamHint),
