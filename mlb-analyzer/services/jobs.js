@@ -168,6 +168,15 @@ function getSettings() {
       if (raw == null) return _d('park_neutral_inputs_enabled', false);
       return raw === true || raw === 'true' || raw === '1' || raw === 1;
     })(),
+    // Edge-sanity cap (feat/edge-sanity-cap). Master toggle + soft/hard
+    // thresholds. Default OFF preserves byte-identical emission.
+    SIGNAL_EDGE_CAP_ENABLED: (function() {
+      const raw = s['signal_edge_cap_enabled'];
+      if (raw == null) return _d('signal_edge_cap_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
+    SIGNAL_EDGE_SOFT_CAP_PP: num('signal_edge_soft_cap_pp', _d('signal_edge_soft_cap_pp', 0.10)),
+    SIGNAL_EDGE_HARD_CAP_PP: num('signal_edge_hard_cap_pp', _d('signal_edge_hard_cap_pp', 0.25)),
     // Starting-pitcher source precedence (services/jobs.js runLineupJob).
     // Default TRUE — RotoWire wins on conflict. Reversible via this flag
     // without a redeploy. See settings-schema.js for the full rationale.
@@ -617,7 +626,43 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   // still runs (DELETE unlocked, deactivate locked-but-no-longer-qualifying)
   // so stale signals from a prior run get cleaned up. Locked bet_lines are
   // preserved by the existing locked-line restore loop.
-  const signals = suppressed ? [] : getSignals(game, model, settings);
+  // outSuppressed collects signals removed by the edge-sanity hard cap
+  // (feat/edge-sanity-cap). Always allocated; getSignals ignores it when
+  // the cap is disabled. Written to bet_signal_audit after the emitted
+  // signals loop so a burst of suppressions is queryable as an
+  // input-breakage alarm.
+  const outSuppressed = [];
+  const signals = suppressed ? [] : getSignals(game, model, settings, outSuppressed);
+  if (outSuppressed.length) {
+    for (const sup of outSuppressed) {
+      try {
+        q.insertBetSignalAudit({
+          signal_id: null,
+          game_date: gameRow.game_date,
+          game_id: gameRow.game_id,
+          signal_type: sup.type,
+          signal_side: sup.side,
+          action: 'suppressed_edge_cap',
+          bet_line: null,
+          closing_line: null,
+          clv: null,
+          source: 'getSignals',
+          detail: JSON.stringify({
+            reason: sup.reason,
+            edge: sup.edge,
+            marketLine: sup.marketLine,
+            modelLine: sup.modelLine,
+            category: sup.category,
+          }),
+        });
+      } catch (e) {
+        // Non-critical — cap already suppressed; audit-log failure just
+        // means we lose reviewability of this one suppression. Do not
+        // block the signal-write path.
+        console.warn('[edge-cap-audit] ' + gameRow.game_id + ': ' + e.message);
+      }
+    }
+  }
   // If lineup is projected (not yet confirmed), save as proj_model snapshot.
   // Skip the model_* UPDATE entirely when suppressed (model values are null
   // and .toFixed would throw; we'd rather leave prior values than null them
@@ -856,7 +901,33 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       companion_spread_outcome: _spreadOutcome,
       companion_spread_pnl:     _spreadPnl,
       companion_spread_src:     _spreadSrc,
+      // Edge-sanity soft-cap flag (feat/edge-sanity-cap). getSignals
+      // sets sig.edge_suspect=true when SIGNAL_EDGE_SOFT_CAP_PP <= edge
+      // < SIGNAL_EDGE_HARD_CAP_PP. Downstream UI reads this to render
+      // a warning + exclude from "best plays" emphasis.
+      edge_suspect: sig.edge_suspect ? 1 : 0,
     });
+    // Audit-log soft-flagged signals too (in addition to insertSignal's
+    // edge_suspect column) so operators can grep the audit table for a
+    // combined count of flagged + suppressed events by day — a burst is
+    // an input-breakage alarm.
+    if (sig.edge_suspect) {
+      try {
+        q.insertBetSignalAudit({
+          signal_id: null,  // no lastInsertRowid tracking here; join on game_id+type+side
+          game_date: gameRow.game_date,
+          game_id: gameRow.game_id,
+          signal_type: sig.type,
+          signal_side: sig.side,
+          action: 'flagged_soft_cap',
+          bet_line: null, closing_line: null, clv: null,
+          source: 'getSignals',
+          detail: JSON.stringify({ edge: sig.edge, category: sig.category }),
+        });
+      } catch (e) {
+        console.warn('[edge-cap-flag-audit] ' + gameRow.game_id + ': ' + e.message);
+      }
+    }
   }
 
   // Remove any duplicate signals (same type+side) — keep highest ID

@@ -181,6 +181,34 @@ const SETTINGS_SCHEMA = {
   // emitted row is forward-collected data for threshold refinement.
   signal_emit_floor_pp: { type: 'number', min: 0.005, max: 0.10, default: 0.01,
     help: 'Minimum raw probability-edge for any signal (ML or Total) to be persisted. Set low to collect data.' },
+  // Edge-sanity cap (feat/edge-sanity-cap). Complements the FLOOR above
+  // by adding a CEILING: implausibly large claimed edges (>25pp) are
+  // more likely broken inputs than real value. Data-driven thresholds
+  // from scripts/edge-calibration-curve.js run against ~600 resolved
+  // bet_signals: realized-vs-claimed calibration Δ degrades from ~-16pp
+  // at 4-6pp claimed edge to ~-42pp at 40+pp claimed edge. The soft
+  // cap goes where calibration meaningfully degrades (10pp Δ ~-22pp);
+  // the hard cap goes where any claim is implausibly large (25pp,
+  // well above the current-cohort v5/v6 natural max of 12.5pp — so on
+  // healthy inputs the cap is dormant, but a future data-quality
+  // regression that inflates edges gets caught the same way the
+  // 99841pp v3-pretuning garbage would be).
+  //
+  // Master toggle default OFF to preserve exact current emission
+  // behavior. When enabled:
+  //   - Signals with edge in [SOFT, HARD) still emit but carry
+  //     edge_suspect=true. UI/downstream must not emphasize them.
+  //   - Signals with edge >= HARD are suppressed from bet_signals
+  //     entirely and logged to bet_signal_audit with action=
+  //     'suppressed_edge_cap' for reviewability.
+  signal_edge_cap_enabled: { type: 'boolean', default: false,
+    help: 'Enable the edge-sanity cap. Default OFF — verified byte-identical to current emission when off. When on, signals with edge >= signal_edge_hard_cap_pp are suppressed and audit-logged; signals in [soft, hard) emit with edge_suspect=true.' },
+  signal_edge_soft_cap_pp: { type: 'number', min: 0.05, max: 0.30, default: 0.10,
+    invariant: (v, all) => Number(all.signal_edge_hard_cap_pp) > v,
+    invariantMsg: 'signal_edge_hard_cap_pp must be > signal_edge_soft_cap_pp',
+    help: 'Soft cap in fractional probability-points (0.10 = 10pp). Signals with edge >= soft cap emit with edge_suspect=true. Default 0.10 from calibration curve — calibration Δ hits -22pp at this claimed edge.' },
+  signal_edge_hard_cap_pp: { type: 'number', min: 0.10, max: 0.50, default: 0.25,
+    help: 'Hard cap in fractional probability-points (0.25 = 25pp). Signals with edge >= hard cap are suppressed from bet_signals + logged to bet_signal_audit. Default 0.25 — well above the current-cohort v5/v6 natural max (~0.125); designed to catch future input breakage.' },
   // Direction-specific UI highlight minimums. Comparison is against the
   // ROUNDED 0.5pp score (Math.round(edge*100/0.5)*0.5/100), not the raw
   // edge, so the UI display and highlight condition stay consistent.
