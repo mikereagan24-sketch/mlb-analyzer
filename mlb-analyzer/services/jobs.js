@@ -159,6 +159,15 @@ function getSettings() {
     })(),
     DEFENSE_FRV_MUTE:          num('defense_frv_mute',          _d('defense_frv_mute', 0.5)),
     DEFENSE_FRV_OPPS_PER_GAME: num('defense_frv_opps_per_game', _d('defense_frv_opps_per_game', 25)),
+    // Park-neutralize wOBA inputs (feat/park-neutral-inputs). Boolean;
+    // TEXT-coerced same as CATCHER_FRAMING_ENABLED / USE_OPENER_LOGIC.
+    // Default false → model.js get*Woba lookups return raw wOBA as
+    // before (byte-identical regression path).
+    PARK_NEUTRAL_INPUTS_ENABLED: (function() {
+      const raw = s['park_neutral_inputs_enabled'];
+      if (raw == null) return _d('park_neutral_inputs_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
     // Starting-pitcher source precedence (services/jobs.js runLineupJob).
     // Default TRUE — RotoWire wins on conflict. Reversible via this flag
     // without a redeploy. See settings-schema.js for the full rationale.

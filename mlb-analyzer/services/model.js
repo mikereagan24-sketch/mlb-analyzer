@@ -45,6 +45,17 @@ const VENUE_ID_OVERRIDES = {
 
 const { normName, fuzzyLookup } = require('../utils/names');
 const { pickVenueOverride } = require('./scraper');
+const { getWobaParkFactor, neutralizeWoba } = require('./park-factors-woba');
+
+// Park-neutralization (feat/park-neutral-inputs). Applied inside
+// getBatterWoba / getPitcherWoba only on the values actually fetched
+// from woba_data — league-average defaults (BAT_DFLT / PIT_DFLT and
+// settings-driven start/opp defaults) stay raw because no park was
+// baked into them. See services/park-factors-woba.js for the transform
+// and the standing tradeoff on traded players (current-team
+// approximation, v1). The neutralizedOrRaw helper below is the single
+// per-value entry point; a no-op when PARK_NEUTRAL_INPUTS_ENABLED is
+// off, factor is 1.00, or teamHint is unresolved.
 
 function buildWobaIndex(rows) {
   const idx = {};
@@ -114,9 +125,25 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) 
   }
   if (bL || bR) {
     const src = bL&&bR ? (bL.source===bR.source?bL.source:'blend') : (bL?.source||bR?.source);
-    return { vsLHP: bL?.woba??d.vsLHP, vsRHP: bR?.woba??d.vsRHP, source: src };
+    // Park-neutralize only the LOOKED-UP wOBA values — d.vsLHP / d.vsRHP
+    // are league-average defaults with no park baked in, so they'd
+    // silently drift 4-5% for a Coors batter with only one hand
+    // resolved. Keep defaults raw; neutralize only the fetched side.
+    const vsLHP = bL ? neutralizedOrRaw(bL.woba, teamHint, settings) : d.vsLHP;
+    const vsRHP = bR ? neutralizedOrRaw(bR.woba, teamHint, settings) : d.vsRHP;
+    return { vsLHP, vsRHP, source: src };
   }
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback' };
+}
+
+// One-value form of applyParkNeutralization used by get*Woba so per-hand
+// values can be neutralized independently — defaults must NOT be
+// neutralized (no park was baked into them), so we can't run the pair
+// through the object form.
+function neutralizedOrRaw(rawWoba, teamHint, settings) {
+  if (!settings || !settings.PARK_NEUTRAL_INPUTS_ENABLED) return rawWoba;
+  const factor = getWobaParkFactor(teamHint);
+  return neutralizeWoba(rawWoba, factor);
 }
 
 function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings) {
@@ -142,7 +169,11 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings)
     d = PIT_DFLT[hand] || PIT_DFLT['R'];
   }
   const src = bL||bR ? (bL?.source===bR?.source?bL?.source||'steamer':'blend') : 'fallback';
-  return { vsLHB: bL?.woba??d.vsLHB, vsRHB: bR?.woba??d.vsRHB, source: src };
+  // Same defaults-stay-raw pattern as getBatterWoba: neutralize only
+  // fetched values.
+  const vsLHB = bL ? neutralizedOrRaw(bL.woba, teamHint, settings) : d.vsLHB;
+  const vsRHB = bR ? neutralizedOrRaw(bR.woba, teamHint, settings) : d.vsRHB;
+  return { vsLHB, vsRHB, source: src };
 }
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
