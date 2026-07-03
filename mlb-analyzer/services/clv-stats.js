@@ -200,9 +200,35 @@ function buildClvStats(opts) {
   }
 
   // Forward-honest BsR with/without — wired to call the existing
-  // backtest harness in forward-honest mode. Right now the snapshot
-  // table is fresh and may return effectively no data; we surface
-  // that explicitly rather than show fake numbers.
+  // backtest harness in forward-honest mode. Now returns a live
+  // accumulation status panel (fix/clv-bsr-status-panel) so the CLV
+  // tab can render:
+  //   - snapshot days accumulated vs the 60-day gate
+  //   - forward games scored vs the ~500-game target
+  //   - provisional CLV-with vs CLV-without and accuracy delta
+  //     (labeled small-sample / noise until gate met)
+  //   - re-check window derived from first_snapshot_date + 60d
+  // Even in the pre-gate empty state, snapshot_coverage.n_snapshot_days
+  // is surfaced so the tab shows "N/60 days" from day zero rather than
+  // a bare "no data yet" placeholder.
+  const DAYS_TARGET  = 60;
+  const GAMES_TARGET = 500;
+  const RECHECK_LEN_DAYS = 30;   // 30d evaluation window once gate is met
+
+  // Given a first snapshot_date, project the re-check window:
+  //   from = first + 60 days (gate met)
+  //   to   = from + 30 days (evaluation lookback for verdict)
+  // Returns null if first_snapshot_date is absent (clock hasn't started).
+  function projectRecheckWindow(firstSnapshotDate) {
+    if (!firstSnapshotDate) return null;
+    const t = Date.parse(firstSnapshotDate);
+    if (isNaN(t)) return null;
+    const gateMet = new Date(t + DAYS_TARGET * 86400000);
+    const end     = new Date(gateMet.getTime() + RECHECK_LEN_DAYS * 86400000);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    return { from: iso(gateMet), to: iso(end) };
+  }
+
   let bsrWithWithout = null;
   try {
     const { runBaserunningBacktest } = require('./baserunning-backtest');
@@ -210,23 +236,59 @@ function buildClvStats(opts) {
       fromDate: from, toDate: to,
       level: 'player', window: 'trailing', forwardHonest: true,
     });
-    if (bt && bt.clv && bt.snapshot_coverage !== undefined) {
+    // Populated path: bt.clv is present; snapshot_coverage is on the
+    // backtest response's baserunning_coverage sub-object.
+    if (bt && bt.clv && bt.baserunning_coverage) {
+      const cov = bt.baserunning_coverage.snapshot_coverage || {};
+      const daysAccumulated = cov.n_snapshot_days || 0;
+      const gateMet = daysAccumulated >= DAYS_TARGET;
       bsrWithWithout = {
-        without: bt.clv.without,
-        with:    bt.clv.with,
-        snapshot_coverage: bt.baserunning_coverage && bt.baserunning_coverage.snapshot_coverage,
-        bet_set_diff:      bt.clv.bet_set_diff,
-        status_note:       'Forward-honest snapshot mode. The snapshot clock starts at the first 6 AM PT capture after deploy; CLV typically needs 60-90 days to clear the noise band, given baserunning nudges only a few bets across the emit threshold per cycle.',
+        without:            bt.clv.without,
+        with:               bt.clv.with,
+        bet_set_diff:       bt.clv.bet_set_diff,
+        accuracy:           bt.accuracy || null,
+        games_scored:       bt.games_scored != null ? bt.games_scored : 0,
+        games_target:       GAMES_TARGET,
+        snapshot_coverage:  cov,
+        days_accumulated:   daysAccumulated,
+        days_target:        DAYS_TARGET,
+        gate_met:           gateMet,
+        recheck_window:     projectRecheckWindow(cov.first_snapshot_date),
+        provisional:        !gateMet,   // true → UI must label "small sample / noise until gate met"
+        status_note:        gateMet
+          ? 'Forward-honest snapshot mode — gate MET. Verdict window open; watch the delta bands and set the disposition.'
+          : 'Forward-honest snapshot mode. CLV typically needs 60-90 days to clear the noise band, given baserunning nudges only a few bets across the emit threshold per cycle. Set the clock, don\'t watch it.',
       };
     } else if (bt && bt.bias_warning && /snapshot/i.test(bt.bias_warning)) {
+      // Pre-gate empty path: no snapshot rows yet. Still return the
+      // structured accumulation fields so the tab can render N/60 = 0.
+      const cov = bt.snapshot_coverage || { n_snapshot_days: 0, first_snapshot_date: null, last_snapshot_date: null };
       bsrWithWithout = {
-        empty: true,
-        reason: bt.bias_warning,
-        status_note: 'Forward-honest snapshot hook live but no data yet. Accumulating ~60-90 days.',
+        empty:              true,
+        reason:             bt.bias_warning,
+        snapshot_coverage:  cov,
+        days_accumulated:   cov.n_snapshot_days || 0,
+        days_target:        DAYS_TARGET,
+        gate_met:           false,
+        games_scored:       0,
+        games_target:       GAMES_TARGET,
+        recheck_window:     projectRecheckWindow(cov.first_snapshot_date),
+        provisional:        true,
+        status_note:        'Forward-honest snapshot hook live but no data yet. Accumulating toward the ' + DAYS_TARGET + '-day gate.',
       };
     }
   } catch (e) {
-    bsrWithWithout = { empty: true, reason: 'forward-honest hook failed: ' + e.message };
+    bsrWithWithout = {
+      empty:           true,
+      reason:          'forward-honest hook failed: ' + e.message,
+      days_accumulated: 0,
+      days_target:     DAYS_TARGET,
+      gate_met:        false,
+      games_scored:    0,
+      games_target:    GAMES_TARGET,
+      provisional:     true,
+      status_note:     'Forward-honest hook error — see .reason.',
+    };
   }
 
   return {

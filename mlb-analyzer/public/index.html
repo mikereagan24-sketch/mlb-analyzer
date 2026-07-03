@@ -2263,22 +2263,83 @@ function renderClvTab(d){
     + Object.entries(src.counts).map(([k, v]) => k + ': ' + v).join(' · ')
     + '</div></div>'
     : '';
-  // BsR with/without hook — empty for now (snapshot clock starts at zero).
+  // Forward-honest BsR live accumulation status
+  // (fix/clv-bsr-status-panel). Server sends structured accumulation
+  // fields in both empty and populated states so the panel always
+  // reflects the current gate progress rather than a bare placeholder.
+  //   - N/60 snapshot days (server: days_accumulated / days_target)
+  //   - games_scored / ~500 target
+  //   - provisional CLV-with vs CLV-without and accuracy delta,
+  //     LABELED "small sample / noise until gate met" when
+  //     bw.provisional is true (until day 60 is reached)
+  //   - recheck window (server: recheck_window = { from, to })
+  // Nothing here changes the model or the gate — display only.
   const bw = d.bsr_with_without || {};
   let bwBlock;
-  if (bw.empty) {
-    bwBlock = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
-      + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Forward-honest BsR (with / without)</div>'
-      + '<div style="font-size:11px;color:var(--text3);font-style:italic">' + (bw.status_note || bw.reason || 'accumulating') + '</div>'
+  if (bw && (bw.snapshot_coverage || bw.days_accumulated != null)) {
+    const days       = bw.days_accumulated || 0;
+    const daysTarget = bw.days_target || 60;
+    const games      = bw.games_scored || 0;
+    const gamesTarget = bw.games_target || 500;
+    const gateMet    = !!bw.gate_met;
+    const daysPct    = Math.min(100, Math.round((days / daysTarget) * 100));
+    const gamesPct   = Math.min(100, Math.round((games / gamesTarget) * 100));
+    const provisionalTag = bw.provisional
+      ? '<span style="background:var(--yellow-bg,#fef3c7);color:var(--yellow,#a16207);font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;letter-spacing:.5px;margin-left:6px">SMALL SAMPLE / NOISE UNTIL GATE MET</span>'
+      : '<span style="background:var(--green-bg,#dcfce7);color:var(--green,#16a34a);font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;letter-spacing:.5px;margin-left:6px">GATE MET</span>';
+
+    // Simple text progress: "N/target (P%)" — no image charts, keep it
+    // in-line with the rest of the CLV tab styling.
+    const progRow = (label, cur, tgt, pct) =>
+      '<div style="display:flex;justify-content:space-between;font-size:11px;margin:2px 0">'
+      + '<span style="color:var(--text2)">' + label + '</span>'
+      + '<span><strong>' + cur + '</strong> / ' + tgt
+      + ' <span style="color:var(--text3)">(' + pct + '%)</span></span>'
       + '</div>';
-  } else if (bw && bw.without) {
-    const wo = bw.without, wi = bw.with;
-    bwBlock = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
-      + '<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Forward-honest BsR (with / without) — ML, morning lock vs gametime close</div>'
-      + '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:var(--text2)"><th style="text-align:left">config</th><th style="text-align:right">avg CLV</th><th style="text-align:right">n</th><th style="text-align:right">% pos</th></tr></thead><tbody>'
+
+    // Provisional deltas — CLV-with vs CLV-without + accuracy delta.
+    // Shown even in pre-gate state, prefixed by the small-sample tag
+    // so the panel is diagnostic from day zero.
+    const wo = bw.without || {};
+    const wi = bw.with    || {};
+    const clvDelta = (wi.avg_clv_pp != null && wo.avg_clv_pp != null)
+      ? Number((wi.avg_clv_pp - wo.avg_clv_pp).toFixed(3)) : null;
+    const accDelta = bw.accuracy && bw.accuracy.delta_mean_abs_err != null
+      ? Number(bw.accuracy.delta_mean_abs_err.toFixed(4)) : null;
+    const accSE    = bw.accuracy && bw.accuracy.delta_se_runs;
+    const cmp = (delta, band) => {
+      if (delta == null) return '<span style="color:var(--text3)">—</span>';
+      const inside = band != null && Math.abs(delta) <= band;
+      const color = inside ? 'color:var(--text3)' : (delta >= 0 ? 'color:var(--green)' : 'color:var(--red)');
+      return '<span style="' + color + ';font-weight:500">'
+        + (delta > 0 ? '+' : delta < 0 ? '−' : '±') + Math.abs(delta).toFixed(2)
+        + '</span>' + (band != null ? '<span style="color:var(--text3);font-size:10px"> (±' + band.toFixed(2) + ')</span>' : '');
+    };
+
+    const provisionalTable = '<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px">'
+      + '<thead><tr style="color:var(--text2)"><th style="text-align:left">config</th><th style="text-align:right">avg CLV</th><th style="text-align:right">n bets</th><th style="text-align:right">% pos</th></tr></thead><tbody>'
       + '<tr><td>without BsR</td><td style="text-align:right">' + _bandCell(wo.avg_clv_pp, wo.n_with_close, wo.noise_band_pp) + '</td><td style="text-align:right">' + (wo.n_bets || 0) + '</td><td style="text-align:right">' + _fmtPct(wo.pct_positive) + '</td></tr>'
       + '<tr><td>with BsR</td><td style="text-align:right">' + _bandCell(wi.avg_clv_pp, wi.n_with_close, wi.noise_band_pp) + '</td><td style="text-align:right">' + (wi.n_bets || 0) + '</td><td style="text-align:right">' + _fmtPct(wi.pct_positive) + '</td></tr>'
-      + '</tbody></table>'
+      + '</tbody></table>';
+
+    const deltaRow = (bw.without && bw.with)
+      ? '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px;margin-top:8px">'
+        + '<span><span style="color:var(--text2)">CLV Δ (with − without):</span> ' + cmp(clvDelta, wi.noise_band_pp) + '</span>'
+        + '<span><span style="color:var(--text2)">accuracy Δ (mean|err|):</span> ' + cmp(accDelta, accSE != null ? 2 * accSE : null) + ' runs</span>'
+        + '</div>'
+      : '';
+
+    const rw = bw.recheck_window;
+    const recheckLine = rw && rw.from && rw.to
+      ? '<div style="font-size:11px;color:var(--text2);margin-top:8px">Re-check window: <strong>' + rw.from + '</strong> → <strong>' + rw.to + '</strong></div>'
+      : '<div style="font-size:11px;color:var(--text3);margin-top:8px;font-style:italic">Re-check window: unavailable (clock hasn\'t started — no snapshot rows yet)</div>';
+
+    bwBlock = '<div style="background:var(--bg2);border-radius:var(--r-md);padding:10px 14px;margin-bottom:10px">'
+      + '<div style="font-size:11px;color:var(--text2);margin-bottom:6px">Forward-honest BsR (with / without) — accumulation status' + provisionalTag + '</div>'
+      + progRow('snapshot days', days, daysTarget, daysPct)
+      + progRow('forward games scored', games, gamesTarget, gamesPct)
+      + (bw.without && bw.with ? provisionalTable + deltaRow : '')
+      + recheckLine
       + (bw.status_note ? '<div style="font-size:10px;color:var(--text3);margin-top:6px;font-style:italic">' + bw.status_note + '</div>' : '')
       + '</div>';
   } else {
