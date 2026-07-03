@@ -108,6 +108,33 @@ const SETTINGS_SCHEMA = {
   defense_frv_opps_per_game: { type: 'number', min: 10, max: 40, default: 25,
     help: 'Fielding opportunities a starting fielder sees per full game (~25, near-constant across non-catcher positions per the FRV outs_total data). Per-game FRV = (total_runs/outs_total) x this. Environmental constant.' },
 
+  // --- Park-neutralize wOBA inputs (fixes park double-count) ---------------
+  // The model applies a game-time run-scale park factor at scoring
+  // (see services/model.js runModel around the `pf` resolution and
+  // `aRunsRaw / hRunsRaw` compute). Every batter's wOBA input and every
+  // pitcher's wOBA-against input has ~half its sample at the player's
+  // home park — so an extreme-park hitter (COL Coors, ATH Sutter Health)
+  // carries park-inflated wOBA that gets multiplied a SECOND time by
+  // pf at Coors, and carries the inflation onto the road where it
+  // doesn't apply. Symmetric on the pitcher side (SEA/SD parks under-
+  // value their pitchers).
+  //
+  // When ON, getBatterWoba / getPitcherWoba divide the returned per-hand
+  // wOBA by (1 + (wobaParkFactor - 1) / 2) using the player's team-hint
+  // → park factor from services/park-factors-woba.js WOBA_PARK_FACTORS
+  // (wOBA-scale; distinct from the run-scale PARK_FACTORS applied at
+  // game time — which stays as the ONE place park enters the model).
+  //
+  // Traded players approximate with the CURRENT team's home park (v1
+  // tradeoff — documented in the branch PR; PA-weighted stint blend is
+  // a follow-up).
+  //
+  // Default OFF. Backtest report expected before flip: A/B on games
+  // involving extreme-park teams, signal-volume shift by team, and
+  // W/L of signals that WOULD NOT have fired under neutralization.
+  park_neutral_inputs_enabled: { type: 'boolean', default: false,
+    help: 'Park-neutralize batter wOBA inputs and pitcher wOBA-against inputs to eliminate double-counting against the game-time park factor. Default OFF — verified byte-identical to current behavior when off. When ON, extreme-park teams (COL/ATH hitter inputs deflated ~4-5%, SEA/SD hitter inputs inflated ~2%, mirror for pitchers) see reduced signal volume; league-average parks are near-unchanged. Do not flip on without an A/B backtest per the branch discipline.' },
+
   // --- Starting-pitcher source precedence ---------------------------------
   // When ON, RotoWire wins on conflict with statsapi for away_sp/home_sp:
   // RotoWire scrapes posted/announced lineups, which lead statsapi on
