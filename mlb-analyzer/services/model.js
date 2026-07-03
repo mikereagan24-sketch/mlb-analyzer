@@ -814,10 +814,17 @@ function catKey(signalType, signalSide, signalLabel, marketLine) {
  * @param {Object} game — game_log row
  * @param {ModelResult} modelResult — output from runModel()
  * @param {Object} settings — app_settings keyed values
+ * @param {Array} [outSuppressed] — OPTIONAL. When provided, signals
+ *   suppressed by the edge-sanity hard cap (feat/edge-sanity-cap) are
+ *   pushed onto this array as `{ type, side, category, edge, marketLine,
+ *   modelLine, reason }` so the caller can persist them to
+ *   bet_signal_audit. Return value only ever includes EMITTED signals;
+ *   callers that don't need audit visibility can omit the arg
+ *   (behavior identical to pre-cap).
  * @returns {Signal[]} Empty array if model._suppressed OR market data is null
  *   (PR #26: null-market suppression for ML and Total independently).
  */
-function getSignals(game, modelResult, settings) {
+function getSignals(game, modelResult, settings, outSuppressed) {
   // No signals when the upstream model_result was suppressed (e.g. empty
   // or partial lineups — see runModel). modelResult.aML / .estTot are
   // null in that case, so even attempting to push signals would crash.
@@ -929,7 +936,7 @@ function getSignals(game, modelResult, settings) {
   // rows use just the direction. catKey is intentionally NOT used for
   // new emissions — it embeds the now-null label as 'star-' which
   // would corrupt category-based grouping.
-  return signals.map(s => {
+  const categorized = signals.map(s => {
     let category;
     if (s.type === 'ML') {
       category = parseInt(s.marketLine) < 0 ? 'fav' : 'dog';
@@ -938,6 +945,40 @@ function getSignals(game, modelResult, settings) {
     }
     return { ...s, category };
   });
+
+  // Edge-sanity cap (feat/edge-sanity-cap). Default OFF — byte-identical
+  // to pre-cap behavior when disabled. When enabled:
+  //   - edge >= HARD cap → suppressed entirely (removed from returned
+  //     array); pushed onto outSuppressed for audit-log persistence.
+  //   - edge >= SOFT cap and < HARD → emitted with edge_suspect=true.
+  //   - edge < SOFT → emitted unchanged.
+  // Thresholds are fractional pp (0.10 = 10pp). Data-driven defaults
+  // from scripts/edge-calibration-curve.js — see settings-schema.js.
+  const CAP_ENABLED = !!settings.SIGNAL_EDGE_CAP_ENABLED;
+  if (!CAP_ENABLED) return categorized;
+  const SOFT = typeof settings.SIGNAL_EDGE_SOFT_CAP_PP !== 'undefined'
+    ? Number(settings.SIGNAL_EDGE_SOFT_CAP_PP) : 0.10;
+  const HARD = typeof settings.SIGNAL_EDGE_HARD_CAP_PP !== 'undefined'
+    ? Number(settings.SIGNAL_EDGE_HARD_CAP_PP) : 0.25;
+  const emitted = [];
+  for (const s of categorized) {
+    if (s.edge >= HARD) {
+      if (Array.isArray(outSuppressed)) {
+        outSuppressed.push({
+          type: s.type, side: s.side, category: s.category,
+          edge: s.edge, marketLine: s.marketLine, modelLine: s.modelLine,
+          reason: 'edge_hard_cap',
+        });
+      }
+      continue;  // do not emit
+    }
+    if (s.edge >= SOFT) {
+      emitted.push({ ...s, edge_suspect: true });
+    } else {
+      emitted.push(s);
+    }
+  }
+  return emitted;
 }
 
 // "To win $100" P&L. Hoisted to module scope (was inner-defined inside

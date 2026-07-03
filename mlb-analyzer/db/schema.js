@@ -1862,17 +1862,25 @@ const q = {
   getGameById: db.prepare(`SELECT * FROM game_log WHERE game_date = ? AND game_id = ?`),
   getDates: db.prepare(`SELECT DISTINCT game_date FROM game_log ORDER BY game_date DESC LIMIT 60`),
   deleteSignalsForGame: db.prepare(`DELETE FROM bet_signals WHERE game_date = ? AND game_id = ?`),
+  // Edge-sanity cap column (feat/edge-sanity-cap). Migrated here — not
+  // in the later batch of ALTER TABLE statements — because insertSignal
+  // below binds @edge_suspect and prepare() fails if the column doesn't
+  // exist yet. Also runs before any other insertSignal-preparing block.
+  _edgeSuspectColumnMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN edge_suspect INTEGER NOT NULL DEFAULT 0").run(); } catch(e) {}
+    return true;
+  })(),
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
       category, market_line, model_line, edge_pct, outcome, pnl, cohort,
       companion_spread_line, companion_spread_price, companion_spread_outcome,
-      companion_spread_pnl, companion_spread_src
+      companion_spread_pnl, companion_spread_src, edge_suspect
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
       @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
       @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
-      @companion_spread_pnl, @companion_spread_src
+      @companion_spread_pnl, @companion_spread_src, @edge_suspect
     )
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
@@ -2958,6 +2966,8 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
 // Add is_active and notes columns if not present
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1").run(); } catch(e) {}
   try { db.prepare("ALTER TABLE bet_signals ADD COLUMN notes TEXT").run(); } catch(e) {}
+  // (edge_suspect column migration lives near the insertSignal prepared
+  // statement above so it runs BEFORE prepare() sees @edge_suspect.)
 
 // ============================================================
 // feat/continuous-edge-score migrations
