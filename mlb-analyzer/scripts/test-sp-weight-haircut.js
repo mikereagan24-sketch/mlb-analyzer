@@ -127,6 +127,14 @@ function inspectPitcher(p) {
     { ip: 5.5, n: 5,    want: 0.75, name: '5 priors → still full (clamped at N=3)' },
     { ip: 4.0, n: 0,    want: null,  name: 'low IP (4.0) + 0 priors → low weight, but verify clamp behavior' },
     { ip: 7.0, n: 8,    want: 0.90, name: 'high IP (7.0) + many priors → full forecast weight (0.75 + 1.5*0.10)' },
+    // Audit finding 2 (2026-07-03): forecastIp==null used to return null,
+    // which fell through the caller's `?? SP_PIT_WEIGHT` to 0.80 (max).
+    // Fixed to return the low-conf target (0.62), same weight a pitcher
+    // WITH a forecast but ZERO priors receives. Both null-forecast and
+    // n=any-value hit this path.
+    { ip: null, n: null, want: 0.62, name: 'AUDIT FIX 2: null forecast + null priors → low-conf target 0.62 (was null → 0.80)' },
+    { ip: null, n: 0,    want: 0.62, name: 'AUDIT FIX 2: null forecast + 0 priors → 0.62' },
+    { ip: null, n: 10,   want: 0.62, name: 'AUDIT FIX 2: null forecast overrides priors → still 0.62' },
   ];
   for (const c of cases) {
     const got = computeSpPitWeightFromForecast(c.ip, settings, c.n);
