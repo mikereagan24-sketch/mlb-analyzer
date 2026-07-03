@@ -47,15 +47,19 @@ const { normName, fuzzyLookup } = require('../utils/names');
 const { pickVenueOverride } = require('./scraper');
 const { getWobaParkFactor, neutralizeWoba } = require('./park-factors-woba');
 
-// Park-neutralization (feat/park-neutral-inputs). Applied inside
-// getBatterWoba / getPitcherWoba only on the values actually fetched
-// from woba_data — league-average defaults (BAT_DFLT / PIT_DFLT and
-// settings-driven start/opp defaults) stay raw because no park was
-// baked into them. See services/park-factors-woba.js for the transform
-// and the standing tradeoff on traded players (current-team
-// approximation, v1). The neutralizedOrRaw helper below is the single
-// per-value entry point; a no-op when PARK_NEUTRAL_INPUTS_ENABLED is
-// off, factor is 1.00, or teamHint is unresolved.
+// Park-neutralization (feat/park-neutral-inputs, revised 2026-07-03).
+// Applied inside blendWoba ONLY to the actuals term of the proj/act
+// blend. Rationale (audit 2026-07-02, finding 1): the Steamer RoS
+// projections we ingest via /api/projections are already park-neutral
+// (verified with a 340-hitter sample across 12 teams — no correlation
+// between team park factor and mean projected wOBA). The 2-year splits
+// actuals ARE inflated by home PAs, so those DO need to be deflated
+// by the wOBA-scale park factor.
+//
+// League-average defaults (BAT_DFLT / PIT_DFLT and settings-driven
+// start/opp defaults) stay raw because no park was baked into them.
+// Traded players are approximated with the current-team's home park
+// factor (v1 tradeoff, documented in services/park-factors-woba.js).
 
 function buildWobaIndex(rows) {
   const idx = {};
@@ -66,28 +70,47 @@ function buildWobaIndex(rows) {
   return idx;
 }
 
-function blendWoba(proj, act, minSample, wProj, wAct) {
+// blendWoba mixes the (already-park-neutral) Steamer projection with
+// the (home-park-inflated) 2yr actuals. When wobaParkFactor is provided
+// and != 1.0, ONLY the actuals term is deflated before blending — the
+// projection term is preserved raw. When null / 1.0 / neutralization
+// toggle is off, both terms flow through unchanged (byte-identical to
+// pre-PR #142 behavior).
+function blendWoba(proj, act, minSample, wProj, wAct, wobaParkFactor) {
   const hp = proj && !isNaN(proj.woba);
   const ha = act && !isNaN(act.woba) && act.sample >= minSample;
   const wp = wProj || 0.65;
   const wa = wAct  || 0.35;
-  if (hp && ha) return { woba: proj.woba*wp + act.woba*wa, source:'blend' };
-  if (hp) return { woba: proj.woba, source:'steamer' };
-  if (ha) return { woba: act.woba, source:'actual' };
+  // Neutralize ONLY the actuals term. A null / 1.0 factor is a no-op.
+  const actWoba = (ha && wobaParkFactor != null && wobaParkFactor !== 1.0)
+    ? neutralizeWoba(act.woba, wobaParkFactor)
+    : (ha ? act.woba : null);
+  if (hp && ha) return { woba: proj.woba*wp + actWoba*wa, source:'blend' };
+  if (hp)      return { woba: proj.woba, source:'steamer' };
+  if (ha)      return { woba: actWoba,   source:'actual' };
   return null;
+}
+
+// Resolve the wOBA-scale park factor for a player's team when the
+// neutralization toggle is on; returns null otherwise (blend then
+// treats null as "no adjustment", byte-identical to pre-PR path).
+function resolveNeutralizationFactor(teamHint, settings) {
+  if (!settings || !settings.PARK_NEUTRAL_INPUTS_ENABLED) return null;
+  return getWobaParkFactor(teamHint);
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) {
   if (minPA == null) minPA = 60;
+  const pf = resolveNeutralizationFactor(teamHint, settings);
   const bL = blendWoba(
     fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
     fuzzyLookup(idx['bat-act-lhp'], name, teamHint),
-    minPA, wProj, wAct
+    minPA, wProj, wAct, pf
   );
   const bR = blendWoba(
     fuzzyLookup(idx['bat-proj-rhp'], name, teamHint),
     fuzzyLookup(idx['bat-act-rhp'], name, teamHint),
-    minPA, wProj, wAct
+    minPA, wProj, wAct, pf
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
   // Default selection has three priority layers:
@@ -125,38 +148,27 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) 
   }
   if (bL || bR) {
     const src = bL&&bR ? (bL.source===bR.source?bL.source:'blend') : (bL?.source||bR?.source);
-    // Park-neutralize only the LOOKED-UP wOBA values — d.vsLHP / d.vsRHP
-    // are league-average defaults with no park baked in, so they'd
-    // silently drift 4-5% for a Coors batter with only one hand
-    // resolved. Keep defaults raw; neutralize only the fetched side.
-    const vsLHP = bL ? neutralizedOrRaw(bL.woba, teamHint, settings) : d.vsLHP;
-    const vsRHP = bR ? neutralizedOrRaw(bR.woba, teamHint, settings) : d.vsRHP;
-    return { vsLHP, vsRHP, source: src };
+    // Neutralization (when enabled) already happened inside blendWoba
+    // on the actuals term only — projections stayed raw. Defaults
+    // (d.vsLHP / d.vsRHP) never had park baked in, so they're used
+    // as-is when a hand's blend is missing.
+    return { vsLHP: bL?.woba ?? d.vsLHP, vsRHP: bR?.woba ?? d.vsRHP, source: src };
   }
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback' };
 }
 
-// One-value form of applyParkNeutralization used by get*Woba so per-hand
-// values can be neutralized independently — defaults must NOT be
-// neutralized (no park was baked into them), so we can't run the pair
-// through the object form.
-function neutralizedOrRaw(rawWoba, teamHint, settings) {
-  if (!settings || !settings.PARK_NEUTRAL_INPUTS_ENABLED) return rawWoba;
-  const factor = getWobaParkFactor(teamHint);
-  return neutralizeWoba(rawWoba, factor);
-}
-
 function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings) {
   if (minBF == null) minBF = 100;
+  const pf = resolveNeutralizationFactor(teamHint, settings);
   const bL = blendWoba(
     fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
     fuzzyLookup(idx['pit-act-lhb'], name, teamHint),
-    minBF, wProj, wAct
+    minBF, wProj, wAct, pf
   );
   const bR = blendWoba(
     fuzzyLookup(idx['pit-proj-rhb'], name, teamHint),
     fuzzyLookup(idx['pit-act-rhb'], name, teamHint),
-    minBF, wProj, wAct
+    minBF, wProj, wAct, pf
   );
   let d;
   if (settings && settings.PIT_DFLT_R_VS_LHB != null) {
@@ -169,11 +181,13 @@ function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings)
     d = PIT_DFLT[hand] || PIT_DFLT['R'];
   }
   const src = bL||bR ? (bL?.source===bR?.source?bL?.source||'steamer':'blend') : 'fallback';
-  // Same defaults-stay-raw pattern as getBatterWoba: neutralize only
-  // fetched values.
-  const vsLHB = bL ? neutralizedOrRaw(bL.woba, teamHint, settings) : d.vsLHB;
-  const vsRHB = bR ? neutralizedOrRaw(bR.woba, teamHint, settings) : d.vsRHB;
-  return { vsLHB, vsRHB, source: src };
+  // Same as getBatterWoba: blend already neutralized the actuals term
+  // if enabled; defaults stay raw.
+  return {
+    vsLHB: bL?.woba ?? d.vsLHB,
+    vsRHB: bR?.woba ?? d.vsRHB,
+    source: src,
+  };
 }
 
 function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
@@ -651,9 +665,14 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   // SP forecast — the value persisted to game_log.{away,home}_sp_forecast_ip
   // by the lineup-job (see services/jobs.js forecastForPitcher). Null
   // forecast (e.g. lineup-job hasn't run since deploy, or pitcher had no
-  // shrinkage source) falls back to the fixed SP_PIT_WEIGHT, preserving
-  // v3 behavior. Bullpen weight is the complement so the pitching
-  // component always sums to 1.0.
+  // shrinkage source) now returns the low-confidence target (0.62 by
+  // default via SP_FORECAST_LOW_CONF_TARGET) — same treatment a pitcher
+  // WITH a forecast but ZERO priors receives. Revised 2026-07-03 per
+  // audit finding 2: the pre-revision path returned null → the caller's
+  // `?? SP_PIT_WEIGHT` fallback pushed it to 0.80 (max confidence),
+  // which was the same backwards-fallback pattern the haircut PR itself
+  // was designed to fix. Bullpen weight is the complement so the
+  // pitching component always sums to 1.0.
   //
   // Note the cross-side mapping below: the AWAY batters are facing the
   // HOME pitcher, so their perBatterEW call uses HOME's forecast to
@@ -667,6 +686,11 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   // for backfill. Forward writes always populate both.
   const awayNP = game.away_sp_forecast_n_priors != null ? parseInt(game.away_sp_forecast_n_priors, 10) : null;
   const homeNP = game.home_sp_forecast_n_priors != null ? parseInt(game.home_sp_forecast_n_priors, 10) : null;
+  // computeSpPitWeightFromForecast never returns null post-fix, so the
+  // `?? SP_PIT_WEIGHT` fallback that previously assigned 0.80 to no-
+  // forecast pitchers is gone. The `?? SP_PIT_WEIGHT` remains as a
+  // defensive back-stop against a defect in the function; if it fires
+  // in production that's a bug, not a normal path.
   const awaySpPitW = computeSpPitWeightFromForecast(awayFc, settings, awayNP) ?? SP_PIT_WEIGHT;
   const homeSpPitW = computeSpPitWeightFromForecast(homeFc, settings, homeNP) ?? SP_PIT_WEIGHT;
   const awayRelPitW = 1 - awaySpPitW;
@@ -1101,9 +1125,6 @@ const SP_FORECAST_PATTERN_MIN_STARTS_DEFAULT       = 3;
 //   FORECAST_WEIGHT_MIN            clamp floor (default 0.50)
 //   FORECAST_WEIGHT_MAX            clamp ceiling (default 0.95)
 //
-// Returns null when forecastIp is null/undefined — caller falls back to
-// fixed SP_PIT_WEIGHT, preserving v3 behavior for games with no forecast.
-//
 // `nPriors` (optional) is the count of clean current-season starts
 // behind the forecast. When supplied AND below the full-confidence
 // threshold, the returned weight is pulled toward
@@ -1113,10 +1134,23 @@ const SP_FORECAST_PATTERN_MIN_STARTS_DEFAULT       = 3;
 //   nPriors = 0          → fully pulled to target (0.62)
 //   nPriors = FULL/2     → halfway between target and forecast weight
 //   nPriors ≥ FULL (3)   → no haircut, forecast weight unchanged
-// When nPriors is null/undefined, behavior is back-compat-identical to
-// the pre-haircut function.
+// When nPriors is null/undefined AND forecastIp is present, behavior is
+// back-compat-identical to the pre-haircut function (returns forecastWeight).
+//
+// forecastIp==null path (revised 2026-07-03, audit finding 2): a pitcher
+// with NO forecast at all is the LEAST-informed case and used to return
+// null — which fell through the caller's `?? SP_PIT_WEIGHT` to the
+// MAXIMUM default weight (0.80). That was the same backwards-fallback
+// pattern as the pre-haircut bug: missing data → max confidence. Fixed
+// to return the low-confidence target (0.62 by default), the same
+// weight a pitcher WITH a forecast but ZERO priors receives. This lets
+// the null-forecast case use the existing haircut machinery rather
+// than a new constant. Callers should drop the `?? SP_PIT_WEIGHT`
+// fallback since the function no longer returns null.
 function computeSpPitWeightFromForecast(forecastIp, settings, nPriors) {
-  if (forecastIp == null) return null;
+  const target = parseFloat(settings?.SP_FORECAST_LOW_CONF_TARGET);
+  const targetUsed = (target === target) ? target : SP_FORECAST_LOW_CONF_TARGET_DEFAULT;
+  if (forecastIp == null) return targetUsed;
   const anchor = parseFloat(settings?.FORECAST_WEIGHT_ANCHOR_IP) || 5.5;
   const baseVal = parseFloat(settings?.FORECAST_WEIGHT_ANCHOR_VALUE) || 0.75;
   const slope = parseFloat(settings?.FORECAST_WEIGHT_SLOPE);
@@ -1126,8 +1160,6 @@ function computeSpPitWeightFromForecast(forecastIp, settings, nPriors) {
   const raw = baseVal + (forecastIp - anchor) * slopeUsed;
   const forecastWeight = Math.max(minW, Math.min(maxW, raw));
   if (nPriors == null) return forecastWeight;
-  const target = parseFloat(settings?.SP_FORECAST_LOW_CONF_TARGET);
-  const targetUsed = (target === target) ? target : SP_FORECAST_LOW_CONF_TARGET_DEFAULT;
   const fullN = parseInt(settings?.SP_FORECAST_FULL_CONF_PRIORS, 10)
     || SP_FORECAST_FULL_CONF_PRIORS_DEFAULT;
   const n = Math.max(0, Math.min(fullN, Number(nPriors) || 0));
