@@ -109,28 +109,25 @@ console.log('\n=== 1. TOR@SEA sp_sp: Gilbert SP_fc=5.67 / Hancock bulk_fc=5.44 �
   console.log('  shares: opener=' + (sh.opener || 0).toFixed(3)
     + '  bulk=' + (sh.bulk || 0).toFixed(3)
     + '  bullpen=' + (sh.bullpen || 0).toFixed(3));
-  // Raw formula (post-swap 2026-07-04):
+  // Raw formula (post-swap + flat-matrix 2026-07-04):
   //   openerIP = 5.67 × 0.90 = 5.103
   //   bulkCap  = 9 − 5.103   = 3.897
   //   bulkIP   = min(5.44, 3.897) = 3.897 (capped)
-  //   RAW opener target = 5.103 / 9 = 0.567
-  //   RAW bulk target   = 3.897 / 9 = 0.433
+  //   opener target = 5.103 / 9 = 0.567
+  //   bulk target   = 3.897 / 9 = 0.433
+  //   bullpen       = 1 − 0.567 − 0.433 = 0.000
   //
-  // buildPerPositionWeights compresses the raw targets via PA-weighted
-  // redistribution: OPENER_FACED_DEFAULT concentrates opener on early
-  // lineup positions; a raw opener target of 0.567 doesn't fit the
-  // distribution shape without spillover to bullpen. Realized ~0.45.
-  // Still ~30% higher than PR #150's opener_forecast_ip path (~0.32),
-  // moving Gilbert into the correct band (realized SEA tandem
-  // openers averaged 0.543).
-  expect('opener share in [0.42, 0.55] band (SP forecast → realized ~0.45; matches SEA ~0.54 direction)',
-    sh.opener != null && sh.opener >= 0.42 && sh.opener <= 0.55,
-    'got ' + (sh.opener != null ? sh.opener.toFixed(3) : 'null') + '; raw formula target 0.567 compressed by per-position matrix');
-  expect('bulk share in [0.35, 0.45] band (capped by 9 − opener × QH)',
-    sh.bulk != null && sh.bulk >= 0.35 && sh.bulk <= 0.45,
+  // Flat matrix: sp_sp bypasses buildPerPositionWeights and applies
+  // targets uniformly across all 9 slots (see model.js comment). So
+  // realized shares equal targets exactly.
+  expect('opener share ≈ 0.567 (flat matrix, no compression)',
+    sh.opener != null && Math.abs(sh.opener - 0.567) < 0.005,
+    'got ' + (sh.opener != null ? sh.opener.toFixed(3) : 'null'));
+  expect('bulk share ≈ 0.433 (capped by 9 − opener × QH)',
+    sh.bulk != null && Math.abs(sh.bulk - 0.433) < 0.005,
     'got ' + (sh.bulk != null ? sh.bulk.toFixed(3) : 'null'));
-  expect('bullpen residual ≥ 0',
-    sh.bullpen != null && sh.bullpen >= -0.001,
+  expect('bullpen ≈ 0.000 (two starters cover 9 IP)',
+    sh.bullpen != null && sh.bullpen < 0.01,
     'got ' + (sh.bullpen != null ? sh.bullpen.toFixed(3) : 'null'));
 }
 
@@ -172,11 +169,9 @@ console.log('\n=== 3. Self-updating: sp_forecast bump → opener share grows ===
   console.log('  sp_fc=6.00 → op=' + shHigh.opener.toFixed(3));
   expect('opener share grows with forecast', shHigh.opener > shLow.opener + 0.05,
     'delta=' + (shHigh.opener - shLow.opener).toFixed(3));
-  // Raw ratio is 1.5× (0.90*6.0/9 vs 0.90*4.0/9). Realized share after
-  // buildPerPositionWeights' redistribution + bulk-cap interaction
-  // compresses this, but the share should still meaningfully grow.
+  // Flat matrix: ratio is 1.5× exact (0.90*6.0/9 = 0.600 vs 0.90*4.0/9 = 0.400).
   const ratio = shHigh.opener / shLow.opener;
-  expect('meaningful growth (ratio >= 1.2×)', ratio >= 1.20,
+  expect('linear growth (ratio ≈ 1.5×)', Math.abs(ratio - 1.5) < 0.02,
     'ratio=' + ratio.toFixed(3));
 }
 
@@ -204,14 +199,10 @@ console.log('\n=== 5. QUICK_HOOK_FACTOR override — shares scale linearly ===')
   const shH = extractHomeSideShares(mrHalf);
   console.log('  QH=0.90 → op=' + shD.opener.toFixed(3));
   console.log('  QH=0.45 → op=' + shH.opener.toFixed(3));
-  // Raw ratio is 0.5× (halving QH halves opener_IP → halves raw target).
-  // Realized ratio is looser due to per-position redistribution: when
-  // raw target is well below the natural distribution's PA-weighted
-  // total, no scaling is needed, so the compression at high QH is
-  // larger than at low QH. This widens the realized ratio.
+  // Flat matrix: ratio is 0.5× exact (halving QH halves opener_IP → halves target).
   const ratio = shH.opener / shD.opener;
-  expect('opener share decreases meaningfully with QH (ratio in [0.45, 0.75])',
-    ratio >= 0.45 && ratio <= 0.75,
+  expect('opener share halves with QH (ratio ≈ 0.5×)',
+    Math.abs(ratio - 0.5) < 0.02,
     'ratio=' + ratio.toFixed(3));
 }
 
