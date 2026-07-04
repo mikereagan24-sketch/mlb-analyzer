@@ -48,6 +48,29 @@ const SETTINGS_SCHEMA = {
     help: 'Bulk-guy weight in opener-led games. Default 0.60 ≈ 5 innings of 9 plus workhorse share.' },
   opener_relief_pit_weight: { type: 'number', min: 0.10, max: 0.40, default: 0.25,
     help: 'Leftover bullpen weight in opener-led games. Default 0.25 ≈ 3 innings of 9 (later, lower-leverage).' },
+  // SP-SP tandem sub-mode (feat/sp-sp-tandem-forecast-split, 2026-07-04).
+  // Activated only when BOTH opener AND bulk are RR-fresh rotation SPs
+  // (SP1..SP5, role_at ≤7d) — the Gilbert/Hancock 2026-07-04 subtype
+  // where a returning SP opens on an IL-ramp pitch limit behind a
+  // stretched-out rotation bulk. detectOpeners writes the flag onto
+  // game_log.{away,home}_tandem_subtype='sp_sp'; model.js reads it in
+  // buildOpenerOpts and, when set, derives opener/bulk shares from each
+  // pitcher's own forecast IP instead of the opener-class anchor
+  // constants:
+  //   opener_share = opener_forecast_ip × QUICK_HOOK_FACTOR / 9
+  //   bulk_share   = min(bulk_forecast_ip, 9 − opener_forecast_ip × QH) / 9
+  //   bullpen      = residual (naturally small; not clamped)
+  // The QH factor reflects "reliable stretched-out bulk SP means a
+  // quicker hook than a normal start". Both pitchers' forecasts already
+  // flow through the confidence haircut, so a ramping opener's
+  // uncertainty is handled by n_priors rather than by any special-case
+  // logic here.
+  //
+  // Classic openers (either tandem member non-rotation) fall through
+  // unchanged. Manual pitcher_role_override wins as always. Stale RR
+  // falls back to classic openers (byte-identical).
+  quick_hook_factor: { type: 'number', min: 0.50, max: 1.00, default: 0.90,
+    help: 'SP-SP tandem sub-mode only (fires when detectOpeners tagged tandem_subtype=sp_sp). Multiplier on the opener\'s forecast IP; captures the mechanistic "reliable stretched-out bulk SP behind the opener means a quicker hook than a normal start." Default 0.90. Classic openers, single-SP piggybacks, bullpen games, and standard games all bypass this factor entirely.' },
   // Phase 2 feature flag — DEFAULT FALSE. When false, opener-led games
   // run the standard SP path (opener as the SP) and the opener-aware
   // values are computed in shadow only. Flipping to true is the moment

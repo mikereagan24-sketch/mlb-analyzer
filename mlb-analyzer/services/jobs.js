@@ -133,6 +133,7 @@ function getSettings() {
     OPENER_PIT_WEIGHT:        num('opener_pit_weight',         _d('opener_pit_weight', 0.15)),
     BULK_PIT_WEIGHT:          num('bulk_pit_weight',           _d('bulk_pit_weight', 0.60)),
     OPENER_RELIEF_PIT_WEIGHT: num('opener_relief_pit_weight',  _d('opener_relief_pit_weight', 0.25)),
+    QUICK_HOOK_FACTOR:        num('quick_hook_factor',         _d('quick_hook_factor', 0.90)),
     USE_OPENER_LOGIC: (function() {
       const raw = s['use_opener_logic'];
       if (raw == null) return _d('use_opener_logic', false);
@@ -3957,7 +3958,7 @@ async function detectOpeners(dateStr) {
     if (out.source === 'fallback') return null;
     return out.forecast;
   };
-  const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters) => {
+  const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters, tandemSubtype) => {
     // side comes from a closed { 'away', 'home' } enum below — safe to
     // splice into the column name. NEVER widen this to user input.
     //
@@ -3968,17 +3969,28 @@ async function detectOpeners(dateStr) {
     //   isOpener && bulkGuy   → 'opener'        (3-way model split)
     //   isOpener && !bulkGuy  → 'bullpen_game'  (0.15 opener + 0.85 BP)
     //   !isOpener             → 'standard'      (existing path)
+    //
+    // tandemSubtype (feat/sp-sp-tandem-forecast-split, 2026-07-04) is
+    // an OPTIONAL further refinement written alongside game_type:
+    //   'sp_sp' → both opener AND bulk are RR-fresh rotation SPs.
+    //             model.js buildOpenerOpts uses the forecast-driven
+    //             split formula instead of opener-class anchors.
+    //   null    → classic opener / bullpen_game / standard.
+    //             model.js falls through to the existing anchor path.
     const gameType = isOpener
       ? (bulkGuy ? 'opener' : 'bullpen_game')
       : 'standard';
+    const subtypeCol = 'tandem_subtype_' + side;
     const sql = "UPDATE game_log SET "
       + "is_opener_game_" + side + " = ?, "
       + "bulk_guy_" + side + " = ?, "
       + "opener_planned_batters_" + side + " = ?, "
       + "game_type_" + side + " = ?, "
+      + subtypeCol + " = ?, "
       + "opener_detected_at = datetime('now') "
       + "WHERE game_date = ? AND game_id = ?";
-    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, gameType, date, gameId);
+    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, gameType,
+      tandemSubtype != null ? tandemSubtype : null, date, gameId);
 
     // After writing detection state, refresh the role-specific forecast
     // columns. The lineup-job's earlier upsertGame gated bulk_forecast_ip
@@ -4277,12 +4289,34 @@ async function detectOpeners(dateStr) {
         }
       }
 
-      writeDetection(dateStr, g.game_id, side, isOpener, bulkGuy, plannedBatters);
+      // Tandem subtype (feat/sp-sp-tandem-forecast-split, 2026-07-04).
+      // If both the opener AND the bulk are RR-fresh rotation SPs, tag
+      // this as an 'sp_sp' tandem so model.js uses the forecast-driven
+      // split formula. Only fires on opener-mode games with a named
+      // bulk (game_type='opener' with bulkGuy set). Anything else
+      // stays null → classic path is byte-identical.
+      let tandemSubtype = null;
+      if (isOpener && bulkGuy && spRow && spRow.mlb_id) {
+        const bulkMlbId = resolveMlbId(team, bulkGuy);
+        if (bulkMlbId && isFreshRotationSp(spRow.mlb_id) && isFreshRotationSp(bulkMlbId)) {
+          tandemSubtype = 'sp_sp';
+          const spFg   = q.getFgRoleByMlbId.get(spRow.mlb_id);
+          const bulkFg = q.getFgRoleByMlbId.get(bulkMlbId);
+          console.log('[opener-detect] ' + g.game_id + '/' + side
+            + ': tandem_subtype=sp_sp — opener ' + sp
+            + ' (' + (spFg && spFg.role_detail) + ') + bulk ' + bulkGuy
+            + ' (' + (bulkFg && bulkFg.role_detail) + ')'
+            + ' — model.js will derive split from their own forecasts');
+        }
+      }
+
+      writeDetection(dateStr, g.game_id, side, isOpener, bulkGuy, plannedBatters, tandemSubtype);
       if (isOpener) {
         detectedCount++;
         if (!bulkGuy) unknownBulkCount++;
         console.log('[opener-detect] ' + g.game_id + '/' + side + ': ' + team
-          + ' using opener ' + sp + ' → bulk-guy ' + (bulkGuy || 'UNKNOWN'));
+          + ' using opener ' + sp + ' → bulk-guy ' + (bulkGuy || 'UNKNOWN')
+          + (tandemSubtype ? ' [sp_sp]' : ''));
       }
     }
   }
