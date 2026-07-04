@@ -622,10 +622,49 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     const openerFc = (openerFcRaw != null) ? parseFloat(openerFcRaw) : null;
     const bulkFcRaw   = side === 'away' ? game.away_bulk_forecast_ip   : game.home_bulk_forecast_ip;
     const bulkFc   = (bulkFcRaw != null) ? parseFloat(bulkFcRaw) : null;
-    const targetOpenerWeight = computeOpenerPitWeightFromForecast(openerFc, settings)
-      ?? (parseFloat(settings?.OPENER_WEIGHT_ANCHOR_VALUE) || 0.15);
-    const targetBulkWeight   = computeBulkPitWeightFromForecast(bulkFc, settings)
-      ?? (parseFloat(settings?.BULK_WEIGHT_ANCHOR_VALUE) || 0.60);
+
+    // SP-SP tandem sub-mode (feat/sp-sp-tandem-forecast-split, 2026-07-04).
+    // When jobs.js detectOpeners tagged both pitchers as fresh RR
+    // rotation SPs (tandem_subtype='sp_sp'), derive the split from
+    // their own forecasts instead of the opener-class anchors:
+    //   opener_share = opener_forecast_ip × QUICK_HOOK_FACTOR / 9
+    //   bulk_share   = min(bulk_forecast_ip, 9 − opener_forecast_ip × QH) / 9
+    //   bullpen      = 1 − opener_share − bulk_share (natural residual)
+    // Self-updating property: bump either forecast and the share moves
+    // proportionally. Confidence haircut still applies per-pitcher via
+    // computeSpPitWeightFromForecast up the pipeline, so a ramping
+    // opener with thin n_priors gets his uncertainty absorbed into the
+    // forecast IP itself — no special-case for it here.
+    //
+    // Guarded so a partial payload (null openerFc or null bulkFc)
+    // silently falls through to the anchor path — never fails
+    // scoring on missing forecast data.
+    const tandemSubtype = side === 'away'
+      ? game.tandem_subtype_away
+      : game.tandem_subtype_home;
+    let targetOpenerWeight;
+    let targetBulkWeight;
+    if (tandemSubtype === 'sp_sp' && openerFc != null && bulkFc != null) {
+      const QH = (settings && settings.QUICK_HOOK_FACTOR != null)
+        ? parseFloat(settings.QUICK_HOOK_FACTOR)
+        : 0.90;
+      const openerIP = openerFc * QH;
+      const bulkCap  = Math.max(0, 9 - openerIP);
+      const bulkIP   = Math.min(bulkFc, bulkCap);
+      targetOpenerWeight = openerIP / 9;
+      targetBulkWeight   = bulkIP / 9;
+      if (!quiet) console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
+        + ': SP-SP tandem — opener_fc=' + openerFc.toFixed(2)
+        + ' × QH=' + QH.toFixed(2) + ' → op_ip=' + openerIP.toFixed(2)
+        + ' (' + targetOpenerWeight.toFixed(3) + '); bulk_fc=' + bulkFc.toFixed(2)
+        + ' capped at ' + bulkCap.toFixed(2)
+        + ' → bk_ip=' + bulkIP.toFixed(2) + ' (' + targetBulkWeight.toFixed(3) + ')');
+    } else {
+      targetOpenerWeight = computeOpenerPitWeightFromForecast(openerFc, settings)
+        ?? (parseFloat(settings?.OPENER_WEIGHT_ANCHOR_VALUE) || 0.15);
+      targetBulkWeight   = computeBulkPitWeightFromForecast(bulkFc, settings)
+        ?? (parseFloat(settings?.BULK_WEIGHT_ANCHOR_VALUE) || 0.60);
+    }
     const perPositionWeights = buildPerPositionWeights('opener', targetOpenerWeight, targetBulkWeight);
     const s0 = perPositionWeights[0], s4 = perPositionWeights[4], s8 = perPositionWeights[8];
     // Compute realized PA-weighted weights for logging + persistence.

@@ -1128,6 +1128,17 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) 
 // preferred over identifyBulkGuy's historical-pattern scoring.
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_announced TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_announced TEXT"); } catch(e) {}
+// Tandem subtype (feat/sp-sp-tandem-forecast-split, 2026-07-04). Set by
+// detectOpeners to 'sp_sp' when BOTH the opener AND the bulk are
+// RR-fresh rotation SPs (SP1..SP5, role_at ≤7d). Consumed by model.js
+// buildOpenerOpts, which then uses the forecast-driven split formula
+// (opener_forecast × QUICK_HOOK_FACTOR / 9 for opener; bulk_forecast
+// capped by 9 − opener × QH for bulk) instead of the opener-class
+// anchor constants. NULL for classic openers / bullpen games /
+// standard games — model.js falls through to the existing anchor path
+// on NULL.
+try { db.exec("ALTER TABLE game_log ADD COLUMN tandem_subtype_away TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN tandem_subtype_home TEXT"); } catch(e) {}
 // SP projected IP/start from FG Depth Charts, captured at lineup-job time
 // for diagnostic visibility on /api/games/<date>. processGameSignals does
 // its own fresh lookup at signal-fire time via q.getPitcherProjIP, so
