@@ -3717,8 +3717,13 @@ async function loadSettings(){
     _ec.checked = s.signal_edge_cap_enabled === 'true'
                || s.signal_edge_cap_enabled === true
                || s.signal_edge_cap_enabled === '1';
-    set('s-edge-soft-cap', s.signal_edge_soft_cap_pp);
-    set('s-edge-hard-cap', s.signal_edge_hard_cap_pp);
+    // Fall back to schema defaults when the DB row is absent (e.g. a key
+    // that shipped with a UI but was never saved yet). Prior behavior left
+    // numeric inputs blank, then saveSettings sent '' which the server
+    // validator rejects as "cannot be blank" — killing the whole batch and
+    // silently discarding the checkbox flips too.
+    set('s-edge-soft-cap', s.signal_edge_soft_cap_pp != null ? s.signal_edge_soft_cap_pp : '0.10');
+    set('s-edge-hard-cap', s.signal_edge_hard_cap_pp != null ? s.signal_edge_hard_cap_pp : '0.25');
   } catch(e){ console.error('loadSettings error',e); }
 }
 
