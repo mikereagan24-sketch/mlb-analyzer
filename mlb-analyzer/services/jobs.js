@@ -4095,33 +4095,50 @@ async function detectOpeners(dateStr) {
       ).get(team, sp);
       let isOpener = false, bulkGuy = null, plannedBatters = null;
 
-      // SP disambiguator (fix/opener-detection-rr-consult, 2026-07-04).
-      // If the named SP is a fresh RR-classified rotation starter (role
-      // 'SP' + role_detail SP1..SP5, role_at within 7 days), block
-      // downstream pattern-driven opener classification. Motivating
-      // case: TOR@SEA 2026-07-04 — Logan Gilbert (SEA SP1 returning
-      // from IL with short ramp starts) was flipped to opener because
-      // RotoWire PRIM-tagged his teammate as an announced bulk. His
-      // short recent outings are injury-ramp; the existing SP-weight
-      // n_priors haircut is the correct uncertainty mechanism, not
-      // opener routing.
+      // SP disambiguator helper (fix/opener-rr-gate-precedence, 2026-07-04).
+      // Answers "is this SP a fresh RR-classified rotation starter
+      // (role 'SP' + role_detail SP1..SP5, role_at within 7 days)?"
       //
-      // Precedence rules from the brief:
+      // Used by the FG-role-reliever pattern-match branch below as the
+      // narrow guard: an inferred (unannounced) opener classification
+      // is blocked when RR lists the pitcher as a rotation slot.
+      //
+      // SUPERSEDES PR #148 SCOPE. PR #148 placed this gate above BOTH
+      // branches, which erased known-good information: on TOR@SEA
+      // 2026-07-04 Gilbert (SEA SP1 on an IL-ramp pitch limit) genuinely
+      // opens with Hancock (SEA SP5) the announced bulk — a real
+      // piggyback tandem. The over-broad gate flipped the game to
+      // 'standard' with bulk_guy=null, discarding Hancock and pricing
+      // the game as ~5.7 IP Gilbert + anonymous bullpen (worse than the
+      // original bug it tried to fix).
+      //
+      // Precedence rules (revised):
       //   1. pitcher_role_override — ALWAYS wins (handled above at
-      //      ~line 4030; this gate never reaches an override case).
-      //   2. Explicit announced-OPENER source — none currently; add
-      //      here if one is ever introduced.
-      //   3. RR SP + SP1..SP5 (this new gate) — blocks the announced-
-      //      bulk branch AND the FG-role-reliever pattern-match branch
-      //      below. bulk_guy_*_announced is still stored on the row
-      //      for divergence observation but doesn't drive routing.
-      //   4. RotoWire announced-bulk branch — retained (may fire on
-      //      pitchers WITHOUT a fresh SP1..SP5 tag).
-      //   5. FG-role-reliever + short-outings branch — retained.
+      //      ~line 4030; this gate never sees an override case).
+      //   2. RotoWire announced-bulk (PRIM) branch — WINS over RR-gate.
+      //      An announced tandem is known information (two named
+      //      pitchers, curated by RotoWire); RR-rotation status of the
+      //      named SP does NOT flip the game back to standard. This is
+      //      the crucial change from PR #148.
+      //   3. RR SP + SP1..SP5 (this gate) — blocks only the FG-role-
+      //      reliever pattern-match branch below (inferred openers
+      //      with no announced bulk).
+      //   4. FG-role-reliever + short-outings branch — retained,
+      //      guarded by (3).
       //
-      // Freshness gate: role_at must be within 7 days. Stale RR falls
-      // back to current behavior rather than trusting stale data —
-      // limit case per the brief: "handle stale roles gracefully".
+      // Freshness: role_at must be within 7 days. Stale RR falls back
+      // to pre-fix behavior (no gate) rather than trusting stale data.
+      //
+      // FOLLOW-UP (out of scope, noted per brief): when the opener is
+      // a fresh RR rotation SP AND the announced-bulk branch fires
+      // (Gilbert-type — ramping starter opening a tandem), the current
+      // opener-share compute already reads the forecast IP through
+      // computeOpenerPitWeightFromForecast (see model.js:1155). For
+      // Gilbert on 2026-07-04 that produced O:0.29 (from a 3.38 IP
+      // opener forecast, clamped at the max weight), which the owner
+      // said was "approximately right." No parameter change needed
+      // here; a subtype-aware anchor for ramping-SP-openers is a
+      // separate refinement PR if the population turns out non-trivial.
       const isFreshRotationSp = (mlbId) => {
         if (!mlbId) return false;
         const fg = q.getFgRoleByMlbId.get(mlbId);
@@ -4134,21 +4151,6 @@ async function detectOpeners(dateStr) {
         const ageDays = (Date.now() - roleT) / 86400000;
         return ageDays <= 7;
       };
-      if (spRow && spRow.mlb_id && isFreshRotationSp(spRow.mlb_id)) {
-        const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
-        const announcedBulkForLog = side === 'away'
-          ? g.bulk_guy_away_announced
-          : g.bulk_guy_home_announced;
-        writeDetection(dateStr, g.game_id, side, false, null, null);
-        console.log('[opener-detect] ' + g.game_id + '/' + side
-          + ': SP ' + sp + ' has fresh RR rotation slot '
-          + fg.role_detail + ' (role_at=' + fg.role_at + ')'
-          + ' — routed as normal SP; announced bulk '
-          + (announcedBulkForLog || 'n/a')
-          + ' recorded but NOT flipped to opener (short outings, if any,'
-          + ' are treated by the SP-weight n_priors haircut)');
-        continue;
-      }
 
       // Highest-confidence signal: RotoWire has PRIM-tagged a bulk
       // pitcher behind a named SP. RotoWire's announcement is curated
@@ -4159,8 +4161,15 @@ async function detectOpeners(dateStr) {
       // announced bulk) was classified as standard because Falter's
       // FG role is SP, ignoring the announced bulk entirely.
       //
-      // Gated above by the RR-rotation-slot check — a fresh SP1..SP5
-      // classification blocks this branch (Gilbert case).
+      // This branch WINS over the RR-rotation-slot gate (fix/opener-
+      // rr-gate-precedence — supersedes PR #148). An announced tandem
+      // is known information — RR-rotation status of the named SP
+      // does not overrule it. Ramping-starter opener cases (Gilbert-
+      // type) are handled naturally: the announced-bulk branch keeps
+      // both pitchers routed as a piggyback, and the opener share
+      // reflects the SP's forecast IP via computeOpenerPitWeightFrom-
+      // Forecast — for Gilbert that produced O:0.29 which the owner
+      // said was "approximately right."
       const announcedBulk = side === 'away'
         ? g.bulk_guy_away_announced
         : g.bulk_guy_home_announced;
@@ -4221,25 +4230,49 @@ async function detectOpeners(dateStr) {
         bulkGuy = announcedBulk;
         plannedBatters = 4;
       } else if (spRow && spRow.mlb_id) {
-        const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
-        const fgSaysReliever = fg && (fg.role === 'RP' || fg.role === 'CL');
-        if (fgSaysReliever) {
-          // Confirming signal: pitches per appearance over last ~10 outings.
-          // < 30 pitches/app is the proxy for "<2 IP". When we have no
-          // data (recent callup), trust the FG signal alone.
-          const outings = db.prepare(
-            "SELECT pitches_thrown FROM pitcher_game_log WHERE pitcher_mlb_id=? ORDER BY game_date DESC LIMIT 10"
-          ).all(spRow.mlb_id);
-          const avgPitches = outings.length
-            ? outings.reduce((s, o) => s + (o.pitches_thrown || 0), 0) / outings.length
-            : null;
-          if (avgPitches == null || avgPitches < 30) {
-            isOpener = true;
-            plannedBatters = 4; // spec default until per-pitcher tuning lands
-            // No announced bulk reached this branch (the early
-            // if-announcedBulk branch above handles those). Fall back
-            // to identifyBulkGuy's historical-pattern scoring.
-            bulkGuy = identifyBulkGuy(team, dateStr, sp);
+        // RR-rotation-slot gate — narrow scope (fix/opener-rr-gate-
+        // precedence, 2026-07-04). Only fires here, on the inferred /
+        // pattern-match path. The announced-bulk branch above already
+        // fires unconditionally on PRIM-tagged tandems, so a rotation
+        // SP with an announced bulk keeps the piggyback routing.
+        //
+        // Here, no bulk was announced. If RR lists this SP as a fresh
+        // rotation slot, the "avg pitches < 30" pattern below would
+        // be picking up injury-ramp / short-leash rather than opener
+        // usage — that's what the SP-weight n_priors haircut is for.
+        // Block classification and let the SP path score.
+        if (isFreshRotationSp(spRow.mlb_id)) {
+          const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
+          console.log('[opener-detect] ' + g.game_id + '/' + side
+            + ': SP ' + sp + ' has fresh RR rotation slot '
+            + fg.role_detail + ' (role_at=' + fg.role_at + ')'
+            + ' AND no announced bulk — pattern-match opener'
+            + ' classification BLOCKED; routed as normal SP (short'
+            + ' outings, if any, treated by the SP-weight n_priors'
+            + ' haircut). If a bulk gets announced later, the announced'
+            + '-bulk branch above will pick up the tandem naturally.');
+          // isOpener stays false; falls through to writeDetection below.
+        } else {
+          const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
+          const fgSaysReliever = fg && (fg.role === 'RP' || fg.role === 'CL');
+          if (fgSaysReliever) {
+            // Confirming signal: pitches per appearance over last ~10 outings.
+            // < 30 pitches/app is the proxy for "<2 IP". When we have no
+            // data (recent callup), trust the FG signal alone.
+            const outings = db.prepare(
+              "SELECT pitches_thrown FROM pitcher_game_log WHERE pitcher_mlb_id=? ORDER BY game_date DESC LIMIT 10"
+            ).all(spRow.mlb_id);
+            const avgPitches = outings.length
+              ? outings.reduce((s, o) => s + (o.pitches_thrown || 0), 0) / outings.length
+              : null;
+            if (avgPitches == null || avgPitches < 30) {
+              isOpener = true;
+              plannedBatters = 4; // spec default until per-pitcher tuning lands
+              // No announced bulk reached this branch (the early
+              // if-announcedBulk branch above handles those). Fall back
+              // to identifyBulkGuy's historical-pattern scoring.
+              bulkGuy = identifyBulkGuy(team, dateStr, sp);
+            }
           }
         }
       }

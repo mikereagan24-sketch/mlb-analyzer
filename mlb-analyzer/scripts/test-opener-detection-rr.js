@@ -1,17 +1,30 @@
-// Fixture tests for fix/opener-detection-rr-consult.
+// Fixture tests for fix/opener-rr-gate-precedence (supersedes
+// fix/opener-detection-rr-consult / PR #148).
 //
-// Isolates the SP-rotation-slot gate + freshness check from the rest of
-// detectOpeners so we can exercise Gilbert-type / opener / override /
-// stale-role cases without a full lineup fixture. The gate is a small,
-// self-contained function; test it directly.
+// The gate helper itself is unchanged from PR #148 — the fixture cases
+// below test isFreshRotationSp's inputs/outputs identically. What
+// changed in this PR is the CALL SITE precedence:
 //
-// Cases:
+//   BEFORE (#148): gate blocked BOTH the announced-bulk branch AND the
+//   FG-role-reliever branch — so a real piggyback tandem (Gilbert +
+//   Hancock, TOR@SEA 2026-07-04) was erased because Gilbert's RR
+//   rotation slot overrode the announced tandem.
+//
+//   AFTER (this PR): gate only fires INSIDE the FG-role-reliever
+//   branch's else-of-announced-bulk fork. Announced-bulk fires first
+//   and wins on tandem cases. See services/jobs.js detectOpeners.
+//
+// Gate-helper cases (unchanged from #148):
 //   1. Fresh RR SP1..SP5 → protected (isFreshRotationSp = true).
 //   2. Fresh RR SP but role_detail is empty / non-slot ("SP") → NOT protected.
 //   3. Fresh RR RP + rotation-shape detail (edge case) → NOT protected.
 //   4. Stale RR SP1..SP5 (role_at > 7 days) → NOT protected (falls back).
 //   5. No RR row at all → NOT protected.
 //   6. Malformed role_at → NOT protected.
+//
+// Precedence tests (new, this PR): see scripts/test-opener-detection-
+// precedence.js for the announced-bulk / gate / override matrix run
+// against the real detectOpeners function.
 //
 // Run: node scripts/test-opener-detection-rr.js
 
