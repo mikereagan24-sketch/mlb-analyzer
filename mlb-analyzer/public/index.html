@@ -502,6 +502,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Default batter wOBA vs same-handed starter when no CSV data found. Used as fallback only.">Batter dflt (same hand)</label><input type="number" id="s-bat-dflt-start" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="Default batter wOBA vs opposite-handed reliever when no CSV data found. Used as fallback only.">Batter dflt (opp hand)</label><input type="number" id="s-bat-dflt-opp" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
+      <div class="setting-row"><label title="Park-neutralize wOBA inputs so the game-time park factor is the only place park enters the model. Actuals-only neutralization (PR #144): projections aren't touched (Steamer is already park-neutral). Deflates extreme-park hitter actuals ~2-3% for COL/ATH, inflates SEA/SD ~1%. Toggle OFF is byte-identical.">Park-neutralize wOBA inputs</label><input type="checkbox" id="s-park-neutral" style="margin-left:4px"></div>
       <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7"></div>
       <div class="setting-row"><label title="Lower bound for win probability clamp. Caps extreme ML output. Default 0.25 (cap ≈ ±300).">Win prob clamp lo</label><input type="number" id="s-wp-clamp-lo" step="0.01" min="0.05" max="0.45"></div>
       <div class="setting-row"><label title="Upper bound for win probability clamp. Caps extreme ML output. Default 0.75 (cap ≈ ±300).">Win prob clamp hi</label><input type="number" id="s-wp-clamp-hi" step="0.01" min="0.55" max="0.95"></div>
@@ -518,6 +519,9 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">ML dog highlight min (prob pts)</label><input type="number" id="s-hl-ml-dog" step="0.005" min="0"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Totals under highlight min (prob pts)</label><input type="number" id="s-hl-tot-under" step="0.005" min="0"></div>
 <div style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label style="font-size:11px;color:var(--text2)" for="s-hl-tot-overs">Totals overs highlight enabled</label><input type="checkbox" id="s-hl-tot-overs"></div>
+<div style="grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-top:6px;border-top:1px solid var(--border);padding-top:8px"><label style="font-size:11px;color:var(--text2)" for="s-edge-cap-enabled" title="Master toggle for the edge-sanity cap (PR #145). When ON, signals with edge ≥ hard cap are suppressed to bet_signal_audit (action=suppressed_edge_cap); signals in [soft, hard) still emit but carry edge_suspect=true. Default OFF — verified byte-identical.">Edge-sanity cap enabled</label><input type="checkbox" id="s-edge-cap-enabled"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Signals with edge ≥ soft cap emit with edge_suspect=true. Default 0.10 (10pp).">Edge soft cap (prob pts)</label><input type="number" id="s-edge-soft-cap" step="0.005" min="0.05" max="0.30"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Signals with edge ≥ hard cap are suppressed + audit-logged. Default 0.25 (25pp). Must be > soft cap.">Edge hard cap (prob pts)</label><input type="number" id="s-edge-hard-cap" step="0.005" min="0.10" max="0.50"></div>
 </div>
 <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
 <!-- Admin token affordance. Writes require X-Admin-Token (see
@@ -3524,6 +3528,11 @@ const _SETTINGS_SCHEMA_ID_MAP = {
   ui_highlight_ml_dog_min_pp: 's-hl-ml-dog',
   ui_highlight_tot_under_min_pp: 's-hl-tot-under',
   ui_highlight_tot_overs_enabled: 's-hl-tot-overs',
+  // Dormant-settings surfacing (feat/expose-dormant-settings).
+  park_neutral_inputs_enabled: 's-park-neutral',
+  signal_edge_cap_enabled: 's-edge-cap-enabled',
+  signal_edge_soft_cap_pp: 's-edge-soft-cap',
+  signal_edge_hard_cap_pp: 's-edge-hard-cap',
 };
 let _SETTINGS_SCHEMA_CACHE = null;
 
@@ -3699,6 +3708,17 @@ async function loadSettings(){
     _overs.checked = s.ui_highlight_tot_overs_enabled === 'true'
                   || s.ui_highlight_tot_overs_enabled === true
                   || s.ui_highlight_tot_overs_enabled === '1';
+    // Dormant-settings surfacing (feat/expose-dormant-settings).
+    var _pn = (document.getElementById('s-park-neutral')||{});
+    _pn.checked = s.park_neutral_inputs_enabled === 'true'
+               || s.park_neutral_inputs_enabled === true
+               || s.park_neutral_inputs_enabled === '1';
+    var _ec = (document.getElementById('s-edge-cap-enabled')||{});
+    _ec.checked = s.signal_edge_cap_enabled === 'true'
+               || s.signal_edge_cap_enabled === true
+               || s.signal_edge_cap_enabled === '1';
+    set('s-edge-soft-cap', s.signal_edge_soft_cap_pp);
+    set('s-edge-hard-cap', s.signal_edge_hard_cap_pp);
   } catch(e){ console.error('loadSettings error',e); }
 }
 
@@ -3756,6 +3776,11 @@ async function saveSettings(){
     ui_highlight_ml_dog_min_pp:     get('s-hl-ml-dog'),
     ui_highlight_tot_under_min_pp:  get('s-hl-tot-under'),
     ui_highlight_tot_overs_enabled: (document.getElementById('s-hl-tot-overs')||{}).checked ? 'true' : 'false',
+    // Dormant-settings surfacing (feat/expose-dormant-settings).
+    park_neutral_inputs_enabled: (document.getElementById('s-park-neutral')||{}).checked ? 'true' : 'false',
+    signal_edge_cap_enabled:     (document.getElementById('s-edge-cap-enabled')||{}).checked ? 'true' : 'false',
+    signal_edge_soft_cap_pp:     get('s-edge-soft-cap'),
+    signal_edge_hard_cap_pp:     get('s-edge-hard-cap'),
   };
   try{
     // Use adminPost — POST /settings requires X-Admin-Token (see
