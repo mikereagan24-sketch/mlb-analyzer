@@ -623,38 +623,60 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     const bulkFcRaw   = side === 'away' ? game.away_bulk_forecast_ip   : game.home_bulk_forecast_ip;
     const bulkFc   = (bulkFcRaw != null) ? parseFloat(bulkFcRaw) : null;
 
-    // SP-SP tandem sub-mode (feat/sp-sp-tandem-forecast-split, 2026-07-04).
+    // SP-SP tandem sub-mode (feat/sp-sp-tandem-forecast-split, 2026-07-04;
+    // forecast source revised 2026-07-04 per docs/sea-tandem-analysis).
     // When jobs.js detectOpeners tagged both pitchers as fresh RR
     // rotation SPs (tandem_subtype='sp_sp'), derive the split from
-    // their own forecasts instead of the opener-class anchors:
-    //   opener_share = opener_forecast_ip × QUICK_HOOK_FACTOR / 9
-    //   bulk_share   = min(bulk_forecast_ip, 9 − opener_forecast_ip × QH) / 9
+    // their own SP-role forecasts instead of the opener-class anchors:
+    //   opener_share = opener SP_forecast × QUICK_HOOK_FACTOR / 9
+    //   bulk_share   = min(bulk_forecast_ip, 9 − opener SP_fc × QH) / 9
     //   bullpen      = 1 − opener_share − bulk_share (natural residual)
-    // Self-updating property: bump either forecast and the share moves
-    // proportionally. Confidence haircut still applies per-pitcher via
-    // computeSpPitWeightFromForecast up the pipeline, so a ramping
-    // opener with thin n_priors gets his uncertainty absorbed into the
-    // forecast IP itself — no special-case for it here.
     //
-    // Guarded so a partial payload (null openerFc or null bulkFc)
+    // Forecast source (2026-07-04 revision): the OPENER side now uses
+    // sp_forecast_ip (the pitcher's forecast under role='start'), not
+    // opener_forecast_ip. Rationale, from docs/sea-tandem-analysis-
+    // 2026-07-04.md:
+    //   - role='opener' forecast Bayesian-shrinks toward the 1.35-IP
+    //     opener-class anchor. For a rotation SP temporarily deployed
+    //     as opener (Gilbert IL-ramp; Miller/Castillo tandem rotation),
+    //     this dragged the forecast halfway toward 1-IP-class values
+    //     that don't reflect his actual usage.
+    //   - Realized SEA tandem openers (n=3 completed: 5.67 / 4.00 / 5.00
+    //     IP, mean 4.89) put the opener share at ~54%, not the ~34%
+    //     the opener_forecast_ip path computed.
+    //   - Switching to sp_forecast_ip × QH lands Gilbert at ~0.567 —
+    //     matches the realized band.
+    //
+    // Confidence haircut still applies to sp_forecast_ip up the
+    // pipeline (n_priors shrinkage in forecastSpIP with role='start').
+    // A ramping opener's uncertainty is absorbed into the forecast IP
+    // itself; no special-case for it here.
+    //
+    // The BULK side keeps bulk_forecast_ip (role='bulk' baseline 5.4).
+    // That baseline is already appropriate for a stretched-out SP
+    // taking the second half of a tandem — no revision needed.
+    //
+    // Guarded so a partial payload (null openerSpFc or null bulkFc)
     // silently falls through to the anchor path — never fails
     // scoring on missing forecast data.
+    const openerSpFcRaw = side === 'away' ? game.away_sp_forecast_ip : game.home_sp_forecast_ip;
+    const openerSpFc = (openerSpFcRaw != null) ? parseFloat(openerSpFcRaw) : null;
     const tandemSubtype = side === 'away'
       ? game.tandem_subtype_away
       : game.tandem_subtype_home;
     let targetOpenerWeight;
     let targetBulkWeight;
-    if (tandemSubtype === 'sp_sp' && openerFc != null && bulkFc != null) {
+    if (tandemSubtype === 'sp_sp' && openerSpFc != null && bulkFc != null) {
       const QH = (settings && settings.QUICK_HOOK_FACTOR != null)
         ? parseFloat(settings.QUICK_HOOK_FACTOR)
         : 0.90;
-      const openerIP = openerFc * QH;
+      const openerIP = openerSpFc * QH;
       const bulkCap  = Math.max(0, 9 - openerIP);
       const bulkIP   = Math.min(bulkFc, bulkCap);
       targetOpenerWeight = openerIP / 9;
       targetBulkWeight   = bulkIP / 9;
       if (!quiet) console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
-        + ': SP-SP tandem — opener_fc=' + openerFc.toFixed(2)
+        + ': SP-SP tandem — opener SP_fc=' + openerSpFc.toFixed(2)
         + ' × QH=' + QH.toFixed(2) + ' → op_ip=' + openerIP.toFixed(2)
         + ' (' + targetOpenerWeight.toFixed(3) + '); bulk_fc=' + bulkFc.toFixed(2)
         + ' capped at ' + bulkCap.toFixed(2)
