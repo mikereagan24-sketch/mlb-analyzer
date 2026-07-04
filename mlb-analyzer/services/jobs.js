@@ -4095,6 +4095,61 @@ async function detectOpeners(dateStr) {
       ).get(team, sp);
       let isOpener = false, bulkGuy = null, plannedBatters = null;
 
+      // SP disambiguator (fix/opener-detection-rr-consult, 2026-07-04).
+      // If the named SP is a fresh RR-classified rotation starter (role
+      // 'SP' + role_detail SP1..SP5, role_at within 7 days), block
+      // downstream pattern-driven opener classification. Motivating
+      // case: TOR@SEA 2026-07-04 — Logan Gilbert (SEA SP1 returning
+      // from IL with short ramp starts) was flipped to opener because
+      // RotoWire PRIM-tagged his teammate as an announced bulk. His
+      // short recent outings are injury-ramp; the existing SP-weight
+      // n_priors haircut is the correct uncertainty mechanism, not
+      // opener routing.
+      //
+      // Precedence rules from the brief:
+      //   1. pitcher_role_override — ALWAYS wins (handled above at
+      //      ~line 4030; this gate never reaches an override case).
+      //   2. Explicit announced-OPENER source — none currently; add
+      //      here if one is ever introduced.
+      //   3. RR SP + SP1..SP5 (this new gate) — blocks the announced-
+      //      bulk branch AND the FG-role-reliever pattern-match branch
+      //      below. bulk_guy_*_announced is still stored on the row
+      //      for divergence observation but doesn't drive routing.
+      //   4. RotoWire announced-bulk branch — retained (may fire on
+      //      pitchers WITHOUT a fresh SP1..SP5 tag).
+      //   5. FG-role-reliever + short-outings branch — retained.
+      //
+      // Freshness gate: role_at must be within 7 days. Stale RR falls
+      // back to current behavior rather than trusting stale data —
+      // limit case per the brief: "handle stale roles gracefully".
+      const isFreshRotationSp = (mlbId) => {
+        if (!mlbId) return false;
+        const fg = q.getFgRoleByMlbId.get(mlbId);
+        if (!fg || fg.role !== 'SP') return false;
+        const detail = String(fg.role_detail || '').trim().toUpperCase();
+        if (!/^SP[1-5]$/.test(detail)) return false;
+        if (!fg.role_at) return false;
+        const roleT = Date.parse(String(fg.role_at).replace(' ', 'T') + 'Z');
+        if (isNaN(roleT)) return false;
+        const ageDays = (Date.now() - roleT) / 86400000;
+        return ageDays <= 7;
+      };
+      if (spRow && spRow.mlb_id && isFreshRotationSp(spRow.mlb_id)) {
+        const fg = q.getFgRoleByMlbId.get(spRow.mlb_id);
+        const announcedBulkForLog = side === 'away'
+          ? g.bulk_guy_away_announced
+          : g.bulk_guy_home_announced;
+        writeDetection(dateStr, g.game_id, side, false, null, null);
+        console.log('[opener-detect] ' + g.game_id + '/' + side
+          + ': SP ' + sp + ' has fresh RR rotation slot '
+          + fg.role_detail + ' (role_at=' + fg.role_at + ')'
+          + ' — routed as normal SP; announced bulk '
+          + (announcedBulkForLog || 'n/a')
+          + ' recorded but NOT flipped to opener (short outings, if any,'
+          + ' are treated by the SP-weight n_priors haircut)');
+        continue;
+      }
+
       // Highest-confidence signal: RotoWire has PRIM-tagged a bulk
       // pitcher behind a named SP. RotoWire's announcement is curated
       // and trumps FG role heuristics — a "regular SP" being used as
@@ -4103,6 +4158,9 @@ async function detectOpeners(dateStr) {
       // this branch, BOS-KC 5/19 (Bailey Falter SP, Luinder Avila
       // announced bulk) was classified as standard because Falter's
       // FG role is SP, ignoring the announced bulk entirely.
+      //
+      // Gated above by the RR-rotation-slot check — a fresh SP1..SP5
+      // classification blocks this branch (Gilbert case).
       const announcedBulk = side === 'away'
         ? g.bulk_guy_away_announced
         : g.bulk_guy_home_announced;
