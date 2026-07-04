@@ -666,6 +666,7 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
       : game.tandem_subtype_home;
     let targetOpenerWeight;
     let targetBulkWeight;
+    let isSpSpTandem = false;
     if (tandemSubtype === 'sp_sp' && openerSpFc != null && bulkFc != null) {
       const QH = (settings && settings.QUICK_HOOK_FACTOR != null)
         ? parseFloat(settings.QUICK_HOOK_FACTOR)
@@ -675,6 +676,7 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
       const bulkIP   = Math.min(bulkFc, bulkCap);
       targetOpenerWeight = openerIP / 9;
       targetBulkWeight   = bulkIP / 9;
+      isSpSpTandem = true;
       if (!quiet) console.log('[opener-model] ' + (game.game_id || '?') + '/' + side
         + ': SP-SP tandem — opener SP_fc=' + openerSpFc.toFixed(2)
         + ' × QH=' + QH.toFixed(2) + ' → op_ip=' + openerIP.toFixed(2)
@@ -687,7 +689,26 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
       targetBulkWeight   = computeBulkPitWeightFromForecast(bulkFc, settings)
         ?? (parseFloat(settings?.BULK_WEIGHT_ANCHOR_VALUE) || 0.60);
     }
-    const perPositionWeights = buildPerPositionWeights('opener', targetOpenerWeight, targetBulkWeight);
+    // SP-SP tandem: bypass the per-position matrix and apply target
+    // shares flat across all nine positions. Rationale: a 5-IP opener
+    // cycles the full lineup, so per-slot exposure differences are
+    // second-order; SEA realized data shows two tandem starters
+    // covering exactly 9 IP (bp≈0 empirically, not assumed). The
+    // OPENER_FACED_DEFAULT shape assumes opener exits by ~pos5 and
+    // leaks ~11pp opener weight to bullpen for a long-outing opener
+    // via renorm at top-of-order + tail vacuum at pos6-9.
+    // Refinement path (Option A) if the tandem population grows
+    // enough to calibrate: swap in a tandem-shaped OPENER_FACED curve
+    // (e.g. ~[1.5, 1.5, 1.4, 1.3, 1.1, 0.9, 0.4, 0.1, 0.0]) instead
+    // of flat. For now, flat matches the two-starters-cover-9-IP
+    // realized pattern directly.
+    const perPositionWeights = isSpSpTandem
+      ? Array.from({ length: 9 }, () => ({
+          opener:  targetOpenerWeight,
+          bulk:    targetBulkWeight,
+          bullpen: Math.max(0, 1 - targetOpenerWeight - targetBulkWeight),
+        }))
+      : buildPerPositionWeights('opener', targetOpenerWeight, targetBulkWeight);
     const s0 = perPositionWeights[0], s4 = perPositionWeights[4], s8 = perPositionWeights[8];
     // Compute realized PA-weighted weights for logging + persistence.
     let realizedOpener = 0, realizedBulk = 0, realizedBullpen = 0, paSum = 0;
