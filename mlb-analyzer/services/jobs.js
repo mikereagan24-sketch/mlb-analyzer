@@ -1408,7 +1408,61 @@ async function runLineupJob(dateStr) {
         const key = team + ':' + normName(pitcherName);
         if (rosterByNorm.has(key)) mlbId = rosterByNorm.get(key);
       }
-      if (mlbId == null) return null;
+      // Abbreviated-name fallback (docs/sp-forecast-abbrev-name-2026-07-04.md).
+      // RotoWire occasionally writes SPs as 'Y. Yamamoto' / 'C. Sanchez' /
+      // 'S. Woods Richardson'. Exact + normalized-exact both miss because
+      // team_rosters has the full name ('Yoshinobu Yamamoto'). Without this
+      // fallback the SP forecast column persisted null and the model priced
+      // the pitcher at SP_FORECAST_LOW_CONF_TARGET=0.62 — the same
+      // low-confidence weight assigned to a genuine no-priors pitcher. Fired
+      // silently for ~20 games since 2026-03-01 (S. Woods Richardson,
+      // E. Rodriguez, C. Sanchez, B. Williamson recurring).
+      //
+      // Pattern mirrors utils/names.js fuzzyLookup's isAbbrev branch: scope
+      // the scan to this team, match by first-initial + last-name against
+      // rosterByNorm. Only resolves when exactly one roster entry matches
+      // (ambiguous cases like two 'E. Rodriguez' on the same team return
+      // null and stay in the low-conf bucket — safer than resolving to the
+      // wrong pitcher). Cost: O(roster-for-team) per unresolved abbrev,
+      // typically ~40 entries — trivial vs. the forecastSpIP call itself.
+      if (mlbId == null) {
+        const norm = normName(pitcherName);
+        const parts = norm.split(' ');
+        const isAbbrev = parts.length >= 2 && parts[0].length === 1;
+        if (isAbbrev) {
+          const initial = parts[0];
+          const last = parts[parts.length - 1];
+          const prefix = team + ':';
+          let matches = 0;
+          let matchId = null;
+          let matchNormName = null;
+          for (const [k, v] of rosterByNorm.entries()) {
+            if (!k.startsWith(prefix)) continue;
+            const rn = k.slice(prefix.length);
+            const p = stripSfx(rn).split(' ');
+            if (p[p.length - 1] === last && p[0] && p[0][0] === initial) {
+              matches++;
+              matchId = v;
+              matchNormName = rn;
+              if (matches > 1) break;
+            }
+          }
+          if (matches === 1) {
+            mlbId = matchId;
+            console.log('[forecast-for-pitcher] abbrev-resolved name=' + pitcherName
+              + ' team=' + team + ' → ' + matchNormName + ' mlbId=' + mlbId);
+          } else if (matches > 1) {
+            console.log('[forecast-null-resolve] abbrev-ambiguous name=' + pitcherName
+              + ' team=' + team + ' role=' + (role || 'start') + ' matches=' + matches);
+          }
+        }
+      }
+      if (mlbId == null) {
+        // Distinct log tag for the health counter — greppable and structured.
+        console.log('[forecast-null-resolve] name=' + pitcherName
+          + ' team=' + team + ' role=' + (role || 'start') + ' reason=unresolved-name');
+        return null;
+      }
       const out = forecastSpIP({
         index: spStartIndex,
         pitcherMlbId: mlbId,
@@ -1417,7 +1471,11 @@ async function runLineupJob(dateStr) {
         role: role || 'start',
       });
       console.log('[forecast-for-pitcher] name=' + pitcherName + ' team=' + team + ' role=' + (role || 'start') + ' mlbId=' + mlbId + ' source=' + out.source + ' forecast=' + (out.forecast != null ? out.forecast.toFixed(4) : 'null') + ' n_priors=' + ((out.components && out.components.total_clean_priors) || 0));
-      if (out.source === 'fallback') return null;
+      if (out.source === 'fallback') {
+        console.log('[forecast-null-resolve] name=' + pitcherName + ' team=' + team
+          + ' role=' + (role || 'start') + ' reason=index-fallback mlbId=' + mlbId);
+        return null;
+      }
       // league_only persists with n_priors=0 (low-conf haircut target);
       // shrinkage persists with its actual prior count.
       const nPriors = (out.components && out.components.total_clean_priors) || 0;

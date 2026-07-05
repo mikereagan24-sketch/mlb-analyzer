@@ -6015,6 +6015,47 @@ router.get('/health/:date', (req, res) => {
       }
     }
 
+    // ---- check 7d: sp_forecast_resolution ----
+    // Surfaces silent SP-forecast misses: SP name populated but
+    // *_sp_forecast_ip is null. When this fires the model prices the
+    // pitcher at SP_FORECAST_LOW_CONF_TARGET=0.62, indistinguishable
+    // from a genuine no-priors pitcher. Was invisible for months until
+    // the SD@LAD 2026-07-04 Yamamoto case surfaced it
+    // (docs/sp-forecast-abbrev-name-2026-07-04.md). This check makes
+    // future misses visible; the resolver fix in
+    // services/jobs.js forecastForPitcher closes the abbreviated-name
+    // pathway but this check catches any remaining chain break
+    // (fallback source, missing roster row, etc.).
+    {
+      const misses = db.prepare(
+        "SELECT game_id, away_sp, home_sp, away_sp_forecast_ip, home_sp_forecast_ip " +
+        "FROM game_log " +
+        "WHERE game_date = ? AND COALESCE(is_removed, 0) = 0 " +
+        "  AND ((away_sp IS NOT NULL AND away_sp_forecast_ip IS NULL) " +
+        "    OR (home_sp IS NOT NULL AND home_sp_forecast_ip IS NULL))"
+      ).all(date);
+      if (misses.length === 0) {
+        checks.push({ id: 'sp_forecast_resolution', status: 'pass', severity: 'warn',
+          message: 'All named SPs have a resolved forecast IP' });
+      } else {
+        const detail = misses.map(m => {
+          const parts = [];
+          if (m.away_sp && m.away_sp_forecast_ip == null) parts.push(m.away_sp + '(away)');
+          if (m.home_sp && m.home_sp_forecast_ip == null) parts.push(m.home_sp + '(home)');
+          return m.game_id + ':' + parts.join('/');
+        }).join(', ');
+        checks.push({
+          id: 'sp_forecast_resolution',
+          status: 'warn',
+          severity: 'warn',
+          message: misses.length + ' game(s) with an SP whose forecast IP failed to resolve — '
+            + 'model is pricing that side at SP_FORECAST_LOW_CONF_TARGET (0.62), '
+            + 'indistinguishable from a real no-priors pitcher: ' + detail,
+          affected_games: cap(misses.map(m => m.game_id)),
+        });
+      }
+    }
+
     // ---- check 8: cron_health (any job that hasn't successfully run in 25h) ----
     {
       const window25h = "datetime('now','-25 hours')";
