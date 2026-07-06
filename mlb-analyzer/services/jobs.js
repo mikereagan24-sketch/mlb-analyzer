@@ -13,6 +13,23 @@ const { normName, stripSfx } = require('../utils/names');
 const { calcCLV } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
 
+// Cohort assignment by game_date. Shared by processGameSignals (auto-
+// emitted signals) AND routes/api.js POST /signals/manual (manual bet
+// log). Prior to hoisting, /signals/manual hardcoded 'v3', so every
+// manually-logged bet since April was tagged v3 regardless of the true
+// epoch — invisible under any default cohort filter. See
+// docs/locked-bet-visibility-fix-2026-07-06.md.
+//
+// Boundaries match db/schema.js one-shot migrations exactly. Update in
+// lockstep at each cohort cutover.
+function cohortForGameDate(game_date) {
+  return game_date >= '2026-07-06' ? 'v7'
+    : game_date >= '2026-05-30' ? 'v6'
+    : game_date >= '2026-05-20' ? 'v5'
+    : game_date >= '2026-05-12' ? 'v4'
+    : game_date < '2026-04-24' ? 'v3-pretuning' : 'v3';
+}
+
 // Pacific-Time date helpers (app is Pacific-based now). Neutral names on
 // purpose — if the app's canonical TZ ever shifts again, only these three
 // function bodies need updating, not every call site.
@@ -906,11 +923,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       //                  v6 by game_date boundary). Framing
       //                  effectively LIVE (mute=1.0, coverage ramping
       //                  from ingest cutover 2026-06-17).
-      cohort: gameRow.game_date >= '2026-07-06' ? 'v7'
-        : gameRow.game_date >= '2026-05-30' ? 'v6'
-        : gameRow.game_date >= '2026-05-20' ? 'v5'
-        : gameRow.game_date >= '2026-05-12' ? 'v4'
-        : gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',
+      cohort: cohortForGameDate(gameRow.game_date),
       companion_spread_line:    _spreadLine,
       companion_spread_price:   _spreadPrice,
       companion_spread_outcome: _spreadOutcome,
@@ -971,9 +984,15 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       });
     } catch(e) { /* audit failure must not block lifecycle */ }
   }
-  db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
-    SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
-  )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
+  // Lock-immune dedupe: a locked row (bet_line IS NOT NULL) has the owner's
+  // money on it and must never be deleted, even if a subsequent unlocked
+  // duplicate has a larger id. Prior to this guard, an unusual insertion
+  // race could delete a locked row purely by id ordering.
+  db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=?
+    AND bet_line IS NULL
+    AND id NOT IN (
+      SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
+    )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
   // Restore bet_lines for locked signals.
   // If a locked signal no longer qualifies, mark is_active=0 with a note instead of deleting.
   // This keeps it in backtesting but hides it from the Games tab.
@@ -5160,4 +5179,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

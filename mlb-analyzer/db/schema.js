@@ -1418,6 +1418,27 @@ try { db.exec("UPDATE bet_signals SET cohort='v5' WHERE cohort='v4' AND game_dat
 // correctly — this only touches future game_dates.
 try { db.exec("UPDATE bet_signals SET cohort='v7' WHERE cohort='v6' AND game_date >= '2026-07-06'"); } catch(e) {}
 
+// Manual-bet mistag backfill (2026-07-06).
+// Before fix/locked-bet-visibility, routes/api.js POST /signals/manual
+// hardcoded cohort='v3' at line 4754. Every manually-logged bet since
+// the v3 era got that stale tag, invisible under any modern default
+// cohort filter. Retag by game_date using the same ladder as
+// services/jobs.js cohortForGameDate(). Restricted to bet_locked_at
+// IS NOT NULL AND game_date >= '2026-05-12' so real v3 rows (games
+// from 2026-04-24 to 2026-05-11) aren't disturbed. Idempotent —
+// subsequent boots update 0 rows once the code fix propagates.
+try {
+  db.exec(
+    "UPDATE bet_signals SET cohort = CASE " +
+    "  WHEN game_date >= '2026-07-06' THEN 'v7' " +
+    "  WHEN game_date >= '2026-05-30' THEN 'v6' " +
+    "  WHEN game_date >= '2026-05-20' THEN 'v5' " +
+    "  WHEN game_date >= '2026-05-12' THEN 'v4' " +
+    "  ELSE 'v3' END " +
+    "WHERE cohort = 'v3' AND bet_locked_at IS NOT NULL AND game_date >= '2026-05-12'"
+  );
+} catch(e) {}
+
 // Runline companion capture (Step 2 of 3 in runline workstream).
 // ML signals snapshot the spread (-1.5 / +1.5) line + price + source
 // at fire time, then get graded against the eventual game result so
