@@ -984,15 +984,24 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       });
     } catch(e) { /* audit failure must not block lifecycle */ }
   }
-  // Lock-immune dedupe: a locked row (bet_line IS NOT NULL) has the owner's
-  // money on it and must never be deleted, even if a subsequent unlocked
-  // duplicate has a larger id. Prior to this guard, an unusual insertion
-  // race could delete a locked row purely by id ordering.
-  db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=?
-    AND bet_line IS NULL
-    AND id NOT IN (
-      SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
-    )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
+  // Dedupe keeps MAX(id) per (game, type, side). Old locked rows get
+  // deleted here; the restore-locks loop below immediately re-stamps
+  // the new (larger-id) row with the captured lockedLines data. The
+  // net effect at rest is one row per (type, side), locked if the
+  // group was ever locked.
+  //
+  // NOTE: 2026-07-06 regression fix. A previous iteration added
+  // `AND bet_line IS NULL` here to preserve locked rows through
+  // dedupe. That broke the invariant that each rerun ended with
+  // one row per (type, side) — locked old row + new row both
+  // survived, then restore-locks stamped both identically,
+  // producing 5-7× duplicates on rerun-heavy days
+  // (docs/dedupe-regression-2026-07-07.md). Reverted; the
+  // restore-locks path was already the mechanism for preserving
+  // lock stamps.
+  db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
+    SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
+  )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
   // Restore bet_lines for locked signals.
   // If a locked signal no longer qualifies, mark is_active=0 with a note instead of deleting.
   // This keeps it in backtesting but hides it from the Games tab.

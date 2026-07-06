@@ -1439,6 +1439,63 @@ try {
   );
 } catch(e) {}
 
+// Duplicate-row cleanup (2026-07-07). Prior locked-bet-visibility PR
+// added `AND bet_line IS NULL` to the dedupe DELETE in
+// services/jobs.js processGameSignals — that broke the invariant that
+// each rerun ended with one row per (game, type, side). Each rerun
+// left the old locked row + added a new one; restore-locks then
+// stamped both identically, producing 5-7× duplicates on
+// rerun-heavy days (mainly 2026-07-06).
+//
+// This migration collapses duplicates by keeping ONE row per
+// (game_date, game_id, signal_type, signal_side):
+//   - If any row in the group has bet_locked_at set: keep the row
+//     with the EARLIEST bet_locked_at (the ORIGINAL lock event —
+//     later rows are echo-stamps from restore-locks reruns). Ties
+//     broken by MIN(id).
+//   - Otherwise: keep MAX(id) (freshest reruns' row for unlocked
+//     signals).
+// Deletes are audit-logged with action='dedupe_cleanup'. Idempotent —
+// subsequent boots delete 0 rows once run.
+try {
+  const dupGroups = db.prepare(
+    "SELECT game_date, game_id, signal_type, signal_side, COUNT(*) AS n " +
+    "FROM bet_signals GROUP BY game_date, game_id, signal_type, signal_side HAVING COUNT(*) > 1"
+  ).all();
+  if (dupGroups.length > 0) {
+    console.log('[dedupe-cleanup] found ' + dupGroups.length + ' duplicate (game,type,side) groups');
+    let deleted = 0;
+    for (const g of dupGroups) {
+      // Row selection: locked-earliest else MAX(id).
+      const rows = db.prepare(
+        "SELECT id, bet_locked_at FROM bet_signals " +
+        "WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=? " +
+        "ORDER BY (CASE WHEN bet_locked_at IS NULL THEN 1 ELSE 0 END), bet_locked_at ASC, id ASC"
+      ).all(g.game_date, g.game_id, g.signal_type, g.signal_side);
+      // rows[0] is the survivor by our ordering
+      const keepId = rows[0].id;
+      const deleteIds = rows.slice(1).map(r => r.id);
+      for (const id of deleteIds) {
+        try {
+          const row = db.prepare("SELECT id, signal_type, signal_side, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE id=?").get(id);
+          if (row) {
+            db.prepare(
+              "INSERT INTO bet_signal_audit (signal_id, game_date, game_id, signal_type, signal_side, action, bet_line, closing_line, clv, source, detail) " +
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ).run(id, g.game_date, g.game_id, row.signal_type, row.signal_side, 'dedupe_cleanup',
+                  row.bet_line, row.closing_line, row.clv,
+                  'schema_boot_migration_2026-07-07',
+                  'kept_id=' + keepId + ', duplicate_group_size=' + rows.length);
+          }
+        } catch(e) { /* audit failure must not block dedupe */ }
+        db.prepare("DELETE FROM bet_signals WHERE id=?").run(id);
+        deleted++;
+      }
+    }
+    console.log('[dedupe-cleanup] deleted ' + deleted + ' duplicate rows');
+  }
+} catch(e) {}
+
 // Runline companion capture (Step 2 of 3 in runline workstream).
 // ML signals snapshot the spread (-1.5 / +1.5) line + price + source
 // at fire time, then get graded against the eventual game result so
