@@ -1064,11 +1064,11 @@ router.get('/backtest', (req, res) => {
     const requestedFrom = from || '2026-01-01';
     const fromDate = requestedFrom < MIN_MODEL_DATE ? MIN_MODEL_DATE : requestedFrom;
     const toDate = to || '2099-12-31';
-    // Cohort filter: default 'v6' (current model epoch — continuous
-    // pp edge score replaced star tiers on 2026-05-30, plus
-    // forecastForPitcher defensive fix on the same date).
-    // Pass ?cohort=all for everything, or v1 / v2-tainted / v3 / v4 / v5 / v6.
-    const cohortArg = (cohort || 'v6').toString();
+    // Cohort filter: default 'v7' (current model epoch, cutover
+    // 2026-07-06 — birth certificate at docs/cohort-v7-cutover-2026-07-05.md).
+    // Pass ?cohort=all for everything, or v1 / v2-tainted / v3 / v4 / v5 /
+    // v6 / v7.
+    const cohortArg = (cohort || 'v7').toString();
     const filterByCohort = cohortArg !== 'all';
     const cohortPred = filterByCohort ? ' AND cohort=?' : '';
     const cohortPredBS = filterByCohort ? ' AND bs.cohort=?' : '';
@@ -1167,8 +1167,8 @@ router.get('/backtest/lineup-sensitivity', (req, res) => {
     const { from, to, cohort } = req.query;
     const fromDate = from || '2026-04-09';
     const toDate = to || '2099-12-31';
-    // Mirror /backtest cohort default (v6 = current epoch as of 2026-05-30).
-    const cohortArg = (cohort || 'v6').toString();
+    // Mirror /backtest cohort default (v7 = current epoch as of 2026-07-06).
+    const cohortArg = (cohort || 'v7').toString();
     const filterByCohort = cohortArg !== 'all';
     const cohortPred = filterByCohort ? ' AND bs.cohort=?' : '';
     const params = filterByCohort
