@@ -48,7 +48,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso } = require('../services/jobs');
+const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -1144,7 +1144,12 @@ router.get('/backtest', (req, res) => {
       " LEFT JOIN game_log gl ON gl.game_date=bs.game_date AND gl.game_id=bs.game_id" +
       " WHERE bs.game_date BETWEEN ? AND ?" +
       "   AND bs.game_date >= '2026-04-09'" +
-      "   AND (bs.is_active = 1 OR bs.outcome != 'pending')" +
+      // Locked bets ALWAYS visible in backtest — owner has money on them,
+      // grading depends on them appearing. Prior to this guard, a locked
+      // signal that got deactivated at rerun (edge no longer meets floor)
+      // was invisible until grade time. See
+      // docs/locked-bet-visibility-fix-2026-07-06.md.
+      "   AND (bs.is_active = 1 OR bs.outcome != 'pending' OR bs.bet_line IS NOT NULL)" +
       cohortPredBS +
       " ORDER BY bs.game_date, bs.id"
     ).all(fromDate, toDate, ...cohortParams);
@@ -4745,13 +4750,18 @@ router.post('/signals/manual', (req, res) => {
       }, gl.away_score, gl.home_score, gl.market_total);
       outcome=r.outcome; pnl=r.pnl;
     }
+    // Cohort must match the epoch the game_date falls in — hardcoded 'v3'
+    // was a stale copy from the v3 era and made every manually-logged bet
+    // invisible under later default cohort filters. See
+    // docs/locked-bet-visibility-fix-2026-07-06.md.
+    const cohort = cohortForGameDate(game_date);
     const info = db.prepare(`INSERT INTO bet_signals
       (game_log_id,game_date,game_id,signal_type,signal_side,signal_label,category,
        market_line,model_line,edge_pct,outcome,pnl,bet_line,cohort,bet_locked_at,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
       .run(gl.id,game_date,game_id,signal_type,signal_side,null,category,
            Number(market_line),model_line,edge_pct,outcome,pnl,
-           bet_line!=null?Number(bet_line):null,'v3');
+           bet_line!=null?Number(bet_line):null,cohort);
     try {
       q.insertBetSignalAudit({
         signal_id: info.lastInsertRowid,
