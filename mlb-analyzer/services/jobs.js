@@ -887,13 +887,27 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       //                  (wOBA blend retuned to 0.45/0.55 after the blend
       //                  sweep showed actuals were underweighted — ROI
       //                  peaked near 0.45/0.55 across 545 games)
-      //   v6           : 2026-05-30 onward
+      //   v6           : 2026-05-30 — 2026-07-05
       //                  (continuous edge score replaces star tiers;
       //                  signals report raw pp edges via edge_pct,
       //                  signal_label NULL. Plus forecastForPitcher
       //                  defensive fix — null on league_only instead of
       //                  leaking 5.45 baseline.)
-      cohort: gameRow.game_date >= '2026-05-30' ? 'v6'
+      //   v7           : 2026-07-06 onward — birth certificate in
+      //                  docs/cohort-v7-cutover-2026-07-05.md. Signal
+      //                  stack materially changed vs v6: park-neutral
+      //                  inputs LIVE (#142/#144/#146, actuals-only,
+      //                  PA-weighted stints); edge-sanity cap LIVE
+      //                  (soft/hard); opener precedence + RR gate
+      //                  (#148/#149); SP-SP tandem forecast split with
+      //                  flat weights (#150/#151); SP-forecast fuzzy
+      //                  resolver (#154). RUN_MULT=46 (temporary 50
+      //                  window during 2026-07-04 → 2026-07-05 stayed
+      //                  v6 by game_date boundary). Framing
+      //                  effectively LIVE (mute=1.0, coverage ramping
+      //                  from ingest cutover 2026-06-17).
+      cohort: gameRow.game_date >= '2026-07-06' ? 'v7'
+        : gameRow.game_date >= '2026-05-30' ? 'v6'
         : gameRow.game_date >= '2026-05-20' ? 'v5'
         : gameRow.game_date >= '2026-05-12' ? 'v4'
         : gameRow.game_date < '2026-04-24' ? 'v3-pretuning' : 'v3',

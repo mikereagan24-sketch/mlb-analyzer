@@ -1410,6 +1410,14 @@ try { db.exec("UPDATE bet_signals SET cohort='v4' WHERE cohort='v3' AND game_dat
 // signals are tagged v5 directly by jobs.js.
 try { db.exec("UPDATE bet_signals SET cohort='v5' WHERE cohort='v4' AND game_date >= '2026-05-20'"); } catch(e) {}
 
+// v7 cohort backfill: cutover 2026-07-06 (docs/cohort-v7-cutover-2026-07-05.md).
+// Catches any signals mis-tagged v6 because the cohort-ladder code hadn't
+// deployed yet at scoring time. Idempotent: subsequent boots update 0
+// rows because new signals for 2026-07-06+ game_dates are tagged v7
+// directly by services/jobs.js. Signals for 2026-07-05 or earlier stay v6
+// correctly — this only touches future game_dates.
+try { db.exec("UPDATE bet_signals SET cohort='v7' WHERE cohort='v6' AND game_date >= '2026-07-06'"); } catch(e) {}
+
 // Runline companion capture (Step 2 of 3 in runline workstream).
 // ML signals snapshot the spread (-1.5 / +1.5) line + price + source
 // at fire time, then get graded against the eventual game result so
