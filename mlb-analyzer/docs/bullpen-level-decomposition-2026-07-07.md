@@ -268,6 +268,107 @@ Step 1 + Step 2 together land within the target range. Step 3
 addresses spread, not level, and gates on Step 5's predictive
 test.
 
+## Step 6 (owner-proposed, deferred) — deviation multiplier `k`
+
+**Owner proposal, recorded here for post-fix evaluation. DO NOT
+implement ahead of Steps 1-2 landing.** A multiplier on the
+polluted input amplifies its errors — Colorado's opener-inflated
+bullpen mean scaled by 1.5× is 50% more wrong, not sharper.
+
+Motivation: even after Steps 1-2 correct the level, and Step 4
+delivers ~2pt more spread, the sharpened team-mean distribution
+may still under-disperse relative to reality (~50pt real spread
+across 30 teams). If the construction is honest but the range is
+too narrow — e.g. post-fix P90-P10 lands at ~30pt vs real ~50pt
+— a calibrated multiplier is a defensible tail-stretcher.
+
+### Form 1 — uniform multiplier
+
+```
+league_mean = mean(team_bullpen_wOBA across 30 teams)
+adjusted_i  = league_mean + k × (raw_i − league_mean)
+```
+
+`k = 1.0` = no change (byte-identical). `k = 1.5` pulls
+extremes further from the mean by 50%.
+
+### Form 2 — tail-only multiplier
+
+Applies `k` only when the team is beyond a threshold `τ` from
+league mean:
+
+```
+Δ_i = raw_i − league_mean
+if |Δ_i| >= τ:
+    adjusted_i = league_mean + k × Δ_i
+else:
+    adjusted_i = raw_i
+```
+
+Preserves the fit for the middle 60-80% of teams. Only stretches
+the tails (CLE/ATL elite pens, COL/BAL blowup pens). Two
+parameters (k, τ), so needs more data to calibrate cleanly.
+
+### Measurement plan when Steps 1-2 land
+
+1. **Compute post-fix team distribution** — 30-team snapshot of
+   the corrected bullpen input (Steamer regression addressed,
+   opener/bulk downweighted). Report P10-P90 spread.
+
+2. **Compare to real spread targets**:
+   - Historical MLB 2024-2025 team-bullpen wOBA-allowed range
+     (~50pt).
+   - **Predictive-dispersion target**: what team-spread would
+     optimize predictive accuracy on the resolved-game
+     population? Define via a Brier-score minimization or a
+     late-inning-decided win-prob calibration — pick whichever
+     the Step 5 predictive test infrastructure produces
+     naturally.
+
+3. **Fit k against the predictive target**:
+   - Grid-search `k ∈ [1.0, 2.0]` against the resolved-game
+     population (with the corrected input).
+   - Report predictive-accuracy improvement per k value.
+   - Separately fit the tail-only variant with `τ ∈ {3pt, 5pt,
+     8pt}` and its own k.
+
+4. **Decision output**:
+   - If `k_best ≈ 1.0` at the predictive optimum: sharpened
+     construction is enough, no multiplier needed. Ship Steps
+     1-4 and stop.
+   - If `k_best > 1.0` uniform outperforms tail-only by ≥1pp of
+     predictive accuracy: recommend uniform `k` as a settings-
+     level toggle (`BULLPEN_DEVIATION_K`, default 1.0 for byte-
+     identical off).
+   - If tail-only outperforms uniform: recommend tail-only with
+     the two-parameter form (adds one more settings key).
+   - Same ship discipline as always: holdout must improve, no
+     degrade elsewhere.
+
+### Why the ordering matters (owner's guardrail)
+
+If `k` is applied BEFORE Steps 1-2, the current 6.6pt Steamer
+level bias and 2.2pt opener/bulk contamination get MULTIPLIED
+by `k`. A 1.5× multiplier on the current input:
+
+- Colorado (currently 0.3227, ~14pt above the model's league
+  mean 0.3088): would move to 0.3298 → looks like +21pt above
+  mean → looks WORSE than the already-opener-polluted input.
+- Elite pens (currently ~0.297, ~12pt below mean): would move
+  to 0.2892 → looks like -20pt below mean → over-corrected
+  because the current 0.297 was already understated by the
+  Steamer level bias.
+
+Multiplier on a polluted input is a false-precision knob.
+Construction fix first.
+
+### Timing
+
+Do not schedule Step 6 measurement until Step 4 (sharper
+construction toggle) has landed and Step 5 (predictive test) has
+run at least one full evaluation. Adds one more measurement PR
+after the construction sequence completes.
+
 ## Files
 
 - Reference: `db/schema.js:2926-3061` (getBullpenWoba,
