@@ -79,6 +79,47 @@ const SETTINGS_SCHEMA = {
   use_opener_logic: { type: 'boolean', default: false,
     help: 'Phase 2: enable opener-aware pitching split for opener-led games. Default false; opener_model_* is shadowed when off, swapped with model_* when on.' },
 
+  // --- Bullpen input construction (Steps 1+2, 2026-07-07) -------------------
+  // bullpen_min_bf: gate the actuals blend inside q.getBullpenWoba SEPARATELY
+  // from the SP-facing min_bf (which stays at 100 for SP handedness splits).
+  // Reason: relievers rarely reach 100 BF vs a specific handedness in a
+  // season (median ~40-70), so a shared minBF=100 forced the bullpen path
+  // to run on pure Steamer for the majority of pool RPs. Steamer over-
+  // regresses toward league-mean on small-sample RPs, which is the DOMINANT
+  // contributor (~9.4pt UP) to the model bullpen mean being ~10pt higher
+  // than realized. Default 50 lets ~2× as many RPs qualify for the blend;
+  // set to 100 to reproduce the legacy (pre-2026-07-07) behavior byte-
+  // identically.
+  bullpen_min_bf: { type: 'number', min: 25, max: 200, default: 50,
+    help: 'BF threshold to blend actuals with Steamer projection inside the bullpen pool (q.getBullpenWoba). Separate from the SP-facing min_bf (default 100). Dormant on current data (pit-act-* tables have no rows below sample=150) but present so mid-season callups with 50-99 BF can start blending. Set to 100 for legacy byte-identical.' },
+  // bullpen_downweight_starters: when true, each rostered RP's contribution
+  // to the pool mean is scaled by (1 − start_BF_fraction) computed over the
+  // last 60d of pitcher_game_log. RPs who threw N% of their BF as starters
+  // (openers, tandem bulk, spot starts) contribute (1 − N%) of a full weight.
+  // Removes the pull-up on team means from opener/bulk pollution (~2.5pt UP,
+  // 22% of the current gap). Default true; false reproduces the legacy
+  // equal-weight aggregation byte-identically.
+  bullpen_downweight_starters: { type: 'boolean', default: true,
+    help: 'When ON, downweight each rostered RP by (1 − start_BF_fraction over last 60d) in q.getBullpenWoba pool aggregation. Removes opener/bulk pollution. Default true; OFF for legacy byte-identical.' },
+  // Bullpen-specific proj/act blend. Separate from the global w_proj/w_act
+  // (which stays at 0.45/0.55 for SP and batter paths) because RP actuals
+  // over the sample threshold are a much stronger signal than SP actuals:
+  // RPs have smaller BF per year, so Bayesian regression toward league-mean
+  // dominates Steamer's RP projections — the +9.4pt residual level bias
+  // observed in the 2026-07-07 decomposition after the 0.45/0.55 blend.
+  // Tilting to actuals-heavy on the bullpen path lets elite RPs (Cade Smith
+  // 0.216 realized vs 0.345 projected, Erik Miller 0.196 vs 0.300) exert
+  // more pull. Defaults 0.25/0.75 land the 30-team roster-pool mean at
+  // ~0.306 (from a legacy 0.307); pure actuals (0.00/1.00) floors at 0.304.
+  // Byte-identical to the pre-2026-07-07 blend: set both to match the
+  // global w_proj/w_act (0.45/0.55 in current prod).
+  bullpen_w_proj: { type: 'number', min: 0.0, max: 1.0, default: 0.25,
+    help: 'Bullpen-only Steamer projection weight (vs actuals) in the per-RP blend inside q.getBullpenWoba. Independent of the global w_proj so batter/SP paths are unaffected. Default 0.25. Set to match the global w_proj (0.45 in current prod) for byte-identical legacy.' },
+  bullpen_w_act: { type: 'number', min: 0.0, max: 1.0, default: 0.75,
+    invariant: (v, all) => Math.abs(v + Number(all.bullpen_w_proj) - 1.0) < 0.02,
+    invariantMsg: 'bullpen_w_proj + bullpen_w_act must equal 1.0',
+    help: 'Bullpen-only actuals weight in the per-RP blend inside q.getBullpenWoba. Default 0.75. Set to match the global w_act (0.55 in current prod) for byte-identical legacy.' },
+
   // --- SP/RP split (model side) --------------------------------------------
   sp_weight: { type: 'number', min: 0.5, max: 0.95, default: 0.80,
     help: 'SP weight in run estimation.' },
