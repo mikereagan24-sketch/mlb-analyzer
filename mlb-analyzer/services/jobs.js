@@ -180,7 +180,7 @@ function getSettings() {
     // Venue-aware signal edges (feat/venue-aware-signals). Default OFF —
     // when ON, market_line is sourced from services/odds-comparison.js
     // winner (fillable-at-stake guarded) and the emitted row is tagged
-    // with price_venue + cohort promoted to v8.
+    // with price_venue. Cohort stays v7 per the 2026-07-08 amendment.
     SIGNAL_VENUE_AWARE_ENABLED: (function() {
       const raw = s['signal_venue_aware_enabled'];
       if (raw == null) return _d('signal_venue_aware_enabled', false);
@@ -1042,17 +1042,14 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       //                  v6 by game_date boundary). Framing
       //                  effectively LIVE (mute=1.0, coverage ramping
       //                  from ingest cutover 2026-06-17).
-      //   v8           : promoted when SIGNAL_VENUE_AWARE_ENABLED is on —
-      //                  signals evaluated against the best net at-size
-      //                  price across Poly + Kalshi (services/odds-
-      //                  comparison.js), fillable-at-stake guarded. Birth
-      //                  cert: docs/cohort-v8-cutover-2026-07-07.md. Rows
-      //                  with venue_stale=1 are v8 rows that fell back to
-      //                  Kalshi-direct because the venue comparison was
-      //                  unavailable — kept in v8 for population coherence
-      //                  (owner's amendment call: not silent). Default OFF;
-      //                  when off the cohort stays v7 by game_date rule.
-      cohort: _venueAware ? 'v8' : cohortForGameDate(gameRow.game_date),
+      //   Note (2026-07-08 amendment): SIGNAL_VENUE_AWARE_ENABLED, when
+      //                  flipped ON, keeps the cohort at v7 rather than
+      //                  cutting v8 — one day of pre-venue-aware v7
+      //                  signals (~30 rows on 2026-07-06/07-07) isn't
+      //                  worth a cohort split. See v7 birth cert amendment
+      //                  in docs/cohort-v7-cutover-2026-07-05.md for the
+      //                  small known heterogeneity note.
+      cohort: cohortForGameDate(gameRow.game_date),
       companion_spread_line:    _spreadLine,
       companion_spread_price:   _spreadPrice,
       companion_spread_outcome: _spreadOutcome,

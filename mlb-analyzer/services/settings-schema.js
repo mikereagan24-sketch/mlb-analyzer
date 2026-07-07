@@ -229,17 +229,18 @@ const SETTINGS_SCHEMA = {
   //   - The winning venue is recorded per-signal in bet_signals.price_venue
   //     so CLV grading can compare to the same book that supplied the entry.
   //
-  // Cohort discipline: flipping ON promotes emitted rows from v7 → v8
-  // (services/jobs.js cohortForGameDate override in processGameSignals) so
-  // the population change is visible in backtest output. Default OFF ships
-  // byte-identical — no cohort change, no code path change.
+  // Cohort discipline: flipping ON keeps emitted rows at cohort v7 —
+  // owner's 2026-07-08 amendment decision, small known heterogeneity
+  // (~30 pre-amendment v7 rows carry Kalshi-only baseline) documented
+  // in the v7 birth cert. Backtest segmentation uses price_venue +
+  // venue_stale, not a separate cohort. Default OFF ships byte-identical.
   //
   // Follow-up (deferred): closing-line capture stays Kalshi-only in this
   // PR. When the toggle flips ON, CLV against a Poly-anchored bet_line is
   // computed against a Kalshi closing_line — that mismatch is documented
-  // in the birth cert.
+  // in the v7 birth cert amendment.
   signal_venue_aware_enabled: { type: 'boolean', default: false,
-    help: 'Evaluate signal edges against the best net at-size price across Poly + Kalshi (services/odds-comparison.js) with fillable-at-stake guard. Default OFF — byte-identical to Kalshi-only. When ON, emitted rows promote to cohort v8 and record price_venue per side.' },
+    help: 'Evaluate signal edges against the best net at-size price across Poly + Kalshi (services/odds-comparison.js) with fillable-at-stake guard. Default OFF — byte-identical to Kalshi-only. When ON, records price_venue per emitted ML signal; cohort stays v7 (see v7 birth cert amendment for the small pre-amendment heterogeneity note).' },
 
   // --- Kalshi-direct moneyline (override Unabated/OddsAPI ML primary) -------
   kalshi_direct_primary_enabled: { type: 'boolean', default: false,

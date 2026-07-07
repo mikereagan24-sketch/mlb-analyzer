@@ -64,19 +64,22 @@ passes the resulting `rowsByGid` map to each `processGameSignals`
 call via `opts.venueRowsByGid`. Cache miss → single fetch → serve
 all downstream calls for this rerun.
 
-### Cohort discipline
+### Cohort discipline (2026-07-08 amendment)
 
-`SIGNAL_VENUE_AWARE_ENABLED = true` promotes emitted rows from v7
-to **v8** unconditionally (setting-gated, not game_date-gated). Birth
-cert: `docs/cohort-v8-cutover-2026-07-07.md`. Rows that fall back to
-Kalshi-direct because the venue comparison was unavailable or the
-winner failed the fillable-at-stake guard **still get v8** — with
-`venue_stale=1` to segment them out in backtest. Owner's explicit
-"not silent" call: the cohort change reflects operator intent even
-when the fallback fires.
+Owner's decision: **do not cut v8** for one day of pre-venue-aware
+signals. Emitted rows stay `cohort='v7'` when the toggle is on.
+Backtest segmentation uses `bet_signals.price_venue` (`'poly'` |
+`'kalshi'` | NULL) and `bet_signals.venue_stale` (0/1), not a
+separate cohort. The small heterogeneity inside v7 (~30 signals on
+2026-07-06/07 emitted with Kalshi-baseline before the amendment)
+is documented in the v7 birth cert
+(`docs/cohort-v7-cutover-2026-07-05.md`).
 
-Default OFF ships byte-identical to v7 — no code path change, no
-cohort change, no runComparison fetches.
+Default OFF ships byte-identical to pre-amendment v7 — no code
+path change, no runComparison fetches. Toggle-ON change is entirely
+in the market-baseline data plane; the model stack (park-neutral
+inputs, edge cap, opener detection, tandem split, fuzzy resolver,
+RUN_MULT 46) is unchanged.
 
 ### Storage
 
@@ -84,10 +87,10 @@ Two new `bet_signals` columns (ALTER on boot, DEFAULT-safe for
 existing rows):
 
 - `price_venue TEXT` — `'poly'` | `'kalshi'` | NULL. NULL for totals
-  (deferred to Stage 2) and for pre-v8 rows.
-- `venue_stale INTEGER NOT NULL DEFAULT 0` — 1 when a v8 row fell
-  back to Kalshi-direct because the venue comparison was unavailable
-  or the winner failed the guard.
+  (deferred to Stage 2) and for pre-amendment rows.
+- `venue_stale INTEGER NOT NULL DEFAULT 0` — 1 when a toggle-on row
+  fell back to Kalshi-direct because the venue comparison was
+  unavailable or the winner failed the guard.
 
 ### Fillable-at-stake semantics
 
@@ -173,9 +176,10 @@ the top of the block.
 
 ## Follow-ups (deferred; documented in birth cert)
 
-- CLV closing-line venue routing
+- CLV closing-line venue routing (called out in v7 birth cert
+  amendment)
 - Totals venue-awareness (over/under prices)
-- Non-cron `processGameSignals` callers (9 of 10 currently emit v8
+- Non-cron `processGameSignals` callers (9 of 10 currently emit
   with `venue_stale=1` when toggle is on)
 
 ## Files
@@ -183,9 +187,11 @@ the top of the block.
 - `services/settings-schema.js` — `signal_venue_aware_enabled`
 - `db/schema.js` — seed row + ALTER TABLE for `price_venue` + `venue_stale`
 - `services/jobs.js` — `_venueCache` + `_fetchVenueSlateCached` +
-  `_pickBestML` + processGameSignals injection + insertSignal thread
-  + cohort promotion; lineup cron slate prefetch
+  `_pickBestML` + processGameSignals injection + insertSignal thread;
+  lineup cron slate prefetch. Cohort stays via `cohortForGameDate`.
 - `public/index.html` — one checkbox + schema map + load + save
 - `tmp/verify-venue-aware.js` — read-only diff harness
-- `docs/cohort-v8-cutover-2026-07-07.md` — v8 birth cert
+- `docs/cohort-v7-cutover-2026-07-05.md` — amended with the 2026-07-08
+  venue-aware note
+- (removed) v8 birth cert — decision reverted to keep cohort v7
 - `docs/venue-aware-signals-2026-07-07.md` — this file
