@@ -794,6 +794,30 @@ db.exec(`
     game_date TEXT PRIMARY KEY,
     opened_at TEXT NOT NULL
   );
+  -- Venue-comparison pregame snapshot (feat/venue-freeze-and-labels).
+  -- The /admin/odds-comparison route fetches Poly + Kalshi orderbooks live
+  -- via services/odds-comparison.js runComparison. That live fetch has no
+  -- awareness of game_log.odds_locked_at (the 10-min-before-first-pitch
+  -- freeze), which produced the MIL@STL bug: mid-game Poly +496 leaking
+  -- into the venue flag on the slate card while the odds-capture side
+  -- correctly stayed frozen at +173. Fix: cache the last pregame per-game
+  -- comparison row here so the route can serve the frozen snapshot for
+  -- any game where odds_locked_at IS NOT NULL instead of re-fetching live.
+  --
+  -- snapshot_json is the raw services/odds-comparison.js row (poly,
+  -- kalshi, winner, totals_priced, totals_ladder_summary shape). Written
+  -- opportunistically at the moment the route returns a comparison row
+  -- for a game that is NOT yet locked; last write wins (INSERT OR
+  -- REPLACE on (game_date, game_id)). Rows are ~2-3KB so a season's
+  -- worth is well under a megabyte. No cleanup cron for now — cheap and
+  -- audit-useful.
+  CREATE TABLE IF NOT EXISTS venue_comparison_snapshot (
+    game_date   TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    snapshot_at TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY (game_date, game_id)
+  );
   -- empirical_market_captures — feat/morning-capture-ml-totals.
   -- Two-track (morning/gametime) freeze of moneyline and totals
   -- markets, mirroring the empirical_spread_outcomes pattern for
@@ -1709,6 +1733,19 @@ try {
   db.exec(`CREATE TABLE IF NOT EXISTS morning_capture_state (
     game_date TEXT PRIMARY KEY,
     opened_at TEXT NOT NULL
+  )`);
+} catch(e) {}
+
+// venue_comparison_snapshot (feat/venue-freeze-and-labels). Idempotent
+// runtime create so old deploys pick up the table before the route reads
+// or writes it; matches the morning_capture_state pattern above.
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS venue_comparison_snapshot (
+    game_date   TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    snapshot_at TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY (game_date, game_id)
   )`);
 } catch(e) {}
 

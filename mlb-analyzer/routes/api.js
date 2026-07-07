@@ -3095,15 +3095,95 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
       }));
     }
 
+    // Pregame-freeze rule (feat/venue-freeze-and-labels). MIL@STL 2026-07-08
+    // bug: mid-game Poly +496 leaked into the venue flag while the odds
+    // capture side correctly stayed frozen at Kalshi +173. Root cause: the
+    // odds-capture path respects game_log.odds_locked_at (set 10 min before
+    // scheduled first pitch); runComparison does not, and always fetches
+    // live orderbooks. Fix: at the ROUTE, split the requested game_ids
+    // into {locked, unlocked} sets. Locked games: serve last snapshot from
+    // venue_comparison_snapshot marked frozen. Unlocked games: fetch live
+    // and persist the row into venue_comparison_snapshot as a side effect.
+    // Locked rows without a snapshot fall through to a { frozen: true,
+    // no_snapshot: true } sentinel so the UI can render honestly instead
+    // of a stale live number.
+    const lockedRows = db.prepare(
+      "SELECT game_id, odds_locked_at FROM game_log "
+    + "WHERE game_date = ? AND odds_locked_at IS NOT NULL"
+    ).all(date);
+    const lockedByGid = new Map();
+    for (const r of lockedRows) lockedByGid.set(r.game_id, r.odds_locked_at);
+    // If a gameIds filter was supplied, only the intersection is relevant
+    // for the freeze split — otherwise every game_log-locked game on this
+    // date is in scope.
+    const inScopeLocked = gameIds
+      ? [...lockedByGid.keys()].filter(g => gameIds.includes(g))
+      : [...lockedByGid.keys()];
+    const inScopeUnlocked = gameIds
+      ? gameIds.filter(g => !lockedByGid.has(g))
+      : null; // null = "fetch whatever polyRows has that isn't locked"
+    // Only skip the runComparison call when caller asked for a specific
+    // set AND every one of those is locked — otherwise we still need the
+    // fetch for the unlocked subset.
+    const skipLiveFetch = gameIds && inScopeUnlocked.length === 0;
+
     let data;
     try {
-      const { runComparison } = require('../services/odds-comparison');
-      data = await runComparison(date, {
-        stakeUsd: stake,
-        gameIds: gameIds || undefined,
-        totalRequests: Object.keys(totalRequests).length ? totalRequests : undefined,
-      });
+      if (skipLiveFetch) {
+        data = { window: { date, stake_usd: stake }, rows: [] };
+      } else {
+        const { runComparison } = require('../services/odds-comparison');
+        data = await runComparison(date, {
+          stakeUsd: stake,
+          gameIds: inScopeUnlocked || undefined,
+          totalRequests: Object.keys(totalRequests).length ? totalRequests : undefined,
+        });
+      }
       data.fetched_at = new Date().toISOString();
+
+      // Persist snapshots for unlocked rows so a subsequent lock has a
+      // pregame row to serve. INSERT OR REPLACE per (game_date, game_id).
+      const snapNow = new Date().toISOString();
+      const persistStmt = db.prepare(
+        "INSERT OR REPLACE INTO venue_comparison_snapshot "
+      + "(game_date, game_id, snapshot_at, snapshot_json) VALUES (?, ?, ?, ?)"
+      );
+      for (const row of (data.rows || [])) {
+        if (!row.game_id) continue;
+        if (lockedByGid.has(row.game_id)) continue; // paranoia: never write a locked snapshot
+        try {
+          persistStmt.run(date, row.game_id, snapNow, JSON.stringify(row));
+        } catch (e) {
+          console.warn('[venue-snapshot] persist failed for ' + row.game_id + ': ' + e.message);
+        }
+      }
+
+      // For every locked in-scope game_id NOT covered by data.rows, load
+      // the last snapshot and inject it with frozen:true. If no snapshot
+      // exists, emit a sentinel so the UI renders "frozen — no snapshot"
+      // rather than falling through to unavailable.
+      const covered = new Set((data.rows || []).map(r => r.game_id));
+      const loadSnap = db.prepare(
+        "SELECT snapshot_at, snapshot_json FROM venue_comparison_snapshot "
+      + "WHERE game_date = ? AND game_id = ?"
+      );
+      for (const gid of inScopeLocked) {
+        if (covered.has(gid)) continue;
+        const s = loadSnap.get(date, gid);
+        if (s) {
+          try {
+            const row = JSON.parse(s.snapshot_json);
+            row.frozen = true;
+            row.snapshot_at = s.snapshot_at;
+            row.locked_at = lockedByGid.get(gid) || null;
+            data.rows.push(row);
+          } catch (e) {
+            data.rows.push({ game_id: gid, frozen: true, no_snapshot: true, locked_at: lockedByGid.get(gid) || null, snapshot_parse_error: e.message });
+          }
+        } else {
+          data.rows.push({ game_id: gid, frozen: true, no_snapshot: true, locked_at: lockedByGid.get(gid) || null });
+        }
+      }
     } catch (e) {
       // Total failure — still return a shaped response so the UI's
       // per-game null path handles it (never blocks the matchup page).

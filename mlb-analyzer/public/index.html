@@ -551,6 +551,35 @@ const KEY_LABELS={'bat-proj-lhp':'Batters vs LHP (Steamer)','bat-proj-rhp':'Batt
 const FILE_KEY_TESTS=[{key:'bat-proj-lhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-proj-rhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-proj-lhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-proj-rhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/rhb|_rh/i.test(n)},{key:'bat-act-lhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-act-rhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-act-lhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-act-rhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/rhb|_rh/i.test(n)}];
 function detectKey(fn){const n=fn.toLowerCase();for(const{key,t}of FILE_KEY_TESTS)if(t(n))return key;return null;}
 function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
+// Baseline provenance helpers (feat/venue-freeze-and-labels). The signal
+// row displays market_line as "mkt: XXX" — but that number carries three
+// pieces of hidden context: what venue supplied it (Kalshi-direct vs
+// venue-aware Poly/Kalshi winner), whether it's fee-adjusted at fill,
+// and when it was captured. Suffix + hover surface all three so operators
+// don't misread emit-vs-live drift as an error.
+function _mktBaselineSuffix(s){
+  // Venue-aware ON: price_venue is 'poly' or 'kalshi' — show a compact
+  // venue tag and the capture time. Kalshi-direct legacy: keep the
+  // number bare (existing behavior) so old cohorts read unchanged.
+  if (s && s.price_venue) {
+    var t = s.created_at ? ' @' + new Date(s.created_at.replace(' ','T')+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+    var v = s.price_venue === 'poly' ? 'Ⓟ' : (s.price_venue === 'kalshi' ? 'Ⓚ' : '');
+    var stale = s.venue_stale ? '⚠' : '';
+    return ' <span style="color:var(--text3);font-size:10px">'+v+stale+t+'</span>';
+  }
+  return '';
+}
+function _mktBaselineTitle(s){
+  if (!s) return '';
+  var when = s.created_at ? ('captured at signal emit ' + s.created_at) : 'captured at signal emit';
+  if (s.price_venue === 'poly') {
+    return when + ' — Poly $100-fill net-at-size (fee + depth adjusted). Baseline the edge was scored against; live venue-comparison numbers on the card refresh every 60s and will drift.';
+  }
+  if (s.price_venue === 'kalshi') {
+    return when + ' — Kalshi $100-fill net-at-size (fee + depth adjusted). Baseline the edge was scored against; live venue-comparison numbers on the card refresh every 60s and will drift.';
+  }
+  return when + ' — Kalshi-direct capture from game_log.market_*_ml (venue-aware off). Baseline the edge was scored against; live venue-comparison numbers on the card refresh every 60s and will drift.';
+}
 // Phase 2 opener-aware reads. PR #58 wired parallel opener_model_*
 // columns; PR #59 flipped use_opener_logic on so signals now fire on
 // opener_model_* for opener-led games. The UI surface line was still
@@ -1406,13 +1435,19 @@ function playVenueLineFor(sig, row, g){
     if (!row) {
       return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable</div>';
     }
+    const totFrozenMark = row.frozen
+      ? ' <span title="Odds are locked (game near/after first pitch). Showing last pregame venue snapshot." style="color:var(--text3);font-size:10px">🧊 frozen ' + (row.snapshot_at ? new Date(row.snapshot_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '') + '</span>'
+      : '';
+    if (row.no_snapshot) {
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': 🧊 frozen — no pregame snapshot captured</div>';
+    }
     const tp = row.totals_priced;
     if (!tp) {
-      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue posted this total</div>';
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue posted this total' + totFrozenMark + '</div>';
     }
     const bucket = tp[side];
     if (!bucket) {
-      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': ' + side + ' not priced</div>';
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': ' + side + ' not priced' + totFrozenMark + '</div>';
     }
     // Flag closest-strike mismatch honestly on each venue.
     const mPoly = tp.matched && tp.matched.poly;
@@ -1421,27 +1456,27 @@ function playVenueLineFor(sig, row, g){
     const kalFlag  = (mKal  && mKal.exact  === false) ? ' (closest ' + mKal.strike  + ')' : '';
     const poly = bucket.poly, kal = bucket.kalshi, winner = bucket.winner;
     if (!poly && !kal) {
-      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue priced this side</div>';
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue priced this side' + totFrozenMark + '</div>';
     }
     if (!poly) {
       return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
-        + ': Kalshi ' + fmt(kal.net_american) + kalFlag + ' — bet Kalshi (Poly unavailable)</div>';
+        + ': Kalshi ' + fmt(kal.net_american) + ' net' + kalFlag + ' — bet Kalshi (Poly unavailable)' + totFrozenMark + '</div>';
     }
     if (!kal) {
       return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
-        + ': Poly ' + fmt(poly.net_american) + polyFlag + ' — bet Poly (Kalshi unavailable)</div>';
+        + ': Poly ' + fmt(poly.net_american) + ' net' + polyFlag + ' — bet Poly (Kalshi unavailable)' + totFrozenMark + '</div>';
     }
     const pn = poly.net_american, kn = kal.net_american;
     if (winner === 'poly') {
       return '<div class="pv-line pv-poly">▶ ' + escapeHtml(sideLabel)
-        + ': <b>Poly ' + fmt(pn) + polyFlag + '</b> (Kalshi ' + fmt(kn) + kalFlag + ') — bet Poly</div>';
+        + ': <b>Poly ' + fmt(pn) + ' net' + polyFlag + '</b> (Kalshi ' + fmt(kn) + ' net' + kalFlag + ') — bet Poly' + totFrozenMark + '</div>';
     }
     if (winner === 'kalshi') {
       return '<div class="pv-line pv-kalshi">▶ ' + escapeHtml(sideLabel)
-        + ': <b>Kalshi ' + fmt(kn) + kalFlag + '</b> (Poly ' + fmt(pn) + polyFlag + ') — bet Kalshi</div>';
+        + ': <b>Kalshi ' + fmt(kn) + ' net' + kalFlag + '</b> (Poly ' + fmt(pn) + ' net' + polyFlag + ') — bet Kalshi' + totFrozenMark + '</div>';
     }
     return '<div class="pv-line pv-tie">▶ ' + escapeHtml(sideLabel)
-      + ': tied at ' + fmt(pn) + polyFlag + kalFlag + ' — either venue</div>';
+      + ': tied at ' + fmt(pn) + ' net' + polyFlag + kalFlag + ' — either venue' + totFrozenMark + '</div>';
   }
 
   // ML branch (existing behavior).
@@ -1451,31 +1486,46 @@ function playVenueLineFor(sig, row, g){
   if (!row) {
     return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable</div>';
   }
+  // Frozen-snapshot marker (feat/venue-freeze-and-labels). The route
+  // stamps row.frozen=true + row.snapshot_at when a game is odds-locked;
+  // the underlying poly/kalshi shape is the last pregame snapshot, not
+  // live in-game odds. Render a leading marker so the operator knows
+  // the numbers are captured, not current.
+  const frozenMark = row.frozen
+    ? ' <span title="Odds are locked (game near/after first pitch). Showing last pregame venue snapshot. Live comparison is disabled during this window to avoid in-game price leak (see MIL@STL 2026-07-08)." style="color:var(--text3);font-size:10px">🧊 frozen ' + (row.snapshot_at ? new Date(row.snapshot_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '') + '</span>'
+    : '';
+  if (row.no_snapshot) {
+    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': 🧊 frozen — no pregame snapshot captured</div>';
+  }
   const poly = row.poly && row.poly[side];
   const kal  = row.kalshi && row.kalshi[side];
   const winner = row.winner && row.winner[side];
   if (!poly && !kal) {
-    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue priced this side</div>';
+    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': neither venue priced this side' + frozenMark + '</div>';
   }
+  // Suffix "net" on all numbers so operators can distinguish net-at-size
+  // (fee+depth-adjusted) from the venue's top-of-book gross. Gross is
+  // still visible in the fuller admin/odds-comparison panel via
+  // (top +XXX, fee $Y).
   if (!poly) {
     return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
-      + ': Kalshi ' + fmt(kal.net_american) + ' — bet Kalshi (Poly unavailable)</div>';
+      + ': Kalshi ' + fmt(kal.net_american) + ' net — bet Kalshi (Poly unavailable)' + frozenMark + '</div>';
   }
   if (!kal) {
     return '<div class="pv-line pv-partial">▶ ' + escapeHtml(sideLabel)
-      + ': Poly ' + fmt(poly.net_american) + ' — bet Poly (Kalshi unavailable)</div>';
+      + ': Poly ' + fmt(poly.net_american) + ' net — bet Poly (Kalshi unavailable)' + frozenMark + '</div>';
   }
   const pn = poly.net_american, kn = kal.net_american;
   if (winner === 'poly') {
     return '<div class="pv-line pv-poly">▶ ' + escapeHtml(sideLabel)
-      + ': <b>Poly ' + fmt(pn) + '</b> (Kalshi ' + fmt(kn) + ') — bet Poly</div>';
+      + ': <b>Poly ' + fmt(pn) + ' net</b> (Kalshi ' + fmt(kn) + ' net) — bet Poly' + frozenMark + '</div>';
   }
   if (winner === 'kalshi') {
     return '<div class="pv-line pv-kalshi">▶ ' + escapeHtml(sideLabel)
-      + ': <b>Kalshi ' + fmt(kn) + '</b> (Poly ' + fmt(pn) + ') — bet Kalshi</div>';
+      + ': <b>Kalshi ' + fmt(kn) + ' net</b> (Poly ' + fmt(pn) + ' net) — bet Kalshi' + frozenMark + '</div>';
   }
   return '<div class="pv-line pv-tie">▶ ' + escapeHtml(sideLabel)
-    + ': tied at ' + fmt(pn) + ' — either venue</div>';
+    + ': tied at ' + fmt(pn) + ' net — either venue' + frozenMark + '</div>';
 }
 
 function renderGameResult(g){
@@ -3054,7 +3104,7 @@ function renderSignalTracking(signals) {
       +'<span style="width:50px;font-size:11px;color:var(--text2)">'+(s.away_score!=null?s.away_score+'-'+s.home_score:'')+'</span>'
       +'<span style="width:50px">'+pill(s)+'</span>'
       +'<span style="width:55px;color:var(--text2)">'+s.signal_side+(s.bet_line!=null?' <span title="locked '+(s.bet_locked_at||'')+'">🔒</span>':'')+'</span>'
-      +'<span style="width:60px">mkt: '+fmtML(s.market_line)+'</span>'
+      +'<span style="width:110px" title="'+_mktBaselineTitle(s)+'">mkt: '+fmtML(s.market_line)+_mktBaselineSuffix(s)+'</span>'
       +'<span style="width:60px">mdl: '+modelML+'</span>'
       +'<span style="width:90px;display:flex;gap:4px;align-items:center">'
         +'<input id="'+inputId+'" type="number" placeholder="bet" value="'+betVal+'" style="width:56px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;font-size:11px">'
@@ -3086,7 +3136,7 @@ function renderSignalTracking(signals) {
       +'<span style="width:50px;font-size:11px;color:var(--text2)">'+(s.away_score!=null?s.away_score+'-'+s.home_score:'')+'</span>'
       +'<span style="width:50px">'+pill(s)+'</span>'
       +'<span style="width:55px;color:var(--text2)">'+s.signal_side+(s.bet_line!=null?' <span title="locked '+(s.bet_locked_at||'')+'">🔒</span>':'')+'</span>'
-      +'<span style="width:60px">mkt: '+mktTot+'</span>'
+      +'<span style="width:110px" title="'+_mktBaselineTitle(s)+'">mkt: '+mktTot+_mktBaselineSuffix(s)+'</span>'
       +'<span style="width:60px">mdl: '+modelTot+'</span>'
       +'<span style="width:90px;display:flex;gap:4px;align-items:center">'
         +'<input id="'+inputId+'" type="number" step="0.5" placeholder="bet" value="'+betVal+'" style="width:56px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;font-size:11px">'
