@@ -5,6 +5,48 @@ bumped to `v7` for signals emitted on games with `game_date >= 2026-07-06`.
 This doc is the birth certificate: what defines v7, what settings state
 it was born under, and what accumulation clocks reset.
 
+## Amendment 2026-07-08 — venue-aware pricing enabled inside v7
+
+The `SIGNAL_VENUE_AWARE_ENABLED` toggle
+(`services/settings-schema.js`, PR feat/venue-aware-signals) is
+flipped ON as of **2026-07-08**. Emitted rows continue to carry
+`cohort='v7'` — the owner's explicit call to avoid a v8 split for
+one day of Kalshi-baseline signals.
+
+**Known small heterogeneity inside v7**:
+
+- `game_date` in `{2026-07-06, 2026-07-07}` → ~30 signals emitted
+  with Kalshi-only ML baseline (the v7-original semantics).
+- `game_date >= 2026-07-08` → signals emitted with the venue-best
+  (Poly | Kalshi) net-at-size ML baseline, fillable-at-stake
+  guarded.
+
+Both populations share cohort='v7'. Backtest segmentation on this
+sub-population is available via `bet_signals.price_venue`
+(`'poly'`|`'kalshi'`|NULL) and `bet_signals.venue_stale` (0/1). NULL
+`price_venue` on a game_date ≥ 2026-07-08 row indicates a Totals
+signal (Totals stay Kalshi-baseline in this amendment — see
+follow-ups in `docs/venue-aware-signals-2026-07-07.md`); NULL on a
+game_date ≤ 2026-07-07 row is a pre-amendment v7 row.
+
+Rationale for staying in v7:
+- ~30 pre-amendment rows is a rounding error against the expected
+  v7 accumulation window.
+- The venue-aware fix is a market-baseline correction, not a
+  model-stack change — the underlying model (park-neutral inputs,
+  edge cap, opener detection, tandem split, fuzzy resolver, RUN_MULT
+  46) is unchanged.
+- CLV closing-line capture still Kalshi-baseline in this amendment
+  (documented follow-up). CLV on Poly-anchored rows will show a
+  venue mismatch until that follow-up lands; call it out when
+  reading v7 CLV numbers for the amendment window.
+
+Accumulation clocks noted in the "Standing-watch accumulation
+clocks — RESET" section below do **not** reset again for this
+amendment. Watches count the whole v7 population.
+
+
+
 **Cutover boundary**: `game_date >= '2026-07-06'` → cohort `'v7'`.
 Games with `game_date <= '2026-07-05'` continue to emit as `'v6'`.
 Signals emitted during the brief RUN_MULT=50 window (2026-07-04 → 2026-07-05)

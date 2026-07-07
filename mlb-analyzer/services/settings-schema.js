@@ -211,6 +211,37 @@ const SETTINGS_SCHEMA = {
   sp_prefer_rotowire: { type: 'boolean', default: true,
     help: 'When ON (default), RotoWire wins over statsapi when both supply a starting pitcher and they disagree. RotoWire pulls confirmed/announced lineups, which lead statsapi probables on reshuffled / doubleheader games. A null/missing RotoWire SP is NEVER allowed to overwrite a present statsapi value (the null-safety check is independent of this flag). sp_source_conflict still fires on every disagreement regardless of which value wins. Flip OFF to fall back to statsapi-wins precedence.' },
 
+  // --- Venue-aware signal edges (feat/venue-aware-signals, 2026-07-07) ------
+  // When ON, the signal engine evaluates edges against the BEST net at-size
+  // price across Poly and Kalshi (services/odds-comparison.js winner per
+  // side), not Kalshi-only. Fixes the failure mode where a signal computed
+  // against Kalshi's ML understates the true available edge on games where
+  // Poly ships a materially better fill (owner case COL@LAD 2026-07-07: Poly
+  // +240 vs Kalshi +228 — borderline plays that would fire against +240
+  // never fire against +228).
+  //
+  // Guardrails:
+  //   - Fillable-at-stake required. A side is eligible only if !partial
+  //     (walk depleted the book before hitting the stake target). Partial
+  //     books cannot supply the baseline; the signal falls back to Kalshi.
+  //   - Comparison-unavailable / stale → fall back to Kalshi-only and mark
+  //     the row with venue_stale=1. No silent regression to Kalshi.
+  //   - The winning venue is recorded per-signal in bet_signals.price_venue
+  //     so CLV grading can compare to the same book that supplied the entry.
+  //
+  // Cohort discipline: flipping ON keeps emitted rows at cohort v7 —
+  // owner's 2026-07-08 amendment decision, small known heterogeneity
+  // (~30 pre-amendment v7 rows carry Kalshi-only baseline) documented
+  // in the v7 birth cert. Backtest segmentation uses price_venue +
+  // venue_stale, not a separate cohort. Default OFF ships byte-identical.
+  //
+  // Follow-up (deferred): closing-line capture stays Kalshi-only in this
+  // PR. When the toggle flips ON, CLV against a Poly-anchored bet_line is
+  // computed against a Kalshi closing_line — that mismatch is documented
+  // in the v7 birth cert amendment.
+  signal_venue_aware_enabled: { type: 'boolean', default: false,
+    help: 'Evaluate signal edges against the best net at-size price across Poly + Kalshi (services/odds-comparison.js) with fillable-at-stake guard. Default OFF — byte-identical to Kalshi-only. When ON, records price_venue per emitted ML signal; cohort stays v7 (see v7 birth cert amendment for the small pre-amendment heterogeneity note).' },
+
   // --- Kalshi-direct moneyline (override Unabated/OddsAPI ML primary) -------
   kalshi_direct_primary_enabled: { type: 'boolean', default: false,
     help: 'When ON, fetch MLB moneylines directly from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE the ML on any oddsRaw row that Kalshi covers. The Unabated/OddsAPI fetch still runs and supplies (a) ML for games Kalshi does not cover and (b) totals/spreads for every game (Kalshi-direct is ML-only for now). Locked games are skipped. Default OFF — dormant.' },

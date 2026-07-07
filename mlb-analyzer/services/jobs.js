@@ -30,6 +30,50 @@ function cohortForGameDate(game_date) {
     : game_date < '2026-04-24' ? 'v3-pretuning' : 'v3';
 }
 
+// Venue-aware signal edges (feat/venue-aware-signals). Slate-level cache
+// for services/odds-comparison.js runComparison so we don't re-fetch the
+// Poly + Kalshi slate per-game inside processGameSignals. 60-second TTL
+// matches the routes/api.js cache. Only touched when
+// SIGNAL_VENUE_AWARE_ENABLED is on — off-path is a no-op.
+const _VENUE_TTL_MS = 60_000;
+const _venueCache = new Map(); // key=game_date, value={ ts, rowsByGid }
+async function _fetchVenueSlateCached(game_date) {
+  const now = Date.now();
+  const hit = _venueCache.get(game_date);
+  if (hit && (now - hit.ts) < _VENUE_TTL_MS) return hit.rowsByGid;
+  const { runComparison } = require('./odds-comparison');
+  try {
+    const res = await runComparison(game_date, {});
+    const rowsByGid = {};
+    for (const r of (res.rows || [])) if (r.game_id) rowsByGid[r.game_id] = r;
+    _venueCache.set(game_date, { ts: now, rowsByGid });
+    return rowsByGid;
+  } catch (e) {
+    console.warn('[venue-aware] runComparison failed for ' + game_date + ': ' + e.message);
+    // Cache the failure for the TTL so we don't hammer on repeat calls.
+    _venueCache.set(game_date, { ts: now, rowsByGid: {} });
+    return {};
+  }
+}
+
+// Pick the venue-best net American ML for a side, respecting the fillable-
+// at-stake guard. Returns {ml, venue} on success, or null if neither venue
+// qualifies (caller falls back to Kalshi-direct with venue_stale=1).
+function _pickBestML(rowForGame, side) {
+  if (!rowForGame) return null;
+  const P = rowForGame.poly && rowForGame.poly[side];
+  const K = rowForGame.kalshi && rowForGame.kalshi[side];
+  const polyOK = P && P.net_american != null && !P.partial;
+  const kalOK  = K && K.net_american != null && !K.partial;
+  if (!polyOK && !kalOK) return null;
+  if (polyOK && !kalOK)  return { ml: P.net_american, venue: 'poly' };
+  if (kalOK && !polyOK)  return { ml: K.net_american, venue: 'kalshi' };
+  // Both eligible — higher net_american = better for the bettor.
+  return P.net_american >= K.net_american
+    ? { ml: P.net_american, venue: 'poly' }
+    : { ml: K.net_american, venue: 'kalshi' };
+}
+
 // Pacific-Time date helpers (app is Pacific-based now). Neutral names on
 // purpose — if the app's canonical TZ ever shifts again, only these three
 // function bodies need updating, not every call site.
@@ -133,6 +177,15 @@ function getSettings() {
     // stay byte-identical.
     BULLPEN_W_PROJ: num('bullpen_w_proj', _d('bullpen_w_proj', 0.25)),
     BULLPEN_W_ACT:  num('bullpen_w_act',  _d('bullpen_w_act',  0.75)),
+    // Venue-aware signal edges (feat/venue-aware-signals). Default OFF —
+    // when ON, market_line is sourced from services/odds-comparison.js
+    // winner (fillable-at-stake guarded) and the emitted row is tagged
+    // with price_venue. Cohort stays v7 per the 2026-07-08 amendment.
+    SIGNAL_VENUE_AWARE_ENABLED: (function() {
+      const raw = s['signal_venue_aware_enabled'];
+      if (raw == null) return _d('signal_venue_aware_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
     BAT_DFLT_START: num('bat_dflt_start', 0.315),
     BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
     UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
@@ -403,7 +456,15 @@ function checkBookDivergence(awayML, homeML, xcheckAwayML, xcheckHomeML, xcheckS
  *
  * notes: free-form deactivation reason or manual annotation.
  */
-function processGameSignals(gameRow, wobaIdx, settings) {
+function processGameSignals(gameRow, wobaIdx, settings, opts) {
+  // opts.venueRowsByGid: optional map { [game_id]: comparisonRow } from
+  // services/odds-comparison.js runComparison, prefetched slate-wide so
+  // per-game processing stays synchronous. When SIGNAL_VENUE_AWARE_ENABLED
+  // is on and this map is absent (or has no entry for this game_id, or
+  // both venues failed the fillable-at-stake guard), the market baseline
+  // falls back to gameRow.market_* (Kalshi-direct) and the emitted row is
+  // marked venue_stale=1 so the fallback is visible downstream.
+  const _venueRows = (opts && opts.venueRowsByGid) || null;
   // Per-team bullpen wOBA from pit-act data
   const awayParts = (gameRow.game_id||'').split('-');
   const awayAbbr = awayParts[0]||'';
@@ -625,6 +686,26 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     awayFieldingRunsPerGame: awayFieldingRunsPerGame,
     homeFieldingRunsPerGame: homeFieldingRunsPerGame,
   };
+  // Venue-aware market baseline override (feat/venue-aware-signals). When
+  // SIGNAL_VENUE_AWARE_ENABLED is on AND the caller pre-fetched the venue
+  // comparison slate for this date, override game.market_{away,home}_ml on
+  // the object handed to runModel with the winner's net_american per side.
+  // Fillable-at-stake guard inside _pickBestML rejects partial fills. On
+  // unavailable / non-fillable → falls back to Kalshi-direct market_line
+  // (gameRow.market_*) and marks _venueStaleFlag so bet_signals.venue_stale
+  // records the fallback.
+  const _venueAware = !!(settings && settings.SIGNAL_VENUE_AWARE_ENABLED);
+  let _venueByMarket = { ml_away: null, ml_home: null }; // filled in when override applies
+  let _venueStaleFlag = _venueAware; // start true; cleared once a valid override lands
+  if (_venueAware) {
+    const rowForGame = _venueRows && _venueRows[gameRow.game_id];
+    if (rowForGame) {
+      const bestA = _pickBestML(rowForGame, 'away');
+      const bestH = _pickBestML(rowForGame, 'home');
+      if (bestA) { game.market_away_ml = bestA.ml; _venueByMarket.ml_away = bestA.venue; _venueStaleFlag = false; }
+      if (bestH) { game.market_home_ml = bestH.ml; _venueByMarket.ml_home = bestH.venue; _venueStaleFlag = false; }
+    }
+  }
   const stdModel = runModel(game, wobaIdx, settings, 'standard');
   // Phase 2 shadow: compute the opener-aware model whenever a side is
   // opener-led, regardless of the use_opener_logic flag. Persisted into
@@ -877,8 +958,21 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   ).all(gameRow.game_date, gameRow.game_id);
   db.prepare('DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND (bet_line IS NULL OR bet_line=0)').run(gameRow.game_date, gameRow.game_id);
   for (const sig of signals) {
+    // Venue-aware market baseline for the STORED market_line + PnL grading.
+    // When the venue override landed on the game object, use game.market_*
+    // (which already carries the winning venue's net_american). Otherwise
+    // fall back to gl.market_* (Kalshi-direct). PnL grading uses the same
+    // baseline so ROI reflects the price the model actually saw.
+    const _mkAwayML = _venueByMarket.ml_away ? game.market_away_ml : gl.market_away_ml;
+    const _mkHomeML = _venueByMarket.ml_home ? game.market_home_ml : gl.market_home_ml;
+    const _sigMarketLine = sig.type === 'ML'
+      ? (sig.side === 'away' ? _mkAwayML : _mkHomeML)
+      : gl.market_total;
+    const _sigVenue = sig.type === 'ML'
+      ? (sig.side === 'away' ? _venueByMarket.ml_away : _venueByMarket.ml_home)
+      : null;
     const { outcome, pnl } = (gl.away_score != null)
-      ? calcPnl({type:sig.type, side:sig.side, marketLine:sig.type==='ML'?(sig.side==='away'?gl.market_away_ml:gl.market_home_ml):gl.market_total, over_price:gl.over_price, under_price:gl.under_price}, gl.away_score, gl.home_score, gl.market_total)
+      ? calcPnl({type:sig.type, side:sig.side, marketLine:_sigMarketLine, over_price:gl.over_price, under_price:gl.under_price}, gl.away_score, gl.home_score, gl.market_total)
       : { outcome: 'pending', pnl: 0 };
     // Step 2 runline companion: snapshot the spread for ML signals,
     // null for Total. Side-of-signal picks the matching half of the
@@ -908,9 +1002,7 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       // ('fav'|'dog'|'over'|'under') post-cutover.
       signal_label: sig.label,
       category: sig.category,
-      market_line: sig.type === 'ML'
-        ? (sig.side === 'away' ? gl.market_away_ml : gl.market_home_ml)
-        : gl.market_total,
+      market_line: _sigMarketLine,
       model_line: sig.type === 'ML'
         ? (sig.side === 'away' ? model.aML : model.hML)
         : parseFloat(model.estTot.toFixed(2)),
@@ -950,6 +1042,13 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       //                  v6 by game_date boundary). Framing
       //                  effectively LIVE (mute=1.0, coverage ramping
       //                  from ingest cutover 2026-06-17).
+      //   Note (2026-07-08 amendment): SIGNAL_VENUE_AWARE_ENABLED, when
+      //                  flipped ON, keeps the cohort at v7 rather than
+      //                  cutting v8 — one day of pre-venue-aware v7
+      //                  signals (~30 rows on 2026-07-06/07-07) isn't
+      //                  worth a cohort split. See v7 birth cert amendment
+      //                  in docs/cohort-v7-cutover-2026-07-05.md for the
+      //                  small known heterogeneity note.
       cohort: cohortForGameDate(gameRow.game_date),
       companion_spread_line:    _spreadLine,
       companion_spread_price:   _spreadPrice,
@@ -961,6 +1060,13 @@ function processGameSignals(gameRow, wobaIdx, settings) {
       // < SIGNAL_EDGE_HARD_CAP_PP. Downstream UI reads this to render
       // a warning + exclude from "best plays" emphasis.
       edge_suspect: sig.edge_suspect ? 1 : 0,
+      // Venue-aware signal edges (feat/venue-aware-signals). price_venue
+      // records which venue supplied the baseline ('poly'|'kalshi'|null
+      // for totals until Stage 2 lands them). venue_stale=1 marks a v8
+      // row that couldn't obtain a fillable venue-best baseline and fell
+      // back to Kalshi-direct — visible in backtest so ROI can segment.
+      price_venue: _sigVenue,
+      venue_stale: (_venueAware && (_sigVenue == null)) ? 1 : 0,
     });
     // Audit-log soft-flagged signals too (in addition to insertSignal's
     // edge_suspect column) so operators can grep the audit table for a
@@ -1575,6 +1681,21 @@ async function runLineupJob(dateStr) {
      WHERE game_date=? AND game_id=?`
   );
 
+    // Venue-aware signal edges (feat/venue-aware-signals). Prefetch the
+    // slate-wide venue comparison once so per-game processGameSignals stays
+    // synchronous. Off-path when the setting is off — the fetch is
+    // skipped and processGameSignals runs without an override.
+    let _venueRowsByGid = null;
+    if (settings && settings.SIGNAL_VENUE_AWARE_ENABLED) {
+      try {
+        _venueRowsByGid = await _fetchVenueSlateCached(dateStr);
+        console.log('[venue-aware] fetched ' + Object.keys(_venueRowsByGid).length + ' comparison rows for ' + dateStr);
+      } catch (e) {
+        console.warn('[venue-aware] prefetch failed for ' + dateStr + ' — falling back per-game to Kalshi-direct (venue_stale=1): ' + e.message);
+        _venueRowsByGid = {};
+      }
+    }
+
     for (const g of games) {
       const gameId = g.game_id || makeGameId(g.away_team, g.home_team);
       let awayLU = (g.away_lineup || []).map(b => ({ name: b.name, hand: b.hand, pos: b.pos || null }));
@@ -2053,7 +2174,7 @@ async function runLineupJob(dateStr) {
           ...gameRow,
           away_lineup_json: JSON.stringify(awayLU),
           home_lineup_json: JSON.stringify(homeLU),
-        }, wobaIdx, settings);
+        }, wobaIdx, settings, { venueRowsByGid: _venueRowsByGid });
         gamesUpdated++;
       }
     }
