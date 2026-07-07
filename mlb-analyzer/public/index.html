@@ -500,6 +500,10 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="Slope converting run differential to over probability. Higher = model is more aggressive on totals. Default: 0.08 (8% per run).">Total prob slope</label><input type="number" id="s-tot-slope" step="0.005" min="0.01" max="0.25"></div>
       <div class="setting-row"><label title="Minimum plate appearances required to use a batter's actual wOBA. Below this threshold, projection-only is used.">Min PA (actual)</label><input type="number" id="s-min-pa" step="1" min="10" max="200"></div>
       <div class="setting-row"><label title="Minimum batters faced required to use a pitcher's actual wOBA. Below this threshold, projection-only is used.">Min BF (actual)</label><input type="number" id="s-min-bf" step="1" min="10" max="300"></div>
+      <div class="setting-row"><label title="BF threshold to blend actuals with Steamer inside the bullpen pool (q.getBullpenWoba). Separate from the SP-facing Min BF because relievers rarely reach 100 BF vs one handedness. Lower = more RPs blended → corrects Steamer over-regression on elite/blowup relievers. Default 50; set to 100 for legacy byte-identical.">Bullpen Min BF</label><input type="number" id="s-bullpen-min-bf" step="1" min="25" max="200"></div>
+      <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Downweight each rostered RP by (1 − start_BF_fraction) over last 60d in the bullpen pool. Strips opener/bulk pollution from Chad Patrick / Tanner Gordon / Shane Drohan type usages. Default ON; OFF for legacy byte-identical.">Bullpen: downweight starters</label><input type="checkbox" id="s-bullpen-downweight-starters" style="margin-left:4px"></div>
+      <div class="setting-row"><label title="Bullpen-only Steamer weight in per-RP blend inside q.getBullpenWoba. Independent of the global Steamer weight above — SP/batter paths keep 0.45/0.55. Tilting actuals-heavy corrects Steamer over-regression on elite RPs (Cade Smith, Erik Miller). Default 0.25; set to 0.45 to match the global for byte-identical legacy.">Bullpen Steamer weight (w_proj)</label><input type="number" id="s-bullpen-w-proj" step="0.05" min="0" max="1"></div>
+      <div class="setting-row"><label title="Bullpen-only actuals weight in per-RP blend. Must sum to 1.0 with the bullpen Steamer weight. Default 0.75; set to 0.55 to match the global for byte-identical legacy.">Bullpen actuals weight (w_act)</label><input type="number" id="s-bullpen-w-act" step="0.05" min="0" max="1"></div>
       <div class="setting-row"><label title="Default batter wOBA vs same-handed starter when no CSV data found. Used as fallback only.">Batter dflt (same hand)</label><input type="number" id="s-bat-dflt-start" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="Default batter wOBA vs opposite-handed reliever when no CSV data found. Used as fallback only.">Batter dflt (opp hand)</label><input type="number" id="s-bat-dflt-opp" step="0.001" min="0.250" max="0.400"></div>
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
@@ -3534,6 +3538,11 @@ const _SETTINGS_SCHEMA_ID_MAP = {
   signal_edge_cap_enabled: 's-edge-cap-enabled',
   signal_edge_soft_cap_pp: 's-edge-soft-cap',
   signal_edge_hard_cap_pp: 's-edge-hard-cap',
+  // Bullpen input construction (fix/bullpen-min-bf-and-opener-weighting).
+  bullpen_min_bf: 's-bullpen-min-bf',
+  bullpen_downweight_starters: 's-bullpen-downweight-starters',
+  bullpen_w_proj: 's-bullpen-w-proj',
+  bullpen_w_act: 's-bullpen-w-act',
 };
 let _SETTINGS_SCHEMA_CACHE = null;
 
@@ -3677,6 +3686,10 @@ async function loadSettings(){
     set('s-tot-slope',       s.tot_slope);
     set('s-min-pa',          s.min_pa);
     set('s-min-bf',          s.min_bf);
+    set('s-bullpen-min-bf',  s.bullpen_min_bf);
+    { const el = document.getElementById('s-bullpen-downweight-starters'); if (el) el.checked = (s.bullpen_downweight_starters === 'true' || s.bullpen_downweight_starters === true); }
+    set('s-bullpen-w-proj',  s.bullpen_w_proj);
+    set('s-bullpen-w-act',   s.bullpen_w_act);
     set('s-bat-dflt-start',  s.bat_dflt_start);
     set('s-bat-dflt-opp',    s.bat_dflt_opp);
     set('s-unknown-pitcher-woba', s.unknown_pitcher_woba);
@@ -3765,6 +3778,10 @@ async function saveSettings(){
         tot_slope:          get('s-tot-slope'),
         min_pa:             get('s-min-pa'),
         min_bf:             get('s-min-bf'),
+        bullpen_min_bf:     get('s-bullpen-min-bf'),
+        bullpen_downweight_starters: (document.getElementById('s-bullpen-downweight-starters')||{}).checked ? 'true' : 'false',
+        bullpen_w_proj:     get('s-bullpen-w-proj'),
+        bullpen_w_act:      get('s-bullpen-w-act'),
         bat_dflt_start:     get('s-bat-dflt-start'),
         bat_dflt_opp:       get('s-bat-dflt-opp'),
         unknown_pitcher_woba: get('s-unknown-pitcher-woba'),

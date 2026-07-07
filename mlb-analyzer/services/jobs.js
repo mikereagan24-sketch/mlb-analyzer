@@ -117,6 +117,22 @@ function getSettings() {
     TOT_SLOPE:      num('tot_slope',         _d('tot_slope', 0.08)),
     MIN_PA:         num('min_pa',         60),
     MIN_BF:         num('min_bf',         100),
+    // Bullpen-side actuals-blend gate. Separate from SP-facing MIN_BF because
+    // RPs rarely reach 100 BF vs one handedness. Default 50 (schema).
+    BULLPEN_MIN_BF: num('bullpen_min_bf', _d('bullpen_min_bf', 50)),
+    // Downweight rostered RPs by (1 − start_BF_fraction) in the pool mean —
+    // strips opener/bulk pollution. TEXT-coerced boolean like the other
+    // toggles above. Default true (schema) — set to 'false' for byte-identical.
+    BULLPEN_DOWNWEIGHT_STARTERS: (function() {
+      const raw = s['bullpen_downweight_starters'];
+      if (raw == null) return _d('bullpen_downweight_starters', true);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
+    // Bullpen-specific proj/act blend (Path B). Defaults 0.25/0.75. Null →
+    // fall back to the global W_PROJ/W_ACT so legacy DBs without these rows
+    // stay byte-identical.
+    BULLPEN_W_PROJ: num('bullpen_w_proj', _d('bullpen_w_proj', 0.25)),
+    BULLPEN_W_ACT:  num('bullpen_w_act',  _d('bullpen_w_act',  0.75)),
     BAT_DFLT_START: num('bat_dflt_start', 0.315),
     BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
     UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
@@ -401,7 +417,18 @@ function processGameSignals(gameRow, wobaIdx, settings) {
   const _bpStrongL = (settings && settings.BP_STRONG_WEIGHT_L != null) ? parseFloat(settings.BP_STRONG_WEIGHT_L) : 0.35;
   const _bpWeakL   = (settings && settings.BP_WEAK_WEIGHT_L   != null) ? parseFloat(settings.BP_WEAK_WEIGHT_L)   : 0.65;
   const _unknownWoba = (settings && settings.UNKNOWN_PITCHER_WOBA != null) ? parseFloat(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
+  // bullpen path uses its own BF gate — RPs rarely reach the SP-facing MIN_BF=100
+  // vs a single handedness in a season, so a shared gate forced the bullpen
+  // path onto pure Steamer for the majority of pool RPs. Fresh key
+  // BULLPEN_MIN_BF (default 50 in schema) unblocks the actuals blend. Falls
+  // back to MIN_BF for legacy DBs where the new row hasn't been seeded.
   const _minBF = (settings && settings.MIN_BF != null) ? parseFloat(settings.MIN_BF) : 100;
+  const _bullpenMinBF = (settings && settings.BULLPEN_MIN_BF != null) ? parseFloat(settings.BULLPEN_MIN_BF) : _minBF;
+  const _downweightStarters = !!(settings && (settings.BULLPEN_DOWNWEIGHT_STARTERS === true || settings.BULLPEN_DOWNWEIGHT_STARTERS === 'true'));
+  // Bullpen-specific blend override. Fall back to the global W_PROJ/W_ACT
+  // when the settings row is missing so legacy DBs are byte-identical.
+  const _bullpenWProj = (settings && settings.BULLPEN_W_PROJ != null) ? parseFloat(settings.BULLPEN_W_PROJ) : _wProj;
+  const _bullpenWAct  = (settings && settings.BULLPEN_W_ACT  != null) ? parseFloat(settings.BULLPEN_W_ACT)  : _wAct;
   const LEAGUE_BP = 0.318;
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
   let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;
@@ -410,8 +437,8 @@ function processGameSignals(gameRow, wobaIdx, settings) {
     if (q.getBullpenWobaBlended) {
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _minBF);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _minBF);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct);
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;

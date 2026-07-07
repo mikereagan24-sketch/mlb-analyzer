@@ -5271,8 +5271,13 @@ router.get('/debug/bullpen-report', (req, res) => {
   try {
     const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const settings = getSettings();
-    const W_PROJ = settings.W_PROJ != null ? Number(settings.W_PROJ) : 0.65;
-    const W_ACT  = settings.W_ACT  != null ? Number(settings.W_ACT)  : 0.35;
+    const W_PROJ_GLOBAL = settings.W_PROJ != null ? Number(settings.W_PROJ) : 0.65;
+    const W_ACT_GLOBAL  = settings.W_ACT  != null ? Number(settings.W_ACT)  : 0.35;
+    // Bullpen path uses its own blend (Path B, default 0.25/0.75) so the
+    // displayed per-RP proj+act blend column matches what the model actually
+    // feeds. Null → fall back to the global for byte-identical legacy.
+    const W_PROJ = settings.BULLPEN_W_PROJ != null ? Number(settings.BULLPEN_W_PROJ) : W_PROJ_GLOBAL;
+    const W_ACT  = settings.BULLPEN_W_ACT  != null ? Number(settings.BULLPEN_W_ACT)  : W_ACT_GLOBAL;
     // Per-handedness bullpen strong/weak weights — the blended wOBA below
     // mirrors the primary branch of q.getBullpenWobaBlended so the report
     // number matches what runModel will feed into perBatterEW for this game.
@@ -5283,7 +5288,10 @@ router.get('/debug/bullpen-report', (req, res) => {
     const UNKNOWN_PITCHER_WOBA = settings.UNKNOWN_PITCHER_WOBA != null ? Number(settings.UNKNOWN_PITCHER_WOBA) : 0.335;
     // MIN_BF gate mirrors q.getBullpenWoba so the displayed report number
     // matches what the model actually feeds into perBatterEW for the game.
-    const MIN_BF = settings.MIN_BF != null ? Number(settings.MIN_BF) : 100;
+    // Bullpen path uses BULLPEN_MIN_BF (default 50 in schema), which falls
+    // back to the SP-facing MIN_BF for legacy DBs missing the new row.
+    const SP_MIN_BF = settings.MIN_BF != null ? Number(settings.MIN_BF) : 100;
+    const MIN_BF = settings.BULLPEN_MIN_BF != null ? Number(settings.BULLPEN_MIN_BF) : SP_MIN_BF;
 
     const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
     // Use getWobaIndex() rather than re-building from raw SQL — this
@@ -5509,6 +5517,13 @@ router.get('/debug/model-trace', (req, res) => {
     const BP_WL_  = num(settings.BP_WEAK_WEIGHT_L,   0.65);
     const UNK_    = num(settings.UNKNOWN_PITCHER_WOBA, 0.335);
     const MIN_BF_ = num(settings.MIN_BF, 100);
+    const BP_MIN_BF_ = num(settings.BULLPEN_MIN_BF, MIN_BF_);
+    const BP_DWS_ = settings.BULLPEN_DOWNWEIGHT_STARTERS === true
+                 || settings.BULLPEN_DOWNWEIGHT_STARTERS === 'true'
+                 || settings.BULLPEN_DOWNWEIGHT_STARTERS === '1'
+                 || settings.BULLPEN_DOWNWEIGHT_STARTERS === 1;
+    const BP_WP_ = num(settings.BULLPEN_W_PROJ, W_PROJ_);
+    const BP_WA_ = num(settings.BULLPEN_W_ACT,  W_ACT_);
     const LEAGUE_BP = 0.318;
     let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP, awayBpWoba = LEAGUE_BP;
     let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
@@ -5516,8 +5531,8 @@ router.get('/debug/model-trace', (req, res) => {
     const awayLineupArr = tryParseLocal(gameRow.away_lineup_json) || [];
     try {
       if (q.getBullpenWobaBlended) {
-        const aBp = q.getBullpenWobaBlended(awayAbbr, gameRow.away_sp || gameRow.away_pitcher || '', homeLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, MIN_BF_);
-        const hBp = q.getBullpenWobaBlended(homeAbbr, gameRow.home_sp || gameRow.home_pitcher || '', awayLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, MIN_BF_);
+        const aBp = q.getBullpenWobaBlended(awayAbbr, gameRow.away_sp || gameRow.away_pitcher || '', homeLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, BP_MIN_BF_, BP_DWS_, BP_WP_, BP_WA_);
+        const hBp = q.getBullpenWobaBlended(homeAbbr, gameRow.home_sp || gameRow.home_pitcher || '', awayLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, BP_MIN_BF_, BP_DWS_, BP_WP_, BP_WA_);
         if (aBp?.vsRHB) awayBpVsR = aBp.vsRHB;
         if (aBp?.vsLHB) awayBpVsL = aBp.vsLHB;
         if (hBp?.vsRHB) homeBpVsR = hBp.vsRHB;

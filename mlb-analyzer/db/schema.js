@@ -271,6 +271,10 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('tot_slope', '0.08');
   INSERT OR IGNORE INTO app_settings VALUES ('min_pa', '60');
   INSERT OR IGNORE INTO app_settings VALUES ('min_bf', '100');
+  INSERT OR IGNORE INTO app_settings VALUES ('bullpen_min_bf', '50');
+  INSERT OR IGNORE INTO app_settings VALUES ('bullpen_downweight_starters', 'true');
+  INSERT OR IGNORE INTO app_settings VALUES ('bullpen_w_proj', '0.25');
+  INSERT OR IGNORE INTO app_settings VALUES ('bullpen_w_act',  '0.75');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_start', '0.315');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_opp', '0.320');
   INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
@@ -2923,7 +2927,38 @@ q.getPitchersByTeam = (dataKey, teamAbbr) => {
   ).all(dataKey, '%'+teamAbbr);
 };
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF) => {
+// Cached prepared statement for the 60d start-BF fraction lookup. Falls back
+// to `game_date < today` if no gameDate anchor is provided (backtest paths).
+// Returns SUM(batters_faced WHERE was_starter=1) / SUM(batters_faced) for
+// each pitcher_name in the last 60d ending on the anchor. Undefined pitchers
+// (no game log rows) map to fraction=0 → weight=1 (no downweight applied).
+q._bullpenStartFracStmt = null;
+function _computeStartFracIndex(anchorDate) {
+  if (!q._bullpenStartFracStmt) {
+    try {
+      q._bullpenStartFracStmt = db.prepare(
+        "SELECT pitcher_name, "
+      + "SUM(CASE WHEN was_starter=1 THEN batters_faced ELSE 0 END) AS start_bf, "
+      + "SUM(batters_faced) AS total_bf "
+      + "FROM pitcher_game_log "
+      + "WHERE game_date >= ? AND game_date <= ? "
+      + "GROUP BY pitcher_name"
+      );
+    } catch (e) { return {}; }
+  }
+  const anchor = anchorDate || new Date().toISOString().slice(0, 10);
+  const cutoff = new Date(new Date(anchor).getTime() - 60 * 86400000)
+    .toISOString().slice(0, 10);
+  const rows = q._bullpenStartFracStmt.all(cutoff, anchor);
+  const idx = {};
+  for (const r of rows) {
+    if (!r.total_bf || r.total_bf <= 0) continue;
+    idx[normName(r.pitcher_name)] = r.start_bf / r.total_bf;
+  }
+  return idx;
+}
+
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
   if (unknownWoba == null) unknownWoba = 0.335;
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
@@ -2957,6 +2992,15 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
 
   const W_PROJ = (wProj != null) ? wProj : 0.65;
   const W_ACT = (wAct != null) ? wAct : 0.35;
+  // Bullpen-specific blend weights (Path B, 2026-07-07). Distinct from the
+  // global W_PROJ/W_ACT so the SP and batter paths stay on 0.45/0.55 while
+  // the bullpen path tilts to actuals-heavy (default 0.25/0.75). Rationale:
+  // RP actuals over the sample threshold are a stronger signal than the
+  // corresponding SP actuals since Steamer's RP projections regress hard
+  // to league-mean. Null → fall back to the global W_PROJ/W_ACT so legacy
+  // callers and untouched settings stay byte-identical.
+  const BP_W_PROJ = (bullpenWProj != null) ? bullpenWProj : W_PROJ;
+  const BP_W_ACT  = (bullpenWAct  != null) ? bullpenWAct  : W_ACT;
   // Gate actuals at minBF — matches the gate in services/model.js blendWoba
   // (used for SPs and bulk pitchers). Below threshold, actuals don't have
   // enough signal to override projection. Defaults to 100 inline so
@@ -2968,7 +3012,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
     const actMatch = fuzzyLookup(actIdx, pName, teamAbbr);
     const useAct = actMatch && actMatch.woba && actMatch.sample_size >= minSample;
     const woba = useAct
-      ? W_PROJ * proj.woba + W_ACT * actMatch.woba
+      ? BP_W_PROJ * proj.woba + BP_W_ACT * actMatch.woba
       : proj.woba;
     return { name: pName, woba, sample: proj.sample_size, fallback: false };
   });
@@ -3001,21 +3045,35 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // Always include fallback entries — a rostered callup will throw innings.
   const pool = primary.concat(fallbackList);
   if (!pool.length) return null;
-  // Equal-weight aggregation across the pool. Each rostered RP (whether
-  // established, partial-projection, or fallback callup) contributes
-  // equally to the team's bullpen wOBA average. We don't know who the
-  // manager will deploy, and a thin-sample reliever shouldn't be penalized
-  // for being new — his fallback wOBA already encodes the "we don't know"
-  // uncertainty (UNKNOWN_PITCHER_WOBA, default 0.335). The 70/30 actuals
-  // blend per pitcher is preserved (above) — that gating happens BEFORE
-  // aggregation, so a pitcher with meaningful actuals still blends his
-  // projection and actuals into a single per-pitcher value before this
-  // pool-level mean.
-  const woba = pool.reduce((s,p)=>s+p.woba, 0) / pool.length;
+  // Weighted aggregation across the pool. Each rostered RP (whether
+  // established, partial-projection, or fallback callup) contributes to the
+  // team's bullpen wOBA average with weight = (1 − start_BF_fraction over
+  // the last 60d) when downweightStarters is on; else weight = 1 (byte-
+  // identical to legacy equal-weight mean). The 70/30 actuals blend per
+  // pitcher is preserved above — that gating happens BEFORE aggregation, so
+  // a pitcher with meaningful actuals still blends his projection and
+  // actuals into a single per-pitcher value before this pool-level mean.
+  // A pitcher who threw 60% of his BF as an opener/bulk (Tanner Gordon,
+  // Shane Drohan) contributes 0.40 units to the pool instead of 1.0 —
+  // removing his opener-inflated projection from the pure-relief mean.
+  const startFracIdx = downweightStarters ? _computeStartFracIndex(gameDate) : null;
+  let sumW = 0, sumWoba = 0;
+  for (const p of pool) {
+    const frac = startFracIdx ? (startFracIdx[p.name] || 0) : 0;
+    // Fallback callups (no proj row) also fall through with frac=0 → w=1
+    // — they have no start history to downweight against.
+    const w = 1 - frac;
+    sumW += w;
+    sumWoba += w * p.woba;
+  }
+  // Guard: if every pitcher in the pool is 100% starter (sumW → 0), the
+  // downweight collapses the mean. Fall back to equal-weight in that
+  // edge case — a bullpen with only failed openers is still a bullpen.
+  const woba = sumW > 0.01 ? sumWoba / sumW : pool.reduce((s,p)=>s+p.woba, 0) / pool.length;
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
   // Blend the team's bullpen-allowed wOBA using per-handedness strong/weak
   // manager-assumption weights. For each batter in the opposing lineup the
   // manager is assumed to deploy `strongWt` share of the better-matched
@@ -3023,8 +3081,8 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
   // the R/L split tuned separately because righty vs lefty matchup leverage
   // differs in practice. Fallback (no lineup) averages R and L weights.
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   if (!vsRHB && !vsLHB) return null;
