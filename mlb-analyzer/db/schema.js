@@ -275,6 +275,7 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('bullpen_downweight_starters', 'true');
   INSERT OR IGNORE INTO app_settings VALUES ('bullpen_w_proj', '0.25');
   INSERT OR IGNORE INTO app_settings VALUES ('bullpen_w_act',  '0.75');
+  INSERT OR IGNORE INTO app_settings VALUES ('signal_venue_aware_enabled', 'false');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_start', '0.315');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_opp', '0.320');
   INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
@@ -1971,17 +1972,30 @@ const q = {
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN edge_suspect INTEGER NOT NULL DEFAULT 0").run(); } catch(e) {}
     return true;
   })(),
+  // Venue-aware signal columns (feat/venue-aware-signals). Same pattern as
+  // edge_suspect: run BEFORE insertSignal's prepare() so the columns exist
+  // when the statement compiles. price_venue records which venue supplied
+  // the market baseline for edge computation ('poly'|'kalshi'); venue_stale
+  // marks rows that fell back to Kalshi-only because the venue comparison
+  // was unavailable or the winner failed the fillable-at-stake guard.
+  _venueColumnsMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN price_venue TEXT").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN venue_stale INTEGER NOT NULL DEFAULT 0").run(); } catch(e) {}
+    return true;
+  })(),
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
       category, market_line, model_line, edge_pct, outcome, pnl, cohort,
       companion_spread_line, companion_spread_price, companion_spread_outcome,
-      companion_spread_pnl, companion_spread_src, edge_suspect
+      companion_spread_pnl, companion_spread_src, edge_suspect,
+      price_venue, venue_stale
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
       @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
       @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
-      @companion_spread_pnl, @companion_spread_src, @edge_suspect
+      @companion_spread_pnl, @companion_spread_src, @edge_suspect,
+      @price_venue, @venue_stale
     )
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
