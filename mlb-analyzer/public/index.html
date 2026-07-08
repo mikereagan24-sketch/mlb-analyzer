@@ -558,27 +558,39 @@ function fmtML(ml){if(ml==null)return'—';return ml>0?'+'+ml:''+ml;}
 // and when it was captured. Suffix + hover surface all three so operators
 // don't misread emit-vs-live drift as an error.
 function _mktBaselineSuffix(s){
-  // Venue-aware ON: price_venue is 'poly' or 'kalshi' — show a compact
-  // venue tag and the capture time. Kalshi-direct legacy: keep the
-  // number bare (existing behavior) so old cohorts read unchanged.
-  if (s && s.price_venue) {
-    var t = s.created_at ? ' @' + new Date(s.created_at.replace(' ','T')+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
-    var v = s.price_venue === 'poly' ? 'Ⓟ' : (s.price_venue === 'kalshi' ? 'Ⓚ' : '');
-    var stale = s.venue_stale ? '⚠' : '';
-    return ' <span style="color:var(--text3);font-size:10px">'+v+stale+t+'</span>';
-  }
-  return '';
+  // Under the refresh design (feat/upsert-signal-refresh), market_line
+  // moves on every odds pull / cron pass while unlocked. updated_at is
+  // pushed forward on each refresh; created_at stays pinned to first
+  // sighting. Show venue tag, staleness (fallback tier), lock state,
+  // and FRESHNESS (updated_at when present, else created_at).
+  if (!s) return '';
+  var v = s.price_venue === 'poly'   ? 'Ⓟ'
+        : s.price_venue === 'kalshi' ? 'Ⓚ'
+        : '';
+  var stale = s.venue_stale ? '⚠' : '';
+  var when = s.updated_at || s.created_at;
+  var t = when ? ' @' + new Date(when.replace(' ','T')+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+  var locked = s.bet_locked_at ? '🔒' : '';
+  var suffix = v + stale + locked + t;
+  if (!suffix) return '';
+  return ' <span style="color:var(--text3);font-size:10px">' + suffix + '</span>';
 }
 function _mktBaselineTitle(s){
   if (!s) return '';
-  var when = s.created_at ? ('captured at signal emit ' + s.created_at) : 'captured at signal emit';
-  if (s.price_venue === 'poly') {
-    return when + ' — Poly $100-fill net-at-size (fee + depth adjusted). Baseline the edge was scored against; live venue-comparison numbers on the card refresh every 60s and will drift.';
+  var first = s.created_at ? 'first emitted ' + s.created_at : '';
+  var refreshed = (s.updated_at && s.updated_at !== s.created_at) ? ' · last refreshed ' + s.updated_at : '';
+  var head = first + refreshed;
+  if (s.bet_locked_at) {
+    return head + ' — LOCKED at ' + s.bet_locked_at + '. Baseline frozen at lock time regardless of subsequent refresh passes; CLV grades against this locked line.';
   }
-  if (s.price_venue === 'kalshi') {
-    return when + ' — Kalshi $100-fill net-at-size (fee + depth adjusted). Baseline the edge was scored against; live venue-comparison numbers on the card refresh every 60s and will drift.';
-  }
-  return when + ' — Kalshi-direct capture from game_log.market_*_ml (venue-aware off). Baseline the edge was scored against; live venue-comparison numbers on the card refresh every 60s and will drift.';
+  var venueDesc = s.price_venue === 'poly'   ? 'Poly $100-fill net-at-size (fee + depth adjusted)'
+                : s.price_venue === 'kalshi' ? 'Kalshi $100-fill net-at-size (fee + depth adjusted)'
+                : 'Kalshi-direct capture (venue-aware off or comparison unavailable)';
+  var refreshNote = s.venue_stale
+    ? ' — fallback tier active (venue winner unavailable/partial). ⚠ marks fee-adjusted Kalshi fallback or raw capture.'
+    : ' — venue winner net: same number as the venue-flag bold pregame.';
+  var freezeNote = ' Refreshes on every odds pull + lineup cron; freezes at T-10min via game_log.odds_locked_at, and permanently on bet_locked_at.';
+  return head + ' — ' + venueDesc + refreshNote + freezeNote;
 }
 // Phase 2 opener-aware reads. PR #58 wired parallel opener_model_*
 // columns; PR #59 flipped use_opener_logic on so signals now fire on

@@ -952,11 +952,23 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     return;
   }
 
-  // Preserve any locked bet_lines before wiping signals
-  const lockedLines = db.prepare(
-    'SELECT signal_type, signal_side, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE game_date=? AND game_id=? AND bet_line IS NOT NULL'
+  // UPSERT lifecycle (feat/upsert-signal-refresh, 2026-07-08). Replaces
+  // the DELETE-unlocked + INSERT-fresh + restore-locks + dedupe dance
+  // with per-tuple UPSERTs. Ownership rule from the owner's design
+  // ruling: the ML market baseline is the venue winner's fee-adjusted
+  // net-at-size, refreshed every cron pass. bet_locked_at freezes the
+  // baseline permanently for locked rows (WHERE guard inside the
+  // prepared statement); pregame refresh flows through unlocked rows.
+  //
+  //   existingByKey: snapshot of the current DB state per (type, side)
+  //   BEFORE any UPSERT. Used to (a) compute per-column deltas for the
+  //   bet_signal_audit entries so refresh history is reconstructable,
+  //   (b) detect orphan rows to deactivate at the tail.
+  const existingRows = db.prepare(
+    'SELECT id, signal_type, signal_side, market_line, model_line, edge_pct, category, price_venue, venue_stale, is_active, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE game_date=? AND game_id=?'
   ).all(gameRow.game_date, gameRow.game_id);
-  db.prepare('DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND (bet_line IS NULL OR bet_line=0)').run(gameRow.game_date, gameRow.game_id);
+  const existingByKey = {};
+  for (const r of existingRows) existingByKey[r.signal_type + '|' + r.signal_side] = r;
   for (const sig of signals) {
     // Venue-aware market baseline for the STORED market_line + PnL grading.
     // When the venue override landed on the game object, use game.market_*
@@ -990,7 +1002,13 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       _spreadOutcome = r.outcome === 'pending' ? null : r.outcome;
       _spreadPnl     = r.outcome === 'pending' ? null : r.pnl;
     }
-    q.insertSignal.run({
+    // Snapshot the pre-UPSERT row for this key so audit deltas are
+    // computable AFTER the row moves. Absent → treat as insert; present
+    // and bet_locked_at IS NOT NULL → UPSERT is a no-op (the WHERE guard
+    // catches it), audit skipped so it doesn't record a phantom refresh.
+    const _sigKey = sig.type + '|' + sig.side;
+    const _preRow = existingByKey[_sigKey] || null;
+    q.upsertSignal.run({
       game_log_id: gl.id,
       game_date: gameRow.game_date,
       game_id: gameRow.game_id,
@@ -1068,6 +1086,58 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       price_venue: _sigVenue,
       venue_stale: (_venueAware && (_sigVenue == null)) ? 1 : 0,
     });
+    // Refresh audit trail. Records action='insert' on first sight and
+    // action='refresh' on every subsequent pass that changes a tracked
+    // column. Locked rows produce no audit because the WHERE guard on
+    // upsertSignal makes the UPDATE a no-op — nothing to record.
+    try {
+      const _mlWasLocked = _preRow && _preRow.bet_locked_at != null;
+      if (!_mlWasLocked) {
+        const _modelLineNew = sig.type === 'ML'
+          ? (sig.side === 'away' ? model.aML : model.hML)
+          : parseFloat(model.estTot.toFixed(2));
+        const _newSnap = {
+          market_line: _sigMarketLine,
+          model_line:  _modelLineNew,
+          edge_pct:    sig.edge,
+          category:    sig.category,
+          price_venue: _sigVenue,
+          venue_stale: (_venueAware && (_sigVenue == null)) ? 1 : 0,
+        };
+        const _delta = {};
+        let _changed = false;
+        if (!_preRow) {
+          // first sighting — record baseline for future comparison
+          _delta.first_sight = _newSnap;
+          _changed = true;
+        } else {
+          for (const k of Object.keys(_newSnap)) {
+            if (_preRow[k] !== _newSnap[k]) {
+              _delta[k] = { from: _preRow[k], to: _newSnap[k] };
+              _changed = true;
+            }
+          }
+        }
+        if (_changed) {
+          q.insertBetSignalAudit({
+            signal_id: _preRow ? _preRow.id : null,
+            game_date: gameRow.game_date,
+            game_id: gameRow.game_id,
+            signal_type: sig.type,
+            signal_side: sig.side,
+            action: _preRow ? 'refresh' : 'insert',
+            bet_line: null,
+            closing_line: null,
+            clv: null,
+            source: 'process_game_signals_upsert',
+            detail: JSON.stringify(_delta),
+          });
+        }
+      }
+    } catch (e) {
+      // Audit failure never blocks signal write.
+      console.warn('[upsert-audit] ' + gameRow.game_id + '/' + sig.type + '/' + sig.side + ': ' + e.message);
+    }
     // Audit-log soft-flagged signals too (in addition to insertSignal's
     // edge_suspect column) so operators can grep the audit table for a
     // combined count of flagged + suppressed events by day — a burst is
@@ -1117,75 +1187,63 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       });
     } catch(e) { /* audit failure must not block lifecycle */ }
   }
-  // Dedupe keeps MAX(id) per (game, type, side). Old locked rows get
-  // deleted here; the restore-locks loop below immediately re-stamps
-  // the new (larger-id) row with the captured lockedLines data. The
-  // net effect at rest is one row per (type, side), locked if the
-  // group was ever locked.
+  // Deactivate orphans (feat/upsert-signal-refresh). An orphan is any
+  // row from existingByKey whose (type, side) is NOT in the current
+  // `signals` array — meaning getSignals no longer emits for that
+  // tuple. Deactivation semantics:
   //
-  // NOTE: 2026-07-06 regression fix. A previous iteration added
-  // `AND bet_line IS NULL` here to preserve locked rows through
-  // dedupe. That broke the invariant that each rerun ended with
-  // one row per (type, side) — locked old row + new row both
-  // survived, then restore-locks stamped both identically,
-  // producing 5-7× duplicates on rerun-heavy days
-  // (docs/dedupe-regression-2026-07-07.md). Reverted; the
-  // restore-locks path was already the mechanism for preserving
-  // lock stamps.
-  db.prepare(`DELETE FROM bet_signals WHERE game_date=? AND game_id=? AND id NOT IN (
-    SELECT MAX(id) FROM bet_signals WHERE game_date=? AND game_id=? GROUP BY signal_type, signal_side
-  )`).run(gameRow.game_date, gameRow.game_id, gameRow.game_date, gameRow.game_id);
-  // Restore bet_lines for locked signals.
-  // If a locked signal no longer qualifies, mark is_active=0 with a note instead of deleting.
-  // This keeps it in backtesting but hides it from the Games tab.
-  const newSigKeys = new Set(signals.map(s=>s.type+'|'+s.side));
-  if (lockedLines.length) {
-    for (const locked of lockedLines) {
-      if (!newSigKeys.has(locked.signal_type+'|'+locked.signal_side)) {
-        // Signal no longer qualifies — deactivate with a note
-        // When suppressed (incomplete lineup), model_* values are null;
-        // skip .toFixed and write a suppression note instead.
-        const finalMdl = suppressed
-          ? null
-          : (locked.signal_type === 'Total'
-              ? parseFloat(model.estTot.toFixed(2))
-              : (locked.signal_side === 'away' ? model.aML : model.hML));
-        const mktRef = locked.signal_type === 'Total'
-          ? (gameRow.market_total != null ? ', mkt=' + gameRow.market_total : '')
-          : (locked.signal_side === 'away'
-              ? (gameRow.market_away_ml != null ? ', mkt=' + gameRow.market_away_ml : '')
-              : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
-        const note = suppressed
-          ? 'Lineup incomplete (' + (model._suppressed_detail || 'no batters') + ') — model output suppressed, signal deactivated.'
-          : 'Model ' + locked.signal_type.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
-        db.prepare("UPDATE bet_signals SET is_active=0, notes=? WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
-          .run(note, gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
-        try {
-          const deact = db.prepare(
-            "SELECT id FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?"
-          ).get(gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
-          q.insertBetSignalAudit({
-            signal_id: deact ? deact.id : null,
-            game_date: gameRow.game_date,
-            game_id: gameRow.game_id,
-            signal_type: locked.signal_type,
-            signal_side: locked.signal_side,
-            action: 'auto_deactivate',
-            bet_line: locked.bet_line,
-            closing_line: locked.closing_line,
-            clv: locked.clv,
-            source: 'process_game_signals_deactivate',
-            detail: note,
-          });
-        } catch(e) { /* audit failure must not block lifecycle */ }
-        console.log('[model] Deactivated stale signal: '+locked.signal_type+'/'+locked.signal_side+' | '+note);
-        continue;
-      }
-      db.prepare(
-        'UPDATE bet_signals SET bet_line=?, bet_locked_at=?, closing_line=?, clv=? WHERE game_date=? AND game_id=? AND UPPER(signal_type)=UPPER(?) AND UPPER(signal_side)=UPPER(?)'
-      ).run(locked.bet_line, locked.bet_locked_at, locked.closing_line, locked.clv,
-            gameRow.game_date, gameRow.game_id, locked.signal_type, locked.signal_side);
-    }
+  //   - Unlocked (bet_line IS NULL): is_active=0. bet_signals_audit
+  //     action='deactivated'. The row stays in the table so a later
+  //     cron pass with fresh inputs can UPSERT it back to is_active=1
+  //     (the ON CONFLICT DO UPDATE sets is_active=1 unconditionally
+  //     inside the WHERE-guarded UPDATE).
+  //
+  //   - Locked (bet_line IS NOT NULL): is_active=0 same as before,
+  //     but bet_line/bet_locked_at/closing_line/clv are preserved by
+  //     the surgical UPDATE (deactivateSignal only touches is_active
+  //     + notes + updated_at). The row remains queryable for CLV /
+  //     backtest / audit purposes.
+  //
+  // No more DELETE + INSERT + restore-locks dance. The UPSERT's WHERE
+  // bet_locked_at IS NULL guard is the lock-preservation mechanism.
+  const currentKeys = new Set(signals.map(s => s.type + '|' + s.side));
+  for (const [key, preRow] of Object.entries(existingByKey)) {
+    if (currentKeys.has(key)) continue;
+    if (preRow.is_active === 0) continue; // already deactivated
+    const [dType, dSide] = key.split('|');
+    // Note text — when suppressed (incomplete lineup), model_* values
+    // are null so skip the .toFixed reference to the fresh model
+    // output and log the suppression reason instead.
+    const finalMdl = suppressed
+      ? null
+      : (dType === 'Total'
+          ? parseFloat(model.estTot.toFixed(2))
+          : (dSide === 'away' ? model.aML : model.hML));
+    const mktRef = dType === 'Total'
+      ? (gameRow.market_total != null ? ', mkt=' + gameRow.market_total : '')
+      : (dSide === 'away'
+          ? (gameRow.market_away_ml != null ? ', mkt=' + gameRow.market_away_ml : '')
+          : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
+    const note = suppressed
+      ? 'Lineup incomplete (' + (model._suppressed_detail || 'no batters') + ') — model output suppressed, signal deactivated.'
+      : 'Model ' + dType.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
+    q.deactivateSignal.run(note, gameRow.game_date, gameRow.game_id, dType, dSide);
+    try {
+      q.insertBetSignalAudit({
+        signal_id: preRow.id,
+        game_date: gameRow.game_date,
+        game_id: gameRow.game_id,
+        signal_type: dType,
+        signal_side: dSide,
+        action: 'deactivated',
+        bet_line: preRow.bet_line,
+        closing_line: preRow.closing_line,
+        clv: preRow.clv,
+        source: 'process_game_signals_upsert',
+        detail: note,
+      });
+    } catch (e) { /* audit failure must not block lifecycle */ }
+    console.log('[model] Deactivated stale signal: ' + dType + '/' + dSide + ' | ' + note);
   }
   return { model, signals };
 }
@@ -1204,6 +1262,131 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
 //
 // Returns the array of rows from fetchSchedule (empty on fetch failure
 // — failure is non-fatal, callers degrade open).
+
+// Odds-cron tail refresh (feat/upsert-signal-refresh, 2026-07-08).
+// Lightweight per-side rewrite of bet_signals.market_line + edge_pct
+// against fresh venue-comparison rows, WITHOUT rebuilding the model.
+// Called from runOddsJob's tail so a market move re-anchors edges even
+// between full lineup-cron passes.
+//
+// Design rulings enforced here:
+//
+//   Staleness guard — skip games where the LATEST lineup capture is
+//   newer than the row's last baseline write. bet_signals.updated_at
+//   is bumped by processGameSignals when the model output persists;
+//   game_log.lineups_quality_at is bumped when RotoWire pushes a new
+//   lineup. If lineups_quality_at > updated_at, the persisted model
+//   snapshot is stale relative to the lineup that shipped after it;
+//   refreshing edge from a stale model against fresh prices produces
+//   a false-precision number. Skip; next full processGameSignals pass
+//   picks it up cleanly.
+//
+//   Freeze — skip games with game_log.odds_locked_at set. The T-10
+//   pregame freeze rule from PR #163 applies here too.
+//
+//   Locked-row protection — never touch bet_signals rows with
+//   bet_locked_at IS NOT NULL (WHERE guard on the UPDATE).
+//
+//   Fallback tiers (owner's tightened ruling):
+//     tier 1: venue winner's net_american (fillable, fee-adjusted).
+//             venue_stale = 0.
+//     tier 2: Kalshi net_american (fillable, fee-adjusted, when tier 1
+//             is unavailable OR venue-aware is OFF). venue_stale = 1.
+//     tier 3: raw game_log.market_*_ml Kalshi-direct capture. Last
+//             resort when Kalshi book is not computable. venue_stale = 1.
+//
+// Returns { refreshed, staleSkip, lockedGameSkip, lockedRowSkip,
+//           lockedByOdds, unchanged }.
+async function refreshSignalBaselines(dateStr, settings, opts) {
+  const stats = { refreshed: 0, staleSkip: 0, lockedGameSkip: 0, lockedRowSkip: 0, unchanged: 0, noComparison: 0 };
+  const _venueAware = !!(settings && settings.SIGNAL_VENUE_AWARE_ENABLED);
+  let venueRowsByGid = (opts && opts.venueRowsByGid) || null;
+  if (_venueAware && !venueRowsByGid) {
+    try { venueRowsByGid = await _fetchVenueSlateCached(dateStr); }
+    catch (e) { console.warn('[refresh-tail] venue fetch failed: ' + e.message); venueRowsByGid = {}; }
+  }
+  const games = q.getGamesByDate.all(dateStr);
+  const activeRows = db.prepare(
+    "SELECT bs.id, bs.game_id, bs.signal_type, bs.signal_side, bs.market_line, bs.model_line, bs.edge_pct, bs.category, bs.price_venue, bs.venue_stale, bs.bet_locked_at, bs.updated_at, bs.created_at, gl.odds_locked_at, gl.lineups_quality_at, gl.market_away_ml, gl.market_home_ml "
+  + "FROM bet_signals bs JOIN game_log gl ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id "
+  + "WHERE bs.game_date = ? AND bs.is_active = 1 AND bs.signal_type = 'ML'"
+  ).all(dateStr);
+  const updateStmt = db.prepare(
+    "UPDATE bet_signals SET market_line=?, edge_pct=?, price_venue=?, venue_stale=?, updated_at=datetime('now') "
+  + "WHERE id=? AND bet_locked_at IS NULL"
+  );
+  const impliedP = ml => ml < 0 ? Math.abs(ml)/(Math.abs(ml)+100) : 100/(ml+100);
+  for (const row of activeRows) {
+    // 1) Per-bet freeze
+    if (row.bet_locked_at) { stats.lockedRowSkip++; continue; }
+    // 2) T-10 pregame freeze (game-level)
+    if (row.odds_locked_at) { stats.lockedGameSkip++; continue; }
+    // 3) Staleness guard: lineup change newer than last baseline write.
+    //    updated_at can be null on rows created before this PR shipped;
+    //    fall back to created_at.
+    const rowStamp = row.updated_at || row.created_at;
+    if (row.lineups_quality_at && rowStamp && row.lineups_quality_at > rowStamp) {
+      stats.staleSkip++;
+      continue;
+    }
+    // 4) Pick baseline per fallback tiers.
+    const cmpRow = venueRowsByGid ? venueRowsByGid[row.game_id] : null;
+    let newMarket = null, newVenue = null, newStale = 1;
+    if (_venueAware && cmpRow) {
+      const best = _pickBestML(cmpRow, row.signal_side);
+      if (best) { newMarket = best.ml; newVenue = best.venue; newStale = 0; }
+    }
+    if (newMarket == null && cmpRow) {
+      // Tier 2: Kalshi net (fillable, fee-adjusted)
+      const K = cmpRow.kalshi && cmpRow.kalshi[row.signal_side];
+      if (K && K.net_american != null && !K.partial) {
+        newMarket = K.net_american; newVenue = 'kalshi'; newStale = 1;
+      }
+    }
+    if (newMarket == null) {
+      // Tier 3: raw game_log capture (last resort)
+      newMarket = row.signal_side === 'away' ? row.market_away_ml : row.market_home_ml;
+      newVenue = null; newStale = 1;
+    }
+    if (newMarket == null) { stats.noComparison++; continue; }
+    // 5) Skip write if nothing changed.
+    if (newMarket === row.market_line && newVenue === row.price_venue && (newStale ? 1 : 0) === row.venue_stale) {
+      stats.unchanged++;
+      continue;
+    }
+    // 6) Recompute edge from the persisted model_line snapshot. Same
+    //    formula as services/model.js:getSignals; category tells us
+    //    which side of the edge lives on this row.
+    const modelP = impliedP(row.model_line);
+    const marketP = impliedP(newMarket);
+    const newEdge = Math.max(0, modelP - marketP);
+    const res = updateStmt.run(newMarket, parseFloat(newEdge.toFixed(4)), newVenue, newStale, row.id);
+    if (res.changes > 0) {
+      stats.refreshed++;
+      try {
+        q.insertBetSignalAudit({
+          signal_id: row.id,
+          game_date: dateStr,
+          game_id: row.game_id,
+          signal_type: row.signal_type,
+          signal_side: row.signal_side,
+          action: 'refresh_odds_tail',
+          bet_line: null,
+          closing_line: null,
+          clv: null,
+          source: 'refreshSignalBaselines',
+          detail: JSON.stringify({
+            market_line: { from: row.market_line, to: newMarket },
+            edge_pct:    { from: row.edge_pct,    to: parseFloat(newEdge.toFixed(4)) },
+            price_venue: { from: row.price_venue, to: newVenue },
+            venue_stale: { from: row.venue_stale, to: newStale },
+          }),
+        });
+      } catch (e) { /* audit failure never blocks refresh */ }
+    }
+  }
+  return stats;
+}
 
 // statsapi-side SP capture with backfill, shared by both bootstrap paths
 // (ensureScheduleBootstrap above and runLineupJob's inline bootstrap loop).
@@ -3738,6 +3921,20 @@ async function runOddsJob(dateStr, opts) {
     const updated = result.updated;
     const sourceLabel = result.source;
     q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + sourceLabel, updated);
+
+    // Tail refresh (feat/upsert-signal-refresh, 2026-07-08). After the
+    // odds cron persists fresh market_*_ml into game_log, re-anchor
+    // bet_signals.market_line/edge_pct for every active unlocked ML row
+    // on this dateStr against the venue winner net. Staleness guard +
+    // T-10 freeze + per-bet freeze all enforced inside
+    // refreshSignalBaselines. Non-fatal on failure — odds cron already
+    // succeeded before this ran.
+    try {
+      const stats = await refreshSignalBaselines(dateStr, settings);
+      console.log('[odds-tail-refresh] ' + dateStr + ' → ' + JSON.stringify(stats));
+    } catch (e) {
+      console.warn('[odds-tail-refresh] ' + dateStr + ' failed (non-fatal): ' + e.message);
+    }
 
     // Chained morning-capture attempt. Kalshi posts D+1 spread
     // markets mid-afternoon on D-1 (~14:30-21:30 UTC, observed),

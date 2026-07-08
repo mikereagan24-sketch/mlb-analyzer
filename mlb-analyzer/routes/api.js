@@ -4835,16 +4835,46 @@ router.post('/signals/manual', (req, res) => {
     // invisible under later default cohort filters. See
     // docs/locked-bet-visibility-fix-2026-07-06.md.
     const cohort = cohortForGameDate(game_date);
+    // ON CONFLICT clause (feat/upsert-signal-refresh, 2026-07-08). Manual
+    // logs no longer explode against the new UNIQUE (game_date, game_id,
+    // signal_type, signal_side) index — if a row already exists (e.g. the
+    // signal fired earlier and the operator is manually recording the
+    // fill), UPDATE the lock/pnl/outcome fields onto it. bet_line and
+    // bet_locked_at ALWAYS overwrite from the manual log; edge_pct/
+    // model_line/market_line only overwrite when the manual log carries
+    // fresher/explicit values (assumed here — manual log is authoritative
+    // for a locked bet). is_active=1 so the row surfaces on Games tab
+    // even if the auto-refresh had deactivated it.
     const info = db.prepare(`INSERT INTO bet_signals
       (game_log_id,game_date,game_id,signal_type,signal_side,signal_label,category,
        market_line,model_line,edge_pct,outcome,pnl,bet_line,cohort,bet_locked_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+      ON CONFLICT(game_date, game_id, signal_type, signal_side) DO UPDATE SET
+        market_line   = excluded.market_line,
+        model_line    = excluded.model_line,
+        edge_pct      = excluded.edge_pct,
+        category      = excluded.category,
+        outcome       = excluded.outcome,
+        pnl           = excluded.pnl,
+        bet_line      = excluded.bet_line,
+        bet_locked_at = datetime('now'),
+        is_active     = 1,
+        notes         = NULL,
+        updated_at    = datetime('now')`)
       .run(gl.id,game_date,game_id,signal_type,signal_side,null,category,
            Number(market_line),model_line,edge_pct,outcome,pnl,
            bet_line!=null?Number(bet_line):null,cohort);
+    // On INSERT: info.lastInsertRowid is the new row's rowid. On the
+    // ON CONFLICT DO UPDATE path: lastInsertRowid is meaningless (0 or
+    // stale). Resolve the row id via the unique tuple in both cases so
+    // audit + response stay consistent.
+    const resolvedRow = db.prepare(
+      'SELECT id FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?'
+    ).get(game_date, game_id, signal_type, signal_side);
+    const rowId = resolvedRow ? resolvedRow.id : info.lastInsertRowid;
     try {
       q.insertBetSignalAudit({
-        signal_id: info.lastInsertRowid,
+        signal_id: rowId,
         game_date,
         game_id,
         signal_type,
@@ -4857,7 +4887,7 @@ router.post('/signals/manual', (req, res) => {
         detail: 'category=' + category + (bet_price != null ? ', bet_price=' + bet_price : ''),
       });
     } catch(e) { /* audit failure must not block insert */ }
-    res.json({success:true,id:info.lastInsertRowid,outcome,pnl,category});
+    res.json({success:true,id:rowId,outcome,pnl,category});
   } catch(e){res.status(500).json({error:e.message});}
 });
 
