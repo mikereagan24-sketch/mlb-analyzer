@@ -2020,6 +2020,30 @@ const q = {
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN venue_stale INTEGER NOT NULL DEFAULT 0").run(); } catch(e) {}
     return true;
   })(),
+  // Refresh-on-cron plumbing (feat/upsert-signal-refresh, 2026-07-08).
+  //
+  //   updated_at — advances every UPSERT-refresh pass. Distinct from
+  //   created_at (which stays pinned to the row's first emission) so the
+  //   UI can render "last refreshed at" without losing "first seen at".
+  //
+  //   uq_bet_signals_key — unique index on (game_date, game_id,
+  //   signal_type, signal_side). Required for the ON CONFLICT clause the
+  //   UPSERT statement uses. Data was already de-facto unique on this
+  //   tuple after the 2026-07-07 dedupe migration; the constraint just
+  //   makes it enforceable.
+  //
+  //   Both must exist BEFORE upsertSignal.prepare() runs — same
+  //   ordering discipline as the columns above.
+  _upsertRefreshMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN updated_at TEXT").run(); } catch(e) {}
+    try { db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS uq_bet_signals_key ON bet_signals (game_date, game_id, signal_type, signal_side)").run(); } catch(e) {
+      // If a UNIQUE index fails to create, there are stale duplicates. Log
+      // and fall back to the legacy INSERT path. Rerun after the dedupe
+      // migration to enable the UPSERT semantics.
+      console.warn('[upsert-refresh] UNIQUE index creation failed — duplicates remain: ' + e.message);
+    }
+    return true;
+  })(),
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
@@ -2034,6 +2058,72 @@ const q = {
       @companion_spread_pnl, @companion_spread_src, @edge_suspect,
       @price_venue, @venue_stale
     )
+  `),
+  // Refresh-aware UPSERT (feat/upsert-signal-refresh, 2026-07-08).
+  //
+  // ON CONFLICT(game_date, game_id, signal_type, signal_side) — the
+  // unique tuple that identifies a signal. Behavior split by lock state:
+  //
+  //   1. Row exists and bet_locked_at IS NULL (unlocked):
+  //      UPDATE the baseline (market_line, model_line, edge_pct,
+  //      price_venue, venue_stale, category, edge_suspect, is_active,
+  //      outcome, pnl, updated_at). Keeps created_at pinned to the
+  //      row's first emission. Refreshes the row against fresh venue-
+  //      winner net and current model output.
+  //
+  //   2. Row exists and bet_locked_at IS NOT NULL (locked):
+  //      The WHERE clause on the DO UPDATE skips it. Locked rows are
+  //      immutable per the owner's ruling — market_line/edge_pct/CLV
+  //      anchor to the price at lock time and never move.
+  //
+  //   3. Row does not exist: INSERT with all values, created_at and
+  //      updated_at both DEFAULT (datetime('now')).
+  //
+  // Locked rows can still be graded (outcome/pnl UPDATEd separately by
+  // the game-final grader) — the WHERE guard here only applies to the
+  // baseline-refresh path.
+  upsertSignal: db.prepare(`
+    INSERT INTO bet_signals (
+      game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
+      category, market_line, model_line, edge_pct, outcome, pnl, cohort,
+      companion_spread_line, companion_spread_price, companion_spread_outcome,
+      companion_spread_pnl, companion_spread_src, edge_suspect,
+      price_venue, venue_stale, updated_at
+    ) VALUES (
+      @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
+      @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
+      @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
+      @companion_spread_pnl, @companion_spread_src, @edge_suspect,
+      @price_venue, @venue_stale, datetime('now')
+    )
+    ON CONFLICT(game_date, game_id, signal_type, signal_side) DO UPDATE SET
+      market_line   = excluded.market_line,
+      model_line    = excluded.model_line,
+      edge_pct      = excluded.edge_pct,
+      category      = excluded.category,
+      signal_label  = excluded.signal_label,
+      price_venue   = excluded.price_venue,
+      venue_stale   = excluded.venue_stale,
+      edge_suspect  = excluded.edge_suspect,
+      outcome       = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.outcome ELSE excluded.outcome END,
+      pnl           = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.pnl     ELSE excluded.pnl     END,
+      is_active     = 1,
+      notes         = NULL,
+      updated_at    = datetime('now')
+    WHERE bet_signals.bet_locked_at IS NULL
+  `),
+  // Deactivate a row whose signal no longer emits. Applies to BOTH locked
+  // and unlocked rows — the lock semantically freezes the *baseline*
+  // (market_line, edge_pct, price_venue) not the *is_active* state.
+  // Locked rows keep their captured bet_line/bet_locked_at/closing_line/
+  // clv intact; UI simply stops surfacing them on the Games tab while
+  // backtest/CLV paths still see the row.
+  deactivateSignal: db.prepare(`
+    UPDATE bet_signals SET
+      is_active = 0,
+      notes = ?,
+      updated_at = datetime('now')
+    WHERE game_date = ? AND game_id = ? AND signal_type = ? AND signal_side = ?
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
   getSignalsForBacktest: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? ORDER BY game_id`),
