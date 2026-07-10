@@ -3132,8 +3132,14 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
       if (skipLiveFetch) {
         data = { window: { date, stake_usd: stake }, rows: [] };
       } else {
-        const { runComparison } = require('../services/odds-comparison');
-        data = await runComparison(date, {
+        // Shared 60s cache in services/odds-comparison.js (with in-flight
+        // promise dedup) replaces the previous route-level cache. Ensures
+        // route + odds-cron tail + matchup-tab fetches all coalesce onto
+        // one upstream fetch per (date, stake, gameIds, totals) window.
+        // See feat/venue-comparison-resilience for the 07-10 incident that
+        // motivated consolidation.
+        const { runComparisonCached } = require('../services/odds-comparison');
+        data = await runComparisonCached(date, {
           stakeUsd: stake,
           gameIds: inScopeUnlocked || undefined,
           totalRequests: Object.keys(totalRequests).length ? totalRequests : undefined,
@@ -3142,58 +3148,171 @@ router.get('/admin/odds-comparison', requireAdminToken, async (req, res) => {
       data.fetched_at = new Date().toISOString();
 
       // Persist snapshots for unlocked rows so a subsequent lock has a
-      // pregame row to serve. INSERT OR REPLACE per (game_date, game_id).
+      // pregame row to serve, AND so future transient live-fetch failures
+      // (Poly 429, Kalshi 5xx, etc.) have a last-good to fall back to
+      // instead of downgrading signal baselines to tier-3 raw captures
+      // (07-10 incident).
       const snapNow = new Date().toISOString();
       const persistStmt = db.prepare(
         "INSERT OR REPLACE INTO venue_comparison_snapshot "
       + "(game_date, game_id, snapshot_at, snapshot_json) VALUES (?, ?, ?, ?)"
       );
+      const persistedCount = { poly: 0, kalshi: 0, both: 0 };
       for (const row of (data.rows || [])) {
         if (!row.game_id) continue;
         if (lockedByGid.has(row.game_id)) continue; // paranoia: never write a locked snapshot
+        // Only persist rows that actually carry venue pricing for at least
+        // one side of one venue. A partial row with only game_id + errors
+        // would poison the snapshot table for the day.
+        const hasPolyAny   = row.poly   && (row.poly.away   || row.poly.home);
+        const hasKalshiAny = row.kalshi && (row.kalshi.away || row.kalshi.home);
+        if (!hasPolyAny && !hasKalshiAny) continue;
         try {
           persistStmt.run(date, row.game_id, snapNow, JSON.stringify(row));
+          if (hasPolyAny && hasKalshiAny) persistedCount.both++;
+          else if (hasPolyAny) persistedCount.poly++;
+          else persistedCount.kalshi++;
         } catch (e) {
           console.warn('[venue-snapshot] persist failed for ' + row.game_id + ': ' + e.message);
         }
       }
 
-      // For every locked in-scope game_id NOT covered by data.rows, load
-      // the last snapshot and inject it with frozen:true. If no snapshot
-      // exists, emit a sentinel so the UI renders "frozen — no snapshot"
-      // rather than falling through to unavailable.
+      // Snapshot-fallback tier (feat/venue-comparison-resilience). Every
+      // in-scope game_id not covered by data.rows (either locked, or the
+      // live fetch simply didn't return a row for it because Poly/Kalshi
+      // was down or the game_id wasn't matched) gets served from
+      // venue_comparison_snapshot with a labeled staleness marker.
+      //
+      // Serve_source semantics:
+      //   'live'       — data.rows entry from this fetch
+      //   'frozen'     — snapshot served because game is at T-10 (odds_locked_at set)
+      //   'stale'      — snapshot served because live fetch didn't cover this
+      //                  game_id (fetch failed for either venue OR game_id
+      //                  didn't match in fetched rows). Marks a transient
+      //                  failure vs the intentional T-10 freeze.
+      //   'no_snapshot' — no snapshot exists AT ALL for this game today.
+      //                   Only then does the UI render "unavailable".
+      //
+      // Staleness gate: STALE_MAX_AGE_MS caps how old a snapshot can be
+      // for the 'stale' serve_source. Beyond that, we serve it labeled
+      // as 'stale' but with an age_stale=true flag so the UI can call
+      // out that it's ancient. Default 30 min per owner ruling.
+      const STALE_MAX_AGE_MS = 30 * 60 * 1000;
       const covered = new Set((data.rows || []).map(r => r.game_id));
+      // Mark all live rows explicitly so the UI can distinguish.
+      for (const row of (data.rows || [])) row.serve_source = 'live';
       const loadSnap = db.prepare(
         "SELECT snapshot_at, snapshot_json FROM venue_comparison_snapshot "
       + "WHERE game_date = ? AND game_id = ?"
       );
-      for (const gid of inScopeLocked) {
-        if (covered.has(gid)) continue;
+      const injectSnapshot = (gid, kind, extra) => {
         const s = loadSnap.get(date, gid);
         if (s) {
           try {
             const row = JSON.parse(s.snapshot_json);
-            row.frozen = true;
+            row.serve_source = kind;
             row.snapshot_at = s.snapshot_at;
-            row.locked_at = lockedByGid.get(gid) || null;
+            const ageMs = Date.now() - new Date(s.snapshot_at).getTime();
+            row.age_stale = (kind === 'stale') && (ageMs > STALE_MAX_AGE_MS);
+            row.frozen = (kind === 'frozen'); // preserve back-compat for callers already reading .frozen
+            Object.assign(row, extra || {});
             data.rows.push(row);
           } catch (e) {
-            data.rows.push({ game_id: gid, frozen: true, no_snapshot: true, locked_at: lockedByGid.get(gid) || null, snapshot_parse_error: e.message });
+            data.rows.push({ game_id: gid, serve_source: 'no_snapshot', no_snapshot: true, snapshot_parse_error: e.message, ...(extra || {}) });
           }
         } else {
-          data.rows.push({ game_id: gid, frozen: true, no_snapshot: true, locked_at: lockedByGid.get(gid) || null });
+          data.rows.push({ game_id: gid, serve_source: 'no_snapshot', no_snapshot: true, ...(extra || {}) });
         }
+      };
+      // Locked games not covered by live rows → frozen-serve
+      for (const gid of inScopeLocked) {
+        if (covered.has(gid)) continue;
+        injectSnapshot(gid, 'frozen', { locked_at: lockedByGid.get(gid) || null });
+        covered.add(gid);
       }
+      // Unlocked games not covered by live rows → stale-serve. When
+      // gameIds is null we don't have a bounded set of "in-scope
+      // unlocked", so infer from the odds source (game_log rows on this
+      // date without odds_locked_at). This handles the transient
+      // Poly-down case: refresh cadence hit an empty runComparison, we
+      // want to fall through to snapshot rather than "unavailable".
+      const unlockedTargets = gameIds
+        ? gameIds.filter(g => !lockedByGid.has(g))
+        : db.prepare(
+            "SELECT game_id FROM game_log WHERE game_date=? AND odds_locked_at IS NULL"
+          ).all(date).map(r => r.game_id);
+      for (const gid of unlockedTargets) {
+        if (covered.has(gid)) continue;
+        injectSnapshot(gid, 'stale', {
+          stale_reason: data.poly_error && data.kalshi_error ? 'both_venues_failed'
+                     : data.poly_error   ? 'poly_failed'
+                     : data.kalshi_error ? 'kalshi_failed'
+                     : 'game_not_matched_in_live_fetch',
+        });
+      }
+      // Slate-wide stats so the log line is useful for incident forensics.
+      data._serve_stats = {
+        live: (data.rows || []).filter(r => r.serve_source === 'live').length,
+        frozen: (data.rows || []).filter(r => r.serve_source === 'frozen').length,
+        stale: (data.rows || []).filter(r => r.serve_source === 'stale').length,
+        no_snapshot: (data.rows || []).filter(r => r.serve_source === 'no_snapshot').length,
+        persisted: persistedCount,
+      };
     } catch (e) {
       // Total failure — still return a shaped response so the UI's
       // per-game null path handles it (never blocks the matchup page).
       console.warn('[admin/odds-comparison] runComparison failed: ' + e.message);
-      return res.json({
-        window: { date, stake_usd: stake },
-        rows: [], error: e.message,
-        fetched_at: new Date().toISOString(),
-        cached: false,
-      });
+      // Try snapshot-only mode. Same shape as the success path, but every
+      // in-scope game_id gets served from the snapshot table if available.
+      // Preserves the "unavailable" bar so operators aren't fooled: if
+      // NO snapshot exists at all, the UI still shows unavailable.
+      try {
+        const loadSnap = db.prepare(
+          "SELECT snapshot_at, snapshot_json FROM venue_comparison_snapshot "
+        + "WHERE game_date = ? AND game_id = ?"
+        );
+        const targets = gameIds
+          ? gameIds
+          : db.prepare("SELECT game_id FROM game_log WHERE game_date=?").all(date).map(r => r.game_id);
+        const rows = [];
+        for (const gid of targets) {
+          const s = loadSnap.get(date, gid);
+          if (s) {
+            try {
+              const row = JSON.parse(s.snapshot_json);
+              row.serve_source = 'stale';
+              row.snapshot_at = s.snapshot_at;
+              row.stale_reason = 'runComparison_threw';
+              rows.push(row);
+            } catch (pe) {
+              rows.push({ game_id: gid, serve_source: 'no_snapshot', snapshot_parse_error: pe.message });
+            }
+          } else {
+            rows.push({ game_id: gid, serve_source: 'no_snapshot' });
+          }
+        }
+        return res.json({
+          window: { date, stake_usd: stake },
+          rows,
+          error: e.message,
+          fetched_at: new Date().toISOString(),
+          cached: false,
+          _serve_stats: {
+            live: 0,
+            frozen: 0,
+            stale: rows.filter(r => r.serve_source === 'stale').length,
+            no_snapshot: rows.filter(r => r.serve_source === 'no_snapshot').length,
+          },
+        });
+      } catch (snapErr) {
+        console.warn('[venue-snapshot fallback] failed: ' + snapErr.message);
+        return res.json({
+          window: { date, stake_usd: stake },
+          rows: [], error: e.message,
+          fetched_at: new Date().toISOString(),
+          cached: false,
+        });
+      }
     }
     _oddsComparisonCache.set(key, { at: now, data });
     // Trim cache if it grows unbounded — should never happen with per-day

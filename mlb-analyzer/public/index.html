@@ -1492,11 +1492,17 @@ function playVenueLineFor(sig, row, g){
     if (!row) {
       return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable</div>';
     }
-    const totFrozenMark = row.frozen
-      ? ' <span title="Odds are locked (game near/after first pitch). Showing last pregame venue snapshot." style="color:var(--text3);font-size:10px">🧊 frozen ' + (row.snapshot_at ? new Date(row.snapshot_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '') + '</span>'
-      : '';
-    if (row.no_snapshot) {
-      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': 🧊 frozen — no pregame snapshot captured</div>';
+    const _fmtTs = ts => ts ? new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+    var totFrozenMark = '';
+    if (row.serve_source === 'frozen' || row.frozen) {
+      totFrozenMark = ' <span title="Odds are locked (game near/after first pitch). Showing last pregame venue snapshot." style="color:var(--text3);font-size:10px">🧊 frozen ' + _fmtTs(row.snapshot_at) + '</span>';
+    } else if (row.serve_source === 'stale') {
+      const _ageStale = row.age_stale ? ' ⚠age' : '';
+      const _reason = row.stale_reason ? ' (' + row.stale_reason + ')' : '';
+      totFrozenMark = ' <span title="Live venue fetch was unavailable' + _reason + '. Showing last-good snapshot. Refresh on next successful cron pass." style="color:var(--text3);font-size:10px">🕘 as of ' + _fmtTs(row.snapshot_at) + _ageStale + '</span>';
+    }
+    if (row.no_snapshot || row.serve_source === 'no_snapshot') {
+      return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable — no snapshot today</div>';
     }
     const tp = row.totals_priced;
     if (!tp) {
@@ -1543,16 +1549,26 @@ function playVenueLineFor(sig, row, g){
   if (!row) {
     return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable</div>';
   }
-  // Frozen-snapshot marker (feat/venue-freeze-and-labels). The route
-  // stamps row.frozen=true + row.snapshot_at when a game is odds-locked;
-  // the underlying poly/kalshi shape is the last pregame snapshot, not
-  // live in-game odds. Render a leading marker so the operator knows
-  // the numbers are captured, not current.
-  const frozenMark = row.frozen
-    ? ' <span title="Odds are locked (game near/after first pitch). Showing last pregame venue snapshot. Live comparison is disabled during this window to avoid in-game price leak (see MIL@STL 2026-07-08)." style="color:var(--text3);font-size:10px">🧊 frozen ' + (row.snapshot_at ? new Date(row.snapshot_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '') + '</span>'
-    : '';
-  if (row.no_snapshot) {
-    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': 🧊 frozen — no pregame snapshot captured</div>';
+  // Snapshot-serve markers (feat/venue-freeze-and-labels +
+  // feat/venue-comparison-resilience). Three distinct serve_source states
+  // beyond 'live':
+  //   'frozen'      — game hit T-10 (odds_locked_at set). Intentional freeze.
+  //   'stale'       — live fetch failed OR game not matched. Fall-back to
+  //                   last-good snapshot; NOT the same as frozen.
+  //   'no_snapshot' — no snapshot exists at all for this game today.
+  //                   Only this state renders "unavailable".
+  const _fmtTime = ts => ts ? new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+  var mark = '';
+  if (row.serve_source === 'frozen' || row.frozen) {
+    mark = ' <span title="Odds are locked (game near/after first pitch). Showing last pregame venue snapshot. Live comparison is disabled during this window to avoid in-game price leak (see MIL@STL 2026-07-08)." style="color:var(--text3);font-size:10px">🧊 frozen ' + _fmtTime(row.snapshot_at) + '</span>';
+  } else if (row.serve_source === 'stale') {
+    const ageStale = row.age_stale ? ' ⚠age' : '';
+    const reason = row.stale_reason ? ' (' + row.stale_reason + ')' : '';
+    mark = ' <span title="Live venue fetch was unavailable' + reason + '. Showing last-good snapshot from HH:MM. Refresh on next successful cron pass." style="color:var(--text3);font-size:10px">🕘 as of ' + _fmtTime(row.snapshot_at) + ageStale + '</span>';
+  }
+  const frozenMark = mark; // preserve variable name for downstream string builds
+  if (row.no_snapshot || row.serve_source === 'no_snapshot') {
+    return '<div class="pv-line pv-none">▶ ' + escapeHtml(sideLabel) + ': venue comparison unavailable — no snapshot today</div>';
   }
   const poly = row.poly && row.poly[side];
   const kal  = row.kalshi && row.kalshi[side];
