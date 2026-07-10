@@ -452,6 +452,30 @@ async function runComparisonCached(dateYYYYMMDD, opts) {
   return entry.promise;
 }
 
+// Synchronous cache peek (fix/venue-lazy-fetch-and-content-guard,
+// 2026-07-10). Returns rowsByGid for the default (date, {}) key IF a
+// fresh, resolved cache entry exists; otherwise null. Used by
+// processGameSignals for its lazy venue lookup — the async
+// runComparisonCached path is too expensive to await inside the
+// sync per-game processing loop, but a cache HIT is a synchronous
+// Map lookup and safe to use.
+//
+// If the cache is empty or expired, caller falls through to the
+// snapshot fallback (also sync — DB read) and finally to
+// game_log capture as tier-3.
+function peekCachedRowsByGid(dateYYYYMMDD, opts) {
+  const key = _cmpKey(dateYYYYMMDD, opts || {});
+  const hit = _cmpCache.get(key);
+  if (!hit) return null;
+  if ((Date.now() - hit.at) >= _CMP_CACHE_TTL_MS) return null;
+  if (!hit.resolved) return null; // in-flight — don't sync-await, let caller fall back
+  const data = hit.data;
+  if (!data || !Array.isArray(data.rows)) return null;
+  const rowsByGid = {};
+  for (const r of data.rows) if (r.game_id) rowsByGid[r.game_id] = r;
+  return rowsByGid;
+}
+
 // Test/admin helper to inspect the cache without exposing the Map.
 function _cmpCacheStats() {
   const now = Date.now();
@@ -463,7 +487,7 @@ function _cmpCacheStats() {
   };
 }
 
-module.exports = { runComparison, runComparisonCached, priceGame, priceAtSize, priceTotal, pickClosestStrike, _cmpCacheStats };
+module.exports = { runComparison, runComparisonCached, peekCachedRowsByGid, priceGame, priceAtSize, priceTotal, pickClosestStrike, _cmpCacheStats };
 
 // CLI: `node services/odds-comparison.js [YYYY-MM-DD] [stake_usd]`
 if (require.main === module) {

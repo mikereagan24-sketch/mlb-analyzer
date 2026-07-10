@@ -2044,6 +2044,17 @@ const q = {
     }
     return true;
   })(),
+  // Lineup content hash (fix/venue-lazy-fetch-and-content-guard, 2026-07-10).
+  // Populated at UPSERT time from the game_log lineup JSON + statuses.
+  // Consumed by refreshSignalBaselines' staleness guard so we skip the
+  // refresh ONLY when the lineup content changed (not just when RotoWire
+  // re-served the same lineup and bumped lineups_quality_at). Backfills
+  // land on next processGameSignals pass; NULL is treated as "unknown,
+  // don't skip" (fail-open — err on refreshing rather than freezing).
+  _lineupHashMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN lineup_hash TEXT").run(); } catch(e) {}
+    return true;
+  })(),
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
@@ -2088,13 +2099,13 @@ const q = {
       category, market_line, model_line, edge_pct, outcome, pnl, cohort,
       companion_spread_line, companion_spread_price, companion_spread_outcome,
       companion_spread_pnl, companion_spread_src, edge_suspect,
-      price_venue, venue_stale, updated_at
+      price_venue, venue_stale, lineup_hash, updated_at
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
       @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
       @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
       @companion_spread_pnl, @companion_spread_src, @edge_suspect,
-      @price_venue, @venue_stale, datetime('now')
+      @price_venue, @venue_stale, @lineup_hash, datetime('now')
     )
     ON CONFLICT(game_date, game_id, signal_type, signal_side) DO UPDATE SET
       market_line   = excluded.market_line,
@@ -2105,6 +2116,7 @@ const q = {
       price_venue   = excluded.price_venue,
       venue_stale   = excluded.venue_stale,
       edge_suspect  = excluded.edge_suspect,
+      lineup_hash   = excluded.lineup_hash,
       outcome       = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.outcome ELSE excluded.outcome END,
       pnl           = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.pnl     ELSE excluded.pnl     END,
       is_active     = 1,

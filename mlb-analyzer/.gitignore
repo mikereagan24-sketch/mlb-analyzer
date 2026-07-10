@@ -19,3 +19,4 @@ forecasts.csv
 # Additional frv scratch (any extension)
 frv-*.cjs
 frv-*.py
+refresh-db.sh

@@ -1,6 +1,7 @@
 // jobs.js v2026-04-12T19:57:39.540Z
 // File encoding: UTF-8 (do not save as Windows-1252)
 const cron = require('node-cron');
+const crypto = require('crypto');
 const { q, db } = require('../db/schema');
 const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
@@ -50,6 +51,67 @@ async function _fetchVenueSlateCached(game_date) {
     console.warn('[venue-aware] runComparisonCached failed for ' + game_date + ': ' + e.message);
     return {};
   }
+}
+
+// Shared snapshot lookup (fix/venue-lazy-fetch-and-content-guard, 2026-07-10).
+// Both processGameSignals and refreshSignalBaselines need to fall back to
+// the last-good pregame venue snapshot when the live comparison is
+// unavailable — same tier discipline in both call paths kills the
+// ping-pong bug where processGameSignals wrote tier-3 (no venue) while
+// refreshSignalBaselines wrote tier-1 (from live), flipping the row
+// back and forth on every cron cycle.
+//
+// Age gate matches refreshSignalBaselines' SNAPSHOT_FRESH_MAX_MS default:
+// 30 minutes. Beyond that, snapshot is too old to be considered tier-1
+// and the caller falls through to lower tiers.
+const _SNAPSHOT_FRESH_MAX_MS_DEFAULT = 30 * 60 * 1000;
+let _snapPrepared = null;
+function _loadFreshSnapshotForGid(game_date, game_id, maxAgeMs) {
+  if (!_snapPrepared) {
+    try {
+      _snapPrepared = db.prepare(
+        "SELECT snapshot_at, snapshot_json FROM venue_comparison_snapshot "
+      + "WHERE game_date=? AND game_id=?"
+      );
+    } catch (e) { return null; }
+  }
+  const s = _snapPrepared.get(game_date, game_id);
+  if (!s) return null;
+  try {
+    const ageMs = Date.now() - new Date(s.snapshot_at).getTime();
+    if (ageMs > (maxAgeMs || _SNAPSHOT_FRESH_MAX_MS_DEFAULT)) return null;
+    const parsed = JSON.parse(s.snapshot_json);
+    parsed._snapshot_at = s.snapshot_at;
+    parsed._snapshot_age_ms = ageMs;
+    return parsed;
+  } catch (e) { return null; }
+}
+
+// Lineup content hash (fix/venue-lazy-fetch-and-content-guard, 2026-07-10).
+// Digests the game_log fields that materially affect processGameSignals'
+// output — lineup JSON per side plus lineup_status per side (projected vs
+// confirmed can swing the model even when the batter list is identical).
+//
+// Used by the refreshSignalBaselines staleness guard: instead of skipping
+// on the timestamp `lineups_quality_at > rowStamp` (which trips whenever
+// RotoWire re-serves the same lineup, freezing the row on stale data),
+// the guard now compares the stored hash on bet_signals against the
+// current game_log hash. Skip only when they differ — meaning a real
+// content change is inbound and processGameSignals is about to rewrite
+// model_line, so refreshing market_line here would produce a mismatched
+// edge_pct in the interim.
+//
+// Nulls collapse to empty strings so a lineup that hasn't populated yet
+// still produces a stable hash rather than throwing.
+function _computeLineupHash(gl) {
+  if (!gl) return null;
+  const parts = [
+    gl.away_lineup_json || '',
+    gl.home_lineup_json || '',
+    gl.away_lineup_status || '',
+    gl.home_lineup_status || '',
+  ];
+  return crypto.createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 16);
 }
 
 // Pick the venue-best net American ML for a side, respecting the fillable-
@@ -460,7 +522,18 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // both venues failed the fillable-at-stake guard), the market baseline
   // falls back to gameRow.market_* (Kalshi-direct) and the emitted row is
   // marked venue_stale=1 so the fallback is visible downstream.
-  const _venueRows = (opts && opts.venueRowsByGid) || null;
+  // Lazy-fetch fallback: 5 of 6 callers of processGameSignals don't
+  // pre-fetch the slate (only runLineupJob does), so relying on opts alone
+  // caused a ping-pong bug where refreshSignalBaselines wrote tier-1 (from
+  // its own live fetch) and the next processGameSignals pass wrote tier-3
+  // (no venue), flipping the row back and forth on each cron cycle. The
+  // block below tries opts.venueRowsByGid first, then peeks the
+  // runComparisonCached shared cache synchronously (60s TTL), then falls
+  // back to the per-game venue_comparison_snapshot via
+  // _loadFreshSnapshotForGid — same tier discipline that
+  // refreshSignalBaselines uses. Result: all 5 callers get tier-1 without
+  // having to thread venue data through 5 call sites by hand.
+  let _venueRows = (opts && opts.venueRowsByGid) || null;
   // Per-team bullpen wOBA from pit-act data
   const awayParts = (gameRow.game_id||'').split('-');
   const awayAbbr = awayParts[0]||'';
@@ -693,8 +766,27 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   const _venueAware = !!(settings && settings.SIGNAL_VENUE_AWARE_ENABLED);
   let _venueByMarket = { ml_away: null, ml_home: null }; // filled in when override applies
   let _venueStaleFlag = _venueAware; // start true; cleared once a valid override lands
+  let _venueServedFromSnapshot = false; // audit flag when tier-1 came from snapshot
   if (_venueAware) {
-    const rowForGame = _venueRows && _venueRows[gameRow.game_id];
+    // Tier discipline (mirrors refreshSignalBaselines):
+    //   (a) prefetched opts.venueRowsByGid (only runLineupJob provides this)
+    //   (b) sync peek of runComparisonCached (60s TTL, shared with jobs+route)
+    //   (c) per-game venue_comparison_snapshot ≤30 min old
+    // Any of (a)/(b)/(c) → venue_stale=0. None → fall through to
+    // Kalshi-direct with venue_stale=1 (tier-3).
+    if (!_venueRows) {
+      try {
+        const { peekCachedRowsByGid } = require('./odds-comparison');
+        if (typeof peekCachedRowsByGid === 'function') {
+          _venueRows = peekCachedRowsByGid(gameRow.game_date) || null;
+        }
+      } catch (e) { /* module missing → stay null, fall to snapshot */ }
+    }
+    let rowForGame = _venueRows && _venueRows[gameRow.game_id];
+    if (!rowForGame) {
+      const snap = _loadFreshSnapshotForGid(gameRow.game_date, gameRow.game_id);
+      if (snap) { rowForGame = snap; _venueServedFromSnapshot = true; }
+    }
     if (rowForGame) {
       const bestA = _pickBestML(rowForGame, 'away');
       const bestH = _pickBestML(rowForGame, 'home');
@@ -889,6 +981,9 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
+  // Compute lineup content hash once; every signal emitted this pass
+  // shares the same digest. Consumed by refreshSignalBaselines' guard.
+  const _lineupHash = _computeLineupHash(gl);
   // If game is already final (scored), freeze all signals — don't rewrite
   if (gl.away_score != null) {
     // Just grade any ungraded signals and return — never wipe a completed game's signals
@@ -1081,6 +1176,11 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       // back to Kalshi-direct — visible in backtest so ROI can segment.
       price_venue: _sigVenue,
       venue_stale: (_venueAware && (_sigVenue == null)) ? 1 : 0,
+      // Lineup content hash — used by refreshSignalBaselines' staleness
+      // guard. Same for all signals emitted this pass since they share
+      // the same gl row. Nulls collapse to empty strings inside the
+      // helper so hash is stable pre-lineup-population.
+      lineup_hash: _lineupHash,
     });
     // Refresh audit trail. Records action='insert' on first sight and
     // action='refresh' on every subsequent pass that changes a tracked
@@ -1302,7 +1402,9 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
     catch (e) { console.warn('[refresh-tail] venue fetch failed: ' + e.message); venueRowsByGid = {}; }
   }
   const activeRows = db.prepare(
-    "SELECT bs.id, bs.game_id, bs.signal_type, bs.signal_side, bs.market_line, bs.model_line, bs.edge_pct, bs.category, bs.price_venue, bs.venue_stale, bs.bet_locked_at, bs.updated_at, bs.created_at, gl.odds_locked_at, gl.lineups_quality_at, gl.market_away_ml, gl.market_home_ml "
+    "SELECT bs.id, bs.game_id, bs.signal_type, bs.signal_side, bs.market_line, bs.model_line, bs.edge_pct, bs.category, bs.price_venue, bs.venue_stale, bs.bet_locked_at, bs.updated_at, bs.created_at, bs.lineup_hash, "
+  + "gl.odds_locked_at, gl.lineups_quality_at, gl.market_away_ml, gl.market_home_ml, "
+  + "gl.away_lineup_json, gl.home_lineup_json, gl.away_lineup_status, gl.home_lineup_status "
   + "FROM bet_signals bs JOIN game_log gl ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id "
   + "WHERE bs.game_date = ? AND bs.is_active = 1 AND bs.signal_type = 'ML'"
   ).all(dateStr);
@@ -1349,11 +1451,29 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
     if (row.bet_locked_at) { stats.lockedRowSkip++; continue; }
     // 2) T-10 pregame freeze (game-level)
     if (row.odds_locked_at) { stats.lockedGameSkip++; continue; }
-    // 3) Staleness guard: lineup change newer than last baseline write.
-    //    updated_at can be null on rows created before this PR shipped;
-    //    fall back to created_at.
-    const rowStamp = row.updated_at || row.created_at;
-    if (row.lineups_quality_at && rowStamp && row.lineups_quality_at > rowStamp) {
+    // 3) Staleness guard: skip only when the lineup CONTENT changed since
+    //    this row was last written by processGameSignals. The prior guard
+    //    used the lineups_quality_at timestamp, which bumps on every
+    //    RotoWire pull even when RotoWire re-served an identical lineup
+    //    — that froze the tail-refresh on rows RotoWire touched without
+    //    materially changing (07-10 incident: 5 games stuck at
+    //    updated_at='2026-07-09' with venue_stale=1 tier-3 baselines).
+    //
+    //    Hash mismatch means processGameSignals is about to rewrite
+    //    model_line off a fresh lineup — refreshing market_line here
+    //    would compute an interim edge against stale model_line.
+    //
+    //    Fail-open on NULL row.lineup_hash (row emitted before this
+    //    migration): refresh, don't skip. The tail-refresh only touches
+    //    market_line/edge_pct/price_venue/venue_stale, never model_line,
+    //    so at worst the row edge_pct lands one pass early.
+    const currentLineupHash = _computeLineupHash({
+      away_lineup_json:   row.away_lineup_json,
+      home_lineup_json:   row.home_lineup_json,
+      away_lineup_status: row.away_lineup_status,
+      home_lineup_status: row.home_lineup_status,
+    });
+    if (row.lineup_hash && currentLineupHash && row.lineup_hash !== currentLineupHash) {
       stats.staleSkip++;
       continue;
     }
