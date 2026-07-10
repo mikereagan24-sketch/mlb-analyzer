@@ -6310,6 +6310,56 @@ router.get('/health/:date', (req, res) => {
       }
     }
 
+    // ---- check 7e: venue_stale_stuck ----
+    // Detects unlocked ML rows that have stayed venue_stale=1 across more
+    // than one full odds-cron interval (odds crons at 8/11/15/17 PT, ~3h
+    // max intra-day gap). The intra-cycle race in
+    // fix/venue-lazy-fetch-and-content-guard is benign: processOddsArray
+    // writes tier-3 first, runLineupJob's opts-prefetch pass corrects to
+    // tier-1 within ~8 seconds, and the row settles at tier-1 until the
+    // next cron. This check catches the scenario where that correction
+    // stops happening — a row stuck at venue_stale=1 for hours means
+    // BOTH the lazy-fetch chain (opts / cache-peek / snapshot ≤30min)
+    // AND refreshSignalBaselines' odds-tail refresh failed to heal it,
+    // which points to a real regression (snapshot capture broken,
+    // runComparison persistently failing, hash-guard misfire).
+    //
+    // Threshold: 240 min = ~1.5× the largest daytime odds-cron gap.
+    // Below that, transient failures may still resolve on the next pass;
+    // above it, at least two cron intervals passed without correction.
+    // Locked rows (bet_locked_at OR odds_locked_at) are excluded — they
+    // frozen intentionally; venue_stale=1 there is expected.
+    {
+      const stuck = db.prepare(
+        "SELECT bs.game_id, bs.signal_side, bs.market_line, bs.updated_at, "
+      + "  CAST((julianday('now') - julianday(bs.updated_at)) * 24 * 60 AS INTEGER) AS age_min "
+      + "FROM bet_signals bs JOIN game_log gl "
+      + "  ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id "
+      + "WHERE bs.game_date = ? AND bs.is_active = 1 AND bs.signal_type = 'ML' "
+      + "  AND bs.venue_stale = 1 "
+      + "  AND bs.bet_locked_at IS NULL "
+      + "  AND gl.odds_locked_at IS NULL "
+      + "  AND COALESCE(gl.is_removed, 0) = 0 "
+      + "  AND gl.away_score IS NULL "
+      + "  AND bs.updated_at < datetime('now', '-240 minutes') "
+      + "ORDER BY bs.updated_at"
+      ).all(date);
+      if (stuck.length === 0) {
+        checks.push({ id: 'venue_stale_stuck', status: 'pass', severity: 'warn',
+          message: 'No unlocked ML rows stuck at venue_stale=1 beyond one cron interval' });
+      } else {
+        const detail = stuck.map(s => s.game_id + '/' + s.signal_side + ' ' + s.age_min + 'm').join(', ');
+        checks.push({
+          id: 'venue_stale_stuck',
+          status: 'warn',
+          severity: 'warn',
+          message: stuck.length + ' unlocked ML row(s) stuck at venue_stale=1 for >240 min — '
+            + 'lazy-fetch chain AND refresh_odds_tail both failed to heal: ' + detail,
+          affected_games: cap(stuck.map(s => s.game_id)),
+        });
+      }
+    }
+
     // ---- check 8: cron_health (any job that hasn't successfully run in 25h) ----
     {
       const window25h = "datetime('now','-25 hours')";
