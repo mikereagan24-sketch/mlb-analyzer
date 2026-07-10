@@ -30,28 +30,24 @@ function cohortForGameDate(game_date) {
     : game_date < '2026-04-24' ? 'v3-pretuning' : 'v3';
 }
 
-// Venue-aware signal edges (feat/venue-aware-signals). Slate-level cache
-// for services/odds-comparison.js runComparison so we don't re-fetch the
-// Poly + Kalshi slate per-game inside processGameSignals. 60-second TTL
-// matches the routes/api.js cache. Only touched when
-// SIGNAL_VENUE_AWARE_ENABLED is on — off-path is a no-op.
-const _VENUE_TTL_MS = 60_000;
-const _venueCache = new Map(); // key=game_date, value={ ts, rowsByGid }
+// Venue-aware signal edges (feat/venue-aware-signals; consolidated
+// with feat/venue-comparison-resilience, 2026-07-10). Previously kept a
+// per-jobs.js 60s Map cache duplicating what routes/api.js had. Owner's
+// Part 1 ruling: route + odds-cron tail + matchup-tab must share one
+// upstream fetch pair per (date, opts) window. Both callers now route
+// through services/odds-comparison.runComparisonCached which owns the
+// shared cache + in-flight-promise dedup. This function stays as a
+// thin adapter that reshapes the { rows: [...] } response into the
+// rowsByGid map processGameSignals + refreshSignalBaselines want.
 async function _fetchVenueSlateCached(game_date) {
-  const now = Date.now();
-  const hit = _venueCache.get(game_date);
-  if (hit && (now - hit.ts) < _VENUE_TTL_MS) return hit.rowsByGid;
-  const { runComparison } = require('./odds-comparison');
+  const { runComparisonCached } = require('./odds-comparison');
   try {
-    const res = await runComparison(game_date, {});
+    const res = await runComparisonCached(game_date, {});
     const rowsByGid = {};
     for (const r of (res.rows || [])) if (r.game_id) rowsByGid[r.game_id] = r;
-    _venueCache.set(game_date, { ts: now, rowsByGid });
     return rowsByGid;
   } catch (e) {
-    console.warn('[venue-aware] runComparison failed for ' + game_date + ': ' + e.message);
-    // Cache the failure for the TTL so we don't hammer on repeat calls.
-    _venueCache.set(game_date, { ts: now, rowsByGid: {} });
+    console.warn('[venue-aware] runComparisonCached failed for ' + game_date + ': ' + e.message);
     return {};
   }
 }
@@ -1298,14 +1294,13 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
 // Returns { refreshed, staleSkip, lockedGameSkip, lockedRowSkip,
 //           lockedByOdds, unchanged }.
 async function refreshSignalBaselines(dateStr, settings, opts) {
-  const stats = { refreshed: 0, staleSkip: 0, lockedGameSkip: 0, lockedRowSkip: 0, unchanged: 0, noComparison: 0 };
+  const stats = { refreshed: 0, staleSkip: 0, lockedGameSkip: 0, lockedRowSkip: 0, unchanged: 0, noComparison: 0, snapshotServed: 0 };
   const _venueAware = !!(settings && settings.SIGNAL_VENUE_AWARE_ENABLED);
   let venueRowsByGid = (opts && opts.venueRowsByGid) || null;
   if (_venueAware && !venueRowsByGid) {
     try { venueRowsByGid = await _fetchVenueSlateCached(dateStr); }
     catch (e) { console.warn('[refresh-tail] venue fetch failed: ' + e.message); venueRowsByGid = {}; }
   }
-  const games = q.getGamesByDate.all(dateStr);
   const activeRows = db.prepare(
     "SELECT bs.id, bs.game_id, bs.signal_type, bs.signal_side, bs.market_line, bs.model_line, bs.edge_pct, bs.category, bs.price_venue, bs.venue_stale, bs.bet_locked_at, bs.updated_at, bs.created_at, gl.odds_locked_at, gl.lineups_quality_at, gl.market_away_ml, gl.market_home_ml "
   + "FROM bet_signals bs JOIN game_log gl ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id "
@@ -1315,6 +1310,39 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
     "UPDATE bet_signals SET market_line=?, edge_pct=?, price_venue=?, venue_stale=?, updated_at=datetime('now') "
   + "WHERE id=? AND bet_locked_at IS NULL"
   );
+  // Snapshot-fallback tier (feat/venue-comparison-resilience, 2026-07-10).
+  // When a live cmpRow isn't available (Poly/Kalshi transient failure OR
+  // 60s-cache-expired-and-refresh-failed OR game_id not matched), load
+  // the most recent snapshot from venue_comparison_snapshot and use it
+  // as tier-1 IF the snapshot age is within SNAPSHOT_FRESH_MAX_MS
+  // (parameterized, default 30 min per owner ruling).
+  //
+  // Rationale: 07-10 incident — 100% of active ML signals ended up at
+  // tier-3 raw game_log captures because the tail-refresh at 18:00 UTC
+  // hit an empty live-fetch and the pre-fix code fell through. The
+  // snapshot from 17:54:11 UTC (6 min stale) held valid venue-winner
+  // nets — under the new logic those become tier-1 with venue_stale=0
+  // (the row didn't downgrade even though the live fetch failed).
+  const SNAPSHOT_FRESH_MAX_MS = Number((settings && settings.SNAPSHOT_FRESH_MAX_MS) || 30 * 60 * 1000);
+  const snapStmt = db.prepare(
+    "SELECT snapshot_at, snapshot_json FROM venue_comparison_snapshot "
+  + "WHERE game_date=? AND game_id=?"
+  );
+  const snapshotCache = {};
+  function loadFreshSnapshotForGid(gid) {
+    if (snapshotCache[gid] !== undefined) return snapshotCache[gid];
+    const s = snapStmt.get(dateStr, gid);
+    if (!s) { snapshotCache[gid] = null; return null; }
+    try {
+      const ageMs = Date.now() - new Date(s.snapshot_at).getTime();
+      if (ageMs > SNAPSHOT_FRESH_MAX_MS) { snapshotCache[gid] = null; return null; }
+      const parsed = JSON.parse(s.snapshot_json);
+      parsed._snapshot_at = s.snapshot_at;
+      parsed._snapshot_age_ms = ageMs;
+      snapshotCache[gid] = parsed;
+      return parsed;
+    } catch (e) { snapshotCache[gid] = null; return null; }
+  }
   const impliedP = ml => ml < 0 ? Math.abs(ml)/(Math.abs(ml)+100) : 100/(ml+100);
   for (const row of activeRows) {
     // 1) Per-bet freeze
@@ -1330,25 +1358,40 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
       continue;
     }
     // 4) Pick baseline per fallback tiers.
-    const cmpRow = venueRowsByGid ? venueRowsByGid[row.game_id] : null;
+    //    tier 1a: live venue winner
+    //    tier 1b: snapshot venue winner (age ≤ SNAPSHOT_FRESH_MAX_MS)
+    //            — same semantics as tier 1a, marked venue_stale=0
+    //    tier 2:  Kalshi net-at-size (from either live cmpRow or fresh
+    //            snapshot; fee-adjusted, venue_stale=1)
+    //    tier 3:  raw game_log Kalshi-direct capture (venue_stale=1)
+    let cmpRow = venueRowsByGid ? venueRowsByGid[row.game_id] : null;
+    let servedFromSnapshot = false;
+    if (!cmpRow && _venueAware) {
+      const snap = loadFreshSnapshotForGid(row.game_id);
+      if (snap) { cmpRow = snap; servedFromSnapshot = true; }
+    }
     let newMarket = null, newVenue = null, newStale = 1;
     if (_venueAware && cmpRow) {
       const best = _pickBestML(cmpRow, row.signal_side);
       if (best) { newMarket = best.ml; newVenue = best.venue; newStale = 0; }
     }
     if (newMarket == null && cmpRow) {
-      // Tier 2: Kalshi net (fillable, fee-adjusted)
+      // Tier 2: Kalshi net (fillable, fee-adjusted). Same tier whether
+      // sourced from live cmpRow or fresh snapshot.
       const K = cmpRow.kalshi && cmpRow.kalshi[row.signal_side];
       if (K && K.net_american != null && !K.partial) {
         newMarket = K.net_american; newVenue = 'kalshi'; newStale = 1;
       }
     }
     if (newMarket == null) {
-      // Tier 3: raw game_log capture (last resort)
+      // Tier 3: raw game_log capture (last resort). Owner's Part 3 will
+      // remove this tier once Kalshi/Poly-only-baseline lands; for now
+      // it stays as backstop.
       newMarket = row.signal_side === 'away' ? row.market_away_ml : row.market_home_ml;
       newVenue = null; newStale = 1;
     }
     if (newMarket == null) { stats.noComparison++; continue; }
+    if (servedFromSnapshot) stats.snapshotServed++;
     // 5) Skip write if nothing changed.
     if (newMarket === row.market_line && newVenue === row.price_venue && (newStale ? 1 : 0) === row.venue_stale) {
       stats.unchanged++;
@@ -1380,6 +1423,9 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
             edge_pct:    { from: row.edge_pct,    to: parseFloat(newEdge.toFixed(4)) },
             price_venue: { from: row.price_venue, to: newVenue },
             venue_stale: { from: row.venue_stale, to: newStale },
+            source:      servedFromSnapshot ? 'snapshot' : (cmpRow ? 'live' : 'game_log_capture'),
+            snapshot_at: servedFromSnapshot && cmpRow ? cmpRow._snapshot_at : null,
+            snapshot_age_ms: servedFromSnapshot && cmpRow ? cmpRow._snapshot_age_ms : null,
           }),
         });
       } catch (e) { /* audit failure never blocks refresh */ }

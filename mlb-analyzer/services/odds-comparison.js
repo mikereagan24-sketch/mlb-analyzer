@@ -232,13 +232,31 @@ async function runComparison(dateYYYYMMDD, opts) {
   }
 
   progress({ step: 'pull_poly', msg: 'fetching Poly MLB events + books' });
-  const polyRows = await poly.getPolymarketMlbLines(dateYYYYMMDD);
+  // Poly fetch used to be a bare await — a single Gamma API failure took
+  // down the ENTIRE runComparison call (07-10 incident: refresh tail wrote
+  // tier-3 raw captures across the slate because Poly's fetch threw and
+  // the route fell to its catch → rows=[] → refresh saw cmpRow=null →
+  // tier-3). Symmetric with Kalshi's try/catch below: catch, log, keep
+  // going with polyRows=[]. Signals fall to tier-2 Kalshi net-at-size or
+  // to snapshot fallback (see route + refreshSignalBaselines) instead of
+  // to tier-3 raw. runComparison returns a partial (Kalshi-only) result
+  // rather than throwing when Poly is down.
+  let polyRows = [];
+  let _polyErr = null;
+  try {
+    polyRows = await poly.getPolymarketMlbLines(dateYYYYMMDD);
+  } catch (e) {
+    _polyErr = e.message || String(e);
+    progress({ step: 'pull_poly_err', msg: _polyErr });
+  }
   progress({ step: 'pull_poly_done', msg: 'poly rows: ' + polyRows.length
-    + '  (with totals ladder: ' + polyRows.filter(r => (r.totals_ladder || []).length).length + ')' });
+    + '  (with totals ladder: ' + polyRows.filter(r => (r.totals_ladder || []).length).length + ')'
+    + (_polyErr ? '  [poly failed: ' + _polyErr + ']' : '') });
 
   progress({ step: 'pull_kalshi', msg: 'fetching Kalshi MLB lines + totals' });
   let kalsRows = [];
   let kalsTotals = [];
+  let _kalErr = null;
   try {
     // includeLive:true so a game that's just started still gets compared
     // — the depth walk is honest either way. Pull totals in parallel;
@@ -251,7 +269,8 @@ async function runComparison(dateYYYYMMDD, opts) {
         : Promise.resolve([]),
     ]);
   } catch (e) {
-    progress({ step: 'pull_kalshi_err', msg: e.message });
+    _kalErr = e.message || String(e);
+    progress({ step: 'pull_kalshi_err', msg: _kalErr });
   }
   progress({ step: 'pull_kalshi_done', msg: 'kalshi ML rows: ' + kalsRows.length
     + '  totals rows: ' + kalsTotals.length });
@@ -351,6 +370,13 @@ async function runComparison(dateYYYYMMDD, opts) {
     filter_applied: filterSet ? { game_ids: [...filterSet] } : null,
     total_requests_applied: totalRequests.size
       ? Object.fromEntries(totalRequests) : null,
+    // Per-source error surface (feat/venue-comparison-resilience). Callers
+    // (route + refreshSignalBaselines) use these to decide the snapshot-
+    // fallback path: if poly_error is set, rows only reflect Kalshi; if
+    // kalshi_error is set, only Poly; if both, rows is empty. Distinct
+    // from a bare throw so a Poly outage doesn't nuke the whole response.
+    poly_error:   _polyErr,
+    kalshi_error: _kalErr,
   };
 }
 
@@ -364,7 +390,80 @@ function priceToAmerican(p) {
   return p >= 0.5 ? -Math.round(100 * p / (1 - p)) : Math.round(100 * (1 - p) / p);
 }
 
-module.exports = { runComparison, priceGame, priceAtSize, priceTotal, pickClosestStrike };
+// Shared runComparison cache (feat/venue-comparison-resilience, 2026-07-10).
+// Consolidates the previously-independent 60s caches in routes/api.js
+// (_oddsComparisonCache) and services/jobs.js (_venueCache). Rationale:
+// three callers (route, odds-cron tail refresh, matchup-tab live fetch)
+// were each hitting Poly's Gamma API + Kalshi orderbooks independently
+// within short windows, and Poly's rate limit is the tightest resource.
+// A single shared cache with in-flight-promise dedup guarantees at most
+// ONE upstream API pair-fetch per (date, stake, gameIds, totalRequests)
+// per TTL window regardless of concurrent callers.
+//
+// TTL of 60s matches the prior route cache. In-flight dedup (Map value
+// is a Promise, not a resolved value) means simultaneous callers with
+// the same key await one fetch instead of triggering N.
+const _CMP_CACHE_TTL_MS = 60 * 1000;
+const _CMP_CACHE_MAX_ENTRIES = 64;
+const _cmpCache = new Map(); // key → { at, promise, resolved, data }
+
+function _cmpKey(dateYYYYMMDD, opts) {
+  const stake = (opts && opts.stakeUsd) || DEFAULT_STAKE_USD;
+  const gids = opts && Array.isArray(opts.gameIds)
+    ? opts.gameIds.slice().sort().join(',')
+    : 'all';
+  const totKeys = opts && opts.totalRequests
+    ? Object.entries(opts.totalRequests).sort().map(([k,v]) => k+':'+v).join(',')
+    : 'none';
+  return dateYYYYMMDD + '|' + stake + '|' + gids + '|t:' + totKeys;
+}
+
+async function runComparisonCached(dateYYYYMMDD, opts) {
+  const key = _cmpKey(dateYYYYMMDD, opts);
+  const now = Date.now();
+  const hit = _cmpCache.get(key);
+  if (hit && (now - hit.at) < _CMP_CACHE_TTL_MS) {
+    // Return cached resolved data OR the still-pending promise (dedup).
+    return hit.resolved ? hit.data : hit.promise;
+  }
+  // Miss (or expired). Fire a single fetch; store the promise so parallel
+  // callers land here and await the same in-flight fetch.
+  const entry = { at: now, resolved: false, data: null, promise: null };
+  entry.promise = (async () => {
+    try {
+      const data = await runComparison(dateYYYYMMDD, opts);
+      entry.data = data;
+      entry.resolved = true;
+      return data;
+    } catch (e) {
+      // On throw, mark resolved so subsequent callers within TTL don't
+      // re-trigger. Throw the same error to all in-flight awaiters.
+      entry.data = { window: { date: dateYYYYMMDD, stake_usd: (opts && opts.stakeUsd) || DEFAULT_STAKE_USD }, rows: [], error: e.message || String(e) };
+      entry.resolved = true;
+      throw e;
+    }
+  })();
+  _cmpCache.set(key, entry);
+  // Trim cache — defensive against long-running processes.
+  if (_cmpCache.size > _CMP_CACHE_MAX_ENTRIES) {
+    const oldest = [..._cmpCache.entries()].sort((a,b) => a[1].at - b[1].at)[0];
+    if (oldest) _cmpCache.delete(oldest[0]);
+  }
+  return entry.promise;
+}
+
+// Test/admin helper to inspect the cache without exposing the Map.
+function _cmpCacheStats() {
+  const now = Date.now();
+  return {
+    size: _cmpCache.size,
+    entries: [..._cmpCache.entries()].map(([k, v]) => ({
+      key: k, age_ms: now - v.at, resolved: v.resolved, has_error: !!(v.data && v.data.error),
+    })),
+  };
+}
+
+module.exports = { runComparison, runComparisonCached, priceGame, priceAtSize, priceTotal, pickClosestStrike, _cmpCacheStats };
 
 // CLI: `node services/odds-comparison.js [YYYY-MM-DD] [stake_usd]`
 if (require.main === module) {
