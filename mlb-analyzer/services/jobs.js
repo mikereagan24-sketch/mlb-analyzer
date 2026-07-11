@@ -3416,7 +3416,10 @@ function processOddsArray(dateStr, oddsRaw, settings) {
     if (!haveTot && !haveXcheckTot) {
       reasons.push('no sane totals: no source provided matching-line O/U');
     } else if (!haveTot && haveXcheckTot) {
-      reasons.push('no primary totals; edge calc using xcheck only');
+      // Post-#230: model.js suppresses the Totals signal entirely when
+      // primary is null — xcheck is stored/displayed only, never anchors
+      // an edge. Flag text updated to reflect suppression, not xcheck-fallback.
+      reasons.push('no primary totals; Totals signal SUPPRESSED (xcheck reference-only)');
     } else if (haveTot && !haveXcheckTot) {
       reasons.push('single-source total, no cross-check available');
     } else if (haveTot && haveXcheckTot) {
