@@ -4091,7 +4091,6 @@ async function runOddsJob(dateStr, opts) {
               skippedLineGap++;
               continue;
             }
-            const chosenRung = candidateRung;
             const overFeeMl = feeAdjustAmericanFromC(chosenRung.over_ask);
             const underFeeMl = feeAdjustAmericanFromC(chosenRung.under_ask);
             if (overFeeMl == null || underFeeMl == null) {
