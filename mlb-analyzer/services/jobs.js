@@ -1503,13 +1503,14 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
         newMarket = K.net_american; newVenue = 'kalshi'; newStale = 1;
       }
     }
-    if (newMarket == null) {
-      // Tier 3: raw game_log capture (last resort). Owner's Part 3 will
-      // remove this tier once Kalshi/Poly-only-baseline lands; for now
-      // it stays as backstop.
-      newMarket = row.signal_side === 'away' ? row.market_away_ml : row.market_home_ml;
-      newVenue = null; newStale = 1;
-    }
+    // Tier 3 raw-capture fallback removed (feat/demote-unabated,
+    // 2026-07-10). Post-#230 the game_log.market_*_ml columns hold
+    // Kalshi/Poly baselines only (never Unabated), so the "last resort
+    // raw capture" was either (a) already Kalshi/Poly and thus
+    // redundant with tier-1/2, or (b) NULL because neither venue
+    // covered the game. Snapshot-fallback tier from #166 replaces this
+    // path. Downstream: unchanged unlocked rows stay at their prior
+    // Kalshi/Poly value until a future cron resolves fresh data.
     if (newMarket == null) { stats.noComparison++; continue; }
     if (servedFromSnapshot) stats.snapshotServed++;
     // 5) Skip write if nothing changed.
@@ -3507,6 +3508,9 @@ function processOddsArray(dateStr, oddsRaw, settings) {
       xcheck_over_price=?,
       xcheck_under_price=?,
       xcheck_total_source=COALESCE(?, xcheck_total_source),
+      unabated_away_ml=?, unabated_home_ml=?, unabated_ml_source=?,
+      unabated_total=?, unabated_over_price=?, unabated_under_price=?,
+      unabated_total_source=?,
       market_away_spread=?, market_home_spread=?,
       market_away_spread_price=?, market_home_spread_price=?,
       market_away_spread_quality=?, market_home_spread_quality=?,
@@ -3526,6 +3530,13 @@ function processOddsArray(dateStr, oddsRaw, settings) {
            o.xcheck_over_price != null ? o.xcheck_over_price : null,
            o.xcheck_under_price != null ? o.xcheck_under_price : null,
            o.xcheck_total_source || null,
+           o.unabated_away_ml != null ? o.unabated_away_ml : null,
+           o.unabated_home_ml != null ? o.unabated_home_ml : null,
+           o.unabated_ml_source || null,
+           o.unabated_total != null ? o.unabated_total : null,
+           o.unabated_over_price != null ? o.unabated_over_price : null,
+           o.unabated_under_price != null ? o.unabated_under_price : null,
+           o.unabated_total_source || null,
            _awaySpread, _homeSpread,
            _awaySpreadPrice, _homeSpreadPrice,
            _awaySpreadQual, _homeSpreadQual,
@@ -3583,6 +3594,39 @@ async function runOddsJob(dateStr, opts) {
         console.log('[odds] Odds API also failed: '+e2.message);
         oddsRaw = []; // ensure array, don't throw — just log and continue
       }
+    }
+
+    // Demote Unabated out of the betting path (feat/demote-unabated, 2026-07-10).
+    // Owner ruling: bet_signals.market_line must only come from Kalshi/Poly.
+    // The Unabated top-priority-sportsbook value that was populating
+    // market_*_ml / market_total / over_price / under_price gets rerouted
+    // to the new unabated_* columns for reference-only display. The
+    // market_* fields are cleared so that ONLY the Kalshi/Poly override
+    // blocks below can fill them; if neither venue covers a game, market_*
+    // stays NULL and downstream signal emission suppresses that market.
+    //
+    // The pre-existing xcheck_* fields keep their current semantics
+    // (Unabated's SECOND-priority sportsbook), so the totals-divergence
+    // flag in processOddsArray still compares Kalshi/Poly-primary against
+    // Unabated-second and fires the same way it did before demotion.
+    for (const o of oddsRaw) {
+      o.unabated_away_ml = (o.market_away_ml != null) ? o.market_away_ml : null;
+      o.unabated_home_ml = (o.market_home_ml != null) ? o.market_home_ml : null;
+      o.unabated_ml_source = o.ml_source || null;
+      o.unabated_total = (o.market_total != null) ? o.market_total : null;
+      o.unabated_over_price = (o.over_price != null) ? o.over_price : null;
+      o.unabated_under_price = (o.under_price != null) ? o.under_price : null;
+      o.unabated_total_source = o.total_source || null;
+      // Clear market_* so Kalshi/Poly overrides are the SOLE source. Any
+      // game they don't cover falls through with NULL, which processGameSignals
+      // treats as "no baseline → no signal emit" per the ruling.
+      o.market_away_ml = null;
+      o.market_home_ml = null;
+      o.ml_source = null;
+      o.market_total = null;
+      o.over_price = null;
+      o.under_price = null;
+      o.total_source = null;
     }
 
     // Statsapi-authoritative gate: drop any odds row whose game_id doesn't
@@ -3975,19 +4019,23 @@ async function runOddsJob(dateStr, opts) {
             const o = oddsById.get(gameId);
 
             // === SNAPSHOT rung selection (independent observation) ===
-            // Prefer the rung matching existing market_total (exact,
-            // then nearest within 0.5) — same rung the override would
-            // pick. Falls back to Kalshi's default chosen rung
-            // (closest-to-$0.50 over) when no market_total exists or
-            // the ladder doesn't bracket. ALWAYS produces a rung so
-            // snapshot coverage is independent of override fate.
+            // Prefer the rung matching unabated_total (exact, then nearest
+            // within 0.5) so the snapshot lines up with the reference-only
+            // display. Falls back to Kalshi's default chosen rung when
+            // no reference exists. ALWAYS produces a rung so snapshot
+            // coverage is independent of override fate.
+            //
+            // Pre-#230: anchored on o.market_total (Unabated). Post-#230:
+            // market_total is Kalshi-only, so the anchor moved to
+            // o.unabated_total (reference-only column) with the same 0.5-
+            // line-gap semantics preserved for observation.
             let candidateRung = null;
             let nearestRung = null, nearestDist = Infinity;
-            if (o && o.market_total != null) {
-              candidateRung = k.ladder.find(r => r.strike === o.market_total);
+            if (o && o.unabated_total != null) {
+              candidateRung = k.ladder.find(r => r.strike === o.unabated_total);
               if (!candidateRung) {
                 for (const r of k.ladder) {
-                  const d = Math.abs(r.strike - o.market_total);
+                  const d = Math.abs(r.strike - o.unabated_total);
                   if (d < nearestDist) { nearestRung = r; nearestDist = d; }
                 }
                 if (nearestRung && nearestDist <= 0.5) candidateRung = nearestRung;
@@ -4004,17 +4052,11 @@ async function runOddsJob(dateStr, opts) {
               under_price_ml: feeAdjustAmericanFromC(snapRung.under_ask),
             });
 
-            // === OVERRIDE (gated on existing market_total + lock) ===
+            // === WRITE (Kalshi is the SOLE source post-#230) ===
             if (!o) {
               console.warn('[odds] Kalshi-direct totals: ' + gameId
                 + ' not in oddsRaw — skipping');
               missingFromOdds++;
-              continue;
-            }
-            // Need an existing line to know which rung to override against.
-            // If backup didn't supply market_total, leave the row alone.
-            if (o.market_total == null) {
-              skippedNoExistingTotal++;
               continue;
             }
             const existing = q.getGameById.get(dateStr, gameId);
@@ -4025,17 +4067,27 @@ async function runOddsJob(dateStr, opts) {
             // Observation-only: record Kalshi's implied fair total.
             // Prefer the continuous interpolated value (from de-vigged
             // ladder, see kalshi.js computeImpliedTotal) so divergence
-            // vs market_total isn't quantized to .5 steps. Falls back
+            // vs bettable line isn't quantized to .5 steps. Falls back
             // to the snapped bettable rung when the ladder doesn't
             // bracket pOver=0.50 (k.implied_total null in that case).
-            // Set this BEFORE the line-gap skip so we capture divergence
-            // even when prices aren't overridden.
             o.kalshi_implied_total = (k.implied_total != null) ? k.implied_total : k.line;
-            if (!candidateRung) {
-              console.warn('[odds] Kalshi-direct totals: ' + gameId
-                + ' nearest Kalshi rung (' + (nearestRung ? nearestRung.strike : 'none')
-                + ') is >0.5 off existing total (' + o.market_total
-                + ') — leaving on backup');
+            // Pick the rung to write:
+            //   - candidateRung set → Unabated reference line matched a
+            //     Kalshi rung within 0.5 (best when they agree on the line)
+            //   - Otherwise use Kalshi's own auto-picked rung (k.line +
+            //     over/under). Post-#230 we DO write in this fallback path
+            //     rather than skipping — the ruling says totals baseline
+            //     must be Kalshi/Poly, so Kalshi's own preferred line IS
+            //     the correct answer when there's no agreement or no
+            //     reference at all. Pre-#230 the code left the row on
+            //     Unabated here; that path is gone.
+            const chosenLine = candidateRung
+              ? candidateRung.strike
+              : k.line;
+            const chosenOverAsk  = candidateRung ? candidateRung.over_ask  : k.over.ask_dollars;
+            const chosenUnderAsk = candidateRung ? candidateRung.under_ask : k.under.ask_dollars;
+            const chosenRung = { strike: chosenLine, over_ask: chosenOverAsk, under_ask: chosenUnderAsk };
+            if (chosenRung.over_ask == null || chosenRung.under_ask == null) {
               skippedLineGap++;
               continue;
             }
@@ -4046,7 +4098,9 @@ async function runOddsJob(dateStr, opts) {
               skippedFeeFail++;
               continue;
             }
-            // Override prices + source. market_total stays from backup.
+            // Post-#230: Kalshi is the SOLE totals source, so write
+            // market_total from Kalshi's rung too (was: left from Unabated).
+            o.market_total = chosenRung.strike;
             o.over_price = overFeeMl;
             o.under_price = underFeeMl;
             o.total_source = 'kalshi';

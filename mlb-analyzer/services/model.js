@@ -943,8 +943,14 @@ function getSignals(game, modelResult, settings, outSuppressed) {
   // totals contract) emitted Total/over 3★ mkt=null mdl=10.35 edge=0.124
   // against the 8.5 default. ML and totals are independent — a game can
   // have valid ML but null totals (suppress only Total) or vice versa.
-  const haveAnyTot = (game.market_total != null && game.over_price != null && game.under_price != null) ||
-                     (game.xcheck_total != null && game.xcheck_over_price != null && game.xcheck_under_price != null);
+  // Totals signal gate: PRIMARY-only (post-feat/demote-unabated, 2026-07-10).
+  // Pre-#230 this OR'd in xcheck as a backstop, which — with Unabated as
+  // the xcheck source — meant a Totals signal could ride an Unabated
+  // price. Owner ruling: totals must only ever price against Kalshi/Poly.
+  // Now that market_total is Kalshi/Poly-only, the xcheck OR is dropped.
+  // Games with Kalshi/Poly ML but no Kalshi/Poly total emit ML signals
+  // only — Totals gets suppressed, which is the correct outcome.
+  const haveAnyTot = game.market_total != null && game.over_price != null && game.under_price != null;
   // Continuous-edge architecture (feat/continuous-edge-score). The
   // 1★/2★/3★ tier bucketing is gone. getSignals emits every signal
   // whose raw probability-edge meets a single low floor; the UI
@@ -984,21 +990,16 @@ function getSignals(game, modelResult, settings, outSuppressed) {
     signals.push({type:'ML',side:'home',label:null,marketLine:hMarket,modelLine:hModel,edge:parseFloat(homeEdge.toFixed(4))});
   }
 
-  // Use the PRIMARY source for the total-side edge calc. The user bets at
-  // the primary venue (typically Kalshi); EV is what's available at the
-  // book they actually transact on, not at sharp consensus. Previously
-  // this preferred xcheck on the theory that Kalshi's thin book produced
-  // outlier juice and a sharp consensus was a more honest model input —
-  // but that hides genuine venue-specific +EV (e.g. Kalshi at +104 over
-  // a 51% model is +EV at Kalshi regardless of what Sporttrade thinks).
-  // xcheck is still STORED and DISPLAYED in the UI and still drives the
-  // line/juice divergence flag in services/jobs.js — it just no longer
-  // anchors the edge calculation here. Line + over + under travel as a
-  // group — never mix xcheck's line with primary's juice or vice versa.
-  const havePrimaryTot = game.market_total != null && game.over_price != null && game.under_price != null;
-  const mktTotal   = havePrimaryTot ? game.market_total : (game.xcheck_total       ?? MARKET_TOTAL_DFLT);
-  const overPrice  = havePrimaryTot ? game.over_price   : (game.xcheck_over_price  ?? -110);
-  const underPrice = havePrimaryTot ? game.under_price  : (game.xcheck_under_price ?? -110);
+  // Totals edge-calc: PRIMARY-only, no xcheck fallback (post-feat/demote-
+  // unabated, 2026-07-10). Owner ruling: totals must only ever price
+  // against Kalshi/Poly. When primary totals are null, haveAnyTot above
+  // already suppresses the Totals signal — this block only runs when a
+  // primary Kalshi/Poly total exists. xcheck (Unabated) is still stored
+  // and displayed in the UI and still drives the totals-divergence flag
+  // in services/jobs.js; it just no longer feeds the edge calc, ever.
+  const mktTotal   = game.market_total;
+  const overPrice  = game.over_price;
+  const underPrice = game.under_price;
   const estTot     = modelResult.estTot;
 
   const overImplied  = overPrice  < 0 ? Math.abs(overPrice) /(Math.abs(overPrice) +100) : 100/(overPrice +100);
