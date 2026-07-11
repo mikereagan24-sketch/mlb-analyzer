@@ -1048,6 +1048,20 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_name TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
+// Unabated reference-only columns (feat/demote-unabated-from-betting-path,
+// 2026-07-10). Per owner ruling: Unabated must not feed any bettable price.
+// Its top-priority sportsbook value moves out of market_* / ml_source /
+// total_source (which now hold Kalshi/Poly-only baselines) into these
+// dedicated columns for reference-only UI display. The pre-existing
+// xcheck_* columns keep holding Unabated's SECOND sportsbook (unchanged),
+// so the totals-divergence flag semantics stay intact.
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_away_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_home_ml INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_ml_source TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_total REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_over_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_under_price INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_total_source TEXT"); } catch(e) {}
 // Per-field-group quality columns. Stored value is set inline at ingest;
 // /api/games/:date computes the displayable state from age + odds_locked_at.
 try { db.exec("ALTER TABLE game_log ADD COLUMN odds_quality TEXT"); } catch(e) {}

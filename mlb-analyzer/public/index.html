@@ -733,11 +733,12 @@ function spBpRatio(g, side){
 // slot always shows a bettable line if any source quoted one. Both
 // null → 'O/U —'.
 function fmtTotalsBlock(g) {
-  // Show ONLY the primary (bettable) line. xcheck is still in the API
-  // response and still drives the divergence flag in services/jobs.js,
-  // but the UI doesn't need to render two prices — the user bets at
-  // the primary venue. When primary is null, fall back to xcheck so
-  // the slot always shows a bettable line if any source quoted one.
+  // Show primary (bettable = Kalshi/Poly) totals when available. When
+  // absent, fall back to Unabated (xcheck / unabated_*) tagged '(ref)'
+  // so the reader knows it is NOT a bettable line — per the
+  // feat/demote-unabated ruling, Unabated must never be presented as
+  // if it feeds signals. Signals are already suppressed for these
+  // games server-side; this label is defense-in-depth on the UI.
   var line = function(total, over, under) {
     if (total == null) return 'O/U —';
     return 'O/U ' + total + (over != null ? ' ('+fmtML(over)+'/'+fmtML(under)+')' : '');
@@ -745,7 +746,9 @@ function fmtTotalsBlock(g) {
   var havePrimary = g.market_total != null && g.over_price != null && g.under_price != null;
   if (havePrimary) return line(g.market_total, g.over_price, g.under_price);
   var haveXcheck  = g.xcheck_total != null && g.xcheck_over_price != null && g.xcheck_under_price != null;
-  if (haveXcheck) return line(g.xcheck_total, g.xcheck_over_price, g.xcheck_under_price);
+  if (haveXcheck) return line(g.xcheck_total, g.xcheck_over_price, g.xcheck_under_price) + ' (ref)';
+  var haveUnabated = g.unabated_total != null && g.unabated_over_price != null && g.unabated_under_price != null;
+  if (haveUnabated) return line(g.unabated_total, g.unabated_over_price, g.unabated_under_price) + ' (ref)';
   return 'O/U —';
 }
 function fmtDate(d){return d?d.slice(0,10):'';}
