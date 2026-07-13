@@ -302,8 +302,19 @@ const SETTINGS_SCHEMA = {
     invariant: (v, all) => Number(all.signal_edge_hard_cap_pp) > v,
     invariantMsg: 'signal_edge_hard_cap_pp must be > signal_edge_soft_cap_pp',
     help: 'Soft cap in fractional probability-points (0.10 = 10pp). Signals with edge >= soft cap emit with edge_suspect=true. Default 0.10 from calibration curve — calibration Δ hits -22pp at this claimed edge.' },
-  signal_edge_hard_cap_pp: { type: 'number', min: 0.10, max: 0.50, default: 0.25,
-    help: 'Hard cap in fractional probability-points (0.25 = 25pp). Signals with edge >= hard cap are suppressed from bet_signals + logged to bet_signal_audit. Default 0.25 — well above the current-cohort v5/v6 natural max (~0.125); designed to catch future input breakage.' },
+  // Hard-cap floor lowered 0.10 → 0.05 (2026-07-13). Original 0.10 floor was
+  // written when the cap was intended as a data-integrity ceiling (default
+  // 0.25 well above the v5/v6 natural max of ~0.125). Post-#175 the cap is
+  // used as a behavioral filter — PR #174's holdout validated 0.08 as the
+  // sweet spot (Val ROI -5.07% → +0.28%, 21 signals suppressed all in 6-10 +
+  // 10+ bands). Floor now matches soft cap's floor (0.05). The real
+  // invariant (hard > soft) is enforced on BOTH sides so updating either
+  // key alone triggers the cross-check; the owner must POST both keys
+  // together when the current soft value would violate hard > soft.
+  signal_edge_hard_cap_pp: { type: 'number', min: 0.05, max: 0.50, default: 0.25,
+    invariant: (v, all) => v > Number(all.signal_edge_soft_cap_pp),
+    invariantMsg: 'signal_edge_hard_cap_pp must be > signal_edge_soft_cap_pp',
+    help: 'Hard cap in fractional probability-points (0.08 = 8pp; 0.25 = 25pp). Signals with edge >= hard cap are suppressed from bet_signals + logged to bet_signal_audit. Default 0.25 was designed as a data-integrity ceiling; PR #174 validated 0.08 as a behavioral filter (see docs/ship-hard-cap-0.08-2026-07-13.md). Must be > signal_edge_soft_cap_pp.' },
   // Direction-specific UI highlight minimums. Comparison is against the
   // ROUNDED 0.5pp score (Math.round(edge*100/0.5)*0.5/100), not the raw
   // edge, so the UI display and highlight condition stay consistent.
