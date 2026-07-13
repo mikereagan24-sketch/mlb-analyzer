@@ -1,0 +1,4 @@
+# Pyth exp v2 sweep — PROD-FAITHFUL (universe=bet_signals, grade=closing_line)
+pyth_exp	fit_book_n	fit_book_roi	val_book_n	val_book_roi	val_12_n	val_12_roi	val_fav_n	val_fav_roi	val_doghome_n	val_doghome_roi	fit_dropped	val_dropped	fit_suppressed	val_suppressed
+1.65	382	3.82	64	-2.28	17	-2.06	2	0.00	11	-39.64	138	21	2	1
+1.83	382	5.36	63	-4.11	15	-29.87	4	50.00	10	-33.60	138	22	2	1
