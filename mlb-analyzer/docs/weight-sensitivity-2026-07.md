@@ -1,4 +1,4 @@
-# Weight sensitivity analytic pass — infrastructure wall + HFA/FAV_ADJ/DOG_ADJ + cap evidence — 2026-07-13
+# Weight sensitivity analytic pass — infra state + HFA/FAV_ADJ/DOG_ADJ + cap evidence — 2026-07-13
 
 > **Pythag holdout section removed.** The proxy-based gate scoring that originally lived here has been superseded by the prod-faithful holdout in **PR #179** (`docs/pyth-exp-holdout-v2-prod-faithful-2026-07-13.md`). See that doc for the definitive Pythag ship/defer decision (result: DEFER, gate (d) fails on prod-faithful evidence).
 
@@ -6,22 +6,38 @@
 
 ---
 
-## Scope note upfront — the weight-sensitivity ask hit an infrastructure wall
+## Scope note — infrastructure state at time of writing vs after PR #179
 
-The task listed 8+ weights to sweep (`W_PIT`/`W_BAT`, `BAT_HAND_SP/RELIEF`, PA weights, `W_PROJ`/`W_ACT`, `BULLPEN_W_*`, plus context weights). Half of these are **not measurable via post-hoc transformation of stored model outputs** — they feed into per-batter expected-wOBA math that requires re-executing `runModel` against time-honest input snapshots (batter/pitcher wOBA state, bullpen quality, framing coverage as of each game_date).
+The task listed 8+ weights to sweep (`W_PIT`/`W_BAT`, `BAT_HAND_SP/RELIEF`, PA weights, `W_PROJ`/`W_ACT`, `BULLPEN_W_*`, plus context weights). At the time this pass ran, none of these were measurable via post-hoc transformation of stored model outputs — they feed into per-batter expected-wOBA math that requires re-executing `runModel` against day-of input state (batter/pitcher wOBA, bullpen quality, framing coverage as of each game_date).
 
-**A minimal feasibility test confirmed the barrier:** calling `model.runModel()` with a stripped-down settings object against a mid-June 2026 game returned `{aML: null, hML: null, estTot: null}` — the model hit its "empty/incomplete lineups → suppress" early-exit because time-honest bullpen wOBA and SP forecast state were missing. A proper re-scoring harness would need to rewind those data sources per game_date. That infrastructure does not exist as a stand-alone tool.
+**Original barrier (now partially resolved):** the initial feasibility test called `model.runModel()` with a stripped-down settings object against a mid-June 2026 game and got `{aML: null, hML: null, estTot: null}` — the model hit its "empty/incomplete lineups → suppress" early-exit because bullpen wOBA and SP forecast state were missing. That looked like a hard block.
 
-**What I CAN measure analytically** (via WP-space transformations of stored `model_line` vs `closing_line`):
+**PR #179 solved the settings-only sweep pattern.** `scripts/sweep-pyth-exp-v2.js` threads day-of state through `q.getBullpenWobaBlended(..., gameRow.game_date, ...)` (same pattern as `scripts/sweep-woba-blend.js`) and rebuilds the game object per candidate settings, so `runModel` returns real predictions instead of nulls. Any settings key that `runModel` consumes without needing per-date wOBA snapshots can now be swept on that pattern.
+
+### What that means for the 6 previously "UNMEASURED" weights
+
+**Runnable now on PR #179's harness pattern** (settings-only sweep against stored `bet_signals` universe, graded at `closing_line`, subject to the same look-ahead caveat as #179 — mild but symmetric across candidates so the *comparison* is honest):
+
+- `W_PIT` / `W_BAT` — pitcher vs batter EW weighting; settings-only
+- `BAT_HAND_SP` / `BAT_HAND_RELIEF` — handedness weights; settings-only
+- `PA weights` — per-position PA scaling; settings-only
+- `SP_WEIGHT` / `RELIEF_WEIGHT` — SP vs bullpen aggregation weights; settings-only
+
+**Still requires Phase 3 per-date wOBA snapshots** (look-ahead is NOT a wash for these — the weight being tuned is directly on the contaminated quantity, so tuning against today's cumulative actuals is look-ahead on the exact input being weighted):
+
+- `W_PROJ` / `W_ACT` — projected vs actual wOBA blend
+- `BULLPEN_W_PROJ` / `BULLPEN_W_ACT` — projected vs actual bullpen wOBA blend
+
+The 4 runnable weights above have not been swept yet — the infrastructure exists (PR #179's pattern) but nobody has run them. They're the natural follow-up work to PR #179.
+
+**What I measured analytically in this pass** (WP-space transformations of stored `model_line` vs `closing_line` — no runModel needed):
 - `HFA_BOOST` — home-side WP shift (subtract/re-add different values)
-- `FAV_ADJ`/`DOG_ADJ` — direct American-odds shifts
+- `FAV_ADJ` / `DOG_ADJ` — direct American-odds shifts
 - `SIGNAL_EDGE_HARD_CAP_PP` — signal suppression
 - `SIGNAL_EMIT_FLOOR_PP` — signal filtering
 - `PYTH_EXP` — WP compression proxy (turned out to be misleading; see PR #178 diagnostic and PR #179 for prod-faithful replacement)
 
-**What I CANNOT measure this pass:** `W_PIT`/`W_BAT`, `BAT_HAND_*`, `W_PROJ`/`W_ACT`, `BULLPEN_W_*`, PA weights, `SP_WEIGHT`/`RELIEF_WEIGHT`. These need a time-honest runModel harness — proposed as follow-up infrastructure (est. 1-2 sessions to build).
-
-This doc now scopes down to: (1) the infrastructure wall, (2) HFA / FAV_ADJ / DOG_ADJ measurements, (3) the cap evidence base (shipping via PR #175). The Pythag holdout section has been moved to PR #179.
+This doc reports the analytic measurements + the cap evidence base + the infrastructure state. The Pythag holdout section has been moved to PR #179.
 
 ---
 
@@ -80,36 +96,40 @@ The cap is a Pareto-improvement move: no downside on productive bands, real upsi
 
 ## Sensitivity ranking (what I could measure)
 
-| weight | analytically measurable? | sensitivity | current value clearly off? |
+| weight | measurable? | sensitivity | current value clearly off? |
 |---|---|---|---|
-| SIGNAL_EDGE_HARD_CAP_PP | YES | **HIGH** — +5.35pp Val ROI recovery at cap=8 | YES: currently off; **SHIP cap=0.08** (via PR #175) |
-| SIGNAL_EMIT_FLOOR_PP | YES | LOW-MEDIUM — see notes | needs its own sweep (deferred) |
+| SIGNAL_EDGE_HARD_CAP_PP | YES (analytic — this pass) | **HIGH** — +5.35pp Val ROI recovery at cap=8 | YES: currently off; **SHIP cap=0.08** (via PR #175) |
+| SIGNAL_EMIT_FLOOR_PP | YES (analytic — this pass) | LOW-MEDIUM — see notes | needs its own sweep (deferred) |
 | PYTH_EXP | Proxy MISLEADING; superseded by PR #179 prod-faithful holdout | see PR #179 | **DEFER** — PR #179 gate (d) FAIL on prod-faithful evidence |
-| HFA_BOOST | YES | MEASURED, not primary — small directional effect (regenerable via `tmp/weight-sensitivity-analytic.js` SWEEP 2) | Slight preference for 0.02 over 0.017 on val, but within noise |
-| FAV_ADJ / DOG_ADJ | YES | Very low — negligible effect | No |
-| W_PIT / W_BAT | NO | UNMEASURED — needs runModel infrastructure | UNKNOWN |
-| BAT_HAND_SP / BAT_HAND_RELIEF | NO | UNMEASURED | UNKNOWN |
-| W_PROJ / W_ACT | NO | UNMEASURED | UNKNOWN |
-| BULLPEN_W_PROJ / W_ACT | NO | UNMEASURED | UNKNOWN |
-| PA weights | NO | UNMEASURED | UNKNOWN |
-| SP_WEIGHT / RELIEF_WEIGHT | NO | UNMEASURED | UNKNOWN |
+| HFA_BOOST | YES (analytic — this pass) | MEASURED, not primary — small directional effect (regenerable via `tmp/weight-sensitivity-analytic.js` SWEEP 2) | Slight preference for 0.02 over 0.017 on val, but within noise |
+| FAV_ADJ / DOG_ADJ | YES (analytic — this pass) | Very low — negligible effect | No |
+| W_PIT / W_BAT | YES via PR #179 pattern (not yet run) | UNMEASURED — follow-up sweep | UNKNOWN |
+| BAT_HAND_SP / BAT_HAND_RELIEF | YES via PR #179 pattern (not yet run) | UNMEASURED — follow-up sweep | UNKNOWN |
+| PA weights | YES via PR #179 pattern (not yet run) | UNMEASURED — follow-up sweep | UNKNOWN |
+| SP_WEIGHT / RELIEF_WEIGHT | YES via PR #179 pattern (not yet run) | UNMEASURED — follow-up sweep | UNKNOWN |
+| W_PROJ / W_ACT | NO — needs Phase 3 per-date wOBA snapshots (look-ahead not symmetric) | UNMEASURED | UNKNOWN |
+| BULLPEN_W_PROJ / W_ACT | NO — needs Phase 3 per-date wOBA snapshots (look-ahead not symmetric) | UNMEASURED | UNKNOWN |
 
-### "Leave these alone" (per this pass — no evidence of miscalibration OR no measurement possible)
+### "Leave these alone" (per this pass — no evidence of miscalibration OR not yet swept)
 
 - HFA_BOOST — measured, small effect, current 0.017 is within noise of the local optimum
 - FAV_ADJ / DOG_ADJ — measured, negligible effect
-- All the "UNMEASURED" weights — the honest answer is "we don't know if they're mis-set." Do NOT change them speculatively; a proper backtest requires infrastructure.
+- All the "UNMEASURED" weights — the honest answer is "we don't know if they're mis-set." Do NOT change them speculatively. Four of them (`W_PIT/W_BAT`, `BAT_HAND_*`, PA weights, `SP_WEIGHT/RELIEF_WEIGHT`) are runnable now on PR #179's harness pattern; the remaining two (`W_PROJ/W_ACT`, `BULLPEN_W_*`) need Phase 3 snapshots before they're honestly measurable.
 
-### Infrastructure recommendation (follow-up, not this pass)
+### Follow-up infrastructure
 
-To properly sweep the 6 unmeasurable weights, build a time-honest runModel harness:
+**Available now — PR #179's harness pattern:** `scripts/sweep-pyth-exp-v2.js` demonstrates the working pattern for settings-only sweeps against the prod `bet_signals` universe, graded at `closing_line`. To sweep any of the 4 "runnable now" weights (`W_PIT/W_BAT`, `BAT_HAND_*`, PA weights, `SP_WEIGHT/RELIEF_WEIGHT`), copy that script, swap `pyth_exp` for the target setting, and re-run. Look-ahead caveat is symmetric across candidates (as in PR #179), so the *comparison* is honest even if the absolute ROI carries mild look-ahead.
+
+**Still-needed for W_PROJ/W_ACT + BULLPEN_W_*:** Phase 3 per-date wOBA snapshots.
 
 1. Snapshot the woba_data table daily → per-date snapshots of batter/pitcher wOBA state
 2. Snapshot bullpen wOBA computations daily
 3. Snapshot SP forecast state daily
 4. Per-signal replay: for a given game_date, load the correct snapshot, call runModel with candidate settings, compare model_line to closing_line, grade PnL.
 
-Estimated build effort: 1-2 sessions. Estimated forward EV: could unlock genuinely productive sweeps on W_PIT/W_BAT, W_PROJ/W_ACT (which the owner explicitly wanted). NOT a priority over shipping the cap, but worth planning for.
+Why only these two need Phase 3: `W_PROJ/W_ACT` weights the projected-vs-actual wOBA blend. Today's `woba_data` is season-cumulative — the "actual" side is contaminated by future games relative to the game_date being scored. Tuning `W_ACT` upward on that data means tuning against a quantity that includes information the model didn't have at the time. Look-ahead applies to the exact input being weighted, so it doesn't cancel across candidates the way it does for pyth_exp (which is a post-WP transform independent of the input state). Same story for `BULLPEN_W_PROJ/W_ACT`.
+
+Estimated Phase 3 build effort: 1-2 sessions. Estimated forward EV: unlocks the last two "unmeasured" weights + removes the look-ahead caveat from every settings-only sweep going forward (making absolute ROI numbers honest, not just relative comparisons).
 
 ---
 
