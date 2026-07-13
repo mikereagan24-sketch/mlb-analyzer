@@ -1,0 +1,9 @@
+# ROI recovery vs hard-cap value (all clean-graded ML rows)
+cap_pp	suppressed_n	saved_dollars	kept_n	kept_roi_pct
+5	216	721	384	1.77
+6	154	459	446	0.93
+7	102	188	498	0.29
+8	72	1172	528	2.14
+9	48	997	552	1.73
+10	26	522	574	0.83
+12	15	650	585	1.04
