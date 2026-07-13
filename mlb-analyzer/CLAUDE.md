@@ -71,6 +71,52 @@ Where this applies today: `market_away_ml`/`market_home_ml`,
 `market_total`/`over_price`/`under_price`, `market_*_spread`, and any
 future column whose consumer treats NULL as "no bettable baseline".
 
+## Post-lock immutability rule (2026-07-12)
+
+**Any code path that writes to `bet_signals` MUST enforce post-lock
+immutability on the baseline fields — `market_line`, `edge_pct`,
+`price_venue`, `venue_stale` — once `game_log.odds_locked_at IS NOT NULL`,
+AND post-bet immutability on the same fields once `bet_signals.bet_locked_at
+IS NOT NULL`.** The owner's PR #164/#228 ruling ("one market number
+pregame, frozen at T-10") applies to BOTH locks, not just the manual
+bet-log lock.
+
+Fields that DO flow post-lock (whitelist):
+
+- `outcome`, `pnl` — game grading writes via the graded-game branch
+- `closing_line`, `clv` — captured once by `cron_closing_lock` at
+  odds_locked_at time; may be re-computed post-grade
+- `companion_spread_outcome`, `companion_spread_pnl` — runline grading
+- `is_active`, `notes` — soft-delete via `deactivateSignal`
+  (leaves the baseline fields alone; only marks the row inactive)
+- `bet_line`, `bet_locked_at` — the manual bet-log lock itself
+
+Everything else on `bet_signals` MUST be immutable once either lock
+is set. If a new writer needs to break this rule, it needs its own
+audit + owner-approved carve-out.
+
+Reason: PR #164/#228 established the ruling for `bet_locked_at`. The
+guard was never wired to `odds_locked_at`, and for four months
+(2026-04 → 2026-07) `processGameSignals` kept rewriting `market_line`
+post-lock. 34 corrupted rows before the guard landed. `closing_line`
+was clean throughout (captured once at lock from the frozen
+`game_log.market_*_ml`), so the bettor's real reference was preserved
+— but the tracked "current market" number was garbage on those 34 rows.
+
+Pre-flight for any PR that adds a new `bet_signals` writer:
+
+1. **List every field the writer sets.**
+2. **Cross-check against the whitelist above.** Any non-whitelisted
+   field needs an `odds_locked_at IS NULL AND bet_locked_at IS NULL`
+   guard, or the write is a corruption vector.
+3. **Add a test** that seeds a locked-but-unfinal row, calls the
+   writer with values that WOULD move the baseline fields, and asserts
+   they don't move. The `tmp/verify-post-lock-immutability.js`
+   harness is the template.
+4. **If the writer is a manual user-authorized override**
+   (e.g. `POST /signals/manual`), that's fine — the ruling only
+   binds automated writers. User writes are the source of truth.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.

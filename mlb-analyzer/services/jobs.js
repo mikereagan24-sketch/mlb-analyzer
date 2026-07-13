@@ -984,6 +984,27 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // Compute lineup content hash once; every signal emitted this pass
   // shares the same digest. Consumed by refreshSignalBaselines' guard.
   const _lineupHash = _computeLineupHash(gl);
+  // Post-lock, pre-final freeze (fix/post-lock-immutability-guard, 2026-07-12).
+  // Once game_log.odds_locked_at is set (T-10 pregame freeze OR game-start
+  // catchup), bet_signals writes for that game are frozen per owner's
+  // "one number pregame, freeze at T-10" ruling from PR #164/#228.
+  //
+  // Without this guard, later processGameSignals passes — any of the 6
+  // caller sites — read gameRow.market_*_ml (also frozen; processOddsArray
+  // skips locked rows correctly) but then run the venue-override block
+  // against LIVE runComparisonCached data. In-play Poly/Kalshi books can
+  // have very thin ladders where a $100 stake walks past top-of-book to
+  // avg_price=0.22, producing net_american=+355 for a game whose true
+  // pregame line was +113. The UPSERT then stomps market_line with the
+  // in-play value. 34 historical rows corrupted this way since April;
+  // closing_line was clean on all of them (captured by cron_closing_lock
+  // at odds_locked_at time, from the frozen pre-lock game_log price).
+  //
+  // closing_line + clv still flow via cron_closing_lock (a separate path
+  // that fires at lock time, once). outcome + pnl still flow via the
+  // graded-game branch above (which runs when gl.away_score != null).
+  // See docs/post-lock-immutability-2026-07-12.md.
+  if (gl.odds_locked_at && gl.away_score == null) return;
   // If game is already final (scored), freeze all signals — don't rewrite
   if (gl.away_score != null) {
     // Just grade any ungraded signals and return — never wipe a completed game's signals
