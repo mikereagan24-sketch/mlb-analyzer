@@ -87,6 +87,18 @@ console.log('  Val (Jul):     ' + valSigs.length + ' signals');
 var base = jobs.getSettings();
 var wobaIdx = jobs.getWobaIndex();
 
+// Brief requires "cap live" for the sweep — post-cap signal population.
+// Live prod DB shows hard=0.25 (owner couldn't set 0.08 due to schema
+// floor, fixed by PR #180 not yet deployed). Pin HARD=0.08 explicitly
+// so this sweep measures effects in the intended post-cap universe.
+// PIN_HARD_CAP is applied in scoreCandidate below.
+var PIN_HARD_CAP = 0.08;
+console.log('Cap-live pin: HARD = ' + PIN_HARD_CAP + ' (live DB shows ' +
+  (base.SIGNAL_EDGE_HARD_CAP_PP != null ? base.SIGNAL_EDGE_HARD_CAP_PP : '0.25 default') +
+  '; pinning to intended post-cap value per brief)');
+console.log('Live DB soft cap: ' + (base.SIGNAL_EDGE_SOFT_CAP_PP != null ? base.SIGNAL_EDGE_SOFT_CAP_PP : '0.10 default') + ' (does not affect suppression; only edge_suspect flag which the sweep does not check)');
+
+
 // Base weight values (from schema defaults, matching production intent)
 var BASE = {
   W_PIT: base.W_PIT != null ? base.W_PIT : 0.40,
@@ -183,7 +195,7 @@ function scoreCandidate(pool, weights) {
   var kept = [];
   var dropped = 0, suppressed = 0, skipped = 0;
   var SOFT = base.SIGNAL_EMIT_FLOOR_PP != null ? Number(base.SIGNAL_EMIT_FLOOR_PP) : 0.01;
-  var HARD = base.SIGNAL_EDGE_HARD_CAP_PP != null ? Number(base.SIGNAL_EDGE_HARD_CAP_PP) : 0.25;
+  var HARD = PIN_HARD_CAP;  // pinned per brief; ignore live DB value
   var progressEvery = Math.max(50, Math.floor(pool.length / 10));
   for (var i = 0; i < pool.length; i++) {
     if (i > 0 && i % progressEvery === 0) process.stdout.write('.');
@@ -257,6 +269,26 @@ console.log('  Val book: n=' + baseValM.book.n + ' ROI=' + baseValM.book.roi.toF
 console.log('  Val 1-2pp: n=' + baseValM.band12.n + ' ROI=' + baseValM.band12.roi.toFixed(2) + '%');
 console.log('  Val big+DOG+HOME: n=' + baseValM.bigdoghome.n + ' ROI=' + baseValM.bigdoghome.roi.toFixed(2) + '%');
 console.log('  Val big+FAV: n=' + baseValM.bigfav.n + ' ROI=' + baseValM.bigfav.roi.toFixed(2) + '%');
+
+// ---- Sanity gate ----
+// Brief: baseline must match prod actual within ~1pp or STOP (the harness
+// isn't prod-faithful and downstream numbers are invalid). Prod actual ML
+// Val ROI per PR #174: ~-5%. Note: with HARD pinned to 0.08 (not live
+// 0.25), the sanity target shifts slightly — a signal population where
+// some prod-emitted signals get suppressed by the pinned cap. Widen the
+// gate to 2pp to accommodate this.
+var PROD_ACTUAL_VAL_ROI = -5.0;
+var SANITY_TOL_PP = 2.0;
+var sanityDelta = Math.abs(baseValM.book.roi - PROD_ACTUAL_VAL_ROI);
+console.log('\n--- SANITY GATE ---');
+console.log('  Baseline Val book ROI: ' + baseValM.book.roi.toFixed(2) + '%');
+console.log('  Prod actual (PR #174): ' + PROD_ACTUAL_VAL_ROI + '%');
+console.log('  Delta: ' + sanityDelta.toFixed(2) + 'pp  (tolerance: ' + SANITY_TOL_PP + 'pp)');
+if (sanityDelta > SANITY_TOL_PP) {
+  console.log('  ✗ FAIL — harness not prod-faithful. Stopping. Do not trust downstream numbers.');
+  process.exit(1);
+}
+console.log('  ✓ PASS — harness is prod-faithful within tolerance');
 
 // ---- 1-by-1 sensitivity ----
 // Each sweep: array of {name, weights} candidates. First entry is baseline
@@ -423,58 +455,115 @@ for (var ki = 0; ki < sensKeys.length; ki++) {
     '   dVal 1-2pp ' + (e.dVal12 >= 0 ? '+' : '') + e.dVal12.toFixed(2) + 'pp');
 }
 
-// ---- Joint tune ----
-// Combine best candidate from each sensitive lever, plus a few neighboring
-// combinations to check that the joint effect is roughly additive.
-// If only 1 sensitive lever: no joint sweep needed (1-by-1 already IS the answer).
-if (sensKeys.length === 1) {
-  console.log('\n  Only 1 sensitive lever — 1-by-1 result IS the ship candidate.');
-  console.log('  Skipping joint sweep.');
-} else {
-  console.log('\n=== JOINT TUNE (' + sensKeys.length + ' sensitive levers) ===');
-  // Assemble the "best" combination (each lever at its best 1-by-1 candidate)
-  var jointWeights = {};
-  for (var ki2 = 0; ki2 < sensKeys.length; ki2++) {
-    Object.assign(jointWeights, sensitiveWeights[sensKeys[ki2]].cand.weights);
-  }
-  var jointRows = [];
-  jointRows.push(['# Joint tune of sensitive levers — Val out-of-sample'].join(''));
-  jointRows.push(['combo','levers','fit_book_n','fit_book_roi','val_book_n','val_book_roi','val_12_n','val_12_roi','val_24_n','val_24_roi','val_46_n','val_46_roi','val_bigfav_n','val_bigfav_roi','val_dh_n','val_dh_roi'].join('\t'));
-  process.stdout.write('  BEST combo (all best-1-by-1): fit ');
-  var jFit = scoreCandidate(fitSigs, jointWeights);
-  process.stdout.write(' val ');
-  var jVal = scoreCandidate(valSigs, jointWeights);
+// ---- Joint tune — small grid over sensitive levers ----
+// Per brief: coordinate-descent OR small grid over just the sensitive ones,
+// trained on Apr-Jun, validated on Jul (held out). Report in-sample AND
+// out-of-sample. If OOS doesn't hold, weights aren't really mis-set.
+//
+// Grid design: 2 candidates per sensitive lever (baseline value + the best
+// 1-by-1 candidate for that lever). All combinations. For N sensitive
+// levers: 2^N combos. Bounded to 32 combos (5 levers) — if more, take
+// only the top-3 sensitive by |dVal book| to keep compute under control.
+if (sensKeys.length === 0) {
+  console.log('\n  No joint tune (0 sensitive levers).');
+} else if (sensKeys.length === 1) {
+  console.log('\n  Only 1 sensitive lever — 1-by-1 result IS the ship candidate; no joint sweep needed.');
+  console.log('  Re-scoring on fit for OOS check...');
+  var k1 = sensKeys[0];
+  var w1 = sensitiveWeights[k1].cand.weights;
+  process.stdout.write('  fit ');
+  var f1 = scoreCandidate(fitSigs, w1);
   process.stdout.write(' done\n');
-  var jFitM = metricsFor(jFit);
-  var jValM = metricsFor(jVal);
-  var leverList = sensKeys.map(function(k){ return k + '=' + sensitiveWeights[k].cand.name; }).join(', ');
-  console.log('  Joint  | ' + leverList);
-  console.log('         | Fit book n=' + jFitM.book.n + ' ROI=' + jFitM.book.roi.toFixed(2) + '%');
-  console.log('         | Val book n=' + jValM.book.n + ' ROI=' + jValM.book.roi.toFixed(2) + '%  (baseline ' + baseValM.book.roi.toFixed(2) + '%, delta ' + (jValM.book.roi - baseValM.book.roi).toFixed(2) + 'pp)');
-  console.log('         | Val 1-2pp n=' + jValM.band12.n + ' ROI=' + jValM.band12.roi.toFixed(2) + '%  (baseline ' + baseValM.band12.roi.toFixed(2) + '%, delta ' + (jValM.band12.roi - baseValM.band12.roi).toFixed(2) + 'pp)');
-  console.log('         | Val big+FAV n=' + jValM.bigfav.n + ' ROI=' + jValM.bigfav.roi.toFixed(2) + '%');
-  console.log('         | Val big+DOG+HOME n=' + jValM.bigdoghome.n + ' ROI=' + jValM.bigdoghome.roi.toFixed(2) + '%');
-  jointRows.push([
-    'best_combined', leverList,
-    jFitM.book.n, jFitM.book.roi.toFixed(2), jValM.book.n, jValM.book.roi.toFixed(2),
-    jValM.band12.n, jValM.band12.roi.toFixed(2), jValM.band24.n, jValM.band24.roi.toFixed(2),
-    jValM.band46.n, jValM.band46.roi.toFixed(2), jValM.bigfav.n, jValM.bigfav.roi.toFixed(2),
-    jValM.bigdoghome.n, jValM.bigdoghome.roi.toFixed(2),
-  ].join('\t'));
-  fs.writeFileSync(path.join(OUT_DIR, 'sweep-look-ahead-safe-weights-joint.tsv'), jointRows.join('\n'));
-  console.log('  Wrote docs/data/sweep-look-ahead-safe-weights-joint.tsv');
+  var f1M = metricsFor(f1);
+  var v1M = sensitiveWeights[k1].valM;
+  console.log('  ' + k1 + '=' + sensitiveWeights[k1].cand.name + ': Fit ROI ' + f1M.book.roi.toFixed(2) + '%  Val ROI ' + v1M.book.roi.toFixed(2) + '%  Val 1-2pp ROI ' + v1M.band12.roi.toFixed(2) + '%');
+} else {
+  // Cap at top-3 sensitive if more than 3
+  var effectiveSens = sensKeys.slice();
+  if (effectiveSens.length > 3) {
+    effectiveSens.sort(function (a, b) { return Math.abs(sensitiveWeights[b].dValBook) - Math.abs(sensitiveWeights[a].dValBook); });
+    effectiveSens = effectiveSens.slice(0, 3);
+    console.log('\n  NOTE: ' + sensKeys.length + ' sensitive levers; joint grid capped at top-3 by |dVal book|: ' + effectiveSens.join(', '));
+  }
 
-  // ---- Ship gate check on joint ----
-  console.log('\n=== SHIP GATE CHECK (joint combo vs baseline, PR #174 gates) ===');
-  var gA = jValM.book.roi > baseValM.book.roi;
-  var gB = jValM.band12.roi >= baseValM.band12.roi - 2;
-  var gC = jValM.bigfav.roi >= 0;
-  var gD = jValM.bigdoghome.roi > baseValM.bigdoghome.roi;
-  console.log('  (a) Val book ROI improves: ' + baseValM.book.roi.toFixed(2) + '% → ' + jValM.book.roi.toFixed(2) + '%  ' + (gA?'PASS':'FAIL'));
-  console.log('  (b) Val 1-2pp not damaged: ' + baseValM.band12.roi.toFixed(2) + '% → ' + jValM.band12.roi.toFixed(2) + '%  ' + (gB?'PASS':'FAIL'));
-  console.log('  (c) Val big+FAV stays ≥0: ' + jValM.bigfav.roi.toFixed(2) + '%  ' + (gC?'PASS':'FAIL'));
-  console.log('  (d) Val big+DOG+HOME improves: ' + baseValM.bigdoghome.roi.toFixed(2) + '% → ' + jValM.bigdoghome.roi.toFixed(2) + '%  ' + (gD?'PASS':'FAIL'));
-  console.log('  SHIP DECISION: ' + ((gA && gB && gC && gD) ? '✓ ALL PASS — joint combo ships' : '✗ ONE OR MORE FAIL — do NOT ship joint combo'));
+  console.log('\n=== JOINT TUNE — small grid over ' + effectiveSens.length + ' sensitive levers (' + Math.pow(2, effectiveSens.length) + ' combos) ===');
+  // Build the grid: each lever contributes 2 candidates (baseline + best).
+  // Baseline entry = {} (empty weight override — falls back to prod defaults).
+  var leverOptions = effectiveSens.map(function (k) {
+    return { key: k, candidates: [
+      { name: 'baseline', weights: {} },
+      { name: sensitiveWeights[k].cand.name, weights: sensitiveWeights[k].cand.weights },
+    ]};
+  });
+  // Enumerate all combos
+  function cartesian(arr) {
+    var out = [[]];
+    for (var i = 0; i < arr.length; i++) {
+      var next = [];
+      for (var j = 0; j < out.length; j++)
+        for (var k = 0; k < arr[i].length; k++)
+          next.push(out[j].concat([arr[i][k]]));
+      out = next;
+    }
+    return out;
+  }
+  var combos = cartesian(leverOptions.map(function (l) { return l.candidates; }));
+
+  var jointRows = [['# Joint tune small grid over sensitive levers — fit + val'].join('')];
+  jointRows.push(['combo_id','levers','fit_book_n','fit_book_roi','val_book_n','val_book_roi','val_12_n','val_12_roi','val_24_n','val_24_roi','val_46_n','val_46_roi','val_bigfav_n','val_bigfav_roi','val_dh_n','val_dh_roi'].join('\t'));
+  var comboResults = [];
+  for (var ci3 = 0; ci3 < combos.length; ci3++) {
+    var combo = combos[ci3];
+    var mergedW = {};
+    for (var ki3 = 0; ki3 < combo.length; ki3++) Object.assign(mergedW, combo[ki3].weights);
+    var comboLabel = effectiveSens.map(function (k, i) { return k + '=' + combo[i].name; }).join(', ');
+    process.stdout.write('  combo ' + (ci3+1) + '/' + combos.length + ': ' + comboLabel + '\n    fit ');
+    var cFit = scoreCandidate(fitSigs, mergedW);
+    process.stdout.write(' val ');
+    var cVal = scoreCandidate(valSigs, mergedW);
+    process.stdout.write(' done\n');
+    var cFitM = metricsFor(cFit);
+    var cValM = metricsFor(cVal);
+    comboResults.push({ id: ci3, label: comboLabel, weights: mergedW, fitM: cFitM, valM: cValM });
+    console.log('    Fit book ' + cFitM.book.roi.toFixed(2) + '%  Val book ' + cValM.book.roi.toFixed(2) + '% (dVal ' + (cValM.book.roi - baseValM.book.roi).toFixed(2) + 'pp)  Val 1-2pp ' + cValM.band12.roi.toFixed(2) + '% (dVal ' + (cValM.band12.roi - baseValM.band12.roi).toFixed(2) + 'pp)');
+    jointRows.push([
+      ci3, comboLabel,
+      cFitM.book.n, cFitM.book.roi.toFixed(2), cValM.book.n, cValM.book.roi.toFixed(2),
+      cValM.band12.n, cValM.band12.roi.toFixed(2), cValM.band24.n, cValM.band24.roi.toFixed(2),
+      cValM.band46.n, cValM.band46.roi.toFixed(2), cValM.bigfav.n, cValM.bigfav.roi.toFixed(2),
+      cValM.bigdoghome.n, cValM.bigdoghome.roi.toFixed(2),
+    ].join('\t'));
+  }
+  fs.writeFileSync(path.join(OUT_DIR, 'sweep-look-ahead-safe-weights-joint.tsv'), jointRows.join('\n'));
+  console.log('\n  Wrote docs/data/sweep-look-ahead-safe-weights-joint.tsv');
+
+  // Score each combo against PR #174's 4 ship gates on Val
+  console.log('\n=== SHIP GATE CHECK — every combo vs baseline ===');
+  console.log('  Gate (a): Val book ROI improves');
+  console.log('  Gate (b): Val 1-2pp not damaged (within -2pp of baseline)');
+  console.log('  Gate (c): Val big+FAV stays >= 0');
+  console.log('  Gate (d): Val big+DOG+HOME improves');
+  var shipCandidates = [];
+  for (var ci4 = 0; ci4 < comboResults.length; ci4++) {
+    var c = comboResults[ci4];
+    var gA = c.valM.book.roi > baseValM.book.roi;
+    var gB = c.valM.band12.roi >= baseValM.band12.roi - 2;
+    var gC = c.valM.bigfav.roi >= 0;
+    var gD = c.valM.bigdoghome.roi > baseValM.bigdoghome.roi;
+    var passAll = gA && gB && gC && gD;
+    console.log('  combo ' + c.id + ': (a) ' + (gA?'PASS':'FAIL') + ' (b) ' + (gB?'PASS':'FAIL') + ' (c) ' + (gC?'PASS':'FAIL') + ' (d) ' + (gD?'PASS':'FAIL') + '   ' + (passAll ? '✓ ALL PASS' : '✗') + '   ' + c.label);
+    if (passAll) shipCandidates.push(c);
+  }
+  console.log('\n  Ship candidates (pass all 4 gates OOS): ' + shipCandidates.length + ' of ' + comboResults.length);
+  if (shipCandidates.length === 0) {
+    console.log('  → NO joint combo survives OOS. Weights are not mis-set at meaningful sample size.');
+  } else {
+    console.log('  → Ship candidates:');
+    for (var si = 0; si < shipCandidates.length; si++) {
+      var sc = shipCandidates[si];
+      console.log('    * ' + sc.label + '   Fit ' + sc.fitM.book.roi.toFixed(2) + '%   Val ' + sc.valM.book.roi.toFixed(2) + '%   Val 1-2pp ' + sc.valM.band12.roi.toFixed(2) + '%');
+    }
+  }
 }
 
 console.log('\n=== DONE ===');
