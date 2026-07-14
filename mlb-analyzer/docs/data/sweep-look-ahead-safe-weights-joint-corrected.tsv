@@ -1,0 +1,10 @@
+# Corrected joint grid — SIGNED-best picks, fit+val, HARD=0.08 pinned
+combo_id	W_PIT	SP_WEIGHT	PA	fit_n	fit_roi	val_n	val_roi	val_12_n	val_12_roi	val_24_n	val_24_roi	val_46_n	val_46_roi	val_bigfav_n	val_bigfav_roi	val_dh_n	val_dh_roi	gA_book	gB_12	gC_fav	gD_dh	ship
+1	baseline	baseline	baseline	320	-0.49	45	-3.13	15	-29.87	14	24.29	9	6.00	3	33.33	3	-100.00	FAIL	PASS	PASS	FAIL	NO
+2	baseline	baseline	flat 4.13	322	-0.43	44	3.91	16	-20.94	12	28.33	8	19.25	4	50.00	3	-100.00	PASS	PASS	PASS	FAIL	NO
+3	baseline	0.75/0.25	baseline	323	0.09	47	0.91	13	-20.69	17	14.41	9	-3.89	3	33.33	3	-100.00	PASS	PASS	PASS	FAIL	NO
+4	baseline	0.75/0.25	flat 4.13	323	0.15	44	-1.41	14	-26.36	15	16.00	8	19.25	3	33.33	3	-100.00	PASS	PASS	PASS	FAIL	NO
+5	0.35/0.65	baseline	baseline	326	2.27	42	9.36	11	-1.27	12	20.92	11	4.91	3	33.33	3	-100.00	PASS	PASS	PASS	FAIL	NO
+6	0.35/0.65	baseline	flat 4.13	322	-1.59	41	12.02	10	-11.40	13	27.00	10	24.30	4	50.00	3	-100.00	PASS	PASS	PASS	FAIL	NO
+7	0.35/0.65	0.75/0.25	baseline	324	4.46	41	12.15	10	-11.40	12	38.00	13	4.15	2	0.00	2	-100.00	PASS	PASS	PASS	FAIL	NO
+8	0.35/0.65	0.75/0.25	flat 4.13	323	0.90	43	11.77	13	-0.08	12	20.92	12	36.92	2	0.00	3	-100.00	PASS	PASS	PASS	FAIL	NO
