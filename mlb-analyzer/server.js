@@ -87,40 +87,56 @@ app.get('/api/version', (req, res) => res.json({
 // API routes
 app.use('/api', require('./routes/api'));
 
-// Health check for Render. Extended to surface today's odds-coverage
-// summary so the demote-completion regression gate (every scheduled game
-// with a Kalshi OR Poly market gets a populated market_line) is visible
-// to an ops check without needing to grep cron logs.
-//   status:            'ok' if server up
-//   odds_coverage.date:            YYYY-MM-DD (PT-anchored, matches cron)
-//   odds_coverage.scheduled:       total game_log rows for the date
-//   odds_coverage.priced:          rows with both market_away_ml + market_home_ml populated
-//   odds_coverage.missing:         [{game_id, ml_source, total_source}]
-// A non-empty odds_coverage.missing on a slate where books have posted is
-// the same signal as the [odds-coverage] MISS lines in the cron log.
+// Health check for Render. Surfaces today's odds-coverage summary so the
+// demote-completion regression gate is visible to an ops check without
+// grepping cron logs. Two independent coverage dimensions tracked:
+//
+//   status:                          'ok' if server up
+//   odds_coverage.date:              YYYY-MM-DD (PT-anchored, matches cron)
+//   odds_coverage.scheduled:         total game_log rows for the date
+//   odds_coverage.ml_priced:         rows with both market_away_ml + market_home_ml populated
+//   odds_coverage.totals_priced:     rows with market_total populated
+//   odds_coverage.ml_missing:        [{game_id, ml_source, odds_locked_at}]
+//   odds_coverage.totals_missing:    [{game_id, total_source, market_total, odds_locked_at}]
+//
+// A non-empty ml_missing/totals_missing on a slate where books have
+// posted is the same signal as the corresponding [odds-coverage] MISS
+// lines in the cron log. A row can appear in one list and not the other
+// when only one source covered.
 app.get('/health', (req, res) => {
   const out = { status: 'ok', time: new Date().toISOString() };
   try {
     const { q, db } = require('./db/schema');
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
     const rows = db.prepare(
-      "SELECT game_id, market_away_ml, market_home_ml, ml_source, total_source, odds_locked_at "
-      + "FROM game_log WHERE game_date = ? ORDER BY game_id"
+      "SELECT game_id, market_away_ml, market_home_ml, market_total, "
+      + "       ml_source, total_source, odds_locked_at "
+      + "  FROM game_log WHERE game_date = ? ORDER BY game_id"
     ).all(today);
-    const priced = rows.filter(r => r.market_away_ml != null && r.market_home_ml != null);
-    const missing = rows
+    const mlPriced     = rows.filter(r => r.market_away_ml != null && r.market_home_ml != null);
+    const totalsPriced = rows.filter(r => r.market_total != null);
+    const mlMissing = rows
       .filter(r => r.market_away_ml == null || r.market_home_ml == null)
       .map(r => ({
         game_id: r.game_id,
         ml_source: r.ml_source,
+        odds_locked_at: r.odds_locked_at,
+      }));
+    const totalsMissing = rows
+      .filter(r => r.market_total == null)
+      .map(r => ({
+        game_id: r.game_id,
         total_source: r.total_source,
+        market_total: r.market_total,
         odds_locked_at: r.odds_locked_at,
       }));
     out.odds_coverage = {
       date: today,
       scheduled: rows.length,
-      priced: priced.length,
-      missing,
+      ml_priced: mlPriced.length,
+      totals_priced: totalsPriced.length,
+      ml_missing: mlMissing,
+      totals_missing: totalsMissing,
     };
   } catch (e) {
     out.odds_coverage_error = e && e.message || String(e);

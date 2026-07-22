@@ -3880,6 +3880,50 @@ async function runOddsJob(dateStr, opts) {
     }
 
     // ====================================================================
+    // Poly-direct fetch (shared by the ML block below AND the totals block
+    // that runs after the Kalshi totals override, ~120 lines down). One
+    // network fetch, two writes — Poly's clob books are already attached
+    // per side by getPolymarketMlbLines, so both blocks consume the same
+    // in-memory rows.
+    //
+    // Non-fatal on failure: both Poly writes skip, no throw propagates.
+    // ====================================================================
+    let polyRows = [];
+    try {
+      polyRows = await getPolymarketMlbLines(dateStr);
+      console.log('[odds] Poly fetched ' + polyRows.length + ' event(s) for ' + dateStr);
+    } catch (e) {
+      console.warn('[odds] Poly fetch failed (non-fatal, ML+totals both skipped): ' + e.message);
+      polyRows = [];
+    }
+
+    // Fee-adjust a Poly top-of-book raw price (0-1 dollar) to an integer
+    // American matching Kalshi's stored convention. Shared by ML and
+    // totals write paths — both go through the same taker-fee shape and
+    // same bettor-unfavorable 1.0-cent shift on final rounding, so
+    // downstream CLV computation stays consistent across sources.
+    //
+    // CLV inflation caveat matches the Kalshi helper (feat/kalshi-fee-
+    // adjusted-lines): stored price is fee-loaded, so CLV against that
+    // baseline runs systematically higher than the raw-market close.
+    // Known + accepted; same trade Kalshi has always had.
+    function polyFeeAdjustAmerican(topAskPrice) {
+      const C = Number(topAskPrice);
+      if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
+      const adj = C + polyTakerFeeRate(C);
+      if (!(adj > 0.001 && adj < 0.999)) return null;
+      if (adj >= 0.5) {
+        const americanFloat = -(100 * adj / (1 - adj));
+        const twoDecimal    = Math.round(americanFloat * 100) / 100;
+        return Math.round(twoDecimal - 1.0);
+      } else {
+        const americanFloat = 100 * (1 - adj) / adj;
+        const twoDecimal    = Math.round(americanFloat * 100) / 100;
+        return Math.round(twoDecimal - 1.0);
+      }
+    }
+
+    // ====================================================================
     // Poly-direct ML override (fix/complete-demote-seed-oddsraw-from-
     // schedule, 2026-07-22). Completes the 2026-07-10 demote by giving
     // Poly a WRITE PATH to game_log.market_*_ml. Kalshi ran first above;
@@ -3896,43 +3940,9 @@ async function runOddsJob(dateStr, opts) {
     //   - Poly game_ids not in oddsRaw (i.e. not in statsapi schedule)
     //     LOGGED and SKIPPED — statsapi is authoritative.
     //   - Whole block try/catch'd: any failure logs and falls through.
-    //
-    // ---- CLV IMPACT — MATCHES KALSHI PATH ----
-    // Poly top-of-book ask is fee-adjusted through polyTakerFeeRate so
-    // the stored market_*_ml is the all-in price the bettor pays.
-    // Symmetric with Kalshi's stored fee-adjusted values, so downstream
-    // CLV computation stays consistent across sources. Same known-and-
-    // accepted CLV inflation noted on the Kalshi-direct helper.
-    //
-    // Totals are NOT written here — Poly totals require per-strike book
-    // walking that's already done by odds-comparison.js's runComparison
-    // for the venue-aware signal path. Adding a slate-level Poly totals
-    // write is a follow-up (needs a rung-pick + fee handling story).
-    // Totals-only games where Kalshi doesn't cover will still surface
-    // NULL market_total, same as pre-fix.
     // ====================================================================
-    try {
-      const polyRows = await getPolymarketMlbLines(dateStr);
-      if (!polyRows.length) {
-        console.log('[odds] Poly-direct: no markets returned for ' + dateStr);
-      } else {
-        // Fee-adjust a Poly top-of-book raw price (0-1 dollar) to an
-        // integer American ML matching Kalshi's stored convention.
-        function polyFeeAdjustAmerican(topAskPrice) {
-          const C = Number(topAskPrice);
-          if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
-          const adj = C + polyTakerFeeRate(C);
-          if (!(adj > 0.001 && adj < 0.999)) return null;
-          if (adj >= 0.5) {
-            const americanFloat = -(100 * adj / (1 - adj));
-            const twoDecimal    = Math.round(americanFloat * 100) / 100;
-            return Math.round(twoDecimal - 1.0);
-          } else {
-            const americanFloat = 100 * (1 - adj) / adj;
-            const twoDecimal    = Math.round(americanFloat * 100) / 100;
-            return Math.round(twoDecimal - 1.0);
-          }
-        }
+    if (polyRows.length) {
+      try {
         const oddsById = new Map();
         for (const o of oddsRaw) oddsById.set(o.game_id, o);
         let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, missingFromSchedule = 0;
@@ -3974,31 +3984,14 @@ async function runOddsJob(dateStr, opts) {
           + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
           + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
           + (missingFromSchedule ? ', ' + missingFromSchedule + ' not in statsapi (skipped)' : ''));
+      } catch (e) {
+        console.warn('[odds] Poly-direct ML override failed (non-fatal, falling through): ' + e.message);
       }
-    } catch (e) {
-      console.warn('[odds] Poly-direct override failed (non-fatal, falling through): ' + e.message);
     }
 
-    // ====================================================================
-    // Coverage instrumentation. Permanent visibility into which scheduled
-    // games are still missing market_*_ml after every override has run.
-    // Complements the Kalshi/Poly per-block WARN lines with a single
-    // slate-level summary that's grep-friendly. Any [odds-coverage] MISS
-    // line is a scheduled game the model can't emit an ML signal on.
-    // ====================================================================
-    {
-      const misses = oddsRaw.filter(o => o.market_away_ml == null || o.market_home_ml == null);
-      console.log('[odds-coverage] ' + dateStr + ': '
-        + (oddsRaw.length - misses.length) + '/' + oddsRaw.length
-        + ' scheduled games have market_*_ml populated');
-      for (const o of misses) {
-        console.warn('[odds-coverage] MISS ' + dateStr + '/' + o.game_id
-          + ' — market_away_ml=' + o.market_away_ml
-          + ' market_home_ml=' + o.market_home_ml
-          + ' unabated_away_ml=' + o.unabated_away_ml
-          + ' unabated_home_ml=' + o.unabated_home_ml);
-      }
-    }
+    // (Coverage instrumentation moved below — runs after ALL overrides,
+    // including the Kalshi/Poly totals blocks further down. See the
+    // block just before processOddsArray.)
 
     // Kalshi-direct SPREADS ingest. Independent of the ML / Totals
     // overrides above — runs every odds-job regardless of the
@@ -4336,6 +4329,156 @@ async function runOddsJob(dateStr, opts) {
         }
       } catch (e) {
         console.warn('[odds] Kalshi-direct totals override failed (non-fatal, falling through): ' + e.message);
+      }
+    }
+
+    // ====================================================================
+    // Poly-direct TOTALS override (fix/poly-totals-write-path, 2026-07-22).
+    // Closes the last coverage gap left by the demote-completion PR: Poly
+    // ML was writing but totals were still NULL when Kalshi didn't cover.
+    // Mirrors the ML block shape (shared polyRows fetch + shared fee
+    // helper hoisted above). Ranks BELOW Kalshi totals — Kalshi wrote
+    // first at the block ~120 lines up, Poly fills any oddsRaw row Kalshi
+    // left market_total NULL.
+    //
+    // RUNG-PICK RULE (explicit — Mike's request):
+    //   1. Anchor to o.unabated_total (the reference-only line the demote
+    //      moved into unabated_*). Exact match on strike → use that rung.
+    //   2. Nearest within 0.5 of unabated_total → use that rung.
+    //   3. Otherwise fall back to Poly's highest-liquidity rung
+    //      (market_liquidity_clob) — no external reference exists, so
+    //      trader activity is the best proxy for "which strike is the
+    //      real market."
+    //
+    // The 0.5-cutoff matches Kalshi's totals path (line ~4249): if Poly
+    // and the consensus disagree on the LINE itself, we'd rather write
+    // the most-traded rung than paper over the disagreement with a
+    // random mismatched strike. Anchor tier is logged per game so we
+    // can grep for "liquidity_fallback" and audit whether those picks
+    // are sane vs xcheck / unabated in retrospect.
+    //
+    // PER-SIDE FEE ADJUSTMENT: over_price and under_price are
+    // independent — each side's raw ladder ask (0-1 dollar) goes through
+    // polyFeeAdjustAmerican separately. Same helper the ML path uses;
+    // same bettor-unfavorable shift + CLV inflation caveat.
+    //
+    // Guardrails: match the Poly-direct ML block above.
+    // ====================================================================
+    if (polyRows.length) {
+      try {
+        const oddsById = new Map();
+        for (const o of oddsRaw) oddsById.set(o.game_id, o);
+        let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, skippedNoLadder = 0, skippedFeeFail = 0;
+        const anchorCounts = { unabated_exact: 0, unabated_nearest: 0, liquidity_fallback: 0 };
+        for (const p of polyRows) {
+          if (!p.game_id) continue;
+          const o = oddsById.get(p.game_id);
+          if (!o) continue;  // ML block already warned; totals doesn't double-log
+          const existing = q.getGameById.get(dateStr, p.game_id);
+          if (existing && existing.odds_locked_at) {
+            skippedLocked++;
+            continue;
+          }
+          // Kalshi wrote first — only fill when it left market_total NULL.
+          if (o.market_total != null) {
+            skippedHaveKalshi++;
+            continue;
+          }
+          const ladder = Array.isArray(p.totals_ladder) ? p.totals_ladder : [];
+          if (ladder.length === 0) {
+            skippedNoLadder++;
+            continue;
+          }
+          // Rung-pick cascade.
+          let picked = null, anchorTier = null;
+          if (o.unabated_total != null) {
+            picked = ladder.find(r => Math.abs(r.strike - o.unabated_total) < 0.001);
+            if (picked) anchorTier = 'unabated_exact';
+            if (!picked) {
+              let best = null, bestDist = Infinity;
+              for (const r of ladder) {
+                const d = Math.abs(r.strike - o.unabated_total);
+                if (d < bestDist) { best = r; bestDist = d; }
+              }
+              if (best && bestDist <= 0.5) { picked = best; anchorTier = 'unabated_nearest'; }
+            }
+          }
+          if (!picked) {
+            let best = null, bestLiq = -1;
+            for (const r of ladder) {
+              const liq = r.market_liquidity_clob != null ? r.market_liquidity_clob : 0;
+              if (liq > bestLiq) { best = r; bestLiq = liq; }
+            }
+            picked = best;
+            anchorTier = 'liquidity_fallback';
+          }
+          if (!picked) {
+            skippedNoLadder++;
+            continue;
+          }
+          const overAskC  = parseFloat(picked.over_price_str);
+          const underAskC = parseFloat(picked.under_price_str);
+          const overMl  = polyFeeAdjustAmerican(overAskC);
+          const underMl = polyFeeAdjustAmerican(underAskC);
+          if (overMl == null || underMl == null) {
+            skippedFeeFail++;
+            continue;
+          }
+          o.market_total = picked.strike;
+          o.over_price   = overMl;
+          o.under_price  = underMl;
+          o.total_source = 'polymarket';
+          anchorCounts[anchorTier] = (anchorCounts[anchorTier] || 0) + 1;
+          wrote++;
+          console.log('[odds] Poly-direct totals: ' + p.game_id
+            + ' anchor=' + anchorTier
+            + ' strike=' + picked.strike
+            + ' over/under=' + overMl + '/' + underMl
+            + (o.unabated_total != null ? ' (unabated_total=' + o.unabated_total + ')' : ''));
+        }
+        console.log('[odds] Poly-direct totals: ' + wrote + ' game(s) written'
+          + ' [anchors: unabated_exact=' + (anchorCounts.unabated_exact || 0)
+          + ', unabated_nearest=' + (anchorCounts.unabated_nearest || 0)
+          + ', liquidity_fallback=' + (anchorCounts.liquidity_fallback || 0) + ']'
+          + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
+          + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
+          + (skippedNoLadder ? ', ' + skippedNoLadder + ' no ladder/rung (skipped)' : '')
+          + (skippedFeeFail ? ', ' + skippedFeeFail + ' fee-adj degenerate (skipped)' : ''));
+      } catch (e) {
+        console.warn('[odds] Poly-direct totals override failed (non-fatal, falling through): ' + e.message);
+      }
+    }
+
+    // ====================================================================
+    // Coverage instrumentation. Permanent visibility into which scheduled
+    // games are still missing market_*_ml OR market_total after every
+    // override (Kalshi ML, Poly ML, Kalshi totals, Poly totals) has run.
+    // Complements the per-block WARN lines with a single slate-level
+    // summary that's grep-friendly. Any [odds-coverage] MISS line is a
+    // scheduled game the model can't emit that signal on.
+    //
+    // Two dimensions tracked independently: a game can have ML but no
+    // total, or vice versa (rare but possible when only one source
+    // covers).
+    // ====================================================================
+    {
+      const mlMisses     = oddsRaw.filter(o => o.market_away_ml == null || o.market_home_ml == null);
+      const totalsMisses = oddsRaw.filter(o => o.market_total == null);
+      console.log('[odds-coverage] ' + dateStr + ': ML '
+        + (oddsRaw.length - mlMisses.length) + '/' + oddsRaw.length
+        + ', totals ' + (oddsRaw.length - totalsMisses.length) + '/' + oddsRaw.length
+        + ' scheduled games have populated fields');
+      for (const o of mlMisses) {
+        console.warn('[odds-coverage] ML MISS ' + dateStr + '/' + o.game_id
+          + ' — market_away_ml=' + o.market_away_ml
+          + ' market_home_ml=' + o.market_home_ml
+          + ' unabated_away_ml=' + o.unabated_away_ml
+          + ' unabated_home_ml=' + o.unabated_home_ml);
+      }
+      for (const o of totalsMisses) {
+        console.warn('[odds-coverage] TOTALS MISS ' + dateStr + '/' + o.game_id
+          + ' — market_total=' + o.market_total
+          + ' unabated_total=' + o.unabated_total);
       }
     }
 
