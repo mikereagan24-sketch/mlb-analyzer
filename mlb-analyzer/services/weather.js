@@ -3,7 +3,13 @@
 // Ballpark data: lat, lng, outfield_dir (compass degrees FROM home plate TOWARD CF),
 // sensitivity (0-2 scale; Wrigley=2 most wind-sensitive, typical=1)
 const PARKS = {
-  'chc': { lat:41.9484, lng:-87.6553, cfDir:60,  sens:2.0, name:'Wrigley Field' },
+  // cfDir corrected 2026-07-22 (audit/park-cf-bearings): was 60°.
+  // Wikipedia's Wrigley Field infobox and multiple ballpark-survey
+  // references put home-plate-to-CF at ~33° NNE. Old 60° underweighted
+  // the aligned in/out signal by ~10-15% at the highest-sensitivity
+  // park in the league (sens=2.0). See docs/park-bearings-audit.md
+  // for the audit and the 26 other parks still on unverified 45°.
+  'chc': { lat:41.9484, lng:-87.6553, cfDir:33,  sens:2.0, name:'Wrigley Field' },
   'cws': { lat:41.8300, lng:-87.6339, cfDir:5,   sens:1.0, name:'Guaranteed Rate' },
   'nyy': { lat:40.8296, lng:-73.9262, cfDir:45,  sens:1.0, name:'Yankee Stadium' },
   'nym': { lat:40.7571, lng:-73.8458, cfDir:45,  sens:0.3, name:'Citi Field' },
