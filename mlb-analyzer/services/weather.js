@@ -66,30 +66,127 @@ function calcWindFactor(windDir, windSpeed, park) {
 }
 
 
+// Per-park IANA timezone. gameTime in game_log is an ET wall-clock string
+// (e.g. "7:05 PM ET"); Open-Meteo's hourly array is indexed in the park's
+// LOCAL wall clock when we request `timezone=auto`. Prior versions used
+// the ET hour directly to index — silently off by 1-3h for every non-ET
+// park, and off by an ET-vs-Arizona DST-dependent amount for ARI. See
+// tmp/verify-weather-tz-fix.js for the spot checks.
+const PARK_TZ = {
+  chc:'America/Chicago',    cws:'America/Chicago',
+  nyy:'America/New_York',   nym:'America/New_York',
+  bos:'America/New_York',   phi:'America/New_York',
+  was:'America/New_York',   bal:'America/New_York',
+  atl:'America/New_York',   mia:'America/New_York',
+  tb: 'America/New_York',
+  tor:'America/Toronto',    // ET, but canonical IANA name
+  pit:'America/New_York',   cle:'America/New_York',
+  cin:'America/New_York',   det:'America/Detroit',   // ET
+  mil:'America/Chicago',    min:'America/Chicago',
+  stl:'America/Chicago',    hou:'America/Chicago',
+  tex:'America/Chicago',
+  kan:'America/Chicago',    kc: 'America/Chicago',
+  col:'America/Denver',     // MT with DST
+  ari:'America/Phoenix',    // MT year-round, NO DST
+  lad:'America/Los_Angeles', laa:'America/Los_Angeles',
+  sd: 'America/Los_Angeles', sfg:'America/Los_Angeles',
+  sea:'America/Los_Angeles', oak:'America/Los_Angeles',
+  ath:'America/Los_Angeles',
+};
+
+// Convert a (dateStr, hour, minute) ET wall-clock moment to UTC milliseconds.
+// Uses Intl to derive ET's current UTC offset at the given date, so DST is
+// handled by the platform rather than a hard-coded shift. No dependency.
+function etWallClockToUtcMs(dateStr, hour, minute) {
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  // Naive: treat the ET wall clock as if it were UTC.
+  const naive = Date.UTC(y, mo - 1, d, hour, minute);
+  // Re-render that instant in ET; the difference between the two wall clocks
+  // is ET's UTC offset at that moment (in the correct direction).
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit',
+  }).formatToParts(new Date(naive));
+  const p = {};
+  for (const part of parts) p[part.type] = part.value;
+  // Intl 'hour' can render midnight as '24' in some locales; normalize.
+  const etH = parseInt(p.hour, 10) === 24 ? 0 : parseInt(p.hour, 10);
+  const asEtWallMs = Date.UTC(+p.year, +p.month - 1, +p.day, etH, +p.minute);
+  const offsetMs = asEtWallMs - naive;
+  return naive - offsetMs;
+}
+
+// Given (gameDate, gameTime-ET, timeZone), return "YYYY-MM-DDTHH:00" in the
+// park's local wall clock — the exact string shape Open-Meteo emits in
+// `hourly.time[]` when requested with `timezone=auto`. Enables direct
+// `indexOf` matching against the hourly array without arithmetic that could
+// drift on DST boundaries or cross-date late/early games.
+//
+// Returns null if gameTime doesn't parse.
+function parkLocalHourIso(gameDate, gameTime, timeZone) {
+  if (!gameTime) return null;
+  const m = gameTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const ap = m[3].toUpperCase();
+  if (ap === 'PM' && h !== 12) h += 12;
+  if (ap === 'AM' && h === 12) h = 0;
+
+  const utcMs = etWallClockToUtcMs(gameDate, h, min);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hour12: false,
+    year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit',
+  }).formatToParts(new Date(utcMs));
+  const p = {};
+  for (const part of parts) p[part.type] = part.value;
+  const localH = parseInt(p.hour, 10) === 24 ? 0 : parseInt(p.hour, 10);
+  return `${p.year}-${p.month}-${p.day}T${String(localH).padStart(2, '0')}:00`;
+}
+
 // Fetch wind at game time for a specific park using Open-Meteo (no API key needed)
 // Uses Node 20 built-in fetch
 async function fetchParkWind(homeTeam, gameDate, gameTime) {
   const teamKey = (homeTeam || '').toLowerCase().replace(/[^a-z]/g, '');
   const park = PARKS[teamKey];
   if (!park) return null;
+  const tz = PARK_TZ[teamKey];
+  if (!tz) {
+    console.warn(`[weather] no timezone mapping for ${teamKey}; falling back to naive-hour index`);
+  }
 
-  // Parse game hour (local time)
-  let gameHour = 18;
+  // Compute the park-local hour ISO we want to hit in the Open-Meteo array.
+  // gameTime is an ET wall clock ("7:05 PM ET"); Open-Meteo hourly.time
+  // strings are the park's LOCAL wall clock, so we convert once and match
+  // by string. Falls back to naive-hour indexing only when either the
+  // gameTime can't be parsed or the park has no TZ entry.
+  let targetIso = null;
+  let gameHourNaive = 18;
   if (gameTime) {
     const m = gameTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
     if (m) {
-      let h = parseInt(m[1]), ap = m[3].toUpperCase();
+      let h = parseInt(m[1], 10);
+      const ap = m[3].toUpperCase();
       if (ap === 'PM' && h !== 12) h += 12;
       if (ap === 'AM' && h === 12) h = 0;
-      gameHour = h;
+      gameHourNaive = h;
     }
+  }
+  if (tz) {
+    targetIso = parkLocalHourIso(gameDate, gameTime, tz);
   }
 
   try {
+    // Request gameDate ± 1 day so cross-date wraps (a late-ET game at a
+    // PT park, or a very-early-ET matinee at an ET park with DST shifts)
+    // are still findable in the hourly array. Open-Meteo returns 24
+    // hours per date requested; 3 days = ~72 rows, cheap.
+    const startDate = _shiftDate(gameDate, -1);
+    const endDate   = _shiftDate(gameDate, +1);
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${park.lat}&longitude=${park.lng}` +
       `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
       `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
-      `&start_date=${gameDate}&end_date=${gameDate}`;
+      `&start_date=${startDate}&end_date=${endDate}`;
     // User-Agent: some upstream APIs reject headerless server-side fetches.
     // Open-Meteo's free tier rate-limit is per-IP, and Render shared IPs hit
     // it; the UA helps the provider distinguish our traffic if we need to
@@ -105,7 +202,27 @@ async function fetchParkWind(homeTeam, gameDate, gameTime) {
       return null;
     }
 
-    const idx = Math.min(gameHour, data.hourly.time.length - 1);
+    // Preferred path: exact string match against the park-local ISO hour we
+    // computed. Fallback path (targetIso null): naive-hour index into
+    // gameDate-only data — retains the pre-fix behavior for the tiny
+    // no-TZ / no-gameTime cases, so this fix doesn't silently break parks
+    // absent from PARK_TZ.
+    let idx = -1;
+    if (targetIso) {
+      idx = data.hourly.time.indexOf(targetIso);
+      if (idx < 0) {
+        console.warn(`[weather] target ${targetIso} not found in hourly array for ${homeTeam}; falling back to naive hour ${gameHourNaive}`);
+      }
+    }
+    if (idx < 0) {
+      // Find first hourly.time entry whose date part matches gameDate, then
+      // step by gameHourNaive. Robust against the ± 1-day window we now
+      // request (hourly.time is not guaranteed to start at 00:00 of gameDate).
+      const dayStart = data.hourly.time.findIndex(t => t.startsWith(gameDate + 'T'));
+      idx = dayStart >= 0
+        ? Math.min(dayStart + gameHourNaive, data.hourly.time.length - 1)
+        : Math.min(gameHourNaive, data.hourly.time.length - 1);
+    }
     if (idx < 0) return null;
 
     const windSpeed = data.hourly.wind_speed_10m?.[idx];
@@ -130,4 +247,17 @@ async function fetchParkWind(homeTeam, gameDate, gameTime) {
   }
 }
 
-module.exports = { fetchParkWind, calcWindFactor, PARKS };
+// YYYY-MM-DD ± n days. Purely calendar math, no TZ needed.
+function _shiftDate(dateStr, days) {
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  const ms = Date.UTC(y, mo - 1, d) + days * 86400000;
+  const dt = new Date(ms);
+  return dt.getUTCFullYear() + '-'
+    + String(dt.getUTCMonth() + 1).padStart(2, '0') + '-'
+    + String(dt.getUTCDate()).padStart(2, '0');
+}
+
+module.exports = {
+  fetchParkWind, calcWindFactor, PARKS,
+  _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, _shiftDate },
+};
