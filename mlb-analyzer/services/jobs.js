@@ -7,6 +7,7 @@ const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScore
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
+const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
 const { fetchParkWind } = require('./weather');
@@ -3592,85 +3593,142 @@ async function runOddsJob(dateStr, opts) {
   try {
     const settings = getSettings();
 
-    // Bootstrap statsapi schedule first. Adds any newly-discovered games
-    // (e.g. an overnight postponement makeup added after last night's
-    // 8/11PM prefetch) to game_log before odds processing tries to enrich
-    // them. The same fetched rows feed the validIds gate below — saves a
-    // duplicate fetch.
+    // Bootstrap statsapi schedule first. statsapi is the sole source of
+    // truth for which games exist on the slate — the "game universe" is
+    // defined here, not by any book.
     const scheduleRows = await ensureScheduleBootstrap(dateStr);
 
-    let oddsRaw = [];
+    // ====================================================================
+    // Complete the 2026-07-10 demote (fix/complete-demote-seed-oddsraw-
+    // from-schedule, 2026-07-22).
+    //
+    // The original demote moved Unabated out of the BETTING PATH as a
+    // PRICE source (market_*_ml / market_total / over_price / under_price
+    // now had to come from Kalshi or Poly). But Unabated still defined
+    // the SHAPE of oddsRaw — Kalshi-direct override below only writes
+    // into a pre-existing oddsRaw entry, so any game Unabated didn't
+    // return silently escaped every override. Diagnosis on the
+    // 2026-07-22 BAL@BOS and PIT@NYY doubleheaders confirmed the case:
+    // Poly priced both nightcaps, Kalshi had partial coverage, but
+    // Unabated hadn't returned the -g2 entries, so market_*_ml stayed
+    // NULL on both game_log rows. Separately, Poly had NO write path
+    // to game_log.market_*_ml at all — it fed processGameSignals'
+    // in-memory venue baseline but never round-tripped to the row.
+    //
+    // New sequencing:
+    //   1. SEED oddsRaw from scheduleRows — statsapi defines the universe.
+    //   2. Fetch Unabated (or fall back to Odds-API) into unabatedRows.
+    //   3. MERGE Unabated into pre-seeded oddsRaw, writing ONLY to the
+    //      unabated_*/xcheck_* columns per the demote ruling. Never
+    //      touches market_*_ml.
+    //   4. Kalshi-direct override (below) writes market_*_ml from Kalshi.
+    //   5. Poly-direct override (new, below) writes market_*_ml from
+    //      Poly for any row Kalshi didn't cover.
+    //   6. Coverage instrumentation logs any scheduled game with NULL
+    //      market_*_ml after all overrides (permanent visibility).
+    //
+    // The old "demote loop" (NULL market_*_ml on Unabated rows) and the
+    // "statsapi-authoritative gate" (drop Unabated rows not in schedule)
+    // are both replaced by construction — oddsRaw is seeded with NULL
+    // market_*_ml and only contains schedule game_ids to begin with.
+    // ====================================================================
+    let oddsRaw = scheduleRows.map(g => ({
+      game_id:               g.game_id,
+      awayTeam:              g.away_team,
+      homeTeam:              g.home_team,
+      // Price fields all start NULL. Kalshi/Poly overrides fill them.
+      market_away_ml:        null,
+      market_home_ml:        null,
+      market_total:          null,
+      over_price:            null,
+      under_price:           null,
+      ml_source:             null,
+      total_source:          null,
+      // xcheck_* + unabated_* + spread — filled from Unabated below.
+      xcheck_away_ml:        null,
+      xcheck_home_ml:        null,
+      xcheck_total:          null,
+      xcheck_over_price:     null,
+      xcheck_under_price:    null,
+      xcheck_ml_source:      null,
+      xcheck_total_source:   null,
+      unabated_away_ml:      null,
+      unabated_home_ml:      null,
+      unabated_ml_source:    null,
+      unabated_total:        null,
+      unabated_over_price:   null,
+      unabated_under_price:  null,
+      unabated_total_source: null,
+      market_away_spread:    null,
+      market_home_spread:    null,
+      market_away_spread_price: null,
+      market_home_spread_price: null,
+      market_spread_src:     null,
+    }));
+    console.log('[odds] seeded oddsRaw from ' + scheduleRows.length + ' scheduled games');
+
+    // Fetch Unabated (or fall back to Odds-API). unabatedRows carry the
+    // pre-demote market_*_ml — routed into unabated_*/xcheck_* on merge.
+    let unabatedRows = [];
     try {
       console.log('[odds] Fetching from Unabated...');
-      // Split fetch into raw + parse so the snapshot system captures the
-      // upstream JSON before any transformation; /api/replay/odds re-runs
-      // parseUnabatedOdds against the captured payload without re-fetching.
       const unabatedRawJson = await fetchUnabatedRaw();
       writeSnapshot('odds', dateStr, unabatedRawJson);
-      oddsRaw = parseUnabatedOdds(unabatedRawJson, dateStr);
-      console.log('[odds] Unabated returned '+oddsRaw.length+' games');
-      if (!oddsRaw.length) throw new Error('Unabated returned 0 games');
+      unabatedRows = parseUnabatedOdds(unabatedRawJson, dateStr);
+      console.log('[odds] Unabated returned '+unabatedRows.length+' games');
+      if (!unabatedRows.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
       console.log('[odds] Unabated failed: '+e.message+' → falling back to Odds API');
       try {
-        oddsRaw = await fetchOddsAPI(settings.odds_api_key, dateStr);
+        unabatedRows = await fetchOddsAPI(settings.odds_api_key, dateStr);
       } catch(e2) {
         console.log('[odds] Odds API also failed: '+e2.message);
-        oddsRaw = []; // ensure array, don't throw — just log and continue
+        unabatedRows = []; // proceed with pure-Kalshi/Poly slate
       }
     }
 
-    // Demote Unabated out of the betting path (feat/demote-unabated, 2026-07-10).
-    // Owner ruling: bet_signals.market_line must only come from Kalshi/Poly.
-    // The Unabated top-priority-sportsbook value that was populating
-    // market_*_ml / market_total / over_price / under_price gets rerouted
-    // to the new unabated_* columns for reference-only display. The
-    // market_* fields are cleared so that ONLY the Kalshi/Poly override
-    // blocks below can fill them; if neither venue covers a game, market_*
-    // stays NULL and downstream signal emission suppresses that market.
-    //
-    // The pre-existing xcheck_* fields keep their current semantics
-    // (Unabated's SECOND-priority sportsbook), so the totals-divergence
-    // flag in processOddsArray still compares Kalshi/Poly-primary against
-    // Unabated-second and fires the same way it did before demotion.
-    for (const o of oddsRaw) {
-      o.unabated_away_ml = (o.market_away_ml != null) ? o.market_away_ml : null;
-      o.unabated_home_ml = (o.market_home_ml != null) ? o.market_home_ml : null;
-      o.unabated_ml_source = o.ml_source || null;
-      o.unabated_total = (o.market_total != null) ? o.market_total : null;
-      o.unabated_over_price = (o.over_price != null) ? o.over_price : null;
-      o.unabated_under_price = (o.under_price != null) ? o.under_price : null;
-      o.unabated_total_source = o.total_source || null;
-      // Clear market_* so Kalshi/Poly overrides are the SOLE source. Any
-      // game they don't cover falls through with NULL, which processGameSignals
-      // treats as "no baseline → no signal emit" per the ruling.
-      o.market_away_ml = null;
-      o.market_home_ml = null;
-      o.ml_source = null;
-      o.market_total = null;
-      o.over_price = null;
-      o.under_price = null;
-      o.total_source = null;
-    }
-
-    // Statsapi-authoritative gate: drop any odds row whose game_id doesn't
-    // map to a game in statsapi's schedule for dateStr. statsapi is the
-    // single source of truth for *which games exist*; Unabated / Odds API
-    // only enrich. processOddsArray today uses UPDATE (so a phantom can't
-    // create a row), but if that ever loosens this filter prevents a
-    // misidentified Unabated contract from poisoning a slate. Reuses the
-    // bootstrap fetch above; degrades open if that returned 0 rows.
-    if (oddsRaw.length && scheduleRows.length) {
-      const validIds = new Set(scheduleRows.map(g => g.game_id));
-      const before = oddsRaw.length;
-      oddsRaw = oddsRaw.filter(o => {
-        if (validIds.has(o.game_id)) return true;
-        console.warn('[unabated] rejecting phantom matchup not in statsapi: ' + o.game_id);
-        return false;
-      });
-      if (oddsRaw.length < before) {
-        console.log('[odds] gated out '+(before - oddsRaw.length)+' game(s) not in statsapi schedule');
+    // Merge Unabated data into seeded oddsRaw by game_id. Only writes to
+    // unabated_*/xcheck_* + reference spread fields — never touches
+    // market_*_ml, per demote. Phantom game_ids (in Unabated but not
+    // statsapi) get rejected — replaces the old validIds gate.
+    {
+      const seededById = new Map();
+      for (const o of oddsRaw) seededById.set(o.game_id, o);
+      let mergedCount = 0, phantomCount = 0;
+      for (const u of unabatedRows) {
+        const o = seededById.get(u.game_id);
+        if (!o) {
+          console.warn('[unabated] rejecting phantom matchup not in statsapi: ' + u.game_id);
+          phantomCount++;
+          continue;
+        }
+        o.unabated_away_ml     = u.market_away_ml != null ? u.market_away_ml : null;
+        o.unabated_home_ml     = u.market_home_ml != null ? u.market_home_ml : null;
+        o.unabated_ml_source   = u.ml_source || null;
+        o.unabated_total       = u.market_total != null ? u.market_total : null;
+        o.unabated_over_price  = u.over_price != null ? u.over_price : null;
+        o.unabated_under_price = u.under_price != null ? u.under_price : null;
+        o.unabated_total_source = u.total_source || null;
+        // xcheck_* — Unabated's second-priority sportsbook. Preserved so
+        // the totals-divergence flag in processOddsArray still fires
+        // against Kalshi/Poly-primary.
+        o.xcheck_away_ml      = u.xcheck_away_ml != null ? u.xcheck_away_ml : null;
+        o.xcheck_home_ml      = u.xcheck_home_ml != null ? u.xcheck_home_ml : null;
+        o.xcheck_total        = u.xcheck_total != null ? u.xcheck_total : null;
+        o.xcheck_over_price   = u.xcheck_over_price != null ? u.xcheck_over_price : null;
+        o.xcheck_under_price  = u.xcheck_under_price != null ? u.xcheck_under_price : null;
+        o.xcheck_ml_source    = u.xcheck_ml_source || null;
+        o.xcheck_total_source = u.xcheck_total_source || null;
+        // Runline / spread reference — Unabated is the current source.
+        o.market_away_spread       = u.market_away_spread != null ? u.market_away_spread : null;
+        o.market_home_spread       = u.market_home_spread != null ? u.market_home_spread : null;
+        o.market_away_spread_price = u.market_away_spread_price != null ? u.market_away_spread_price : null;
+        o.market_home_spread_price = u.market_home_spread_price != null ? u.market_home_spread_price : null;
+        o.market_spread_src        = u.market_spread_src || null;
+        mergedCount++;
       }
+      console.log('[odds] Unabated merged into ' + mergedCount + ' scheduled game(s)'
+        + (phantomCount ? ', ' + phantomCount + ' phantom(s) rejected' : ''));
     }
 
     // Kalshi-direct ML override (gated). When kalshi_direct_primary_enabled
@@ -3818,6 +3876,127 @@ async function runOddsJob(dateStr, opts) {
         }
       } catch (e) {
         console.warn('[odds] Kalshi-direct override failed (non-fatal, falling through): ' + e.message);
+      }
+    }
+
+    // ====================================================================
+    // Poly-direct ML override (fix/complete-demote-seed-oddsraw-from-
+    // schedule, 2026-07-22). Completes the 2026-07-10 demote by giving
+    // Poly a WRITE PATH to game_log.market_*_ml. Kalshi ran first above;
+    // Poly fills any oddsRaw row Kalshi left NULL. Ranking: Kalshi wins
+    // when both have coverage (matches the pre-existing venue-aware
+    // baseline preference for Kalshi's on-shore market when available).
+    //
+    // Poly is DH-aware since fix/dh-odds-poly-and-oddsapi (PR #183) —
+    // getPolymarketMlbLines returns distinct rows per DH leg with
+    // -g{N}-suffixed game_ids that match statsapi/game_log.
+    //
+    // Guardrails: match the Kalshi-direct block.
+    //   - Locked games (odds_locked_at set) skipped.
+    //   - Poly game_ids not in oddsRaw (i.e. not in statsapi schedule)
+    //     LOGGED and SKIPPED — statsapi is authoritative.
+    //   - Whole block try/catch'd: any failure logs and falls through.
+    //
+    // ---- CLV IMPACT — MATCHES KALSHI PATH ----
+    // Poly top-of-book ask is fee-adjusted through polyTakerFeeRate so
+    // the stored market_*_ml is the all-in price the bettor pays.
+    // Symmetric with Kalshi's stored fee-adjusted values, so downstream
+    // CLV computation stays consistent across sources. Same known-and-
+    // accepted CLV inflation noted on the Kalshi-direct helper.
+    //
+    // Totals are NOT written here — Poly totals require per-strike book
+    // walking that's already done by odds-comparison.js's runComparison
+    // for the venue-aware signal path. Adding a slate-level Poly totals
+    // write is a follow-up (needs a rung-pick + fee handling story).
+    // Totals-only games where Kalshi doesn't cover will still surface
+    // NULL market_total, same as pre-fix.
+    // ====================================================================
+    try {
+      const polyRows = await getPolymarketMlbLines(dateStr);
+      if (!polyRows.length) {
+        console.log('[odds] Poly-direct: no markets returned for ' + dateStr);
+      } else {
+        // Fee-adjust a Poly top-of-book raw price (0-1 dollar) to an
+        // integer American ML matching Kalshi's stored convention.
+        function polyFeeAdjustAmerican(topAskPrice) {
+          const C = Number(topAskPrice);
+          if (!Number.isFinite(C) || !(C > 0.001 && C < 0.999)) return null;
+          const adj = C + polyTakerFeeRate(C);
+          if (!(adj > 0.001 && adj < 0.999)) return null;
+          if (adj >= 0.5) {
+            const americanFloat = -(100 * adj / (1 - adj));
+            const twoDecimal    = Math.round(americanFloat * 100) / 100;
+            return Math.round(twoDecimal - 1.0);
+          } else {
+            const americanFloat = 100 * (1 - adj) / adj;
+            const twoDecimal    = Math.round(americanFloat * 100) / 100;
+            return Math.round(twoDecimal - 1.0);
+          }
+        }
+        const oddsById = new Map();
+        for (const o of oddsRaw) oddsById.set(o.game_id, o);
+        let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, missingFromSchedule = 0;
+        for (const p of polyRows) {
+          if (!p.game_id) continue;
+          const o = oddsById.get(p.game_id);
+          if (!o) {
+            console.warn('[odds] Poly-direct: ' + p.game_id
+              + ' not in statsapi schedule — skipping');
+            missingFromSchedule++;
+            continue;
+          }
+          const existing = q.getGameById.get(dateStr, p.game_id);
+          if (existing && existing.odds_locked_at) {
+            skippedLocked++;
+            continue;
+          }
+          // Kalshi wrote first — only fill when it left the field NULL.
+          if (o.market_away_ml != null || o.market_home_ml != null) {
+            skippedHaveKalshi++;
+            continue;
+          }
+          const awayTopPrice = p.away && p.away.top_ask && p.away.top_ask.price;
+          const homeTopPrice = p.home && p.home.top_ask && p.home.top_ask.price;
+          const awayMl = polyFeeAdjustAmerican(awayTopPrice);
+          const homeMl = polyFeeAdjustAmerican(homeTopPrice);
+          if (awayMl == null || homeMl == null) {
+            console.warn('[odds] Poly-direct: ' + p.game_id
+              + ' top-of-book incomplete (away=' + awayTopPrice
+              + ' home=' + homeTopPrice + ') — skipping');
+            continue;
+          }
+          o.market_away_ml = awayMl;
+          o.market_home_ml = homeMl;
+          o.ml_source = 'polymarket';
+          wrote++;
+        }
+        console.log('[odds] Poly-direct ML: ' + wrote + ' game(s) written'
+          + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
+          + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
+          + (missingFromSchedule ? ', ' + missingFromSchedule + ' not in statsapi (skipped)' : ''));
+      }
+    } catch (e) {
+      console.warn('[odds] Poly-direct override failed (non-fatal, falling through): ' + e.message);
+    }
+
+    // ====================================================================
+    // Coverage instrumentation. Permanent visibility into which scheduled
+    // games are still missing market_*_ml after every override has run.
+    // Complements the Kalshi/Poly per-block WARN lines with a single
+    // slate-level summary that's grep-friendly. Any [odds-coverage] MISS
+    // line is a scheduled game the model can't emit an ML signal on.
+    // ====================================================================
+    {
+      const misses = oddsRaw.filter(o => o.market_away_ml == null || o.market_home_ml == null);
+      console.log('[odds-coverage] ' + dateStr + ': '
+        + (oddsRaw.length - misses.length) + '/' + oddsRaw.length
+        + ' scheduled games have market_*_ml populated');
+      for (const o of misses) {
+        console.warn('[odds-coverage] MISS ' + dateStr + '/' + o.game_id
+          + ' — market_away_ml=' + o.market_away_ml
+          + ' market_home_ml=' + o.market_home_ml
+          + ' unabated_away_ml=' + o.unabated_away_ml
+          + ' unabated_home_ml=' + o.unabated_home_ml);
       }
     }
 

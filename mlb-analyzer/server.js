@@ -87,8 +87,46 @@ app.get('/api/version', (req, res) => res.json({
 // API routes
 app.use('/api', require('./routes/api'));
 
-// Health check for Render
-app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+// Health check for Render. Extended to surface today's odds-coverage
+// summary so the demote-completion regression gate (every scheduled game
+// with a Kalshi OR Poly market gets a populated market_line) is visible
+// to an ops check without needing to grep cron logs.
+//   status:            'ok' if server up
+//   odds_coverage.date:            YYYY-MM-DD (PT-anchored, matches cron)
+//   odds_coverage.scheduled:       total game_log rows for the date
+//   odds_coverage.priced:          rows with both market_away_ml + market_home_ml populated
+//   odds_coverage.missing:         [{game_id, ml_source, total_source}]
+// A non-empty odds_coverage.missing on a slate where books have posted is
+// the same signal as the [odds-coverage] MISS lines in the cron log.
+app.get('/health', (req, res) => {
+  const out = { status: 'ok', time: new Date().toISOString() };
+  try {
+    const { q, db } = require('./db/schema');
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const rows = db.prepare(
+      "SELECT game_id, market_away_ml, market_home_ml, ml_source, total_source, odds_locked_at "
+      + "FROM game_log WHERE game_date = ? ORDER BY game_id"
+    ).all(today);
+    const priced = rows.filter(r => r.market_away_ml != null && r.market_home_ml != null);
+    const missing = rows
+      .filter(r => r.market_away_ml == null || r.market_home_ml == null)
+      .map(r => ({
+        game_id: r.game_id,
+        ml_source: r.ml_source,
+        total_source: r.total_source,
+        odds_locked_at: r.odds_locked_at,
+      }));
+    out.odds_coverage = {
+      date: today,
+      scheduled: rows.length,
+      priced: priced.length,
+      missing,
+    };
+  } catch (e) {
+    out.odds_coverage_error = e && e.message || String(e);
+  }
+  res.json(out);
+});
 
 // JSON error handler for anything under /api that escaped a route's try/catch
 // (malformed JSON bodies, unhandled promise rejections bubbling up, etc).
