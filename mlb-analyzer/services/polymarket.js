@@ -660,36 +660,96 @@ function fillToAmerican(avgFillPrice, feeUsd, filledUsd) {
 // conversion — the "displayed price," which the brief said explicitly
 // misleads at size. The Stage 2 caller walks the book to compute the
 // true at-size average.
+// Doubleheader leg-gap threshold. Matches the invariant used by
+// services/unabated.js: DH legs are never scheduled less than 90min
+// apart at first pitch. A tighter gap is a placeholder / dup event and
+// gets merged into the same leg (liquidity picks the winner).
+const LEG_GAP_MS = 90 * 60 * 1000;
+
 async function getPolymarketMlbLines(date, opts) {
   if (!date) throw new Error('getPolymarketMlbLines: date (YYYY-MM-DD) required');
   const includeUnmatched = !!(opts && opts.includeUnmatched);
 
   const events = await gammaListMlbEvents(date);
-  // Dedupe by game_id, prefer higher-liquidity event. Poly may keep a
-  // placeholder future event live alongside today's real event — the
-  // placeholder has liquidity in the low $ (e.g. $55), the real event
-  // has $500K+. Picking the higher-liquidity event keeps us on the
-  // one traders are actually using.
-  const bestPerGid = new Map();
-  const candidates = [];
+
+  // Doubleheader-aware dedup. Previously this collapsed both legs of a
+  // DH to a single base game_id ({away}-{home}) and picked the
+  // higher-liquidity event, silently dropping the losing leg — verified
+  // against 2026-07-18 PIT@CLE and 2026-07-11 MIL@PIT (docs/dh-odds-
+  // matching-2026-07-18.md). buildGameId already supports gameNumber;
+  // the callers just weren't passing it.
+  //
+  // New pass (mirrors services/unabated.js:296-348):
+  //   1. Extract sides for each valid per-game event.
+  //   2. Group by base team-pair (base {away}-{home}, no suffix).
+  //   3. Within each team-pair, sort by game_start_time_iso ascending,
+  //      then cluster consecutive events within LEG_GAP_MS. Anything
+  //      wider is a separate leg.
+  //   4. Assign gameNumber = clusterIndex + 1 for each cluster (1, 2, ...).
+  //   5. Within each cluster, keep the highest-liquidity event — same
+  //      placeholder filter as before.
+  //   6. Emit game_id via buildGameId(away, home, gameNumber) so leg 2+
+  //      lands under {away}-{home}-g{N} matching statsapi/Unabated/Kalshi.
+  const perEvent = [];
   for (const evt of events) {
     if (!isPerGameEvent(evt)) continue;
     const sides = extractSidesFromEvent(evt);
     if (!sides) continue;
     if (!includeUnmatched && (!sides.away_abbr || !sides.home_abbr)) continue;
-    const gid = (sides.away_abbr && sides.home_abbr)
-      ? buildGameId(sides.away_abbr, sides.home_abbr) : null;
+    sides.totals_ladder = extractTotalsFromEvent(evt);
     const liq = sides.event_liquidity_clob != null ? sides.event_liquidity_clob : 0;
-    const prev = gid ? bestPerGid.get(gid) : null;
-    if (!prev || liq > prev.liq) {
-      // Also pull the totals ladder while we have the event in hand
-      // — top-of-book only; per-strike orderbook fetch is deferred to
-      // priceTotal() when the caller actually wants to depth-walk.
-      sides.totals_ladder = extractTotalsFromEvent(evt);
-      bestPerGid.set(gid, { sides, liq, evt });
-    }
+    perEvent.push({ sides, liq, evt });
   }
-  for (const { sides } of bestPerGid.values()) candidates.push(sides);
+
+  const byTeamPair = new Map();
+  for (const rec of perEvent) {
+    const a = rec.sides.away_abbr;
+    const h = rec.sides.home_abbr;
+    // Base key for grouping — never carries the -g{N} suffix.
+    const base = (a && h) ? (String(a).toLowerCase().replace(/[^a-z]/g,'') + '-' + String(h).toLowerCase().replace(/[^a-z]/g,'')) : null;
+    if (!base) continue;
+    if (!byTeamPair.has(base)) byTeamPair.set(base, []);
+    byTeamPair.get(base).push(rec);
+  }
+
+  const winners = [];
+  for (const [base, recs] of byTeamPair) {
+    // Sort by game_start_time_iso ascending. Null start times sort last
+    // so any typed event with a real start beats a null-start placeholder.
+    recs.sort((x, y) => {
+      const xt = x.sides.game_start_time_iso ? Date.parse(x.sides.game_start_time_iso) : Infinity;
+      const yt = y.sides.game_start_time_iso ? Date.parse(y.sides.game_start_time_iso) : Infinity;
+      return xt - yt;
+    });
+
+    const clusters = [];
+    for (const rec of recs) {
+      const t = rec.sides.game_start_time_iso ? Date.parse(rec.sides.game_start_time_iso) : NaN;
+      const last = clusters[clusters.length - 1];
+      if (last) {
+        const lastT = Date.parse(last[last.length - 1].sides.game_start_time_iso);
+        if (!isNaN(t) && !isNaN(lastT) && Math.abs(t - lastT) < LEG_GAP_MS) {
+          last.push(rec);
+          continue;
+        }
+      }
+      clusters.push([rec]);
+    }
+
+    if (clusters.length > 1) {
+      console.log('[polymarket] doubleheader detected for ' + base + ': ' + clusters.length + ' legs by ' + LEG_GAP_MS/60000 + '-min gap');
+    }
+
+    clusters.forEach((cluster, idx) => {
+      cluster.sort((a, b) => b.liq - a.liq);
+      const best = cluster[0];
+      const gameNumber = idx + 1;
+      best.sides.__game_number = gameNumber;
+      winners.push({ sides: best.sides, gameNumber, base });
+    });
+  }
+
+  const candidates = winners.map(w => w.sides);
 
   const out = [];
   for (const sides of candidates) {
@@ -704,11 +764,16 @@ async function getPolymarketMlbLines(date, opts) {
     const awayTop = topOfBookAsk(awayBook);
     const homeTop = topOfBookAsk(homeBook);
 
+    // sides.__game_number was assigned by the DH-aware clustering pass
+    // above (default 1 for single games). buildGameId encodes it into
+    // the id suffix.
+    const gameNumber = sides.__game_number || 1;
     out.push({
       game_date: date,
       game_id: (sides.away_abbr && sides.home_abbr)
-        ? buildGameId(sides.away_abbr, sides.home_abbr)
+        ? buildGameId(sides.away_abbr, sides.home_abbr, gameNumber)
         : null,
+      game_number: gameNumber,
       away_team: sides.away_abbr,
       home_team: sides.home_abbr,
       event_id: sides.event_id,
