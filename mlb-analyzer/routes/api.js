@@ -49,7 +49,7 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
-const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx } = require('../services/model');
+const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
@@ -6621,6 +6621,42 @@ router.get('/health/:date', (req, res) => {
         ? 'All settings invariants pass'
         : violations.length + ' settings violation(s): ' + violations.slice(0, 5).map(v => v.reason).join('; ') + (violations.length > 5 ? '; +' + (violations.length - 5) + ' more' : '');
       checks.push({ id: 'settings_sanity', status, severity: 'error', message, detail: { violations } });
+    }
+
+    // ---- check: roster_gate (fix/roster-gate-abbrev-aware, 2026-07-23) ----
+    // Counter is process-lifetime. On a healthy slate we expect 0-3
+    // rejections: one for each rostered player Steamer emitted under an
+    // ambiguous shadow key that the gate correctly upgraded (Victor Mesa
+    // class). Higher counts mean the gate is either finding a lot of
+    // real off-roster names OR (the 2026-07-23 incident) mis-rejecting
+    // abbrev-form lookups it doesn't understand. Warn threshold >3 so
+    // the panel goes amber the moment mass fallback starts.
+    //
+    // Severity=warn (not error) — a stuck-high counter degrades the
+    // slate but doesn't break it; the model still runs, just against
+    // league-average wOBA for the mis-rejected batters. Overall status
+    // will drop to 'degraded', panel dot goes amber, we notice.
+    //
+    // recent[] tail (up to 8) surfaces as affected_games so the row
+    // shows batter+team of each recent rejection — the exact class
+    // signal we were missing when the earlier bug went unnoticed for
+    // hours because it was JSON-only.
+    {
+      const stats = getRosterGateStats();
+      const n = stats.totalRejections;
+      const status = n <= 3 ? 'pass' : 'warn';
+      const message = n === 0
+        ? 'no rejections (gate quiet or off)'
+        : n <= 3
+          ? n + ' rejection(s) — normal shadow-upgrade activity'
+          : n + ' rejections — batters likely falling back to league avg';
+      const check = { id: 'roster_gate', status, severity: 'warn', message };
+      if (n > 0 && stats.recent && stats.recent.length) {
+        check.affected_games = stats.recent.slice(-8).map(r =>
+          (r.batter || '?') + '(' + (r.teamHint || '?') + (r.gateResolved ? ',ok' : ',fallback') + ')'
+        );
+      }
+      checks.push(check);
     }
 
     // ---- aggregate overall_status ----
