@@ -3378,10 +3378,21 @@ function processOddsArray(dateStr, oddsRaw, settings) {
   if(oddsRaw.length !== odds.length) console.log('[odds] Deduped '+oddsRaw.length+' -> '+odds.length+' results');
   const wobaIdx = getWobaIndex();
   let updated = 0;
-  // Label-only UPDATE for locked games (see comment block in original site).
+  // Label-only UPDATE for locked games. COALESCE preserves source
+  // labels when the current pass's oddsRaw doesn't carry them, which
+  // is the common case on a locked row: Kalshi and Poly overrides
+  // both short-circuit on `existing.odds_locked_at`, so o.ml_source /
+  // o.total_source stay NULL. Pre-fix (2026-07-22) this used direct
+  // writes, wiping the previously-good 'kalshi'/'polymarket' labels
+  // and leaving locked rows with valid frozen prices but NULL sources
+  // (bal-bos-g2, min-cle 2026-07-22 UI regression). odds_flagged /
+  // odds_flag_reason stay direct-write — they're recomputed every
+  // pass and are meant to reflect this pass's state.
   const refreshLockedLabels = db.prepare(`UPDATE game_log SET
-    ml_source=?, xcheck_ml_source=?,
-    total_source=?, xcheck_total_source=?,
+    ml_source=COALESCE(?, ml_source),
+    xcheck_ml_source=COALESCE(?, xcheck_ml_source),
+    total_source=COALESCE(?, total_source),
+    xcheck_total_source=COALESCE(?, xcheck_total_source),
     odds_flagged=?, odds_flag_reason=?,
     updated_at=datetime('now')
     WHERE game_date=? AND game_id=?`);
@@ -3390,7 +3401,20 @@ function processOddsArray(dateStr, oddsRaw, settings) {
     console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_ml_source + ')');
     const existing = q.getGameById.get(dateStr, o.game_id);
 
-    const haveMarket = o.market_away_ml != null && o.market_home_ml != null;
+    // Effective values: fall back to existing DB values when this pass
+    // has NULL. Symmetric with the COALESCE preservation in the UPDATEs
+    // below — without this fallback, haveMarket / haveTot would flag
+    // "no sane odds" or "no primary totals" on a game where the DB has
+    // valid stale-but-usable data and this pass had no fresh coverage
+    // (bal-bos-g2 / min-cle 2026-07-22 UI regression, where refreshLocked
+    // Labels ALSO wiped ml_source, compounding the misdisplay).
+    const _effAwayMl = o.market_away_ml != null ? o.market_away_ml : (existing && existing.market_away_ml);
+    const _effHomeMl = o.market_home_ml != null ? o.market_home_ml : (existing && existing.market_home_ml);
+    const _effTotal  = o.market_total  != null ? o.market_total  : (existing && existing.market_total);
+    const _effOverP  = o.over_price    != null ? o.over_price    : (existing && existing.over_price);
+    const _effUnderP = o.under_price   != null ? o.under_price   : (existing && existing.under_price);
+
+    const haveMarket = _effAwayMl != null && _effHomeMl != null;
     const singleSource = haveMarket && (!o.xcheck_ml_source || o.xcheck_ml_source === o.ml_source);
     const reasons = [];
     if (!haveMarket) {
@@ -3433,7 +3457,16 @@ function processOddsArray(dateStr, oddsRaw, settings) {
       o.xcheck_under_price = null;
     }
 
-    const haveTot = o.market_total != null && o.over_price != null && o.under_price != null;
+    // Same effective-value logic as haveMarket above — check the fresh
+    // pass first, fall back to the preserved DB value when this pass is
+    // NULL. Note: plausibility guard above already nulled o.market_total
+    // if it fell outside plausible bounds, so those get recomputed
+    // strictly against fresh (a preserved-but-implausible value is not
+    // possible since a prior successful pass would have gated the same).
+    const _effTotalPost  = o.market_total  != null ? o.market_total  : (existing && existing.market_total);
+    const _effOverPost   = o.over_price    != null ? o.over_price    : (existing && existing.over_price);
+    const _effUnderPost  = o.under_price   != null ? o.under_price   : (existing && existing.under_price);
+    const haveTot = _effTotalPost != null && _effOverPost != null && _effUnderPost != null;
     const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
     if (!haveTot && !haveXcheckTot) {
       reasons.push('no sane totals: no source provided matching-line O/U');
@@ -3522,9 +3555,37 @@ function processOddsArray(dateStr, oddsRaw, settings) {
     const _homeSpreadPrice  = (o.market_home_spread_price != null && o.market_home_spread_price !== 0) ? o.market_home_spread_price : null;
     const _awaySpreadQual   = (_awaySpread != null && _awaySpreadPrice != null) ? 'fresh' : null;
     const _homeSpreadQual   = (_homeSpread != null && _homeSpreadPrice != null) ? 'fresh' : null;
+    // Main UPDATE for unlocked rows. COALESCE the betting-path
+    // market fields (market_*_ml, market_total, over_price, under_price)
+    // and total_source so an intermittent-coverage cron doesn't wipe
+    // a previously-valid value.
+    //
+    // Post-demote-completion (PR #185, 2026-07-22), oddsRaw is seeded
+    // from the schedule with market_*_ml = NULL, then Kalshi and Poly
+    // overrides fill in what they cover. If a game had Kalshi coverage
+    // at 4 PM (writing 153/-182) but not at 5 PM, the pre-fix direct
+    // write here wiped 153/-182 to NULL — and if the lock fired next,
+    // the NULL got frozen in (pit-nyy-g2 2026-07-22 case).
+    //
+    // COALESCE(?, market_away_ml) keeps the last-good value when the
+    // current pass has no coverage. Downstream odds_quality still
+    // tracks freshness independently (currently always 'fresh' on any
+    // UPDATE — worth revisiting to age-out stale values, but that's
+    // a separate PR — see docs/stale-market-freshness.md).
+    //
+    // ml_source is already COALESCE'd. total_source moved from direct
+    // write to COALESCE for symmetry with the label preservation on
+    // refreshLockedLabels above.
+    //
+    // odds_flagged / odds_flag_reason stay direct-write — they're
+    // recomputed every pass.
     db.prepare(`UPDATE game_log SET
-      market_away_ml=?, market_home_ml=?,
-      market_total=?, over_price=?, under_price=?, total_source=?,
+      market_away_ml=COALESCE(?, market_away_ml),
+      market_home_ml=COALESCE(?, market_home_ml),
+      market_total=COALESCE(?, market_total),
+      over_price=COALESCE(?, over_price),
+      under_price=COALESCE(?, under_price),
+      total_source=COALESCE(?, total_source),
       kalshi_implied_total=COALESCE(?, kalshi_implied_total),
       ml_source=COALESCE(?, ml_source),
       xcheck_ml_source=COALESCE(?, xcheck_ml_source),
