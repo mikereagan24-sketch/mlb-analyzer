@@ -49,12 +49,12 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
-const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP } = require('../services/model');
+const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
-const { normName, stripSfx } = require('../utils/names');
+const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
 const { calcCLV } = require('../services/clv');
 const router = express.Router();
 
@@ -4372,8 +4372,34 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     }
     const BAT_DFLT = { R: _bDflt('R'), L: _bDflt('L'), S: _bDflt('S') };
     const PIT_DFLT = { R:{vsLHB:0.320,vsRHB:0.295}, L:{vsLHB:0.285,vsRHB:0.330} };
-    function normName(n) { return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
-    function lookupBatter(name, hand, oppSpHand, teamHint) {
+
+    // Active-roster gate for the matchup display
+    // (fix/matchup-woba-use-shared-resolver, 2026-07-23). Built the
+    // same way processGameSignals does (services/jobs.js:737): pull
+    // team_rosters WHERE role='POS' for each side. Empty roster on a
+    // side leaves the set null and buildRosterGatedIdx opts out for
+    // that side -- safer than gating with an empty roster mid-outage.
+    // Per-side because away batters price against the away roster,
+    // home against home.
+    //
+    // Rejection accounting is intentionally omitted here -- the
+    // signals path (processGameSignals -> getBatterWoba) already
+    // increments /health.roster_gate.totalRejections for the same
+    // batter+slate; counting again on view render would inflate the
+    // health signal with page-view traffic instead of pricing.
+    let awayGateSet = null, homeGateSet = null;
+    try {
+      if (q.getPositionPlayers) {
+        const awayRows = q.getPositionPlayers.all((game.away_team || '').toUpperCase()) || [];
+        const homeRows = q.getPositionPlayers.all((game.home_team || '').toUpperCase()) || [];
+        if (awayRows.length) awayGateSet = new Set(awayRows.map(r => normName(r.player_name)));
+        if (homeRows.length) homeGateSet = new Set(homeRows.map(r => normName(r.player_name)));
+      }
+    } catch (_) { /* leave nulls; buildRosterGatedIdx opts out on null */ }
+    const awayGatedIdx = buildRosterGatedIdx(wobaIdx, game.away_team, awayGateSet);
+    const homeGatedIdx = buildRosterGatedIdx(wobaIdx, game.home_team, homeGateSet);
+
+    function lookupBatter(name, hand, oppSpHand, teamHint, ownGatedIdx) {
         const vsKey  = oppSpHand==='R' ? 'bat-proj-rhp' : 'bat-proj-lhp';
         const actKey = oppSpHand==='R' ? 'bat-act-rhp'  : 'bat-act-lhp';
         const oppKey    = oppSpHand==='R' ? 'bat-proj-lhp' : 'bat-proj-rhp';
@@ -4381,63 +4407,50 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         const dflt = BAT_DFLT[hand]||BAT_DFLT['R'];
         const dfltV    = oppSpHand==='R' ? dflt.vsRHP : dflt.vsLHP;
         const dfltVOpp = oppSpHand==='R' ? dflt.vsLHP : dflt.vsRHP;
-        const key=normName(name);
-        const parts=key.split(' ');
-        const isAbbrev=parts.length>=2&&parts[0].length===1;
-        function stripJr(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-        function findIn(idx,k,tHint,minSample){
-          if(!idx)return null;
-          // When minSample is set (act-* lookups), reject entries whose
-          // sample is below the gate. Matches blendWoba's minSample check
-          // in services/model.js — tiny-sample actuals (a rookie's 4 PA
-          // with 2 extra-base hits) are noise, not signal. proj-* lookups
-          // pass minSample=undefined and behave unchanged.
-          const gate = (entry) => {
-            if (!entry) return null;
-            if (minSample != null && (entry.sample == null || entry.sample < minSample)) return null;
-            return entry.woba;
-          };
-          const tl=tHint?tHint.toLowerCase():null;
-          // 1. Exact team key: "bobby witt kc"
-          if(tl&&idx[k+' '+tl]){const w=gate(idx[k+' '+tl]); if(w!=null)return w;}
-          // 2. Exact name
-          if(idx[k]){const w=gate(idx[k]); if(w!=null)return w;}
-          // 3. Search index entries where stripJr(indexKey w/o team) === k, same team
-          // Catches "bobby witt jr kc" when looking up "bobby witt" + "kc"
-          if(tl){
-            const jrEntry=Object.entries(idx).find(([n])=>{
-              if(!n.endsWith(' '+tl))return false;
-              const base=n.slice(0,n.length-tl.length-1).trim();
-              return stripJr(base)===k;
-            });
-            if(jrEntry){const w=gate(jrEntry[1]); if(w!=null)return w;}
-          }
-          // 4. Abbreviated name (M. Busch style)
-          if(isAbbrev){
-            const initial=parts[0],last=parts[parts.length-1];
-            if(tl){const e=Object.entries(idx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripJr(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e){const w=gate(e[1]); if(w!=null)return w;}}
-            const matches=Object.entries(idx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripJr(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
-            if(matches.length===1){const w=gate(matches[0][1]); if(w!=null)return w;}
-          }
-          // 5. Jr-stripped exact key
-          const sk=stripJr(k);
-          if(tl&&idx[sk+' '+tl]){const w=gate(idx[sk+' '+tl]); if(w!=null)return w;}
-          const e2=Object.entries(idx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripJr(n)===sk);
-          if(e2){const w=gate(e2[1]); if(w!=null)return w;}
-          return null;
+
+        // Resolver: shared utils/names.js fuzzyLookup on the ROSTER-GATED
+        // idx (fix/matchup-woba-use-shared-resolver, 2026-07-23). This
+        // replaces the local findIn cascade below — a ~40-line fork of
+        // fuzzyLookup that had drifted from the canonical version.
+        // Drift consequences before this refactor:
+        //   * findIn was missing Stage 4 (suffix-append), so any name
+        //     that needed "Victor Mesa" -> "Victor Mesa Jr TB" lookup
+        //     couldn't resolve here even though services/model.js did.
+        //   * findIn was missing Stage 6 (compound-surname fallback),
+        //     so "S. Woods Richardson"-style names could default here
+        //     while services/model.js resolved them correctly.
+        //   * No active-roster gate — every off-roster shadow in
+        //     woba_data (VVM MIA, minor leaguers, retirees) could
+        //     preempt the real rostered player at Stage 2.
+        // Post-refactor, the endpoint resolves through the same
+        // fuzzyLookup + rosterSet gate the pricing path uses.
+        //
+        // MIN_PA gate applies to act-* only, mirroring the previous
+        // findIn's minSample argument and blendWoba's internal check:
+        // tiny-sample actuals (rookie's 4 PA fluke) get rejected before
+        // becoming actV, so 'act' source only fires on real evidence.
+        function lookupProj(idxKey) {
+          const hit = fuzzyLookup(ownGatedIdx[idxKey], name, teamHint);
+          return hit ? hit.woba : null;
         }
-        // Look up vs SP hand
-        const projV    = findIn(wobaIdx[vsKey],  key, teamHint);
-        const actV     = findIn(wobaIdx[actKey], key, teamHint, MIN_PA);
-        const wobaVsSPraw = (projV&&actV) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
-                          : projV ? +projV.toFixed(3) : actV ? +actV.toFixed(3) : null;
-        const srcVsSP  = (projV&&actV)?'blend':projV?'proj':actV?'act':'default';
+        function lookupAct(idxKey) {
+          const hit = fuzzyLookup(ownGatedIdx[idxKey], name, teamHint);
+          if (!hit) return null;
+          if (hit.sample == null || hit.sample < MIN_PA) return null;
+          return hit.woba;
+        }
+        // Look up vs SP hand (uses gated idx via lookupProj/lookupAct)
+        const projV = lookupProj(vsKey);
+        const actV  = lookupAct(actKey);
+        const wobaVsSPraw = (projV!=null&&actV!=null) ? +(W_PROJ*projV+W_ACT*actV).toFixed(3)
+                          : projV!=null ? +projV.toFixed(3) : actV!=null ? +actV.toFixed(3) : null;
+        const srcVsSP  = (projV!=null&&actV!=null)?'blend':projV!=null?'proj':actV!=null?'act':'default';
         // Look up vs opposite hand (for bullpen blend)
-        const projO    = findIn(wobaIdx[oppKey],    key, teamHint);
-        const actO     = findIn(wobaIdx[oppActKey], key, teamHint, MIN_PA);
-        const wobaVsOppRaw = (projO&&actO) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
-                           : projO ? +projO.toFixed(3) : actO ? +actO.toFixed(3) : null;
-        const srcVsOpp = (projO&&actO)?'blend':projO?'proj':actO?'act':'default';
+        const projO = lookupProj(oppKey);
+        const actO  = lookupAct(oppActKey);
+        const wobaVsOppRaw = (projO!=null&&actO!=null) ? +(W_PROJ*projO+W_ACT*actO).toFixed(3)
+                           : projO!=null ? +projO.toFixed(3) : actO!=null ? +actO.toFixed(3) : null;
+        const srcVsOpp = (projO!=null&&actO!=null)?'blend':projO!=null?'proj':actO!=null?'act':'default';
         // Per-side default policy: independent by default, with one
         // safety exception. The principle:
         //  - Projections are high-confidence (Steamer regresses small
@@ -4488,8 +4501,10 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       game_id:gameId,
       away_sp_woba:lookupPitcher(game.away_sp,game.away_sp_hand||'R',game.away_team),
       home_sp_woba:lookupPitcher(game.home_sp,game.home_sp_hand||'R',game.home_team),
-      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R',game.away_team)})),
-      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R',game.home_team)})),
+      // Away batters priced against home SP hand; use away roster to
+      // gate the resolver. Mirror for home.
+      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R',game.away_team,awayGatedIdx)})),
+      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R',game.home_team,homeGatedIdx)})),
     });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
