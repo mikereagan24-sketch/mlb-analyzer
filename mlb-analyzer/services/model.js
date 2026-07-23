@@ -165,6 +165,28 @@ function resetRosterGateStats() {
   _rosterGateStats.recent.length = 0;
 }
 
+// Public helper for callers that need the SAME filtered sub-maps
+// getBatterWoba builds internally, but without going through the full
+// blend + defaults logic (matchup-view display path in routes/api.js).
+// Returns the raw idx unchanged when rosterSet is null/undefined so
+// the caller can treat "gate opt-out" uniformly.
+//
+// Rejection counting is INTENTIONALLY omitted here — the signals path
+// (getBatterWoba call inside runModel) already records rejections for
+// each batter of the slate. Adding a second increment from every
+// matchup page view would inflate /health.roster_gate.totalRejections
+// with view traffic instead of pricing activity, breaking the health
+// signal.
+function buildRosterGatedIdx(idx, teamHint, rosterSet) {
+  if (rosterSet == null) return idx;
+  return {
+    'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, rosterSet),
+    'bat-act-lhp':  _filterKeyMap(idx['bat-act-lhp']  || {}, teamHint, rosterSet),
+    'bat-proj-rhp': _filterKeyMap(idx['bat-proj-rhp'] || {}, teamHint, rosterSet),
+    'bat-act-rhp':  _filterKeyMap(idx['bat-act-rhp']  || {}, teamHint, rosterSet),
+  };
+}
+
 // blendWoba mixes the (already-park-neutral) Steamer projection with
 // the (home-park-inflated) 2yr actuals. When wobaParkFactor is provided
 // and != 1.0, ONLY the actuals term is deflated before blending — the
@@ -1808,4 +1830,4 @@ function applyCatcherFramingDelta(rvPerGame, settings) {
   return rvPerGame * mute;
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats };
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx };
