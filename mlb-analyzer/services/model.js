@@ -178,6 +178,14 @@ function resetRosterGateStats() {
 // with view traffic instead of pricing activity, breaking the health
 // signal.
 function buildRosterGatedIdx(idx, teamHint, rosterSet) {
+  // hotfix/disable-roster-gate (2026-07-23 URGENT): matchup endpoint at
+  // routes/api.js:4375 calls this directly with its own rosterSet, so a
+  // disable in getBatterWoba alone doesn't cover the display path. Force
+  // opt-out here too — the matchup view must not display the same
+  // league-average fallback the signals path was writing. Both overrides
+  // come out together when fix/roster-gate-abbrev-aware lands.
+  return idx;
+  // eslint-disable-next-line no-unreachable
   if (rosterSet == null) return idx;
   return {
     'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, rosterSet),
@@ -234,6 +242,23 @@ function resolveNeutralizationFactor(teamHint, settings, opts) {
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, rosterSet) {
+  // hotfix/disable-roster-gate (2026-07-23 URGENT): the abbreviated-form
+  // roster check in _isEntryOnRoster does exact-string matching via
+  // rosterSet.has(base). When Steamer emits a rookie under abbreviated
+  // form ("S. Antonacci NYY" without a "Steven Antonacci NYY" companion
+  // row), the idx key normalizes to "s antonacci nyy" whose base
+  // "s antonacci" is NOT in rosterSet {"steven antonacci", ...}. The
+  // gate excludes that entry, fuzzyLookup returns null on the filtered
+  // idx, and the batter falls back to league-average wOBA. This
+  // silently damaged 79 batters (out of ~90) on the 2026-07-23 slate
+  // in prod. Force rosterSet=null here so getBatterWoba returns to
+  // pre-gate behavior — the Victor Mesa shadow bug re-emerges (a known,
+  // narrow miss) but the slate-wide fallback that was distorting every
+  // team's offense goes away. Proper fix (abbrev-aware roster
+  // membership: first-initial + last-name equivalence like fuzzyLookup
+  // Stage 5) is being cut on fix/roster-gate-abbrev-aware. Remove this
+  // override once that lands.
+  rosterSet = null;
   if (minPA == null) minPA = 60;
   const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: false });
 
