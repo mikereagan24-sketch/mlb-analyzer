@@ -734,6 +734,22 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   var homeSpLookupName = gameRow.home_sp || gameRow.home_pitcher || '';
   var awaySpProjIP = q.getPitcherProjIP ? q.getPitcherProjIP(awaySpLookupName) : null;
   var homeSpProjIP = q.getPitcherProjIP ? q.getPitcherProjIP(homeSpLookupName) : null;
+  // Active-roster gate for batter wOBA resolution
+  // (fix/batter-woba-active-roster-gate, 2026-07-23). Build normalized
+  // Set of team_rosters role='POS' player_names per side; runModel
+  // passes each set into getBatterWoba so shadows / off-roster players
+  // in woba_data (Steamer's minor-leaguers, retirees) can't preempt
+  // real hitters via fuzzyLookup. Empty set on missing roster leaves
+  // this side ungated — safer than gating with a stale/empty roster.
+  let awayRosterSet = null, homeRosterSet = null;
+  try {
+    if (q.getPositionPlayers) {
+      const awayRows = q.getPositionPlayers.all((awayAbbr || '').toUpperCase()) || [];
+      const homeRows = q.getPositionPlayers.all((homeAbbr || '').toUpperCase()) || [];
+      if (awayRows.length) awayRosterSet = new Set(awayRows.map(r => normName(r.player_name)));
+      if (homeRows.length) homeRosterSet = new Set(homeRows.map(r => normName(r.player_name)));
+    }
+  } catch (_) { /* no roster table / bad row → leave nulls, gate opts out */ }
   const game = {
     ...gameRow,
     awayLineup: tryParse(gameRow.away_lineup_json) || [],
@@ -755,6 +771,11 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     // only when DEFENSE_FRV_ENABLED.
     awayFieldingRunsPerGame: awayFieldingRunsPerGame,
     homeFieldingRunsPerGame: homeFieldingRunsPerGame,
+    // Active-roster gate: null on either side → getBatterWoba opts out
+    // of the gate for that side. Backtest game-builders (frv-backtest,
+    // baserunning-backtest, temp-backtest, etc.) never attach these,
+    // so historical scoring stays untouched.
+    awayRosterSet, homeRosterSet,
   };
   // Venue-aware market baseline override (feat/venue-aware-signals). When
   // SIGNAL_VENUE_AWARE_ENABLED is on AND the caller pre-fetched the venue
