@@ -5771,6 +5771,19 @@ router.get('/debug/model-trace', (req, res) => {
       }
     } catch(e) { /* fallback */ }
 
+    // Active-roster gate (fix/batter-woba-active-roster-gate). Same
+    // build pattern as jobs.js:737; null on missing roster leaves the
+    // side ungated so the trace still runs on legacy games without
+    // roster snapshots.
+    let awayRosterSet = null, homeRosterSet = null;
+    try {
+      if (q.getPositionPlayers) {
+        const awayRows = q.getPositionPlayers.all((awayAbbr || '').toUpperCase()) || [];
+        const homeRows = q.getPositionPlayers.all((homeAbbr || '').toUpperCase()) || [];
+        if (awayRows.length) awayRosterSet = new Set(awayRows.map(r => normName(r.player_name)));
+        if (homeRows.length) homeRosterSet = new Set(homeRows.map(r => normName(r.player_name)));
+      }
+    } catch (_) { /* leave nulls */ }
     const game = {
       ...gameRow,
       awayLineup: awayLineupArr,
@@ -5778,6 +5791,7 @@ router.get('/debug/model-trace', (req, res) => {
       awayBullpenWoba: awayBpWoba, homeBullpenWoba: homeBpWoba,
       awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
       homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
+      awayRosterSet, homeRosterSet,
     };
 
     // Pull all settings constants now so the trace can show them alongside
@@ -5834,9 +5848,12 @@ router.get('/debug/model-trace', (req, res) => {
     const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
     const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
 
-    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar, ownTeam, spPitW_in, relPitW_in) => {
+    const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar, ownTeam, spPitW_in, relPitW_in, ownRosterSet) => {
       const eff = effHandLocal(b.hand, oppPitcherHand);
-      const bw  = getBatterWoba(wobaIdx, b.name, b.hand, ownTeam, W_PROJ_, W_ACT_, MIN_PA, settings);
+      // Pass ownRosterSet so this trace mirrors the gated production
+      // resolution — otherwise trace_vs_actual_diff drifts whenever
+      // the gate rejects a resolution.
+      const bw  = getBatterWoba(wobaIdx, b.name, b.hand, ownTeam, W_PROJ_, W_ACT_, MIN_PA, settings, ownRosterSet);
       const pitWvsBatter  = eff === 'L' ? pwOpp.vsLHB : pwOpp.vsRHB;
       // Standard non-opener path (model.js lines 158-160) uses the
       // combined bullpenWoba scalar — NOT the vsL/vsR splits. Splits are
@@ -5865,8 +5882,8 @@ router.get('/debug/model-trace', (req, res) => {
     // model.js line 445-446: awayVsBullpen = game.homeBullpenWoba.
     // teamHint mirrors runModel lines 440-441: own team's abbr is passed
     // so fuzzyLookup can disambiguate name collisions in the wOBA index.
-    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba, game.away_team, homeSpPitW, homeRelPitW) }));
-    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba, game.home_team, awaySpPitW, awayRelPitW) }));
+    const awayBatterTraces = (awayLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.home_sp_hand, pwH, homeBpWoba, game.away_team, homeSpPitW, homeRelPitW, awayRosterSet) }));
+    const homeBatterTraces = (homeLineupArr || []).map((b,i) => ({ position: i+1, pa_weight: PA_WEIGHTS[i], ...traceBatter(b, game.away_sp_hand, pwA, awayBpWoba, game.home_team, awaySpPitW, awayRelPitW, homeRosterSet) }));
 
     const aWs = awayBatterTraces.reduce((s,t)=>s + t.expected_wOBA * t.pa_weight, 0);
     const aWp = awayBatterTraces.reduce((s,t)=>s + t.pa_weight, 0);

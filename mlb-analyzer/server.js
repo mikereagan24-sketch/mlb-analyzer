@@ -141,6 +141,24 @@ app.get('/health', (req, res) => {
   } catch (e) {
     out.odds_coverage_error = e && e.message || String(e);
   }
+  // Batter active-roster gate stats
+  // (fix/batter-woba-active-roster-gate). totalRejections counts how
+  // many times getBatterWoba blocked a woba_data resolution because the
+  // resolved entry's team suffix / base name wasn't in the pricing
+  // team's active team_rosters role='POS'. A sustained non-zero here
+  // is the signal that roster ingest went stale or a lineup source
+  // started emitting off-roster names — either way, batters are
+  // silently falling back to league-average. Counter accumulates over
+  // process lifetime; recent[] holds the last 100 rejections for
+  // triage. Both zero out on process restart.
+  try {
+    const { getRosterGateStats } = require('./services/model');
+    if (typeof getRosterGateStats === 'function') {
+      out.roster_gate = getRosterGateStats();
+    }
+  } catch (e) {
+    out.roster_gate_error = e && e.message || String(e);
+  }
   res.json(out);
 });
 

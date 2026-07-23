@@ -43,7 +43,7 @@ const VENUE_ID_OVERRIDES = {
   5340: { parkFactor: 1.20, name: 'Estadio Alfredo Harp Helú (Mexico City)' },
 };
 
-const { normName, fuzzyLookup } = require('../utils/names');
+const { normName, fuzzyLookup, stripSfx } = require('../utils/names');
 const { pickVenueOverride } = require('./scraper');
 const { getWobaParkFactor, neutralizeWoba, computeStintWeightedFactor } = require('./park-factors-woba');
 const stintCache = require('./stint-cache');
@@ -69,6 +69,100 @@ function buildWobaIndex(rows) {
     idx[r.data_key][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
   }
   return idx;
+}
+
+// ── Batter active-roster gate (fix/batter-woba-active-roster-gate, 2026-07-23)
+//
+// woba_data holds every player Steamer ever projected (minor leaguers,
+// retirees, released players, farm system fillers). Names collide across
+// unrelated players; the classic case is "Victor Mesa" (VVM, a MIA
+// farmhand — sample 0.7, wOBA .238) shadowing "Victor Mesa Jr. TB"
+// (real, sample 85, wOBA .313) at fuzzyLookup Stage 2, because the
+// no-team-suffix key "victor mesa" preempts the Stage 4 suffix-append
+// path that would find "victor mesa jr tb" via teamHint.
+//
+// The bullpen pool has always filtered woba_data → team_rosters
+// role='RP' (db/schema.js:3136). Batter resolution never had the
+// equivalent gate. This module now provides one, opt-in per call.
+//
+// Contract: rosterSet is a Set<string> of normName(player_name) values
+// from team_rosters WHERE team=<pricing team> AND role='POS', or null.
+//   rosterSet == null / undefined → NO gate, byte-identical to pre-fix.
+//                                   Backtest path uses this because a
+//                                   TODAY roster can't gate a 2025 game.
+//   rosterSet == Set(...)         → filter each per-key sub-map to
+//                                   entries whose base name ∈ rosterSet.
+//
+// Detection: a rejection is "gate turned a real hit into a fallback",
+// i.e. fuzzyLookup on the RAW idx returned a value that fuzzyLookup on
+// the GATED idx did not. Counted + console-logged + surfaced via
+// getRosterGateStats() to /health.
+
+// Idx keys look like:
+//   "victor mesa jr tb"  — with team suffix
+//   "victor mesa jr"     — no team suffix
+//   "victor mesa mia"    — different team's shadow
+// Extract (base, team) so the gate can check team match + base membership.
+//
+// The trailing token is ONLY treated as a team code if it matches a real
+// MLB abbreviation — otherwise short last names (Brooks Lee, Ha-Seong
+// Kim → "kim", Jose Iglesias short suffix cases, Tim Lin, etc.) would be
+// mis-split as "base=brooks / team=lee", causing their real bat-act
+// entries (never team-tagged by the ingest) to be filtered out and the
+// blend to degrade to steamer-only. Set matches team_rosters.team codes.
+const MLB_TEAM_CODES = new Set([
+  'ari','atl','ath','bal','bos','chc','chw','cin','cle','col',
+  'det','hou','kc','lad','laa','mia','mil','min','nym','nyy',
+  'phi','pit','sd','sea','sf','stl','tb','tex','tor','was',
+]);
+function _splitIdxKey(k) {
+  const m = k.match(/^(.+)\s+([a-z]{2,3})$/);
+  if (m && MLB_TEAM_CODES.has(m[2])) return { base: m[1], team: m[2] };
+  return { base: k, team: null };
+}
+
+function _isEntryOnRoster(idxKey, teamHint, rosterSet) {
+  const { base, team } = _splitIdxKey(idxKey);
+  const teamLc = (teamHint || '').toLowerCase();
+  if (team && team !== teamLc) return false;
+  // Exact-base match only. Do NOT stripSfx-expand rosterSet — the whole
+  // point of the gate is to keep "victor mesa" (base) from matching a
+  // "victor mesa jr" roster entry.
+  return rosterSet.has(base);
+}
+
+function _filterKeyMap(keyMap, teamHint, rosterSet) {
+  const out = {};
+  for (const k of Object.keys(keyMap)) {
+    if (_isEntryOnRoster(k, teamHint, rosterSet)) out[k] = keyMap[k];
+  }
+  return out;
+}
+
+const _rosterGateStats = { totalRejections: 0, recent: [] };
+const _ROSTER_GATE_RECENT_MAX = 100;
+
+function _recordRosterGateRejection(info) {
+  _rosterGateStats.totalRejections++;
+  _rosterGateStats.recent.push(info);
+  if (_rosterGateStats.recent.length > _ROSTER_GATE_RECENT_MAX) {
+    _rosterGateStats.recent.shift();
+  }
+  console.log('[roster-gate] rejected batter="' + info.batter + '" team=' + info.teamHint
+    + (info.rejectedSample != null ? ' sample=' + info.rejectedSample.toFixed(2) : '')
+    + (info.rejectedKey ? ' key=' + info.rejectedKey : ''));
+}
+
+function getRosterGateStats() {
+  return {
+    totalRejections: _rosterGateStats.totalRejections,
+    recent: _rosterGateStats.recent.slice(),
+  };
+}
+
+function resetRosterGateStats() {
+  _rosterGateStats.totalRejections = 0;
+  _rosterGateStats.recent.length = 0;
 }
 
 // blendWoba mixes the (already-park-neutral) Steamer projection with
@@ -117,17 +211,60 @@ function resolveNeutralizationFactor(teamHint, settings, opts) {
   return getWobaParkFactor(teamHint);
 }
 
-function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings) {
+function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, rosterSet) {
   if (minPA == null) minPA = 60;
   const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: false });
+
+  // rosterSet gate — see the _isEntryOnRoster block above for the full
+  // rationale. When rosterSet is provided, filter the four batter
+  // sub-maps to entries the pricing team actually rosters. When null
+  // (backtest path), skip the gate entirely.
+  const gateOn = rosterSet != null;
+  let lookupIdx = idx;
+  if (gateOn) {
+    lookupIdx = {
+      'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, rosterSet),
+      'bat-act-lhp':  _filterKeyMap(idx['bat-act-lhp']  || {}, teamHint, rosterSet),
+      'bat-proj-rhp': _filterKeyMap(idx['bat-proj-rhp'] || {}, teamHint, rosterSet),
+      'bat-act-rhp':  _filterKeyMap(idx['bat-act-rhp']  || {}, teamHint, rosterSet),
+    };
+    // Rejection detection: probe bat-proj-rhp (densest sub-map, most
+    // universally populated). A rejection happens whenever the raw hit
+    // differs from the gated hit — both when the gate blocks entirely
+    // (gateHit=null) AND when the gate promotes fuzzyLookup to a later
+    // cascade stage that lands on a DIFFERENT entry (rawHit=VVM shadow,
+    // gateHit=real Victor Mesa Jr. TB). Both cases matter for the
+    // health signal: the first says "batter defaulted to league avg";
+    // the second says "batter got upgraded to the correct player" —
+    // both are gate activity worth surfacing.
+    const rawHit = fuzzyLookup(idx['bat-proj-rhp'] || {}, name, teamHint);
+    const gateHit = fuzzyLookup(lookupIdx['bat-proj-rhp'], name, teamHint);
+    if (rawHit && rawHit !== gateHit) {
+      // Find the key the raw hit came from for the log line (small idx,
+      // O(N) once per rejection is fine).
+      let rejectedKey = null;
+      for (const k of Object.keys(idx['bat-proj-rhp'] || {})) {
+        if (idx['bat-proj-rhp'][k] === rawHit) { rejectedKey = k; break; }
+      }
+      _recordRosterGateRejection({
+        ts: new Date().toISOString(),
+        batter: name,
+        teamHint,
+        rejectedSample: rawHit.sample,
+        rejectedKey,
+        gateResolved: gateHit != null,
+      });
+    }
+  }
+
   const bL = blendWoba(
-    fuzzyLookup(idx['bat-proj-lhp'], name, teamHint),
-    fuzzyLookup(idx['bat-act-lhp'], name, teamHint),
+    fuzzyLookup(lookupIdx['bat-proj-lhp'], name, teamHint),
+    fuzzyLookup(lookupIdx['bat-act-lhp'], name, teamHint),
     minPA, wProj, wAct, pf
   );
   const bR = blendWoba(
-    fuzzyLookup(idx['bat-proj-rhp'], name, teamHint),
-    fuzzyLookup(idx['bat-act-rhp'], name, teamHint),
+    fuzzyLookup(lookupIdx['bat-proj-rhp'], name, teamHint),
+    fuzzyLookup(lookupIdx['bat-act-rhp'], name, teamHint),
     minPA, wProj, wAct, pf
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
@@ -748,8 +885,14 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const homeOpenerOpts = buildOpenerOpts('home');
   const awayOpenerOpts = buildOpenerOpts('away');
 
-  const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA,settings)}));
-  const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA,settings)}));
+  // rosterSet plumbing (fix/batter-woba-active-roster-gate): callers that
+  // attach game.awayRosterSet / game.homeRosterSet trigger the gate. Live
+  // jobs.js buildGame path populates these from team_rosters role='POS'.
+  // Backtest paths leave them undefined so historical games score against
+  // whatever Steamer had that day (a today-roster gate would nuke every
+  // pre-trade batter).
+  const awayLU = (game.awayLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.away_team,W_PROJ,W_ACT,MIN_PA,settings,game.awayRosterSet)}));
+  const homeLU = (game.homeLineup||[]).map(b=>({...b,...getBatterWoba(wobaIdx,b.name,b.hand,game.home_team,W_PROJ,W_ACT,MIN_PA,settings,game.homeRosterSet)}));
 
   // Away batters face the home team's bullpen; home batters face the away team's bullpen.
   // Fall back to league-average BULLPEN_AVG if the per-team value is null/missing.
@@ -1665,4 +1808,4 @@ function applyCatcherFramingDelta(rvPerGame, settings) {
   return rvPerGame * mute;
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta };
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats };
