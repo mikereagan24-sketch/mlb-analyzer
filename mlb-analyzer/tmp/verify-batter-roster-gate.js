@@ -208,6 +208,110 @@ model.resetRosterGateStats();
   assert(stats.totalRejections === 0, 'gate stays off for undefined rosterSet');
 }
 
+// ── Case 8: abbrev-form Steamer entry + full-name roster (Antonacci class) ──
+// This is the failure mode that took the gate down on 2026-07-23: Steamer
+// emits "S. Antonacci NYY" as the ONLY entry (no full-name companion),
+// while team_rosters has "Steven Antonacci". Pre-fix (exact-match) the
+// gate excluded the real projection and forced fallback. Post-fix
+// abbrev-aware matcher accepts base "s antonacci" because rosterSet
+// "steven antonacci" produces abbrev bucket "s|antonacci".
+console.log('\n=== Case 8: abbrev-form Steamer + full-name roster — resolves cleanly ===');
+model.resetRosterGateStats();
+{
+  const idx = {
+    'bat-proj-lhp': { 's antonacci nyy': { woba: 0.305, sample: 40 } },
+    'bat-act-lhp':  {},
+    'bat-proj-rhp': { 's antonacci nyy': { woba: 0.322, sample: 88 } },
+    'bat-act-rhp':  {},
+  };
+  const roster = new Set(['steven antonacci']);
+  const bw = model.getBatterWoba(idx, 'S. Antonacci', 'R', 'NYY', 0.65, 0.35, 60, settings, roster);
+  assert(bw.source === 'steamer', 'source is steamer (Steamer proj resolved, not fallback): got ' + bw.source);
+  assert(approx(bw.vsRHP, 0.322), 'vsRHP is real Steamer proj .322: got ' + bw.vsRHP);
+  assert(approx(bw.vsLHP, 0.305), 'vsLHP is real Steamer proj .305: got ' + bw.vsLHP);
+  const stats = model.getRosterGateStats();
+  assert(stats.totalRejections === 0, 'no rejection when abbrev-form resolves via matcher: got ' + stats.totalRejections);
+}
+
+// ── Case 9: abbrev-form does NOT admit unrelated shadows ────────────────
+// Roster has "Steven Antonacci" only. Idx has TWO entries with the same
+// last name: "s antonacci nyy" (real, S. Antonacci) and "j antonacci nyy"
+// (hypothetical unrelated player with different first initial). The
+// matcher's abbrev bucket for Antonacci is keyed on "s|antonacci" only.
+// "j antonacci" base gets abbrev-checked, bucket "j|antonacci" is NOT
+// present → EXCLUDED. Distinguishes real abbrev matches from cross-
+// player abbrev collisions.
+console.log('\n=== Case 9: abbrev matcher rejects wrong-initial player ===');
+model.resetRosterGateStats();
+{
+  const idx = {
+    'bat-proj-lhp': {},
+    'bat-act-lhp':  {},
+    'bat-proj-rhp': {
+      's antonacci nyy': { woba: 0.322, sample: 88 },
+      'j antonacci nyy': { woba: 0.180, sample: 20 }, // unrelated, off-roster
+    },
+    'bat-act-rhp':  {},
+  };
+  const roster = new Set(['steven antonacci']);
+  // Look up 'J. Antonacci' — should NOT resolve to the .180 wrong player.
+  const bw = model.getBatterWoba(idx, 'J. Antonacci', 'R', 'NYY', 0.65, 0.35, 60, settings, roster);
+  assert(bw.source === 'fallback', 'wrong-initial player rejected -> fallback: got ' + bw.source);
+  // 'S. Antonacci' should still resolve correctly through the matcher.
+  const bwS = model.getBatterWoba(idx, 'S. Antonacci', 'R', 'NYY', 0.65, 0.35, 60, settings, roster);
+  assert(approx(bwS.vsRHP, 0.322), 'right-initial player still resolves: got ' + bwS.vsRHP);
+}
+
+// ── Case 10: full-name shadow guard still holds (Victor Mesa class) ─────
+// The whole point of the parts[0].length === 1 guard is that "victor
+// mesa" (full first name, base for VVM shadow) must NOT match "victor
+// mesa jr" via lazy (V, mesa) equivalence. Regression-guard for the
+// original class the gate exists to keep out.
+console.log('\n=== Case 10: full-name shadow (Victor Mesa) still rejected ===');
+model.resetRosterGateStats();
+{
+  const idx = buildIdx();
+  const roster = new Set(['victor mesa jr']);
+  const bw = model.getBatterWoba(idx, 'Victor Mesa', 'L', 'TB', 0.65, 0.35, 60, settings, roster);
+  assert(approx(bw.vsRHP, 0.313), 'Mesa still resolves to real Jr TB .313 (shadow rejected): got ' + bw.vsRHP);
+  assert(approx(bw.vsLHP, 0.283), 'Mesa still resolves to real Jr TB .283: got ' + bw.vsLHP);
+  const stats = model.getRosterGateStats();
+  assert(stats.totalRejections === 1, 'Mesa rejection still counted (upgrade path): got ' + stats.totalRejections);
+}
+
+// ── Case 11: Jr. suffix in roster + full-name Steamer entry ─────────────
+// Roster has "Ronald Acuna Jr." → norm "ronald acuna jr". Steamer emits
+// "Ronald Acuna Jr. ATL" AND "Ronald Acuna ATL" (Steamer's typical
+// duplicate). Exact match includes "ronald acuna jr atl" via base
+// "ronald acuna jr" ∈ rosterSet. "ronald acuna atl" is EXCLUDED because
+// base "ronald acuna" is NOT in rosterSet AND is not abbrev (first token
+// "ronald" length 6). Real Jr. resolves; shadow "ronald acuna atl" doesn't
+// leak in via abbrev pathway.
+console.log('\n=== Case 11: Jr. roster + full-name Steamer + no-jr shadow entry ===');
+model.resetRosterGateStats();
+{
+  const acunaProjRHP = { woba: 0.415, sample: 500 };
+  const idx = {
+    'bat-proj-lhp': {
+      'ronald acuna jr atl': { woba: 0.380, sample: 200 },
+      'ronald acuna jr':     { woba: 0.380, sample: 200 },
+      'ronald acuna atl':    { woba: 0.380, sample: 200 },
+      'ronald acuna':        { woba: 0.380, sample: 200 },
+    },
+    'bat-act-lhp': {},
+    'bat-proj-rhp': {
+      'ronald acuna jr atl': acunaProjRHP,
+      'ronald acuna jr':     acunaProjRHP,
+      'ronald acuna atl':    acunaProjRHP,
+      'ronald acuna':        acunaProjRHP,
+    },
+    'bat-act-rhp': {},
+  };
+  const roster = new Set(['ronald acuna jr']);
+  const bw = model.getBatterWoba(idx, 'Ronald Acuna', 'R', 'ATL', 0.65, 0.35, 60, settings, roster);
+  assert(approx(bw.vsRHP, 0.415), 'Acuna resolves via Jr. entry: got ' + bw.vsRHP);
+}
+
 console.log();
 console.log('=== Summary ===');
 console.log('  Passed: ' + passed);

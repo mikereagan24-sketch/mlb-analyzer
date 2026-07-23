@@ -121,20 +121,66 @@ function _splitIdxKey(k) {
   return { base: k, team: null };
 }
 
-function _isEntryOnRoster(idxKey, teamHint, rosterSet) {
+// Roster-matcher (fix/roster-gate-abbrev-aware, 2026-07-23). The prior
+// gate did rosterSet.has(base) — exact-string membership. When Steamer
+// emitted a rookie under abbreviated form ("S. Antonacci NYY" only,
+// no companion "Steven Antonacci NYY" row), the idx entry normalized
+// to base "s antonacci" which was NOT in rosterSet {"steven antonacci",
+// ...}. Filter excluded the real projection, fuzzyLookup returned null
+// on the filtered idx, and getBatterWoba fell back to BAT_DFLT for
+// that batter. On the 2026-07-23 slate this hit 79/90 batters and
+// caused a league-avg-wOBA flattening across every team's offense.
+// Fix: precompute an "initial|lastname" bucket per roster name and
+// accept the idx entry when its base is ACTUALLY abbreviated (first
+// token exactly 1 char). Symmetric to fuzzyLookup Stage 5's own
+// abbrev handling on the lookup side.
+//
+// The abbrev branch is guarded on parts[0].length === 1 so full-name
+// shadows like "victor mesa" (first token "victor" length 6) can NOT
+// match "victor mesa jr" via a lazy (V, mesa) equivalence — that
+// would readmit the original Steamer shadow class the gate exists to
+// keep out. Only ACTUAL abbreviations (single-char first token) get
+// the abbrev-bucket lookup.
+//
+// Last-token comparison uses stripSfx to handle "s antonacci jr" style
+// entries (roster "antonacci" bucket key comes from stripSfx of "steven
+// antonacci jr" → "steven antonacci" → last "antonacci"; matches
+// stripSfx of idx "s antonacci jr" → "s antonacci" → last "antonacci").
+function _buildRosterMatcher(rosterSet) {
+  const abbrev = new Map();
+  for (const name of rosterSet) {
+    const parts = name.split(' ');
+    if (parts.length < 2) continue;
+    const initial = parts[0][0];
+    const stripped = stripSfx(name).split(' ');
+    const last = stripped[stripped.length - 1];
+    if (!initial || !last) continue;
+    abbrev.set(initial + '|' + last, true);
+  }
+  return { exact: rosterSet, abbrev };
+}
+
+function _isEntryOnRoster(idxKey, teamHint, matcher) {
   const { base, team } = _splitIdxKey(idxKey);
   const teamLc = (teamHint || '').toLowerCase();
   if (team && team !== teamLc) return false;
-  // Exact-base match only. Do NOT stripSfx-expand rosterSet — the whole
-  // point of the gate is to keep "victor mesa" (base) from matching a
-  // "victor mesa jr" roster entry.
-  return rosterSet.has(base);
+  if (matcher.exact.has(base)) return true;
+  // Abbrev branch — see the matcher block above for the full rationale
+  // on why parts[0].length === 1 is REQUIRED and not just a nice-to-have.
+  const parts = base.split(' ');
+  if (parts.length >= 2 && parts[0].length === 1) {
+    const initial = parts[0];
+    const stripped = stripSfx(base).split(' ');
+    const last = stripped[stripped.length - 1];
+    if (initial && last && matcher.abbrev.has(initial + '|' + last)) return true;
+  }
+  return false;
 }
 
-function _filterKeyMap(keyMap, teamHint, rosterSet) {
+function _filterKeyMap(keyMap, teamHint, matcher) {
   const out = {};
   for (const k of Object.keys(keyMap)) {
-    if (_isEntryOnRoster(k, teamHint, rosterSet)) out[k] = keyMap[k];
+    if (_isEntryOnRoster(k, teamHint, matcher)) out[k] = keyMap[k];
   }
   return out;
 }
@@ -178,20 +224,13 @@ function resetRosterGateStats() {
 // with view traffic instead of pricing activity, breaking the health
 // signal.
 function buildRosterGatedIdx(idx, teamHint, rosterSet) {
-  // hotfix/disable-roster-gate (2026-07-23 URGENT): matchup endpoint at
-  // routes/api.js:4375 calls this directly with its own rosterSet, so a
-  // disable in getBatterWoba alone doesn't cover the display path. Force
-  // opt-out here too — the matchup view must not display the same
-  // league-average fallback the signals path was writing. Both overrides
-  // come out together when fix/roster-gate-abbrev-aware lands.
-  return idx;
-  // eslint-disable-next-line no-unreachable
   if (rosterSet == null) return idx;
+  const matcher = _buildRosterMatcher(rosterSet);
   return {
-    'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, rosterSet),
-    'bat-act-lhp':  _filterKeyMap(idx['bat-act-lhp']  || {}, teamHint, rosterSet),
-    'bat-proj-rhp': _filterKeyMap(idx['bat-proj-rhp'] || {}, teamHint, rosterSet),
-    'bat-act-rhp':  _filterKeyMap(idx['bat-act-rhp']  || {}, teamHint, rosterSet),
+    'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, matcher),
+    'bat-act-lhp':  _filterKeyMap(idx['bat-act-lhp']  || {}, teamHint, matcher),
+    'bat-proj-rhp': _filterKeyMap(idx['bat-proj-rhp'] || {}, teamHint, matcher),
+    'bat-act-rhp':  _filterKeyMap(idx['bat-act-rhp']  || {}, teamHint, matcher),
   };
 }
 
@@ -242,38 +281,22 @@ function resolveNeutralizationFactor(teamHint, settings, opts) {
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, rosterSet) {
-  // hotfix/disable-roster-gate (2026-07-23 URGENT): the abbreviated-form
-  // roster check in _isEntryOnRoster does exact-string matching via
-  // rosterSet.has(base). When Steamer emits a rookie under abbreviated
-  // form ("S. Antonacci NYY" without a "Steven Antonacci NYY" companion
-  // row), the idx key normalizes to "s antonacci nyy" whose base
-  // "s antonacci" is NOT in rosterSet {"steven antonacci", ...}. The
-  // gate excludes that entry, fuzzyLookup returns null on the filtered
-  // idx, and the batter falls back to league-average wOBA. This
-  // silently damaged 79 batters (out of ~90) on the 2026-07-23 slate
-  // in prod. Force rosterSet=null here so getBatterWoba returns to
-  // pre-gate behavior — the Victor Mesa shadow bug re-emerges (a known,
-  // narrow miss) but the slate-wide fallback that was distorting every
-  // team's offense goes away. Proper fix (abbrev-aware roster
-  // membership: first-initial + last-name equivalence like fuzzyLookup
-  // Stage 5) is being cut on fix/roster-gate-abbrev-aware. Remove this
-  // override once that lands.
-  rosterSet = null;
   if (minPA == null) minPA = 60;
   const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: false });
 
-  // rosterSet gate — see the _isEntryOnRoster block above for the full
-  // rationale. When rosterSet is provided, filter the four batter
-  // sub-maps to entries the pricing team actually rosters. When null
-  // (backtest path), skip the gate entirely.
+  // rosterSet gate (fix/roster-gate-abbrev-aware, 2026-07-23). Builds a
+  // matcher with exact + abbrev buckets, then filters each of the four
+  // batter sub-maps down to entries the pricing team actually rosters.
+  // When rosterSet is null (backtest path), skip the gate entirely.
   const gateOn = rosterSet != null;
   let lookupIdx = idx;
   if (gateOn) {
+    const matcher = _buildRosterMatcher(rosterSet);
     lookupIdx = {
-      'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, rosterSet),
-      'bat-act-lhp':  _filterKeyMap(idx['bat-act-lhp']  || {}, teamHint, rosterSet),
-      'bat-proj-rhp': _filterKeyMap(idx['bat-proj-rhp'] || {}, teamHint, rosterSet),
-      'bat-act-rhp':  _filterKeyMap(idx['bat-act-rhp']  || {}, teamHint, rosterSet),
+      'bat-proj-lhp': _filterKeyMap(idx['bat-proj-lhp'] || {}, teamHint, matcher),
+      'bat-act-lhp':  _filterKeyMap(idx['bat-act-lhp']  || {}, teamHint, matcher),
+      'bat-proj-rhp': _filterKeyMap(idx['bat-proj-rhp'] || {}, teamHint, matcher),
+      'bat-act-rhp':  _filterKeyMap(idx['bat-act-rhp']  || {}, teamHint, matcher),
     };
     // Rejection detection: probe bat-proj-rhp (densest sub-map, most
     // universally populated). A rejection happens whenever the raw hit
