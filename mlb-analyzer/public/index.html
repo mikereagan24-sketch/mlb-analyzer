@@ -206,18 +206,33 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .sp-cancel-btn{padding:3px 7px;font-size:10px;border-radius:4px;background:var(--border);color:var(--text2);border:none;cursor:pointer}
 .lu-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center}
 .lu-modal.open{display:flex}
-.lu-box{background:var(--card);border-radius:10px;padding:20px 24px;width:580px;max-width:96vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.4)}
+/* Widened from 580px in fix/lineup-dropdown-dedup-abbrev-to-roster —
+   previous width forced the name select to ~180px which truncated
+   full names ("SS · M...") in the "{position} · {full name}" label
+   the dropdown renders. 900px gives ~350px per column for the name
+   select, enough for "SS · Vladimir Guerrero Jr." without ellipsis. */
+.lu-box{background:var(--card);border-radius:10px;padding:20px 24px;width:900px;max-width:96vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.4)}
 .lu-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
 .lu-hdr-title{font-size:14px;font-weight:700}
 .lu-close{cursor:pointer;font-size:20px;color:var(--text3);line-height:1;padding:2px 6px}
 .lu-close:hover{color:var(--text)}
-.lu-cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* auto-fit + minmax stacks the two teams vertically on narrow screens
+   (<736px) instead of squeezing both into a mobile viewport. Two
+   columns on desktop is the default matchup-comparison view. */
+.lu-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
 .lu-team-lbl{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:6px}
-.lu-row{display:flex;align-items:center;gap:3px;margin-bottom:3px}
-.lu-num{width:18px;font-size:10px;color:var(--text3);text-align:right;flex-shrink:0}
+.lu-row{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.lu-num{width:18px;font-size:11px;color:var(--text3);text-align:right;flex-shrink:0}
 .lu-row input{flex:1;padding:3px 5px;border:1px solid var(--border);border-radius:3px;font-size:11px;background:var(--bg);color:var(--text)}
 .lu-row input:focus{border-color:var(--accent);outline:none}
-.lu-row select{width:44px;padding:3px 2px;border:1px solid var(--border);border-radius:3px;font-size:11px;background:var(--bg);color:var(--text)}
+/* Two distinct select shapes — name select fills the row (min 240px
+   so a long full name never ellipsizes at the collapsed value); hand
+   select is fixed 55px, only ever showing R/L/S. Pre-refactor the
+   single .lu-row select rule set both to 44px, which is why the name
+   picker showed "M..." for "M. Machado" etc. */
+.lu-row .lu-name-sel{flex:1;min-width:240px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;font-size:12px;background:var(--bg);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lu-row .lu-name-sel:focus{border-color:var(--accent);outline:none}
+.lu-row .lu-hand-sel{width:55px;flex-shrink:0;padding:4px 4px;border:1px solid var(--border);border-radius:3px;font-size:12px;background:var(--bg);color:var(--text)}
 .lu-save{margin-top:14px;width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}
 .lu-save:hover{opacity:.9}
 .manual-modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center}
@@ -3070,22 +3085,53 @@ async function showLineupEdit(gameId, date) {
 
 // Build the roster <select>. Each option's value is the roster's exact
 // player_name (the string that will be POSTed and later fed to
-// getBatterWoba). Option label shows position + name for scanability.
-// A distinguished "— select —" first option (value='') indicates
-// "no player" for slots the user hasn't filled yet.
+// getBatterWoba).
+//
+// Dedup (fix/lineup-dropdown-dedup-abbrev-to-roster, 2026-07-24):
+// pre-refactor logic added an extra "(off-roster)" option for any
+// scraped-lineup name that didn't string-equal a roster entry. But
+// RotoWire routinely posts abbreviated first names ("J. Crawford")
+// while the roster stores full ("J.P. Crawford"). Result: the slot
+// showed TWO options for the same player — "J. Crawford (off-roster)"
+// pre-selected AND "SS · J.P. Crawford" separately. The abbreviated
+// one saved as the POST value, tripping the warning-check (fixed in
+// PR #199) and generally confusing the user about which entry was
+// the "real" one.
+//
+// New behavior:
+//   1. Exact string match: existing roster entry is pre-selected.
+//   2. Fuzzy (initial+last after diacritic-strip and stripSfx) unique
+//      match to a roster entry: substitute the ROSTER's full form as
+//      the pre-selected option; the "(off-roster)" fake option is
+//      NOT rendered. Save emits the roster full form, not the scraped
+//      abbrev.
+//   3. No unique fuzzy match (unknown callup, ambiguous last name):
+//      keep as "(off-roster)" pre-selected — the user can either keep
+//      the guess (fuzzyLookup Stage 5/7 may still resolve at score
+//      time) or pick a roster player manually. This is the safety
+//      net for same-day callups that beat the 6AM roster cron.
 function _renderLineupRow(pfx, idx, current, roster) {
   var currentName = (current && current.name) || '';
   var currentHand = (current && current.hand) || 'R';
-  // Preserve unknown existing name (e.g. from a stale scraped lineup
-  // where the player is off the current roster) as an extra option so
-  // the user sees it and can either keep it or replace it.
-  var rosterHasCurrent = roster.some(function(p) { return p.player_name === currentName; });
+
+  // Match the scraped name to a roster player. Prefer exact-string
+  // match (fast path, no ambiguity risk); fall back to (initial+last)
+  // fuzzy which mirrors fuzzyLookup Stage 5's identity semantics on
+  // the ROSTER side of the resolver.
+  var matchedRoster = null;
+  if (currentName) {
+    matchedRoster = roster.find(function(p) { return p.player_name === currentName; }) || null;
+    if (!matchedRoster) matchedRoster = _matchScrapedToRoster(currentName, roster);
+  }
+  var effectiveSelectedName = matchedRoster ? matchedRoster.player_name : currentName;
+  var showOffRoster = currentName && !matchedRoster;
+
   var options = ['<option value="">— select —</option>'];
-  if (currentName && !rosterHasCurrent) {
+  if (showOffRoster) {
     options.push('<option value="' + _escAttr(currentName) + '" selected>' + _escHtml(currentName) + ' (off-roster)</option>');
   }
   roster.forEach(function(p) {
-    var sel = (p.player_name === currentName) ? ' selected' : '';
+    var sel = (p.player_name === effectiveSelectedName) ? ' selected' : '';
     var label = (p.position || '??') + ' · ' + p.player_name;
     var dataHand = p.hand || 'R';
     options.push('<option value="' + _escAttr(p.player_name) + '" data-hand="' + dataHand + '"' + sel + '>' + _escHtml(label) + '</option>');
@@ -3095,9 +3141,70 @@ function _renderLineupRow(pfx, idx, current, roster) {
   }).join('');
   return '<div class="lu-row">'
     + '<span class="lu-num">' + (idx + 1) + '</span>'
-    + '<select id="' + pfx + idx + 'n" onchange="_luSelectChanged(this, \'' + pfx + '\', ' + idx + ')">' + options.join('') + '</select>'
-    + '<select id="' + pfx + idx + 'h" title="Batter handedness (auto-set from roster; override for switch hitters if needed)">' + handSel + '</select>'
+    + '<select class="lu-name-sel" id="' + pfx + idx + 'n" onchange="_luSelectChanged(this, \'' + pfx + '\', ' + idx + ')">' + options.join('') + '</select>'
+    + '<select class="lu-hand-sel" id="' + pfx + idx + 'h" title="Batter handedness (auto-set from roster; override for switch hitters if needed)">' + handSel + '</select>'
     + '</div>';
+}
+
+// Fuzzy (initial + last-after-stripSfx) match a scraped-lineup name to
+// a roster player. Returns the roster entry when exactly one match
+// exists, else null. Mirrors fuzzyLookup Stage 5's identity semantics
+// but runs on the ROSTER side so we can dedup at render time.
+//
+// Handles the three prod name-form gaps this fixes:
+//   * Abbreviated first name in scrape, full in roster
+//       "J. Crawford"      ↔  "J.P. Crawford"
+//       "V. Robles"        ↔  "Victor Robles"
+//   * Multi-initial abbrev in scrape (both variants norm to "jp crawford")
+//       "J.P. Crawford"    ↔  "J.P. Crawford" (exact fast path)
+//   * Accent/diacritic difference
+//       "Julio Rodriguez"  ↔  "Julio Rodríguez" (NFD strip)
+//   * Trailing suffix drop on either side
+//       "R. Acuna"         ↔  "Ronald Acuña Jr." (stripSfx on roster last-token)
+//
+// Ambiguity guard: if two roster players share the same (first-char,
+// last) fingerprint (rare — e.g. two Rodriguez brothers on the same
+// club), returns null. Slot renders as "(off-roster)" and the user
+// picks manually. Preferable to silently choosing the wrong one.
+function _matchScrapedToRoster(scrapedName, roster) {
+  if (!scrapedName || !roster || !roster.length) return null;
+  var sNorm = _luNormName(scrapedName);
+  var sParts = _luStripSfx(sNorm).split(/\s+/);
+  if (sParts.length < 2) return null;
+  var sInitial = sParts[0] && sParts[0][0];
+  var sLast = sParts[sParts.length - 1];
+  if (!sInitial || !sLast) return null;
+  var matches = [];
+  for (var i = 0; i < roster.length; i++) {
+    var rNorm = _luNormName(roster[i].player_name);
+    var rParts = _luStripSfx(rNorm).split(/\s+/);
+    if (rParts.length < 2) continue;
+    var rInitial = rParts[0] && rParts[0][0];
+    var rLast = rParts[rParts.length - 1];
+    if (rInitial === sInitial && rLast === sLast) matches.push(roster[i]);
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// Client-side normName + stripSfx — mirror utils/names.js (server
+// side) so the dedup logic uses the same comparison utils/names.js
+// fuzzyLookup will apply at score time. Kept inline (rather than
+// bundled) to avoid a module system in the browser bundle just for
+// two small string helpers.
+function _luNormName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function _luStripSfx(name) {
+  return String(name || '')
+    .split(/\s+/)
+    .filter(function(t) { return !/^(jr|sr|ii|iii|iv)\.?$/i.test(t); })
+    .join(' ');
 }
 
 // When a player is picked from the dropdown, auto-fill the adjacent
