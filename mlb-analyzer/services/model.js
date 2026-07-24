@@ -224,6 +224,20 @@ function resetRosterGateStats() {
 // with view traffic instead of pricing activity, breaking the health
 // signal.
 function buildRosterGatedIdx(idx, teamHint, rosterSet) {
+  // hotfix/disable-roster-gate-again (2026-07-23 URGENT-2): prod deploy of
+  // fix/roster-gate-abbrev-aware (#193) produced 107 rejections on the
+  // slate — worse than the 79-rejection storm the abbrev fix was
+  // supposed to resolve. Verifier passed 52/52 including a "PART A real
+  // slate replay" but PART A ran against my LOCAL dev DB, which has a
+  // corrupted team_rosters snapshot (BAL missing Adley Rutschman, wrong
+  // teams' players on wrong rosters) — so PART A's "1 rejection" was an
+  // artifact of the roster being small/wrong, not evidence the gate
+  // resolves prod-shape names correctly. Same disable pattern as the
+  // first hotfix (#192): force opt-out here and in getBatterWoba. Do
+  // not re-enable until a REAL prod-shaped verification (against a
+  // production DB snapshot, not local) shows 0-3 rejections.
+  return idx;
+  // eslint-disable-next-line no-unreachable
   if (rosterSet == null) return idx;
   const matcher = _buildRosterMatcher(rosterSet);
   return {
@@ -281,6 +295,14 @@ function resolveNeutralizationFactor(teamHint, settings, opts) {
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, rosterSet) {
+  // hotfix/disable-roster-gate-again (2026-07-23 URGENT-2): prod deploy
+  // of fix/roster-gate-abbrev-aware (#193) produced 107 rejections
+  // (worse than the pre-fix 79). Force rosterSet=null here to opt every
+  // caller out of the gate. Paired with the return-idx short-circuit in
+  // buildRosterGatedIdx above so both the signals path AND the matchup
+  // display path bypass filtering. Both come out together after a
+  // real prod-shaped verification lands (fix/roster-gate-v2, TBD).
+  rosterSet = null;
   if (minPA == null) minPA = 60;
   const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: false });
 
