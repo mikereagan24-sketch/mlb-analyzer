@@ -51,9 +51,16 @@ function stripSfx(n) {
 //   3. stripSfx("<name>") with/without team
 //   4. add each suffix (jr/sr/ii/iii/iv) with/without team
 //   5. single-letter abbrev first name + team — scan entries ending in team,
-//      match by initial + last name
+//      match by initial + last name (LOOKUP-abbrev vs IDX-full)
 //   6. single-letter abbrev first name — global scan, plus compound-surname
 //      fallback (e.g. "s woods richardson" → try each token as last name)
+//   6.5. FULL-name lookup vs ABBREV-form idx (LOOKUP-full vs IDX-abbrev,
+//      symmetric to stage 5). Only fires when lookup first token is
+//      multi-char (stages 5/6 handle the abbrev-first-token side). Ex:
+//      "Steven Antonacci" + teamHint 'nyy' hits "s antonacci nyy" idx
+//      entry. Introduced 2026-07-24 for feat/lineup-override-ui — roster
+//      full-name picks were systematically defaulting when Steamer only
+//      emitted the abbrev form.
 //   7. stripSfx final scan, ignoring entries with a 2-3 letter team-like suffix
 function fuzzyLookup(keyMap, name, teamHint) {
   if (!keyMap) return null;
@@ -111,6 +118,46 @@ function fuzzyLookup(keyMap, name, teamHint) {
         if (altMatches.length === 1) return altMatches[0][1];
       }
     }
+  }
+
+  // Stage 6.5 — symmetric to Stage 5. Lookup carries a FULL first name
+  // ("Steven Antonacci") but the idx has only the abbrev form
+  // ("s antonacci nyy"). Stage 5 handles the reverse direction; this
+  // fills the previously-uncovered symmetric case. Mutually exclusive
+  // with Stage 5/6 (this fires when NOT abbrev; they fire when isAbbrev),
+  // so placement between them is inert.
+  //
+  // Team-scoped first (higher precision), then global with the
+  // exactly-one-match guard Stage 6 uses. stripSfx on the idx-side base
+  // so "s antonacci jr nyy" still matches "Steven Antonacci" + nyy
+  // (base first_char='s' + last (post-stripSfx) ='antonacci').
+  //
+  // Additive-only: this stage runs only when every earlier stage
+  // returned null, and the return value is the discovered match.
+  // Every lookup that used to return a value still returns the same
+  // value (earlier stages hit first, never reach here); every lookup
+  // that used to return null now MIGHT return a value. No previously-
+  // hitting lookup can shift to a different value.
+  if (!isAbbrev && parts.length >= 2) {
+    const initial = parts[0][0], last = parts[parts.length - 1];
+    if (teamHint) {
+      const tl = teamHint.toLowerCase();
+      const e = Object.entries(keyMap).find(([n]) => {
+        if (!n.endsWith(' ' + tl)) return false;
+        const base = n.slice(0, n.length - tl.length - 1).trim();
+        const p = stripSfx(base).split(' ');
+        return p.length >= 2 && p[0].length === 1 && p[0] === initial && p[p.length - 1] === last;
+      });
+      if (e) return e[1];
+    }
+    // Global scan — require exactly-one match to avoid promoting an
+    // ambiguous cross-team collision (mirrors Stage 6's exactly-one gate).
+    const globalMatches = Object.entries(keyMap).filter(([n]) => {
+      if (/\s[a-z]{2,3}$/.test(n)) return false;  // team-tagged: already tried above
+      const p = stripSfx(n).split(' ');
+      return p.length >= 2 && p[0].length === 1 && p[0] === initial && p[p.length - 1] === last;
+    });
+    if (globalMatches.length === 1) return globalMatches[0][1];
   }
 
   const sk = stripSfx(k);
