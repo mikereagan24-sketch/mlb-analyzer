@@ -935,6 +935,36 @@ async function adminPost(path, payload){
   return body;
 }
 
+// Admin-token-aware DELETE (feat/lineup-override-ui, hotfix for the
+// admin-token auth path). Same retry pattern as adminPost —
+// rotated-token graceful handling, x-app-password carried through if
+// present. Used by the lineup override UI's clear/revert path.
+async function adminDelete(path){
+  async function doDelete(token){
+    const headers = {'Content-Type':'application/json', 'X-Admin-Token': token};
+    if(_appPassword) headers['x-app-password'] = _appPassword;
+    return fetch('/api'+path, {method:'DELETE', headers});
+  }
+  let token = getAdminToken(false);
+  if(!token) throw new Error('Admin token required');
+  let r = await doDelete(token);
+  if(r.status === 401){
+    clearAdminToken();
+    token = getAdminToken(true);
+    if(!token) throw new Error('Admin token required');
+    r = await doDelete(token);
+  }
+  let body = null;
+  try { body = await r.json(); } catch(_) {}
+  if(!r.ok){
+    const err = new Error('API '+path+' → '+r.status);
+    err.status = r.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
 async function refreshWobaStatus(){
   try{
     wobaStatus=await api('/woba-status');
@@ -3221,11 +3251,13 @@ async function saveLineup() {
     var proceed = confirm(body);
     if (!proceed) {
       // Roll back — delete every override we just posted so the game
-      // returns to its pre-modal state.
+      // returns to its pre-modal state. Uses _deleteLineupOverride
+      // (adminDelete) so the DELETE actually authenticates against
+      // requireAdminToken; raw fetch() without X-Admin-Token would
+      // 401 and leave the just-written override in place.
       for (var i = 0; i < postedSides.length; i++) {
-        try {
-          await fetch('/api/lineup-override/' + _luState.date + '/' + _luState.gameId + '/' + postedSides[i], { method: 'DELETE' });
-        } catch (_) { /* best effort */ }
+        try { await _deleteLineupOverride(_luState.date, _luState.gameId, postedSides[i]); }
+        catch (_) { /* best effort — DELETE on missing row is fine */ }
       }
       saveBtn.disabled = false; saveBtn.textContent = 'Save lineups';
       return;
@@ -3239,17 +3271,30 @@ async function saveLineup() {
   await loadGamesFromDB();
 }
 
-// POST helper — includes admin token (mirrors other write endpoints).
-// Backend already writes the override and immediately reruns
-// processGameSignals (routes/api.js:1904), so post-save we just refresh.
+// POST helper — routes through adminPost so it sends X-Admin-Token
+// (checked by requireAdminToken at routes/api.js:80 against the
+// server's DB_DOWNLOAD_TOKEN env var). Original attempt used the
+// api() helper which sends x-app-password on a different auth layer —
+// requireAdminToken ignores x-app-password and returned 401, which
+// looped the prompt because the wrong-header value got cached under
+// the wrong storage key. Now the modal prompts once for the admin
+// token (localStorage 'mlb_admin_token'), caches it session-lifetime,
+// and re-prompts only on rotation (adminPost's built-in 401 retry).
 async function _postLineupOverride(date, gameId, side, lineup) {
   var body = {
     game_date: date, game_id: gameId, side: side,
     lineup: lineup, set_by: 'ui', reason: 'matchup lineup edit',
   };
-  var r = await api('/lineup-override', { method: 'POST', body: JSON.stringify(body) });
-  if (r.error) throw new Error(r.error);
+  var r = await adminPost('/lineup-override', body);
+  if (r && r.error) throw new Error(r.error);
   return r;
+}
+
+async function _deleteLineupOverride(date, gameId, side) {
+  // Same auth layer as _postLineupOverride — adminDelete sends
+  // X-Admin-Token. Called on rollback-after-confirm-cancel and
+  // by the manual "Reset to source" button.
+  return adminDelete('/lineup-override/' + date + '/' + gameId + '/' + side);
 }
 
 async function revertLineupOverride() {
@@ -3259,9 +3304,16 @@ async function revertLineupOverride() {
   var removed = 0;
   for (var i = 0; i < sides.length; i++) {
     try {
-      var r = await api('/lineup-override/' + date + '/' + gameId + '/' + sides[i], { method: 'DELETE' });
+      var r = await _deleteLineupOverride(date, gameId, sides[i]);
       if (r && r.removed) removed += r.removed;
-    } catch (_) { /* silently continue — DELETE on non-existent side is fine */ }
+    } catch (e) {
+      // 401 auth failures bubble up as errors from adminDelete — surface
+      // those so the user knows to enter/rotate the token. Other errors
+      // (e.g. DELETE on a non-existent side returning {success, removed:0})
+      // don't throw; they're silently handled by the loop above.
+      if (e && e.status === 401) { alert('Auth required: ' + e.message); return; }
+      // Ignore non-auth errors — DELETE on missing rows is idempotent-fine.
+    }
   }
   document.getElementById('lu-modal').classList.remove('open');
   await loadGamesFromDB();
