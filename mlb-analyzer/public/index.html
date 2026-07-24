@@ -1066,6 +1066,11 @@ async function loadGamesFromDB(){
   try{
     const games=await api('/games/'+date);
     currentGames=games;
+    // Refresh lineup-override map BEFORE injectEditButtons so the badge
+    // renders in the same pass instead of flickering-in one tick later.
+    // Fire-and-forget on failure (map defaults empty; no badges is a
+    // safe degradation).
+    await _refreshLineupOverrideMap(date);
     renderGameGrid(games,date);
     injectEditButtons(games,date);
     if(games&&games.length) loadDataQuality(date, games, 'dq-games');
@@ -2857,6 +2862,34 @@ function injectEditButtons(games, date) {
       var gspEl = card.querySelector('.gsp');
       if (gspEl) gspEl.after(blu); else card.appendChild(blu);
     }
+    // Manual lineup override badge (feat/lineup-override-ui). Mirrors
+    // the opener badge above — amber, one badge per side that has a
+    // row in lineup_override. Same "loud so the owner never bets a
+    // stale hand-edit without noticing" intent the opener pattern uses.
+    // Cleared implicitly on next loadGamesFromDB (fresh injectEditButtons
+    // pass will render or not render based on the refreshed map).
+    if (_lineupOverrideMap) {
+      ['away','home'].forEach(function(side) {
+        var key = date + '|' + g.game_id + '|' + side;
+        var meta = _lineupOverrideMap[key];
+        if (!meta) return;
+        var badgeClass = 'lu-override-badge-' + side;
+        if (card.querySelector('.' + badgeClass)) return;
+        var teamCode = side === 'away' ? g.away_team : g.home_team;
+        var b = document.createElement('span');
+        b.className = 'lu-override-badge ' + badgeClass;
+        b.style.cssText = 'display:inline-block;margin-left:6px;padding:2px 6px;background:#ffe082;color:#5d4037;border-radius:8px;font-size:11px;font-weight:600;line-height:1.4;cursor:pointer';
+        b.textContent = '✎ ' + teamCode + ' manual lineup';
+        b.title = 'Manual lineup override set '
+          + (meta.set_at || '?')
+          + (meta.set_by ? ' by ' + meta.set_by : '')
+          + (meta.reason ? ' (' + meta.reason + ')' : '')
+          + ' — click to edit or revert';
+        b.onclick = function() { showLineupEdit(g.game_id, date, g); };
+        var gspEl2 = card.querySelector('.gsp');
+        if (gspEl2) gspEl2.appendChild(b); else card.appendChild(b);
+      });
+    }
   });
 }
 function showSPEdit(gameId, date, side) {
@@ -2907,58 +2940,396 @@ async function saveSP(gameId, date, side, rowId) {
   else alert('Save failed: '+r.error);
 }
 
-function showLineupEdit(gameId, date) {
-  _luState.gameId=gameId; _luState.date=date;
-  fetch('/api/games/'+date+'?t='+Date.now()).then(function(r){return r.json();}).then(function(games){
-    var g = games.find(function(x){return x.game_id===gameId;});
-    if (!g) return;
-    _luState.awayTeam=g.away_team; _luState.homeTeam=g.home_team;
-    var aLU = JSON.parse(g.away_lineup_json||'[]');
-    var hLU = JSON.parse(g.home_lineup_json||'[]');
-    while(aLU.length<9) aLU.push({name:'',hand:'R'});
-    while(hLU.length<9) hLU.push({name:'',hand:'R'});
-    function mkRow(pfx, idx, arr) {
-      var b=arr[idx]||{name:'',hand:'R'};
-      var h=b.hand||'R';
-      return '<div class="lu-row">'+
-        '<span class="lu-num">'+(idx+1)+'</span>'+
-        '<input id="'+pfx+idx+'n" value="'+(b.name||'').replace(/"/g,'&quot;')+'">'+
-        '<select id="'+pfx+idx+'h">'+
-          '<option value="R"'+(h==='R'?' selected':'')+'>R</option>'+
-          '<option value="L"'+(h==='L'?' selected':'')+'>L</option>'+
-          '<option value="S"'+(h==='S'?' selected':'')+'>S</option>'+
-        '</select></div>';
-    }
-    document.getElementById('lu-title').textContent = g.away_team+' @ '+g.home_team;
-    document.getElementById('lu-away-lbl').textContent = g.away_team+' Lineup';
-    document.getElementById('lu-home-lbl').textContent = g.home_team+' Lineup';
-    var aSlots='', hSlots='';
-    for(var i=0;i<9;i++){aSlots+=mkRow('lua',i,aLU); hSlots+=mkRow('luh',i,hLU);}
-    document.getElementById('lu-away-rows').innerHTML=aSlots;
-    document.getElementById('lu-home-rows').innerHTML=hSlots;
-    document.getElementById('lu-modal').classList.add('open');
+// Lineup edit modal state + roster cache
+// (feat/lineup-override-ui, 2026-07-24).
+//   awayRoster / homeRoster shape:
+//     [{ player_name, hand ('L'|'R'|'S'), position }]
+//   Cached per-team in a session-scope object so switching between
+//   games' modals doesn't re-hit /api/roster on every open. Rosters
+//   only change on the 6AM PT cron; a page refresh picks up moves.
+var _luState = {
+  gameId: null, date: null,
+  awayTeam: null, homeTeam: null,
+  awayRoster: [], homeRoster: [],
+  awayInitial: [], homeInitial: [],  // starting lineup for change detection
+};
+var _rosterCache = {};
+
+async function _fetchRoster(team) {
+  var k = (team || '').toUpperCase();
+  if (_rosterCache[k]) return _rosterCache[k];
+  try {
+    var r = await fetch('/api/roster/' + encodeURIComponent(k));
+    if (!r.ok) throw new Error('roster HTTP ' + r.status);
+    var rows = await r.json();
+    _rosterCache[k] = Array.isArray(rows) ? rows : [];
+    return _rosterCache[k];
+  } catch (e) {
+    console.warn('[lineup-edit] roster fetch failed for', k, e && e.message);
+    return [];
+  }
+}
+
+async function showLineupEdit(gameId, date) {
+  _luState.gameId = gameId; _luState.date = date;
+  // Ensure the modal DOM exists (added lazily to keep the modal
+  // scope-local and avoid a large always-present div in the body).
+  if (!document.getElementById('lu-modal')) _ensureLineupModal();
+  var res = await fetch('/api/games/' + date + '?t=' + Date.now());
+  var games = await res.json();
+  var g = games.find(function(x) { return x.game_id === gameId; });
+  if (!g) { alert('Game not found'); return; }
+  _luState.awayTeam = g.away_team;
+  _luState.homeTeam = g.home_team;
+
+  var aLU = _parseLineup(g.away_lineup_json);
+  var hLU = _parseLineup(g.home_lineup_json);
+  while (aLU.length < 9) aLU.push({ name: '', hand: 'R' });
+  while (hLU.length < 9) hLU.push({ name: '', hand: 'R' });
+  _luState.awayInitial = aLU.map(function(b) { return { name: b.name, hand: b.hand }; });
+  _luState.homeInitial = hLU.map(function(b) { return { name: b.name, hand: b.hand }; });
+
+  // Fetch both rosters in parallel
+  var rosterPair = await Promise.all([
+    _fetchRoster(g.away_team), _fetchRoster(g.home_team),
+  ]);
+  _luState.awayRoster = rosterPair[0];
+  _luState.homeRoster = rosterPair[1];
+
+  document.getElementById('lu-title').textContent = g.away_team + ' @ ' + g.home_team;
+  document.getElementById('lu-away-lbl').textContent = g.away_team + ' lineup';
+  document.getElementById('lu-home-lbl').textContent = g.home_team + ' lineup';
+
+  var awayHtml = '', homeHtml = '';
+  for (var i = 0; i < 9; i++) {
+    awayHtml += _renderLineupRow('lua', i, aLU[i], _luState.awayRoster);
+    homeHtml += _renderLineupRow('luh', i, hLU[i], _luState.homeRoster);
+  }
+  document.getElementById('lu-away-rows').innerHTML = awayHtml;
+  document.getElementById('lu-home-rows').innerHTML = homeHtml;
+
+  // Empty-roster warning — if either team's roster is empty, dropdowns
+  // will be unusable. Loudly flag it rather than silently rendering an
+  // empty picker (user might otherwise think the picker is just broken).
+  var noRoster = [];
+  if (_luState.awayRoster.length === 0) noRoster.push(g.away_team);
+  if (_luState.homeRoster.length === 0) noRoster.push(g.home_team);
+  var warnEl = document.getElementById('lu-warn');
+  if (noRoster.length) {
+    warnEl.style.display = 'block';
+    warnEl.textContent = '⚠ Roster empty for ' + noRoster.join(', ')
+      + ' — team_rosters not populated for these teams. Refresh rosters (6AM PT cron) or fix the roster ingest before editing.';
+  } else {
+    warnEl.style.display = 'none';
+  }
+
+  // Wire the "Reset to source" button — only clickable if an override
+  // currently exists for this game (either side). Checked via the slate
+  // override map maintained by loadGamesFromDB.
+  var revertBtn = document.getElementById('lu-revert');
+  var hasOverride = _lineupOverrideMap
+    && (_lineupOverrideMap[date + '|' + gameId + '|away']
+     || _lineupOverrideMap[date + '|' + gameId + '|home']);
+  revertBtn.disabled = !hasOverride;
+  revertBtn.title = hasOverride
+    ? 'Delete the manual override(s) and revert to the source lineup on the next cron pull'
+    : 'No manual override active for this game';
+
+  document.getElementById('lu-modal').classList.add('open');
+}
+
+// Build the roster <select>. Each option's value is the roster's exact
+// player_name (the string that will be POSTed and later fed to
+// getBatterWoba). Option label shows position + name for scanability.
+// A distinguished "— select —" first option (value='') indicates
+// "no player" for slots the user hasn't filled yet.
+function _renderLineupRow(pfx, idx, current, roster) {
+  var currentName = (current && current.name) || '';
+  var currentHand = (current && current.hand) || 'R';
+  // Preserve unknown existing name (e.g. from a stale scraped lineup
+  // where the player is off the current roster) as an extra option so
+  // the user sees it and can either keep it or replace it.
+  var rosterHasCurrent = roster.some(function(p) { return p.player_name === currentName; });
+  var options = ['<option value="">— select —</option>'];
+  if (currentName && !rosterHasCurrent) {
+    options.push('<option value="' + _escAttr(currentName) + '" selected>' + _escHtml(currentName) + ' (off-roster)</option>');
+  }
+  roster.forEach(function(p) {
+    var sel = (p.player_name === currentName) ? ' selected' : '';
+    var label = (p.position || '??') + ' · ' + p.player_name;
+    var dataHand = p.hand || 'R';
+    options.push('<option value="' + _escAttr(p.player_name) + '" data-hand="' + dataHand + '"' + sel + '>' + _escHtml(label) + '</option>');
   });
+  var handSel = ['R','L','S'].map(function(h) {
+    return '<option value="' + h + '"' + (h === currentHand ? ' selected' : '') + '>' + h + '</option>';
+  }).join('');
+  return '<div class="lu-row">'
+    + '<span class="lu-num">' + (idx + 1) + '</span>'
+    + '<select id="' + pfx + idx + 'n" onchange="_luSelectChanged(this, \'' + pfx + '\', ' + idx + ')">' + options.join('') + '</select>'
+    + '<select id="' + pfx + idx + 'h" title="Batter handedness (auto-set from roster; override for switch hitters if needed)">' + handSel + '</select>'
+    + '</div>';
+}
+
+// When a player is picked from the dropdown, auto-fill the adjacent
+// hand select from the roster entry's hand. User can still switch the
+// hand manually — the dropdown option carries data-hand as a source
+// of truth we can read; hand-select preserves the last manual value
+// only when the dropdown itself hasn't been touched since.
+function _luSelectChanged(selectEl, pfx, idx) {
+  var chosen = selectEl.value;
+  var dataHand = null;
+  for (var i = 0; i < selectEl.options.length; i++) {
+    if (selectEl.options[i].value === chosen) {
+      dataHand = selectEl.options[i].getAttribute('data-hand');
+      break;
+    }
+  }
+  if (!dataHand) return;  // "— select —" or off-roster entry (no data-hand)
+  var handEl = document.getElementById(pfx + idx + 'h');
+  if (handEl) handEl.value = dataHand;
+}
+
+// Read the 9 slots for a side, validate presence + hand. Returns null
+// if fewer than 9 filled (partial save is a common source of downstream
+// "_suppressed: incomplete_lineup" model output — surface it before
+// hitting the API).
+function _collectLineupSide(pfx) {
+  var out = [];
+  for (var i = 0; i < 9; i++) {
+    var nameEl = document.getElementById(pfx + i + 'n');
+    var handEl = document.getElementById(pfx + i + 'h');
+    if (!nameEl || !handEl) return null;
+    var name = (nameEl.value || '').trim();
+    if (!name) return { partial: true, filled: out.length };
+    var hand = handEl.value || 'R';
+    // Pull position from the selected option (roster-sourced) — the
+    // backend accepts a pos field so the lineup JSON matches the
+    // RotoWire shape and downstream framing/BsR code can find catchers.
+    var pos = null;
+    var opt = nameEl.options[nameEl.selectedIndex];
+    if (opt) {
+      var label = opt.textContent || '';
+      var m = label.match(/^(\S+)\s+·\s+/);
+      if (m) pos = m[1];
+    }
+    out.push({ name: name, hand: hand, pos: pos });
+  }
+  return { partial: false, lineup: out };
+}
+
+// Compare two lineups (order-sensitive) by name+hand. Skips pos since
+// the backend normalizes it. Returns true when they differ at any slot.
+function _sideChanged(before, after) {
+  if (!before || !after) return true;
+  if (before.length !== after.length) return true;
+  for (var i = 0; i < before.length; i++) {
+    if ((before[i].name || '') !== (after[i].name || '')) return true;
+    if ((before[i].hand || 'R') !== (after[i].hand || 'R')) return true;
+  }
+  return false;
 }
 
 async function saveLineup() {
-  var aLU=[], hLU=[];
-  for(var i=0;i<9;i++){
-    var an=(document.getElementById('lua'+i+'n')||{}).value||'';
-    var ah=(document.getElementById('lua'+i+'h')||{}).value||'R';
-    if(an.trim()) aLU.push({name:an.trim(),hand:ah});
-    var hn=(document.getElementById('luh'+i+'n')||{}).value||'';
-    var hh=(document.getElementById('luh'+i+'h')||{}).value||'R';
-    if(hn.trim()) hLU.push({name:hn.trim(),hand:hh});
+  var away = _collectLineupSide('lua');
+  var home = _collectLineupSide('luh');
+  if (!away || !home) { alert('Modal missing rows'); return; }
+  if (away.partial || home.partial) {
+    var msg = [];
+    if (away.partial) msg.push(_luState.awayTeam + ': only ' + away.filled + ' of 9 slots filled');
+    if (home.partial) msg.push(_luState.homeTeam + ': only ' + home.filled + ' of 9 slots filled');
+    alert('Complete both lineups before saving.\n\n' + msg.join('\n')
+      + '\n\nPartial lineups suppress model scoring (would render — until 9 slots are set).');
+    return;
   }
-  var r = await fetch('/api/games/'+_luState.date+'/'+_luState.gameId+'/lineup',{
-    method:'PATCH',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({away_lineup:aLU,home_lineup:hLU})
-  }).then(function(r){return r.json();});
-  if(r.success){
-    document.getElementById('lu-modal').classList.remove('open');
-    loadGamesFromDB();
-  } else alert('Save failed: '+r.error);
+
+  // Which sides actually changed? Only POST the changed ones so an
+  // unrelated edit on one side doesn't reset the other side's
+  // override-status timestamp.
+  var willPostAway = _sideChanged(_luState.awayInitial, away.lineup);
+  var willPostHome = _sideChanged(_luState.homeInitial, home.lineup);
+  if (!willPostAway && !willPostHome) {
+    alert('No changes to save.');
+    return;
+  }
+
+  // First pass: POST each changed side. The backend returns
+  // unresolved_names[] for names that missed the wOBA index exact-key
+  // check. Blocking confirm collects them across both sides.
+  //
+  // NOTE: the backend PERSISTS on POST regardless of confirm. If the
+  // user cancels the confirm, we DELETE the just-written override to
+  // roll back — otherwise a "Cancel" after seeing the warning would
+  // leave the override in place. Idempotent rollback.
+  var saveBtn = document.getElementById('lu-save');
+  saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+
+  var results = { away: null, home: null };
+  var postedSides = [];
+  try {
+    if (willPostAway) {
+      results.away = await _postLineupOverride(_luState.date, _luState.gameId, 'away', away.lineup);
+      postedSides.push('away');
+    }
+    if (willPostHome) {
+      results.home = await _postLineupOverride(_luState.date, _luState.gameId, 'home', home.lineup);
+      postedSides.push('home');
+    }
+  } catch (e) {
+    alert('Save failed: ' + (e.message || e));
+    saveBtn.disabled = false; saveBtn.textContent = 'Save lineups';
+    return;
+  }
+
+  // Consolidate unresolved names across sides. Each entry becomes
+  // "TEAM slot N: player name" so the warning shows exactly where the
+  // problem is, not just a bare count.
+  var unresolved = [];
+  if (results.away && Array.isArray(results.away.unresolved_names)) {
+    results.away.unresolved_names.forEach(function(name) {
+      var slot = away.lineup.findIndex(function(b) { return b.name === name; });
+      unresolved.push({ team: _luState.awayTeam, slot: slot + 1, name: name });
+    });
+  }
+  if (results.home && Array.isArray(results.home.unresolved_names)) {
+    results.home.unresolved_names.forEach(function(name) {
+      var slot = home.lineup.findIndex(function(b) { return b.name === name; });
+      unresolved.push({ team: _luState.homeTeam, slot: slot + 1, name: name });
+    });
+  }
+
+  if (unresolved.length) {
+    // Blocking confirm — show EACH unresolved pick by name. This is the
+    // feature's most important safety surface: any pick that didn't
+    // exact-key-hit will price at BAT_DFLT (league average), which
+    // silently distorts the model. Owner explicitly asked to see the
+    // list, not a count. Symmetric-abbrev fuzzyLookup stage (b) — the
+    // fix that would resolve most of these — is on
+    // fix/fuzzylookup-abbrev-lookup-symmetric.
+    var lines = unresolved.map(function(u) {
+      return '  • ' + u.team + ' slot ' + u.slot + ':  ' + u.name;
+    });
+    var body = unresolved.length + ' pick(s) may not resolve to a real wOBA entry '
+      + '(will fall back to league-average .315/.320):\n\n'
+      + lines.join('\n')
+      + '\n\nCommon causes:\n'
+      + '  · Roster full-name vs Steamer abbrev-form mismatch (S. Antonacci class)\n'
+      + '  · Player has no Steamer projection yet (recent callup)\n'
+      + '  · Name accent/diacritic difference between roster and Steamer\n\n'
+      + 'Save anyway?\n\n'
+      + '[OK] keep the override and accept league-avg for these picks\n'
+      + '[Cancel] roll back the save';
+    var proceed = confirm(body);
+    if (!proceed) {
+      // Roll back — delete every override we just posted so the game
+      // returns to its pre-modal state.
+      for (var i = 0; i < postedSides.length; i++) {
+        try {
+          await fetch('/api/lineup-override/' + _luState.date + '/' + _luState.gameId + '/' + postedSides[i], { method: 'DELETE' });
+        } catch (_) { /* best effort */ }
+      }
+      saveBtn.disabled = false; saveBtn.textContent = 'Save lineups';
+      return;
+    }
+  }
+
+  document.getElementById('lu-modal').classList.remove('open');
+  saveBtn.disabled = false; saveBtn.textContent = 'Save lineups';
+  // Refresh the slate; loadGamesFromDB also re-fetches the override
+  // map so the manual-override badge appears/updates on the card.
+  await loadGamesFromDB();
 }
+
+// POST helper — includes admin token (mirrors other write endpoints).
+// Backend already writes the override and immediately reruns
+// processGameSignals (routes/api.js:1904), so post-save we just refresh.
+async function _postLineupOverride(date, gameId, side, lineup) {
+  var body = {
+    game_date: date, game_id: gameId, side: side,
+    lineup: lineup, set_by: 'ui', reason: 'matchup lineup edit',
+  };
+  var r = await api('/lineup-override', { method: 'POST', body: JSON.stringify(body) });
+  if (r.error) throw new Error(r.error);
+  return r;
+}
+
+async function revertLineupOverride() {
+  var date = _luState.date, gameId = _luState.gameId;
+  if (!date || !gameId) return;
+  var sides = ['away', 'home'];
+  var removed = 0;
+  for (var i = 0; i < sides.length; i++) {
+    try {
+      var r = await api('/lineup-override/' + date + '/' + gameId + '/' + sides[i], { method: 'DELETE' });
+      if (r && r.removed) removed += r.removed;
+    } catch (_) { /* silently continue — DELETE on non-existent side is fine */ }
+  }
+  document.getElementById('lu-modal').classList.remove('open');
+  await loadGamesFromDB();
+  if (!removed) alert('No manual override was active for this game.');
+}
+
+// Slate-level cache of active lineup overrides. Populated by
+// loadGamesFromDB after games load; keyed as date|gid|side → { set_at,
+// set_by, reason }. Consulted by injectEditButtons to render the
+// "Manual lineup override" badge on cards.
+var _lineupOverrideMap = null;
+async function _refreshLineupOverrideMap(date) {
+  try {
+    var rows = await fetch('/api/lineup-override/' + date).then(function(r) { return r.json(); });
+    var map = {};
+    (rows || []).forEach(function(r) {
+      map[r.game_date + '|' + r.game_id + '|' + r.side] = {
+        set_at: r.set_at, set_by: r.set_by, reason: r.reason,
+      };
+    });
+    _lineupOverrideMap = map;
+  } catch (e) {
+    console.warn('[lineup-override-map] fetch failed:', e && e.message);
+    _lineupOverrideMap = {};
+  }
+}
+
+// Lazily inject the modal DOM. Kept out of body markup because it's
+// only used on-click and pulling it out of an initial-render blob
+// makes iteration on the modal shape simpler.
+function _ensureLineupModal() {
+  var d = document.createElement('div');
+  d.className = 'lu-modal';
+  d.id = 'lu-modal';
+  d.onclick = function(e) { if (e.target === d) d.classList.remove('open'); };
+  d.innerHTML =
+    '<div class="lu-box" onclick="event.stopPropagation()">' +
+      '<div class="lu-hdr">' +
+        '<span class="lu-hdr-title" id="lu-title">Edit lineups</span>' +
+        '<span class="lu-close" onclick="document.getElementById(\'lu-modal\').classList.remove(\'open\')">×</span>' +
+      '</div>' +
+      '<div id="lu-warn" style="display:none;margin-bottom:12px;padding:8px 10px;background:var(--yellow-bg);color:var(--yellow);border-radius:6px;font-size:11px;line-height:1.4"></div>' +
+      '<div class="lu-cols">' +
+        '<div>' +
+          '<div class="lu-team-lbl" id="lu-away-lbl">Away lineup</div>' +
+          '<div id="lu-away-rows"></div>' +
+        '</div>' +
+        '<div>' +
+          '<div class="lu-team-lbl" id="lu-home-lbl">Home lineup</div>' +
+          '<div id="lu-home-rows"></div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:14px">' +
+        '<button class="lu-save" id="lu-save" onclick="saveLineup()" style="flex:1">Save lineups</button>' +
+        '<button class="lu-save" id="lu-revert" onclick="revertLineupOverride()" style="flex:0 0 auto;background:var(--yellow);color:#5d4037" title="Delete the manual override(s) and revert to the source lineup">Reset to source</button>' +
+      '</div>' +
+      '<div style="margin-top:8px;font-size:10px;color:var(--text3);line-height:1.5">' +
+        'Manual override is respected while the RotoWire lineup status is <em>projected</em>. Once RotoWire posts a <em>confirmed</em> lineup, the override is auto-cleared on the next cron pull (real beats guess).' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(d);
+}
+
+// Small escapers so option labels can carry accents / apostrophes
+// without breaking innerHTML.
+function _escAttr(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function _escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function _parseLineup(json) { try { return JSON.parse(json || '[]'); } catch (_) { return []; } }
 
 function poissonOverP(line, lambda) {
   if (!lambda || lambda<=0) return 0.5;
