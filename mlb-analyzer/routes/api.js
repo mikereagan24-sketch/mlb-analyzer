@@ -1942,6 +1942,29 @@ router.get('/lineup-override/:game_date', (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Active-roster position players (feat/lineup-override-ui, 2026-07-24).
+// Feeds the lineup-edit dropdowns. Team code is case-insensitive; the
+// underlying team_rosters.team is stored uppercase, so upcase before
+// query. Returns POS-only rows (no pitchers) with the player_name form
+// as-stored, plus batter handedness (L/R/S) and position code so the
+// UI can auto-fill hand and sort/label by position.
+//
+// Response shape: [{ player_name, hand, position }] ordered by position
+// then player_name. Empty array = roster unknown (team not in the
+// active 26-man table yet). No auth; read-only.
+router.get('/roster/:team', (req, res) => {
+  try {
+    const team = String(req.params.team || '').toUpperCase();
+    if (!team) return res.status(400).json({ error: 'team required' });
+    const rows = db.prepare(
+      "SELECT player_name, hand, position FROM team_rosters " +
+      "WHERE team = ? AND role = 'POS' " +
+      "ORDER BY position, player_name"
+    ).all(team);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Parameter sweep — admin-only diagnostic that re-scores a historical
 // date window under a battery of settings combinations and reports ROI
 // by bet direction. Snapshot-aware: each game's date determines which
