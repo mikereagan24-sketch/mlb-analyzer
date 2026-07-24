@@ -1837,37 +1837,40 @@ router.post('/lineup-override', requireAdminToken, (req, res) => {
       pos: (typeof x.pos === 'string' && x.pos.trim()) ? x.pos.trim() : null,
     }));
 
-    // Name-resolution warning. getBatterWoba (services/model.js ~61)
-    // resolves a batter by normName lookup against the bat-proj-*
-    // indexes (with fuzzyLookup fallbacks). A name with no normName
-    // match will silently fall back to BAT_DFLT — the model still
-    // runs, but the caller probably wants to know. Pull the live
-    // wOBA index and check each name's normalized form against the
-    // proj-side indexes (most batters appear in both LHP and RHP
-    // splits; missing both is the "won't resolve" case).
+    // Name-resolution warning (fix/lineup-warning-uses-fuzzylookup,
+    // 2026-07-24). Original check did exact-key + startsWith prefix
+    // scan and OVER-REPORTED — flagged names like "J. Crawford" and
+    // "V. Robles" that fuzzyLookup would resolve fine via Stage 5
+    // (abbrev + teamHint). The false-positive warning fired on 3 of 9
+    // core SEA starters and made the modal's blocking confirm
+    // effectively useless (users couldn't tell false positives from
+    // real problems).
+    //
+    // Now uses the shared fuzzyLookup — the same resolver
+    // getBatterWoba consults at score time. If fuzzyLookup returns
+    // null across all four batter sub-maps, the name will genuinely
+    // fall back to BAT_DFLT (league average) and deserves the warning.
+    // If it returns a hit on ANY sub-map, the model will resolve it,
+    // no warning needed.
+    //
+    // teamHint (per-side) is required for Stage 5 (LOOKUP-abbrev +
+    // teamHint scans entries ending in team code). Pulled from
+    // game_log for the pricing side — the same team that will feed
+    // getBatterWoba downstream.
     let unresolvedNames = [];
     try {
       const idx = getWobaIndex();
-      const lhp = idx['bat-proj-lhp'] || {};
-      const rhp = idx['bat-proj-rhp'] || {};
-      // Also check the actuals side — some recently-called-up bats
-      // appear there before projections refresh.
-      const lhpAct = idx['bat-act-lhp'] || {};
-      const rhpAct = idx['bat-act-rhp'] || {};
+      const gameRow = q.getGameById.get(b.game_date, b.game_id);
+      const teamHint = gameRow
+        ? (b.side === 'away' ? gameRow.away_team : gameRow.home_team)
+        : null;
       for (const x of normalizedLineup) {
-        const k = normName(x.name);
-        // Exact-key check across all four indexes. fuzzyLookup has
-        // additional matching strategies (jr-stripped, abbreviated,
-        // team-keyed), so this can OVER-report unresolved — the
-        // warning is conservative: a flagged name MIGHT still
-        // resolve via fuzzyLookup, but a name that hits any of the
-        // four indexes here is definitely safe.
-        const hit = idx['bat-proj-lhp']
-          && (lhp[k] || rhp[k] || lhpAct[k] || rhpAct[k]
-              // tolerate the "name + team-tag" suffixed keys (e.g.
-              // "judge nyy") by scanning for prefix matches too
-              || Object.keys(lhp).some(kk => kk === k || kk.startsWith(k + ' '))
-              || Object.keys(rhp).some(kk => kk === k || kk.startsWith(k + ' ')));
+        // Check all four batter sub-maps in the same order
+        // getBatterWoba does. Any hit clears the warning.
+        const hit = fuzzyLookup(idx['bat-proj-lhp'] || {}, x.name, teamHint)
+                 || fuzzyLookup(idx['bat-act-lhp']  || {}, x.name, teamHint)
+                 || fuzzyLookup(idx['bat-proj-rhp'] || {}, x.name, teamHint)
+                 || fuzzyLookup(idx['bat-act-rhp']  || {}, x.name, teamHint);
         if (!hit) unresolvedNames.push(x.name);
       }
     } catch (e) {
