@@ -117,6 +117,70 @@ Pre-flight for any PR that adds a new `bet_signals` writer:
    (e.g. `POST /signals/manual`), that's fine — the ruling only
    binds automated writers. User writes are the source of truth.
 
+## Ingest-not-hot-path rule (2026-07-24)
+
+**Do not put general-case filters on the pricing hot path to fix
+narrow data problems. Fix the data at ingest. Monitors report; they
+don't decide. Verification against synthetic data doesn't count for
+anything that touches live pricing — prod-shaped fixtures or it
+doesn't ship.**
+
+Origin: the Victor Mesa shadow (VVM MIA farmhand's Steamer projection
+collided with Victor Mesa Jr. TB's projection under fuzzyLookup's
+Stage 2 no-suffix lookup, contaminating 30 games and 42 signals over
+May–July 2026). Two attempts at a general-case roster-membership
+filter on `getBatterWoba` — the pricing hot path — each caused
+prod-wide mass rejections (79 and 107 batters, respectively, roughly
+88% and 90% of the slate) forcing emergency hotfixes to disable the
+filter. Both attempts passed unit-test suites (29/29 and 39/39
+respectively) and both "passed" a local-DB slate replay that could not
+actually exercise the failure mode because the dev DB's
+`team_rosters` snapshot was corrupted in ways I hadn't noticed.
+
+The correct fix was structural, at the ingest layer (PR
+`fix/woba-ingest-dedup`): our own `ingestWobaCSV` fabricated the
+shadow rows by doubling every Steamer entry as bare-name AND
+name+team. Dropping the bare-name row for team-tagged players +
+a hardcoded exclusion list for the one known cross-Steamer-row
+collision (Victor Mesa) removed the bug without any hot-path change.
+
+Applying this rule:
+
+1. **When narrowly-scoped data bugs surface**, look first for a fix
+   at the layer where the bad data enters the system (ingest, upsert,
+   snapshot). Ask "why does this bad row exist?" before "how do I
+   filter it out at read time?" Ingest-layer fixes have bounded blast
+   radius (they run once per refresh, off-critical-path) and are
+   trivially reversible.
+2. **Reserve hot-path filters** for genuinely runtime-varying
+   conditions the ingest layer cannot know at write time (e.g.,
+   current-slate market prices, cohort filters). Even then, the
+   filter must be verified against **production-shaped data**, not
+   local dev fixtures or synthetic constructions.
+3. **Monitors report; they don't decide.** A weekly audit script
+   (`tmp/audit-mesa-class-shadows.js`) that flags candidate shadows
+   for review is the right pattern — it surfaces the class without
+   making pricing decisions on its own. Any new shadow discovered
+   gets a targeted `SHADOW_EXCLUSIONS` entry, not a filter that
+   might mis-reject other batters.
+4. **Synthetic verification does not count for hot-path changes.**
+   Unit tests and injected fixtures verify local logic; they cannot
+   verify that a filter matches every name-form class production
+   emits. Any PR touching live pricing must run against a snapshot
+   of the prod DB (via `/admin/download-db` or equivalent) and
+   report actual pass counts on the current slate BEFORE merge.
+5. **When a hot-path change causes an incident**, the correct
+   response is disable first (targeted revert or short-circuit
+   in the two callsites), diagnose second. Do not attempt a
+   patch-on-the-live-code fix — the same class of failure will
+   recur under a slightly different name variant. Cut the branch,
+   verify with prod-shaped fixtures, then re-enable.
+
+Related: `_rosterGateStats` / `getRosterGateStats` /
+`buildRosterGatedIdx` in `services/model.js` are dead code kept as
+disabled infrastructure. If a future edit is tempted to re-enable
+them, revisit this section first.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
