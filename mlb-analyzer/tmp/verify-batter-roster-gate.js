@@ -1,3 +1,22 @@
+// SKIPPED as of fix/woba-ingest-dedup (2026-07-24).
+//
+// The roster gate this verifier exercised is permanently disabled after
+// two live-slate incidents (79 + 107 rejections). Shadow bugs are now
+// resolved at the ingest layer via routes/api.js dedup + hardcoded
+// SHADOW_EXCLUSIONS list. See tmp/verify-woba-ingest-dedup.js for the
+// current test surface.
+//
+// File preserved for historical context — the assertions below encode
+// the intent the gate was supposed to satisfy, useful if a future v3
+// attempt is ever considered. Exit 0 immediately so the file can stay
+// in tmp/ without failing any verifier sweep.
+console.log('SKIPPED: roster gate is permanently disabled. See tmp/verify-woba-ingest-dedup.js.');
+process.exit(0);
+
+// ─── HISTORICAL — the assertions below are DEAD until the gate returns ───
+// eslint-disable-next-line no-unreachable
+if (false) {
+
 // Verifier for fix/batter-woba-active-roster-gate.
 //
 // Builds an in-memory woba_data-shaped idx that mirrors the shadow case
@@ -317,3 +336,5 @@ console.log('=== Summary ===');
 console.log('  Passed: ' + passed);
 console.log('  Failed: ' + failed);
 process.exit(failed === 0 ? 0 : 1);
+
+} // close historical if(false) block

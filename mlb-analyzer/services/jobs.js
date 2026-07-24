@@ -3348,7 +3348,50 @@ function startCronJobs() {
     }
   }, { timezone: 'America/Los_Angeles' });
 
-  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P, scores 4A, roster 6A, morning refresh 7A, morning empirical-spread capture 7:30A, tomorrow-slate prefetch 8P + refresh 11P');
+  // --- Weekly shadow-audit sweep (fix/woba-ingest-dedup, 2026-07-24) ---
+  // Runs tmp/audit-mesa-class-shadows.js against the live woba_data to
+  // surface new shadow candidates — same-normalized-name pairs where
+  // one entry has a real-player sample (>=20 PA) and the other is a
+  // low-sample no-suffix bare row that would preempt at fuzzyLookup
+  // Stage 2. Since routes/api.js ingestWobaCSV now drops bare rows for
+  // team-tagged players, most shadows are prevented at ingest; this
+  // audit catches the residual class of cross-Steamer-row collisions
+  // (like Victor Mesa VVM MIA vs Victor Mesa Jr. TB) that dedup can't
+  // resolve on its own.
+  //
+  // Fires 9AM PT Mondays — after the 6AM roster refresh, so the audit
+  // reads current active-roster context. Writes findings to console
+  // (visible in cron_log). Any flagged candidate needs manual review
+  // and, if confirmed, an entry added to SHADOW_EXCLUSIONS in
+  // routes/api.js.
+  //
+  // Fire-and-forget spawn — a script hiccup must not interfere with
+  // the pricing crons.
+  cron.schedule('0 9 * * 1', () => {
+    console.log('[cron] Mon 9AM PT shadow-audit sweep');
+    try {
+      const { spawn } = require('child_process');
+      const path = require('path');
+      const proc = spawn(process.execPath, [path.join(__dirname, '..', 'tmp', 'audit-mesa-class-shadows.js')], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '', err = '';
+      proc.stdout.on('data', d => out += d);
+      proc.stderr.on('data', d => err += d);
+      proc.on('close', code => {
+        console.log('[shadow-audit] exit=' + code);
+        // Print the audit output line-by-line so it flows through the
+        // normal console log stream (cron_log picks it up).
+        for (const line of out.split(/\r?\n/)) if (line) console.log('[shadow-audit] ' + line);
+        if (err) for (const line of err.split(/\r?\n/)) if (line) console.warn('[shadow-audit-stderr] ' + line);
+      });
+      proc.on('error', e => console.error('[shadow-audit] spawn failed:', e && e.message));
+    } catch (e) {
+      console.error('[shadow-audit] scheduling failed:', e && e.message);
+    }
+  }, { timezone: 'America/Los_Angeles' });
+
+  console.log('[cron] Scheduled in America/Los_Angeles: lineups 8A + hourly 12-6P + 11P, odds 8A/11A/3P/5P, scores 4A, roster 6A, morning refresh 7A, morning empirical-spread capture 7:30A, tomorrow-slate prefetch 8P + refresh 11P, weekly shadow-audit Mon 9A');
 }
 
 function gameHasStarted(gameRow, gameDate) {

@@ -197,6 +197,52 @@ function tryParse(str) {
 ;
 
 
+// Shadow exclusion list (fix/woba-ingest-dedup Option c, 2026-07-24).
+//
+// Named woba_data entries that shadow a real rostered player and must
+// be dropped at ingest. The ingest dedup (Option b, in ingestWobaCSV
+// below) removes the OWN-INGEST duplicate bare-name rows and closes
+// the bulk of the shadow class. This list is the residual safety net
+// for shadows that survive because two DIFFERENT Steamer rows produce
+// colliding normalized names (e.g., "Victor Mesa" the MIA farmhand vs
+// "Victor Mesa Jr." — Steamer emits both as distinct rows, so ingest
+// dedup can't tell they collide; only a hardcoded knowledge that
+// "Victor Mesa MIA" is not a real 26-man player resolves it).
+//
+// Keys are 'data_key|player_name' — matched exactly against the raw
+// row before expansion. Both bare and team-tagged variants of a name
+// need explicit entries.
+//
+// Population process:
+//   1. tmp/audit-mesa-class-shadows.js flags shadow candidates weekly.
+//   2. Review flagged candidates against team_rosters (real player?).
+//   3. If confirmed shadow (off-roster low-sample entry colliding with
+//      a real rostered player), add BOTH the bare and team-tagged
+//      forms here with a comment naming the real player being
+//      shadowed.
+//
+// Rare — 1 shadow discovered in 4 months of 2026 season data per audit.
+const SHADOW_EXCLUSIONS = new Set([
+  // Victor Mesa (VVM, MIA farmhand — sample 0.7, wOBA .238) shadowing
+  // Victor Mesa Jr. (real TB active roster — sample 85, wOBA .313).
+  // Discovered 2026-07-23 after user visually noticed .240 in matchup
+  // view. 30 games contaminated May 25 - July 23. See
+  // tmp/audit-mesa-class-shadows.js + tmp/replay-mesa-signal-delta.js.
+  'bat-proj-lhp|Victor Mesa',
+  'bat-proj-lhp|Victor Mesa MIA',
+  'bat-proj-rhp|Victor Mesa',
+  'bat-proj-rhp|Victor Mesa MIA',
+  // Actuals side too — VVM's 2-year splits row also normalizes to
+  // "victor mesa" and would shadow Jr's actuals if actuals ever have
+  // a bare row for the same player. Local DB shows no MIA-tagged
+  // Victor Mesa in bat-act-* today but keep entries for symmetry so
+  // a future Steamer schema change doesn't reopen the bug.
+  'bat-act-lhp|Victor Mesa',
+  'bat-act-lhp|Victor Mesa MIA',
+  'bat-act-rhp|Victor Mesa',
+  'bat-act-rhp|Victor Mesa MIA',
+]);
+
 // Shared wOBA-CSV ingestion path. The manual upload route and the one-click
 // FanGraphs refresh both funnel through here so parse + expand + persist
 // logic stays in one place. Throws on empty parse; returns rows-inserted
@@ -208,17 +254,72 @@ function ingestWobaCSV(key, csvText, filename) {
   const rows = parseCSV(buf, isPitcher);
   if (!rows.length) throw new Error('No valid rows parsed. Check wOBA and Name columns.');
   q.clearWobaKey.run(key);
-  // Store each player twice: by name alone AND by "name TEAM" for disambiguation
+  // Row expansion (fix/woba-ingest-dedup, 2026-07-24):
+  //
+  // Steamer emits ONE row per player. The pre-fix code unconditionally
+  // pushed a bare-name row PLUS a name+team row, deliberately doubling
+  // every entry so a lineup lookup could hit either form at
+  // fuzzyLookup Stage 1 or 2. That doubling was the mechanism behind
+  // the Victor Mesa shadow bug: VVM (MIA farmhand, sample 0.7) and
+  // Victor Mesa Jr. (real TB player, sample 85) each produced a bare
+  // "Victor Mesa"/"Victor Mesa Jr." row. Lookup "Victor Mesa" +
+  // teamHint "tb" then hit VVM's shadow at Stage 2 before Stage 4
+  // could find the real "Victor Mesa Jr. TB". See
+  // tmp/audit-mesa-class-shadows.js for full scope.
+  //
+  // Rules now:
+  //   1. Untagged Steamer row (no r.team): write bare name only. Free
+  //      agents / not-yet-team-attached players still make it into the
+  //      idx via this path (rare — ~0 rows in practice per the audit).
+  //   2. Team-tagged row: write name+team form ONLY. NO bare row —
+  //      that was the shadow. fuzzyLookup Stage 1 hits name+team when
+  //      lineup + teamHint aligns; Stage 4/5 handle the "lineup dropped
+  //      the Jr." and "lineup used first initial" cases without needing
+  //      a bare fallback row in the idx.
+  //   3. If the name has a trailing Jr./Sr./II/III/IV suffix, ALSO
+  //      write a stripped+team form. Lineup "Victor Mesa" + tb then
+  //      hits "Victor Mesa TB" at Stage 1 directly (no cascade
+  //      needed). Uses a token-split rather than the pre-fix regex
+  //      /\b(Jr\.|Sr\.|II|III|IV)\b/gi — that regex silently no-op'd
+  //      on the most common form "Player Jr." because the trailing
+  //      \b never fires after "." (both "." and end-of-string are
+  //      non-word chars, no boundary). Every Jr./Sr. player in the DB
+  //      was missing its stripped+team row as a result (verified: no
+  //      "Bobby Witt KC", "Ronald Acuña ATL", "Vladimir Guerrero TOR"
+  //      companion entries pre-fix).
+  //
+  // (c) Shadow exclusion list — final safety net for known collisions
+  //     the ingest dedup can't reach on its own (name-different-form
+  //     collisions across two Steamer rows). Populated from
+  //     tmp/audit-mesa-class-shadows.js weekly cron findings. Applied
+  //     BEFORE expansion so both bare and team-tagged variants of a
+  //     shadowed name get dropped.
+  const SUFFIX_TOKENS = new Set(['jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv']);
+  function stripSuffixToken(name) {
+    const parts = String(name).trim().split(/\s+/);
+    while (parts.length > 1 && SUFFIX_TOKENS.has(parts[parts.length - 1].toLowerCase())) {
+      parts.pop();
+    }
+    return parts.join(' ');
+  }
   const expandedRows = [];
+  let excludedCount = 0;
   for (const r of rows) {
-    expandedRows.push(r);
-    if (r.team) {
-      expandedRows.push({...r, name: r.name+' '+r.team});
-      // Also store Jr/Sr-stripped + team so "bobby witt kc" matches "Bobby Witt" in lineup
-      const stripped = r.name.replace(/\b(Jr\.|Sr\.|II|III|IV)\b/gi,'').replace(/\s+/g,' ').trim();
-      if (stripped !== r.name) expandedRows.push({...r, name: stripped+' '+r.team});
+    if (SHADOW_EXCLUSIONS.has(key + '|' + r.name)) {
+      excludedCount++;
+      continue;
+    }
+    if (!r.team) {
+      expandedRows.push(r);
+      continue;
+    }
+    expandedRows.push({...r, name: r.name+' '+r.team});
+    const stripped = stripSuffixToken(r.name);
+    if (stripped !== r.name && stripped.length > 0) {
+      expandedRows.push({...r, name: stripped+' '+r.team});
     }
   }
+  if (excludedCount > 0) console.log('[woba-ingest] ' + key + ': excluded ' + excludedCount + ' shadow-list row(s)');
   q.upsertWobaBatch(key, expandedRows);
   // Snapshot this key's rows for date-accurate backtests. The calendar
   // date is the server's local date at ingest time = "the data as it

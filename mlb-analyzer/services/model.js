@@ -224,18 +224,35 @@ function resetRosterGateStats() {
 // with view traffic instead of pricing activity, breaking the health
 // signal.
 function buildRosterGatedIdx(idx, teamHint, rosterSet) {
-  // hotfix/disable-roster-gate-again (2026-07-23 URGENT-2): prod deploy of
-  // fix/roster-gate-abbrev-aware (#193) produced 107 rejections on the
-  // slate — worse than the 79-rejection storm the abbrev fix was
-  // supposed to resolve. Verifier passed 52/52 including a "PART A real
-  // slate replay" but PART A ran against my LOCAL dev DB, which has a
-  // corrupted team_rosters snapshot (BAL missing Adley Rutschman, wrong
-  // teams' players on wrong rosters) — so PART A's "1 rejection" was an
-  // artifact of the roster being small/wrong, not evidence the gate
-  // resolves prod-shape names correctly. Same disable pattern as the
-  // first hotfix (#192): force opt-out here and in getBatterWoba. Do
-  // not re-enable until a REAL prod-shaped verification (against a
-  // production DB snapshot, not local) shows 0-3 rejections.
+  // Roster gate is INTENTIONALLY DISABLED (fix/woba-ingest-dedup,
+  // 2026-07-24). Two live-slate incidents (#192, #194 hotfixes) showed
+  // the gate's hot-path filter over-rejects on abbrev forms, hyphenated
+  // last names, and other name-variant classes we couldn't enumerate
+  // in advance. Cost of each incident was ~90 batters falling back to
+  // league-average wOBA slate-wide. Reward per audit was 1 shadow bug
+  // (Victor Mesa) across the entire 2026 season — a terrible
+  // risk/reward trade.
+  //
+  // Shadow bugs are now handled at their source instead:
+  //   (b) Ingest dedup — routes/api.js ingestWobaCSV no longer writes
+  //       bare-name rows for team-tagged players, closing the class
+  //       of same-normalized-name collisions our own ingest created.
+  //   (c) SHADOW_EXCLUSIONS list — routes/api.js hardcoded list of
+  //       specific problem rows discovered by the weekly audit cron
+  //       (currently just the Victor Mesa VVM MIA entry).
+  // Weekly cron of tmp/audit-mesa-class-shadows.js catches new shadow
+  // candidates so this list gets updated proactively instead of
+  // reactively after we notice a wrong wOBA in the matchup view.
+  //
+  // The getRosterGateStats / _rosterGateStats infrastructure below
+  // stays live — it's harmless when the filter is off (counter stays
+  // at 0) and gives us a place to hang instrumentation if the gate
+  // ever gets rebuilt for other reasons. Health panel row surfaces
+  // the counter and stays informative.
+  //
+  // The _buildRosterMatcher / _isEntryOnRoster / _filterKeyMap
+  // functions below are dead code kept for the same reason — cheap
+  // to keep, expensive to rebuild if a future need arises.
   return idx;
   // eslint-disable-next-line no-unreachable
   if (rosterSet == null) return idx;
@@ -295,13 +312,12 @@ function resolveNeutralizationFactor(teamHint, settings, opts) {
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, rosterSet) {
-  // hotfix/disable-roster-gate-again (2026-07-23 URGENT-2): prod deploy
-  // of fix/roster-gate-abbrev-aware (#193) produced 107 rejections
-  // (worse than the pre-fix 79). Force rosterSet=null here to opt every
-  // caller out of the gate. Paired with the return-idx short-circuit in
-  // buildRosterGatedIdx above so both the signals path AND the matchup
-  // display path bypass filtering. Both come out together after a
-  // real prod-shaped verification lands (fix/roster-gate-v2, TBD).
+  // Roster gate is INTENTIONALLY DISABLED — see buildRosterGatedIdx
+  // above for the full rationale. Shadow bugs are now fixed at the
+  // ingest layer (Option b — routes/api.js ingestWobaCSV dedup) and
+  // via a targeted hardcoded exclusion list (Option c — SHADOW_EXCLUSIONS
+  // in routes/api.js). This forcing to null keeps every caller that
+  // still passes a rosterSet from tripping the dead filter path below.
   rosterSet = null;
   if (minPA == null) minPA = 60;
   const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: false });
