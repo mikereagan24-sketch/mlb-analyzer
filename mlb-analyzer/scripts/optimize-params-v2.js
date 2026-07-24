@@ -200,7 +200,7 @@ var games = stmt.all.apply(stmt, sqlParams);
 // don't carry cohort — bet_signals do — so we resolve via a join.
 if (COHORT_FILTER) {
   var cohortSet = new Set(
-    db.prepare("SELECT DISTINCT game_date || '|' || game_id AS k FROM bet_signals WHERE cohort = ?")
+    db.prepare("SELECT DISTINCT game_date || '|' || game_id AS k FROM bet_signals WHERE cohort = ? AND contaminated_reason IS NULL")
       .all(COHORT_FILTER)
       .map(function (r) { return r.k; })
   );

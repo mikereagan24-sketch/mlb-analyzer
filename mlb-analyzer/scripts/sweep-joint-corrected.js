@@ -38,6 +38,7 @@ var prodSigs = db.prepare(
 + "FROM bet_signals bs "
 + "WHERE bs.signal_type='ML' AND bs.outcome IN ('win','loss','push') "
 + "  AND bs.closing_line IS NOT NULL "
++ "  AND bs.contaminated_reason IS NULL "
 + "  AND bs.game_date >= '2026-04-09' "
 + "  AND NOT ((bs.market_line > 0 AND bs.closing_line > 0 AND ABS(bs.market_line - bs.closing_line) >= 30) "
 + "        OR (bs.market_line < 0 AND bs.closing_line < 0 AND ABS(bs.market_line - bs.closing_line) >= 30) "

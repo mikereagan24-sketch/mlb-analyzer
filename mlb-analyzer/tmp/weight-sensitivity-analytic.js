@@ -65,6 +65,7 @@ const rows = db.prepare(
 + "  ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id "
 + "WHERE bs.signal_type = 'ML' AND bs.outcome IN ('win','loss','push') "
 + "  AND bs.closing_line IS NOT NULL AND bs.model_line IS NOT NULL "
++ "  AND bs.contaminated_reason IS NULL "
 + "  AND bs.game_date >= '2026-04-09' "
 + "  AND NOT (bs.cohort = 'v7' AND bs.game_date IN (" + V7_EXCL + ")) "
 + "  AND NOT " + CORRUPT_SQL

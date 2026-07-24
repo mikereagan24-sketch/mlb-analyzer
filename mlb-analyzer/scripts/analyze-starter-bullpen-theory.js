@@ -119,6 +119,7 @@ var modelTotMap = {};
 var sigRows = db.prepare(
   "SELECT game_date, game_id, MIN(model_line) AS model_total " +
   "FROM bet_signals WHERE signal_type='Total' AND model_line IS NOT NULL " +
+  "  AND contaminated_reason IS NULL " +
   "GROUP BY game_date, game_id"
 ).all();
 for (var si = 0; si < sigRows.length; si++) {

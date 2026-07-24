@@ -78,7 +78,8 @@ console.log('Excluded: v3-pretuning rows with normalized edge > 1.0 (data-qualit
 
 var rows = db.prepare(
   "SELECT signal_type, signal_side, cohort, market_line, edge_pct, outcome, pnl, game_id, game_date "
-  + "FROM bet_signals WHERE outcome IS NOT NULL AND edge_pct IS NOT NULL"
+  + "FROM bet_signals WHERE outcome IS NOT NULL AND edge_pct IS NOT NULL "
+  + "AND contaminated_reason IS NULL"
 ).all();
 console.log('Total resolved rows:', rows.length);
 

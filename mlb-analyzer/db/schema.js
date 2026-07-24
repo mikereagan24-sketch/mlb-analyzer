@@ -189,6 +189,7 @@ db.exec(`
   is_active INTEGER NOT NULL DEFAULT 1, -- 1=show on Games tab, 0=locked bet no longer qualifies
   notes TEXT,                -- explanation when signal state changes (e.g. line moved)
   cohort TEXT DEFAULT 'v1',  -- model/parameter epoch the signal was produced under
+  contaminated_reason TEXT,  -- non-null tag = signal excluded from calibration (see chore/flag-mesa-contaminated-signals)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_signals_date ON bet_signals(game_date);
@@ -2067,6 +2068,48 @@ const q = {
   // don't skip" (fail-open — err on refreshing rather than freezing).
   _lineupHashMigration: (() => {
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN lineup_hash TEXT").run(); } catch(e) {}
+    return true;
+  })(),
+  // contaminated_reason (chore/flag-mesa-contaminated-signals, 2026-07-24).
+  // Nullable text tag identifying signals whose model_line was computed
+  // under a known data defect and must be excluded from calibration /
+  // backtest sweeps. Populated per-episode by targeted migrations
+  // (Mesa's 42 signals below; future contamination classes add their
+  // own migrations with distinct reason tags).
+  //
+  // Calibration/backtest consumers filter WHERE contaminated_reason IS NULL
+  // so future tags automatically get excluded without per-script updates.
+  //
+  // Live-pricing consumers ignore the column entirely — the signals still
+  // display on the Games tab, still track outcomes, still record CLV.
+  // The exclusion is calibration-scope only.
+  _contaminatedReasonMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN contaminated_reason TEXT").run(); } catch(e) {}
+    return true;
+  })(),
+  // One-shot tagging of Victor Mesa's contaminated signals (30 games
+  // May 25 - July 23, 42 signals). See tmp/replay-mesa-signal-delta.js
+  // for the audit that produced this scope. Idempotent via app_settings
+  // flag — reruns are no-ops even if a signal gets re-tagged manually.
+  _mesaContaminationTagging: (() => {
+    try {
+      const flag = db.prepare("SELECT value FROM app_settings WHERE key='mesa_contamination_tagged_2026_07_24'").get();
+      if (flag) return true;
+      const result = db.prepare(
+        "UPDATE bet_signals SET contaminated_reason = 'mesa_shadow_2026' " +
+        "WHERE contaminated_reason IS NULL " +
+        "  AND game_date >= '2026-05-25' AND game_date <= '2026-07-23' " +
+        "  AND (game_date, game_id) IN (" +
+        "    SELECT game_date, game_id FROM game_log " +
+        "    WHERE game_date >= '2026-05-25' AND game_date <= '2026-07-23' " +
+        "      AND (away_lineup_json LIKE '%Victor Mesa%' OR home_lineup_json LIKE '%Victor Mesa%')" +
+        "  )"
+      ).run();
+      db.prepare("INSERT INTO app_settings (key, value) VALUES ('mesa_contamination_tagged_2026_07_24', datetime('now'))").run();
+      console.log('[migration] tagged ' + result.changes + ' bet_signals with contaminated_reason=mesa_shadow_2026');
+    } catch (e) {
+      console.warn('[migration] mesa contamination tagging failed (non-fatal): ' + e.message);
+    }
     return true;
   })(),
   insertSignal: db.prepare(`

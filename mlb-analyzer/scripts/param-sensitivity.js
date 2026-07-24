@@ -61,6 +61,7 @@ const rows = db.prepare(
   "WHERE game_date BETWEEN ? AND ? " +
   "  AND outcome IN ('win','loss') " +
   "  AND closing_line IS NOT NULL " +
+  "  AND contaminated_reason IS NULL " +
   // Exclude corruption rows (matches PR #172 flagged set)
   "  AND NOT ((market_line > 0 AND closing_line > 0 AND ABS(market_line - closing_line) >= 30) " +
   "        OR (market_line < 0 AND closing_line < 0 AND ABS(market_line - closing_line) >= 30) " +
