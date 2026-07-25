@@ -1968,6 +1968,92 @@ router.get('/roster/:team', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Suppressed signals from the LATEST processGameSignals run per game
+// (feat/display-suppressed-signal-edge, 2026-07-25). The card UI shows
+// muted amber pills for hard-cap suppressions so the user can tell
+// "no edge" from "edge exceeded the cap and no signal fired." Pulls
+// verbatim from bet_signal_audit — same computation, no re-derivation
+// in the UI or here.
+//
+// Correctness rules:
+//   1. Only the LATEST processGameSignals run's audit rows are surfaced.
+//      Every recompute inserts new audit rows for still-suppressed
+//      signals; older rows are historical. Filter by created_at ≥
+//      (game_log.updated_at - 5s) — the small buffer covers the case
+//      where the audit-write completes fractionally after the row
+//      update (both happen inside the same processGameSignals call).
+//   2. If a bet_signals row for the same (game_date, game_id,
+//      signal_type, signal_side) currently exists and is active, the
+//      signal is emitting right now → skip the suppression (it's from
+//      a prior run before a line moved past the cap threshold).
+//   3. Detail JSON is parsed here so the UI doesn't have to; response
+//      exposes edge/marketLine/modelLine/reason as flat fields.
+//
+// Response shape (per element):
+//   { game_id, signal_type, signal_side, edge_pp, market_line,
+//     model_line, reason, category, computed_at }
+// Empty array = no suppressions on the slate.
+router.get('/suppressed-signals/:date', (req, res) => {
+  try {
+    const date = req.params.date;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+    // Pull the latest-run audit rows. GROUP BY takes MAX(id) per
+    // (game_id, signal_type, signal_side) — inside a single run each
+    // suppression writes one row, so MAX(id) reliably picks that run's
+    // entry. The join to game_log's updated_at ensures we're anchored
+    // to the CURRENT computation, not history from prior runs where
+    // updated_at has since moved past those audit rows.
+    const rows = db.prepare(
+      "SELECT bsa.game_id, bsa.signal_type, bsa.signal_side, bsa.detail, bsa.created_at " +
+      "FROM bet_signal_audit bsa " +
+      "INNER JOIN ( " +
+      "  SELECT MAX(id) AS max_id " +
+      "  FROM bet_signal_audit " +
+      "  WHERE game_date = ? AND action = 'suppressed_edge_cap' " +
+      "  GROUP BY game_id, signal_type, signal_side " +
+      ") latest ON bsa.id = latest.max_id " +
+      "JOIN game_log gl ON gl.game_date = bsa.game_date AND gl.game_id = bsa.game_id " +
+      "WHERE bsa.created_at >= datetime(gl.updated_at, '-5 seconds')"
+    ).all(date);
+
+    // Filter out suppressions where the same (gid, type, side) is
+    // currently active in bet_signals — an emitting signal supersedes
+    // any historical suppression. In practice this should be rare
+    // (the created_at ≥ updated_at filter already anchors to the
+    // latest run, so if the latest run emitted the signal, no
+    // corresponding suppression audit row is produced), but adding
+    // it defensively for the edge case where audit-write races with
+    // signal-write within a single run.
+    const activeSigs = new Set(
+      db.prepare(
+        "SELECT game_id || '|' || signal_type || '|' || signal_side AS k " +
+        "FROM bet_signals WHERE game_date = ? AND is_active = 1"
+      ).all(date).map(r => r.k)
+    );
+
+    const out = [];
+    for (const r of rows) {
+      const k = r.game_id + '|' + r.signal_type + '|' + r.signal_side;
+      if (activeSigs.has(k)) continue;
+      let d = {};
+      try { d = JSON.parse(r.detail || '{}'); } catch (_) { d = {}; }
+      out.push({
+        game_id: r.game_id,
+        signal_type: r.signal_type,
+        signal_side: r.signal_side,
+        // edge stored as fractional (0.0941 = 9.41pp); UI displays pp
+        edge_pp: (typeof d.edge === 'number') ? +(d.edge * 100).toFixed(1) : null,
+        market_line: d.marketLine != null ? d.marketLine : null,
+        model_line: d.modelLine != null ? d.modelLine : null,
+        category: d.category || null,
+        reason: d.reason || 'edge_hard_cap',
+        computed_at: r.created_at,
+      });
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Parameter sweep — admin-only diagnostic that re-scores a historical
 // date window under a battery of settings combinations and reports ROI
 // by bet direction. Snapshot-aware: each game's date determines which

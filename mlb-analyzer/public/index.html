@@ -264,6 +264,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cron-ok{background:var(--green-bg);color:var(--green)}.cron-err{background:var(--red-bg);color:var(--red)}
 .spinner{display:inline-block;width:11px;height:11px;border:2px solid var(--border);border-top-color:var(--text2);border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:5px}
 @keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} .gcard.sig-value{border-left:3px solid var(--green);} .gcard.sig-lean{border-left:3px solid var(--yellow);} .sig-pill{display:inline-block;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600;letter-spacing:.03em} .sig-pill.s1{background:var(--yellow-bg);color:var(--yellow)}.sig-pill.s2{background:var(--green-bg);color:var(--green)}.sig-pill.s3{background:#e8f0ff;color:#4477cc}  .gcard.sig-s3{border-left:3px solid #4477cc} .gcard.sig-s2{border-left:3px solid var(--green)} .gcard.sig-s1{border-left:3px solid var(--yellow)}
+/* Suppressed-signal pill (feat/display-suppressed-signal-edge, 2026-07-25).
+   Visually distinct from any actionable class (s1/s2/s3): dashed
+   border, strikethrough on the pp number, muted grey text, normal
+   weight (not 600), and a leading ⊘ glyph. Amber reason tag stands
+   out inside the pill. Applies to any signal_type (ML, Total,
+   spread) — the shared pill renders the type in its label so the
+   user sees "9.4pp ML AWAY (hard-cap)" or "8.6pp TOTAL UNDER
+   (hard-cap)" and can tell exactly which market the cap stopped. */
+.sig-pill.suppressed{background:transparent;color:var(--text3);border:1px dashed var(--text3);font-weight:500;text-decoration:line-through;text-decoration-color:var(--text3);text-decoration-thickness:1px;letter-spacing:.02em;opacity:.85}
+.sig-pill.suppressed .sup-glyph{text-decoration:none;display:inline-block;margin-right:2px;font-weight:600;color:var(--text3)}
+.sig-pill.suppressed .sup-reason{text-decoration:none;color:#d97706;font-size:8px;margin-left:4px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 input[type=text],input[type=number],input[type=date],select{padding:6px 10px;border:.5px solid var(--border2);border-radius:var(--r-md);background:var(--bg2);color:var(--text);font-family:inherit;font-size:12px;width:100%}
 code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
@@ -1116,6 +1127,11 @@ async function loadGamesFromDB(){
     // Fire-and-forget on failure (map defaults empty; no badges is a
     // safe degradation).
     await _refreshLineupOverrideMap(date);
+    // Refresh suppressed-signal map for the same reason — the pills
+    // render inline in the card during renderGameGrid, so the map
+    // must be populated before that call. Read-only, empty on
+    // failure (no pills = safe degradation, matches pre-fix state).
+    await _refreshSuppressedSignalMap(date);
     renderGameGrid(games,date);
     injectEditButtons(games,date);
     if(games&&games.length) loadDataQuality(date, games, 'dq-games');
@@ -1352,6 +1368,31 @@ function renderGameGrid(games,date){
     const cls = signalMeetsHighlightThreshold(s) ? 's2' : 's1';
     return '<span class="sig-pill ' + cls + '">' + scoreText + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>';
   }
+  // Suppressed-signal pill (feat/display-suppressed-signal-edge).
+  // Renders the pre-cap computed edge with a strikethrough +
+  // dashed-border style + reason tag. Works for any signal_type
+  // (ML, Total, spread) — the type is in the pill label so the user
+  // can see which market the cap stopped. Reason mapping:
+  //   'edge_hard_cap' → 'HARD-CAP'
+  //   'edge_soft_cap' → 'SOFT'  (currently emitted as edge_suspect
+  //                              instead of suppressed, so this
+  //                              branch is future-proofing)
+  //   anything else   → verbatim uppercased
+  function suppressedPillHtml(sup) {
+    var edge = (sup.edge_pp != null) ? sup.edge_pp.toFixed(1) + 'pp' : '??pp';
+    var reasonLabel = sup.reason === 'edge_hard_cap' ? 'HARD-CAP'
+                    : sup.reason === 'edge_soft_cap' ? 'SOFT-CAP'
+                    : String(sup.reason || 'CAPPED').toUpperCase();
+    var typeSide = (sup.signal_type || '?').toUpperCase() + ' ' + (sup.signal_side || '?').toUpperCase();
+    var tt = 'Signal suppressed by edge cap. Model line ' + (sup.model_line != null ? sup.model_line : '?')
+           + ' vs market ' + (sup.market_line != null ? sup.market_line : '?')
+           + ' → ' + edge + ' edge exceeded the cap threshold. Not a play.';
+    return '<span class="sig-pill suppressed" title="' + tt.replace(/"/g,'&quot;') + '">'
+         + '<span class="sup-glyph">⊘</span>'
+         + edge + ' ' + typeSide
+         + '<span class="sup-reason">' + reasonLabel + '</span>'
+         + '</span>';
+  }
   document.getElementById('game-grid').innerHTML=games.map(g=>{
     const sigs=g.signals||[];
     const score=g.away_score!=null?g.away_score+'-'+g.home_score:'';
@@ -1376,6 +1417,13 @@ function renderGameGrid(games,date){
       (g.is_postponed?' <span style="background:#cc3333;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px;letter-spacing:0.5px">POSTPONED</span>':'')+
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
       (!g.is_postponed&&sigs.length?' '+sigs.map(sigPillHtml).join(' '):'')+
+      // Suppressed-signal pills — rendered after actionable pills so
+      // the actionable ones read left-to-right first. Type is visible
+      // in each pill's label (ML/TOTAL/etc.) so a Total suppressed
+      // alongside an active ML signal reads correctly.
+      (!g.is_postponed && _suppressedSignalMap && _suppressedSignalMap[g.game_id] && _suppressedSignalMap[g.game_id].length
+        ? ' ' + _suppressedSignalMap[g.game_id].map(suppressedPillHtml).join(' ')
+        : '')+
       '</div>'+
       '<div class="gsp"'+(lineupsStyle?' style="'+lineupsStyle+'"':'')+'>'+(_isNeverLoaded(lineupsQ)?'<span title="lineups never loaded">— vs —</span>':((g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'away')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'home')))+lineupsBadge+weatherBadge+(g.temp_f!=null ? (function(){
         var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
@@ -3445,6 +3493,27 @@ async function _refreshLineupOverrideMap(date) {
   } catch (e) {
     console.warn('[lineup-override-map] fetch failed:', e && e.message);
     _lineupOverrideMap = {};
+  }
+}
+
+// Slate-level cache of latest-run hard-cap suppressions. Keyed by
+// game_id → array of { signal_type, signal_side, edge_pp, market_line,
+// model_line, reason, category, computed_at }. Populated in
+// loadGamesFromDB before renderGameGrid so pill inline-render can
+// consult it in the same pass, no flicker.
+var _suppressedSignalMap = null;
+async function _refreshSuppressedSignalMap(date) {
+  try {
+    var rows = await fetch('/api/suppressed-signals/' + date).then(function(r) { return r.json(); });
+    var map = {};
+    (rows || []).forEach(function(r) {
+      if (!map[r.game_id]) map[r.game_id] = [];
+      map[r.game_id].push(r);
+    });
+    _suppressedSignalMap = map;
+  } catch (e) {
+    console.warn('[suppressed-signal-map] fetch failed:', e && e.message);
+    _suppressedSignalMap = {};
   }
 }
 
