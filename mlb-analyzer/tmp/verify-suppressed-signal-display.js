@@ -221,6 +221,57 @@ console.log('\n=== PART C: pill-HTML shape ===');
   assert(/TOTAL UNDER/.test(totPill), 'Total pill shows TOTAL UNDER (not ML)');
 }
 
+// ── PART D: rbox verdict shape (feat/display-suppressed-signal-edge-in-box) ─
+// The rbox verdict slot uses a different DOM shape than the top pill
+// (compact inline flex, no border, no dashed outline — the box itself
+// already visually contains it). Verify the shape stays consistent
+// with what public/index.html vd() produces for a suppressed lookup.
+console.log('\n=== PART D: rbox verdict shape (bottom-of-card ML/Total boxes) ===');
+{
+  // Reproduce the vd() suppression branch from index.html
+  function findSuppression(sups, type, side) {
+    if (type === 'Total') return sups.find(s => s.signal_type === 'Total');
+    return sups.find(s => s.signal_type === type && s.signal_side === side);
+  }
+  function vdSuppressed(sup) {
+    const edgeTxt = (sup.edge_pp != null ? sup.edge_pp.toFixed(1) : '?') + 'pp';
+    const reason = sup.reason === 'edge_hard_cap' ? 'HARD-CAP'
+                 : sup.reason === 'edge_soft_cap' ? 'SOFT-CAP'
+                 : String(sup.reason || 'CAP').toUpperCase();
+    return '<span class="rbox-sup">'
+         + '<span class="rbox-sup-glyph">⊘</span>'
+         + '<span class="rbox-sup-pp">' + edgeTxt + '</span>'
+         + '<span class="rbox-sup-reason">' + reason + '</span>'
+         + '</span>';
+  }
+  // Simulate the ARI example the user mentioned: model -122 vs market
+  // +123, edge ~10.1pp, ML/away suppressed
+  const sups = [
+    { game_id: 'sd-ari', signal_type: 'ML', signal_side: 'away',
+      edge_pp: 10.1, market_line: 123, model_line: -122, reason: 'edge_hard_cap' },
+    { game_id: 'sd-ari', signal_type: 'Total', signal_side: 'under',
+      edge_pp: 9.3, market_line: 8.5, model_line: 7.6, reason: 'edge_hard_cap' },
+  ];
+  const mlAwaySup = findSuppression(sups, 'ML', 'away');
+  const mlHomeSup = findSuppression(sups, 'ML', 'home');
+  const totSup = findSuppression(sups, 'Total', null);
+  assert(mlAwaySup && mlAwaySup.edge_pp === 10.1, 'ML/away suppression lands in Away ML rbox');
+  assert(mlHomeSup === undefined, 'ML/home rbox stays empty when no suppression on that side');
+  assert(totSup && totSup.edge_pp === 9.3, 'Total suppression lands in Total rbox (single-slot)');
+
+  const html = vdSuppressed(mlAwaySup);
+  console.log('  rbox verdict HTML: ' + html);
+  assert(/class="rbox-sup"/.test(html), 'rbox verdict has rbox-sup class');
+  assert(/⊘/.test(html), 'rbox verdict has ⊘ glyph');
+  assert(/rbox-sup-pp/.test(html), 'rbox verdict has strikethrough pp element');
+  assert(/10\.1pp/.test(html), 'rbox verdict shows edge_pp verbatim');
+  assert(/rbox-sup-reason/.test(html), 'rbox verdict has reason tag');
+  assert(/HARD-CAP/.test(html), 'reason tag shows HARD-CAP');
+  // Also verify Total rbox
+  const totHtml = vdSuppressed(totSup);
+  assert(/9\.3pp/.test(totHtml), 'Total rbox verdict shows 9.3pp');
+}
+
 console.log();
 console.log('=== Summary ===');
 console.log('  Passed: ' + passed);

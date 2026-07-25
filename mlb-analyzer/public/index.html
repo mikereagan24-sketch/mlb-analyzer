@@ -124,6 +124,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .rbox-val{font-size:16px;font-weight:500}
 .rbox-mkt{font-size:9px;color:var(--text2)}
 .rbox-verdict{font-size:9px;font-weight:500;margin-top:2px}
+/* Suppressed-signal marker in the rbox verdict slot
+   (feat/display-suppressed-signal-edge-in-box, 2026-07-25). Replaces
+   the bare "—" that used to render when no actionable signal existed.
+   Muted grey + strikethrough on the pp so the eye reads "computed
+   but excluded, not a play" at a glance. Amber reason tag matches
+   the top-of-card pill treatment for consistency. */
+.rbox-sup{display:inline-flex;align-items:center;gap:2px;color:var(--text3);font-size:9px;font-weight:500;line-height:1.2}
+.rbox-sup-glyph{color:var(--text3);font-weight:600}
+.rbox-sup-pp{text-decoration:line-through;text-decoration-color:var(--text3);text-decoration-thickness:1px}
+.rbox-sup-reason{color:#d97706;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .mu-btn{padding:5px 10px;font-size:11px;font-weight:500;border:.5px solid var(--border2);border-radius:var(--r-md);cursor:pointer;background:var(--bg2);color:var(--text2);font-family:inherit}
 .mu-btn.active{background:var(--navy);color:#fff;border-color:var(--navy)}
 .mu-tbl{width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed}
@@ -1727,6 +1737,21 @@ function renderGameResult(g){
   const hEdge=sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML');
   const totEdge=sigs.find(s=>s.signal_type==='Total');
   const vc=sig=>sig?({'3★':'s3','2★':'s2','1★':'s1'}[sig.signal_label]||''):'';
+  // Suppressed-signal lookup for the box-verdict slot
+  // (feat/display-suppressed-signal-edge-in-box, 2026-07-25).
+  // Same _suppressedSignalMap the top pills consult. Match by
+  // (signal_type, signal_side) — a suppressed Total/under lands in
+  // the Total rbox regardless of which side of the game (over/under
+  // rboxes aren't split); a suppressed ML/away lands in the Away ML
+  // rbox. For Total we accept EITHER over or under since the box is
+  // single-slot; if both a hard-capped over AND under coexist on
+  // one game (rare — implies model + market diverge in both
+  // directions, which pretty much can't happen) we take the first.
+  const sups = (_suppressedSignalMap && _suppressedSignalMap[g.game_id]) || [];
+  function findSuppression(type, side) {
+    if (type === 'Total') return sups.find(s => s.signal_type === 'Total');
+    return sups.find(s => s.signal_type === type && s.signal_side === side);
+  }
   // Mixed-display badge. Pre-cutover called sig.signal_label
   // .toUpperCase() unconditionally and crashed on new continuous-
   // edge rows (signal_label=null). Legacy rows still render their
@@ -1734,8 +1759,32 @@ function renderGameResult(g){
   // render the rounded 0.5pp score, green when the direction-
   // specific highlight threshold is met (fav>=2.0pp, dog>=4.5pp,
   // under>=7.0pp; overs never), yellow otherwise.
-  const vd = sig => {
-    if (!sig) return '<span style="color:var(--text2);font-size:9px">—</span>';
+  //
+  // vd now accepts (sig, type, side) so the fall-through can look
+  // up a suppression from the slate-level map when no actionable
+  // signal exists. Suppressed rendering matches the top pill
+  // treatment: ⊘ glyph + strikethrough pp + amber reason tag.
+  // Cannot be confused with a signal — same visual grammar as
+  // .sig-pill.suppressed at the top of the card.
+  const vd = (sig, type, side) => {
+    if (!sig) {
+      const sup = findSuppression(type, side);
+      if (sup) {
+        const edgeTxt = (sup.edge_pp != null ? sup.edge_pp.toFixed(1) : '?') + 'pp';
+        const reason = sup.reason === 'edge_hard_cap' ? 'HARD-CAP'
+                     : sup.reason === 'edge_soft_cap' ? 'SOFT-CAP'
+                     : String(sup.reason || 'CAP').toUpperCase();
+        const tt = 'Signal suppressed by edge cap. Model ' + (sup.model_line != null ? sup.model_line : '?')
+                 + ' vs market ' + (sup.market_line != null ? sup.market_line : '?')
+                 + ' = ' + edgeTxt + '. Not a play.';
+        return '<span class="rbox-sup" title="' + tt.replace(/"/g,'&quot;') + '">'
+             + '<span class="rbox-sup-glyph">⊘</span>'
+             + '<span class="rbox-sup-pp">' + edgeTxt + '</span>'
+             + '<span class="rbox-sup-reason">' + reason + '</span>'
+             + '</span>';
+      }
+      return '<span style="color:var(--text2);font-size:9px">—</span>';
+    }
     if (sig.signal_label !== null && sig.signal_label !== undefined) {
       const col = {'3★':'#4477cc','2★':'var(--green)','1★':'var(--yellow)'}[sig.signal_label] || 'var(--yellow)';
       return '<span style="color:' + col + ';font-size:9px;font-weight:500">' + sig.signal_label.toUpperCase() + '</span>';
@@ -1775,9 +1824,9 @@ function renderGameResult(g){
   const tBoxHl = signalMeetsHighlightThreshold(totEdge) ? ' bet-box-highlight' : '';
   const hBoxHl = signalMeetsHighlightThreshold(hEdge) ? ' bet-box-highlight' : '';
   return'<div class="result-grid">'+
-    '<div class="rbox '+vc(aEdge)+aBoxHl+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(_resolveAwayML(g, sigs))+'</div><div class="rbox-verdict">'+vd(aEdge)+'</div></div>'+
-    '<div class="rbox '+vc(totEdge)+tBoxHl+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(_resolveTotalMkt(g, sigs)||'—')+'</div><div class="rbox-verdict">'+vd(totEdge)+'</div></div>'+
-    '<div class="rbox '+vc(hEdge)+hBoxHl+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(_resolveHomeML(g, sigs))+'</div><div class="rbox-verdict">'+vd(hEdge)+'</div></div>'+
+    '<div class="rbox '+vc(aEdge)+aBoxHl+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(_resolveAwayML(g, sigs))+'</div><div class="rbox-verdict">'+vd(aEdge,'ML','away')+'</div></div>'+
+    '<div class="rbox '+vc(totEdge)+tBoxHl+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(_resolveTotalMkt(g, sigs)||'—')+'</div><div class="rbox-verdict">'+vd(totEdge,'Total',null)+'</div></div>'+
+    '<div class="rbox '+vc(hEdge)+hBoxHl+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(_resolveHomeML(g, sigs))+'</div><div class="rbox-verdict">'+vd(hEdge,'ML','home')+'</div></div>'+
     '</div>'+
     spreadRow +
     (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
