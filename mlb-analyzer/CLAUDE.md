@@ -1,5 +1,41 @@
 # mlb-analyzer — Claude Code project rules
 
+## SP_WEIGHT vs SP_PIT_WEIGHT — do not conflate (2026-07-27)
+
+Two similarly-named settings that measure entirely different things.
+Distinguish them before doing any analysis; conflation has caused real
+errors (see `docs/sp-weight-mechanism-rationale-2026-07-25.md`
+retraction and the docs it links).
+
+**`SP_WEIGHT` (schema `sp_weight`, default 0.80)** — batter-side
+handedness weight. In `services/model.js:perBatterEW:498-502`:
+`batW = vsStart * SP_WEIGHT + vsOpp * RELIEF_WEIGHT` where `vsStart` is
+the batter's split against the *starter's handedness* and `vsOpp` is
+against the opposite hand. It controls which of the hitter's platoon
+splits is weighted. The correct benchmark is: *when a RHP starts, what
+fraction of the game's PAs are thrown by right-handed pitchers*
+(starter + same-hand relievers). Empirical benchmark from
+`pitcher_game_log` BF data: **0.865 vs RHP, 0.649 vs LHP,
+0.800 volume-weighted overall** (docs/sp-weight-empirical-benchmark-2026-07-27.md).
+**Has no dependency on `sp_forecast_ip`.** Bullpen composition, LOOGY
+usage, and PH strategy determine the true value.
+
+**`SP_PIT_WEIGHT` (schema `sp_pit_weight`, default 0.80,
+production effective ~0.71)** — pitching-side SP-vs-bullpen blend. In
+`services/model.js:runModel:1045`: computed per game via
+`computeSpPitWeightFromForecast(game.sp_forecast_ip, settings, n_priors)`.
+Controls how much of the opposing pitching quality comes from the
+starter's wOBA-against vs the bullpen's. **No handedness component.**
+Depends entirely on `sp_forecast_ip` (a Bayesian-shrunk innings-per-start
+forecast from `services/model.js:forecastSpIP`). Currently subject to
+shrinkage-ceiling compression (max forecast ≈5.93 IP → max weight ≈0.79),
+so the schema's 0.95 clamp is dead code.
+
+**Rule:** any doc, sweep, or design that says "SP_WEIGHT" should name
+which one. Mechanism analyses of one CANNOT be repurposed for the
+other. Backfilling `sp_forecast_ip` affects `SP_PIT_WEIGHT` only; it
+does not change `SP_WEIGHT` computations at all.
+
 ## Settings-key UI-parity rule (2026-07-04)
 
 **Any PR that adds a new key to `services/settings-schema.js` MUST also add

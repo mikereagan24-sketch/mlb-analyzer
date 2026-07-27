@@ -1,5 +1,39 @@
 # SP_WEIGHT (0.80) — mechanism analysis
 
+> ## ⚠ RETRACTED 2026-07-26 — WRONG PREMISE
+>
+> This doc analyzes SP_WEIGHT as if it were a *PA-exposure* parameter
+> ("what fraction of PAs does the starter face"). **It is not.**
+> SP_WEIGHT is a *handedness-mix* parameter: it weights the batter's
+> vs-starter-hand split against the vs-opposite-hand split. See
+> `services/model.js perBatterEW:498-502` — `vsStart` is
+> `batter.vsRHP` or `batter.vsLHP` (based on SP hand), not
+> `batter.vsStarter`. There is no PA count involved.
+>
+> The central claim below — that 0.80 is ~26pp above a "~54% exposure
+> floor" — is invalid. The correct benchmark is the fraction of PAs
+> the batter faces the *starter's handedness class* (starter + same-
+> hand relievers), which lands at **0.86 for RHP starters, 0.68 for
+> LHP starters, ~0.80 volume-weighted**. The 0.80 default is basically
+> the volume-weighted correct number.
+>
+> See `docs/sp-weight-benchmark-correction-2026-07-26.md` for the
+> corrected math and its implications (including that a single scalar
+> is structurally wrong for a *different* reason: bullpens are
+> handedness-asymmetric).
+>
+> The exposure math in this doc is arithmetically correct as *raw*
+> exposure but the comparison to SP_WEIGHT is wrong. The recommendations
+> that follow are moot. The sweep script referenced (`sweep-sp-weight-
+> rolling-cv.js`) is unaffected by the framing error — it just measures
+> ROI at different scalar values; the interpretation of its results has
+> been updated in the correction doc.
+>
+> Kept in-repo as a paper trail — reasoning that led to the error is
+> instructive.
+>
+> ---
+
 **Date:** 2026-07-25
 **Scope:** the batter-side SP-vs-bullpen weight used in `services/model.js perBatterEW` (line 502):
 
