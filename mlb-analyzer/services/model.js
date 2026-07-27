@@ -475,7 +475,16 @@ function effHand(bh, ph) { return bh==='S' ? (ph==='R'?'L':'R') : bh; }
 // opener path — opener wOBA reads come from openerOpts.openerVsL/R
 // instead. They still feed the standard non-opener path; non-opener
 // games are untouched by this PR.
-function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP, openerOpts, lineupPosition) {
+// SP_WEIGHT_OVERRIDE (optional, 15th arg): when non-null, uses this value
+// as the batter-side handedness weight and (1 - override) as the relief
+// complement, bypassing the scalar SP_WEIGHT/RELIEF_WEIGHT pair. Enables
+// hand-conditional SP_WEIGHT (docs/sp-weight-empirical-benchmark-2026-07-27.md
+// / docs/sp-weight-hand-conditional-design-2026-07-26.md). When null, path
+// is byte-identical to the pre-PR scalar version. Caller (runModel) is
+// responsible for deciding whether to pass a value (only under
+// use_hand_conditional_sp_weight=true AND opposing SP hand is R or L) or
+// null (any other case — scalar fallback).
+function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEIGHT, RELIEF_WEIGHT, SP_PIT_WEIGHT, RELIEF_PIT_WEIGHT, bullpenWoba, BAT_DFLT_START, BAT_DFLT_OPP, openerOpts, lineupPosition, SP_WEIGHT_OVERRIDE) {
   const eff = effHand(batter.hand, pitcherHand);
   const pitWvsBatter = eff === 'L' ? pitWvsL : pitWvsR;
   let pitW;
@@ -495,8 +504,14 @@ function perBatterEW(batter, pitcherHand, pitWvsL, pitWvsR, W_PIT, W_BAT, SP_WEI
     const relPitW = (RELIEF_PIT_WEIGHT != null) ? RELIEF_PIT_WEIGHT : 0.20;
     pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW;
   }
-  const spW  = (SP_WEIGHT  != null) ? SP_WEIGHT  : 0.77;
-  const relW = (RELIEF_WEIGHT != null) ? RELIEF_WEIGHT : 0.23;
+  let spW, relW;
+  if (SP_WEIGHT_OVERRIDE != null) {
+    spW = SP_WEIGHT_OVERRIDE;
+    relW = 1 - SP_WEIGHT_OVERRIDE;
+  } else {
+    spW  = (SP_WEIGHT  != null) ? SP_WEIGHT  : 0.77;
+    relW = (RELIEF_WEIGHT != null) ? RELIEF_WEIGHT : 0.23;
+  }
   const vsStart = pitcherHand === 'R' ? (batter.vsRHP ?? BAT_DFLT_START) : (batter.vsLHP ?? BAT_DFLT_START);
   const vsOpp   = pitcherHand === 'R' ? (batter.vsLHP ?? BAT_DFLT_OPP)   : (batter.vsRHP ?? BAT_DFLT_OPP);
   const batW = vsStart * spW + vsOpp * relW;
@@ -627,6 +642,18 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const W_ACT     = num(settings.W_ACT,     0.35);
   const SP_WEIGHT     = num(settings.SP_WEIGHT,     0.77);
   const RELIEF_WEIGHT = num(settings.RELIEF_WEIGHT, 0.23);
+  // Hand-conditional SP_WEIGHT (batter-side handedness weight).
+  // Empirical benchmark: RHP starter → 0.865, LHP starter → 0.649
+  // (docs/sp-weight-empirical-benchmark-2026-07-27.md, from
+  // pitcher_game_log 2026-04→07 BF-per-hand analysis, n=2900 team-games).
+  // The two constants replace the flat SP_WEIGHT scalar when
+  // USE_HAND_CONDITIONAL_SP_WEIGHT=true AND opposing SP hand is R or L.
+  // Fallback to scalar when hand is unresolved. Opener games always use
+  // scalar (opener path has its own per-position weight machinery and
+  // SP_WEIGHT is a weaker signal there).
+  const USE_HAND_CONDITIONAL_SP_WEIGHT = !!settings.USE_HAND_CONDITIONAL_SP_WEIGHT;
+  const SP_WEIGHT_R = num(settings.SP_WEIGHT_R, 0.865);
+  const SP_WEIGHT_L = num(settings.SP_WEIGHT_L, 0.649);
   const SP_PIT_WEIGHT     = num(settings.SP_PIT_WEIGHT,     0.80);
   const RELIEF_PIT_WEIGHT = num(settings.RELIEF_PIT_WEIGHT, 0.20);
   const BULLPEN_AVG    = num(settings.BULLPEN_AVG,     0.318);
@@ -1056,10 +1083,53 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   // Per-batter loop. The trailing `i` is the lineup position (0-indexed)
   // — perBatterEW uses it to index openerOpts.perPositionWeights when
   // opener_aware mode is active. Standard non-opener mode ignores it.
-  let aWs=0,aWp=0;
-  awayLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; aWs+=perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,homeSpPitW,homeRelPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts,i)*pa; aWp+=pa; });
-  let hWs=0,hWp=0;
-  homeLU.forEach((b,i)=>{ const pa=PA_WEIGHTS[i]??3.77; hWs+=perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,awaySpPitW,awayRelPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts,i)*pa; hWp+=pa; });
+  //
+  // Hand-conditional SP_WEIGHT override resolution:
+  //   AWAY batters face the HOME starter → use home_sp_hand.
+  //   HOME batters face the AWAY starter → use away_sp_hand.
+  //   Opener-mode sides (openerOpts != null) always use scalar SP_WEIGHT —
+  //   opener path is untouched by this feature per the design doc.
+  //   Unresolved hand (null / not R or L) falls back to scalar.
+  const _hcSpWFor = (spHand) => {
+    if (spHand === 'R') return SP_WEIGHT_R;
+    if (spHand === 'L') return SP_WEIGHT_L;
+    return null;  // unresolved → caller falls back to scalar
+  };
+  const awayBatterHcSpW = _hcSpWFor(game.home_sp_hand);  // AWAY batters face HOME SP
+  const homeBatterHcSpW = _hcSpWFor(game.away_sp_hand);  // HOME batters face AWAY SP
+  // Chosen override per side: only when flag on AND non-opener AND hand resolved.
+  const awayChosenOverride = (USE_HAND_CONDITIONAL_SP_WEIGHT && !homeOpenerOpts && awayBatterHcSpW != null) ? awayBatterHcSpW : null;
+  const homeChosenOverride = (USE_HAND_CONDITIONAL_SP_WEIGHT && !awayOpenerOpts && homeBatterHcSpW != null) ? homeBatterHcSpW : null;
+  // Shadow-mode alternate override (the OTHER path, for logging the delta).
+  // Only meaningful for non-opener sides with resolved hand.
+  const awayAltOverride = (!USE_HAND_CONDITIONAL_SP_WEIGHT && !homeOpenerOpts && awayBatterHcSpW != null) ? awayBatterHcSpW : null;
+  const homeAltOverride = (!USE_HAND_CONDITIONAL_SP_WEIGHT && !awayOpenerOpts && homeBatterHcSpW != null) ? homeBatterHcSpW : null;
+  // Track hand-resolution fallbacks (for the log — measures how often
+  // opposing SP hand couldn't be resolved when hand-conditional was on).
+  const awayHandUnresolved = USE_HAND_CONDITIONAL_SP_WEIGHT && !homeOpenerOpts && awayBatterHcSpW == null;
+  const homeHandUnresolved = USE_HAND_CONDITIONAL_SP_WEIGHT && !awayOpenerOpts && homeBatterHcSpW == null;
+
+  let aWs=0,aWp=0, aWs_alt=0;
+  awayLU.forEach((b,i)=>{
+    const pa=PA_WEIGHTS[i]??3.77;
+    aWs += perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,homeSpPitW,homeRelPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts,i,awayChosenOverride)*pa;
+    // Shadow: only when an alt path is meaningfully different
+    if (awayAltOverride != null || awayChosenOverride != null) {
+      const altOverride = USE_HAND_CONDITIONAL_SP_WEIGHT ? null : awayAltOverride;
+      aWs_alt += perBatterEW(b,game.home_sp_hand,pwH.vsLHB,pwH.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,homeSpPitW,homeRelPitW,awayVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,homeOpenerOpts,i,altOverride)*pa;
+    }
+    aWp+=pa;
+  });
+  let hWs=0,hWp=0, hWs_alt=0;
+  homeLU.forEach((b,i)=>{
+    const pa=PA_WEIGHTS[i]??3.77;
+    hWs += perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,awaySpPitW,awayRelPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts,i,homeChosenOverride)*pa;
+    if (homeAltOverride != null || homeChosenOverride != null) {
+      const altOverride = USE_HAND_CONDITIONAL_SP_WEIGHT ? null : homeAltOverride;
+      hWs_alt += perBatterEW(b,game.away_sp_hand,pwA.vsLHB,pwA.vsRHB,W_PIT,W_BAT,SP_WEIGHT,RELIEF_WEIGHT,awaySpPitW,awayRelPitW,homeVsBullpen,BAT_DFLT_START,BAT_DFLT_OPP,awayOpenerOpts,i,altOverride)*pa;
+    }
+    hWp+=pa;
+  });
 
   const aTeamWoba = aWp>0 ? aWs/aWp : BAT_DFLT_START;
   const hTeamWoba = hWp>0 ? hWs/hWp : BAT_DFLT_START;
@@ -1135,6 +1205,48 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const tempRunAdj = game.temp_run_adj || 0;
   const windRunAdj = windFactor * WIND_SCALE; // factor=1.0 â +2 runs, -1.0 â -2 runs
   const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
+
+  // Hand-conditional SP_WEIGHT SHADOW LOGGING.
+  // Log per-game ML delta between the chosen path and the alternate path,
+  // whenever they differ. When flag off: alt = HC. When flag on: alt = scalar.
+  // Sides with unresolved SP hand or opener-mode games have alt = chosen
+  // (both null), no shadow log emitted. Opener sides skipped.
+  const _hasShadow = (aWs_alt !== 0 && aWs !== aWs_alt) || (hWs_alt !== 0 && hWs !== hWs_alt);
+  if (_hasShadow) {
+    // Recompute the pyth+ML chain with the alt-mode team wOBAs. Only the
+    // batter-side blend differs; pitching, park, framing, defense, weather
+    // are all unchanged.
+    const aTeamWobaAlt = (aWs_alt !== 0) ? aWs_alt / aWp : aTeamWoba;
+    const hTeamWobaAlt = (hWs_alt !== 0) ? hWs_alt / hWp : hTeamWoba;
+    const aRunsRawAlt = Math.max(0,(aTeamWobaAlt-WOBA_BASELINE)*RUN_MULT*pf);
+    const hRunsRawAlt = Math.max(0,(hTeamWobaAlt-WOBA_BASELINE)*RUN_MULT*pf);
+    const aRunsAlt = Math.max(0, aRunsRawAlt - aFramingAdj - aDefenseAdj);
+    const hRunsAlt = Math.max(0, hRunsRawAlt - hFramingAdj - hDefenseAdj);
+    const rawHWAlt = (aRunsAlt<=0&&hRunsAlt<=0)?0.5 : hRunsAlt<=0?0.25 : aRunsAlt<=0?0.75 :
+      hRunsAlt**PYTH_EXP/(hRunsAlt**PYTH_EXP+aRunsAlt**PYTH_EXP);
+    const adjHWAlt = Math.min(Math.max(rawHWAlt+HFA_BOOST, WP_CLAMP_LO), WP_CLAMP_HI);
+    const adjAWAlt = 1-adjHWAlt;
+    const rawAMLAlt = rawToML(adjAWAlt, WP_CLAMP_LO, WP_CLAMP_HI);
+    const rawHMLAlt = rawToML(adjHWAlt, WP_CLAMP_LO, WP_CLAMP_HI);
+    const { adjA:aMLAlt, adjH:hMLAlt } = applySpread(rawAMLAlt, rawHMLAlt, FAV_ADJ, DOG_ADJ);
+    const estTotAlt = Math.max(0, aRunsAlt + hRunsAlt + windRunAdj + tempRunAdj);
+    const _fmt = (n) => n == null || isNaN(n) ? 'null' : (n >= 0 ? '+' + n : String(n));
+    const _mode = USE_HAND_CONDITIONAL_SP_WEIGHT ? 'live-HC' : 'shadow-HC';
+    const _lhpFlag = (game.home_sp_hand === 'L' || game.away_sp_hand === 'L') ? ' LHP_STARTER' : '';
+    console.log('[sp-weight-hc-shadow] mode=' + _mode
+      + ' gd=' + game.game_date + ' gid=' + game.game_id
+      + ' away_sp_hand=' + (game.away_sp_hand||'U') + ' home_sp_hand=' + (game.home_sp_hand||'U')
+      + _lhpFlag
+      + ' aML=' + aML + ' aML_alt=' + aMLAlt + ' dAML=' + _fmt(aMLAlt - aML)
+      + ' hML=' + hML + ' hML_alt=' + hMLAlt + ' dHML=' + _fmt(hMLAlt - hML)
+      + ' estTot=' + estTot.toFixed(3) + ' estTot_alt=' + estTotAlt.toFixed(3)
+      + ' dTot=' + _fmt(+(estTotAlt - estTot).toFixed(3)));
+  } else if (USE_HAND_CONDITIONAL_SP_WEIGHT && (awayHandUnresolved || homeHandUnresolved)) {
+    console.log('[sp-weight-hc-fallback] gd=' + game.game_date + ' gid=' + game.game_id
+      + ' away_sp_hand=' + (game.away_sp_hand||'U') + ' home_sp_hand=' + (game.home_sp_hand||'U')
+      + ' fallback_side=' + (awayHandUnresolved && homeHandUnresolved ? 'BOTH' : awayHandUnresolved ? 'AWAY_batters' : 'HOME_batters'));
+  }
+
   return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj,
     // PR 4: per-side SP weights used in this model run. Persisted to
     // game_log.{away,home}_sp_weight_used by processGameSignals so
