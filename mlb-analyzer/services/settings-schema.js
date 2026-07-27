@@ -121,12 +121,12 @@ const SETTINGS_SCHEMA = {
     help: 'Bullpen-only actuals weight in the per-RP blend inside q.getBullpenWoba. Default 0.75. Set to match the global w_act (0.55 in current prod) for byte-identical legacy.' },
 
   // --- SP/RP split (model side) --------------------------------------------
-  sp_weight: { type: 'number', min: 0.5, max: 0.95, default: 0.80,
-    help: 'SP weight in run estimation.' },
-  relief_weight: { type: 'number', min: 0.05, max: 0.5, default: 0.20,
+  sp_weight: { type: 'number', min: 0.5, max: 0.85, default: 0.80,
+    help: 'SP weight in run estimation. Max tightened from 0.95 to 0.85 on 2026-07-26: rolling-CV sweep (docs/sp-weight-rolling-cv-2026-07-25.md) showed 0.90 was uniformly negative across all 3 folds (mean test ROI -2.55%).' },
+  relief_weight: { type: 'number', min: 0.15, max: 0.5, default: 0.20,
     invariant: (v, all) => Math.abs(v + Number(all.sp_weight) - 1.0) < 0.02,
     invariantMsg: 'sp_weight + relief_weight must equal 1.0',
-    help: 'Bullpen weight in run estimation.' },
+    help: 'Bullpen weight in run estimation. Min tightened from 0.05 to 0.15 (paired with sp_weight max 0.85).' },
 
   // --- Pitching vs batting blend -------------------------------------------
   w_pit: { type: 'number', min: 0.4, max: 0.7, default: 0.40,
