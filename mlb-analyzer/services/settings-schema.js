@@ -122,11 +122,17 @@ const SETTINGS_SCHEMA = {
 
   // --- SP/RP split (model side) --------------------------------------------
   sp_weight: { type: 'number', min: 0.5, max: 0.95, default: 0.80,
-    help: 'SP weight in run estimation.' },
+    help: 'SP weight in run estimation (batter-side handedness weight — vsStart split). Active when use_hand_conditional_sp_weight=false.' },
   relief_weight: { type: 'number', min: 0.05, max: 0.5, default: 0.20,
     invariant: (v, all) => Math.abs(v + Number(all.sp_weight) - 1.0) < 0.02,
     invariantMsg: 'sp_weight + relief_weight must equal 1.0',
-    help: 'Bullpen weight in run estimation.' },
+    help: 'Bullpen weight in run estimation. Complement of sp_weight when hand-conditional off.' },
+  sp_weight_r: { type: 'number', min: 0.5, max: 0.95, default: 0.865,
+    help: 'Hand-conditional SP_WEIGHT when opposing SP is RHP. Empirical benchmark 0.865 from pitcher_game_log (docs/sp-weight-empirical-benchmark-2026-07-27.md, on research branch). Active when use_hand_conditional_sp_weight=true.' },
+  sp_weight_l: { type: 'number', min: 0.5, max: 0.95, default: 0.649,
+    help: 'Hand-conditional SP_WEIGHT when opposing SP is LHP. Empirical benchmark 0.649 (lower than R because managers pinch-hit RHBs and bring in RHP relievers against L starters). Active when use_hand_conditional_sp_weight=true.' },
+  use_hand_conditional_sp_weight: { type: 'boolean', default: false,
+    help: 'When true, perBatterEW routes to sp_weight_r or sp_weight_l based on opposing SP hand instead of the flat sp_weight scalar. When false, model line output is byte-identical to prior behavior. Shadow-mode per-game delta (scalar vs hand-conditional) is always logged when enabled OR when sp_weight_r/l differ from sp_weight.' },
 
   // --- Pitching vs batting blend -------------------------------------------
   w_pit: { type: 'number', min: 0.4, max: 0.7, default: 0.40,

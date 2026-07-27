@@ -517,8 +517,11 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter weight</label><input type="number" id="s-w-bat" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Steamer weight</label><input type="number" id="s-w-proj" step="0.05"></div>
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Actual weight</label><input type="number" id="s-w-act" step="0.05"></div>
-<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter SP hand wt</label><input type="number" id="s-sp-weight" step="0.01" min="0" max="1"></div>
-    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Batter relief wt</label><input type="number" id="s-relief-weight" step="0.01" min="0" max="1"></div>
+<div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Batter-side handedness weight when hand-conditional SP_WEIGHT is OFF. Fraction of the batter's projected wOBA that comes from his vs-starter-hand split. Complement (relief) auto-pairs to 1.0.">Batter SP hand wt (flat)</label><input type="number" id="s-sp-weight" step="0.01" min="0" max="1"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Complement of Batter SP hand wt when hand-conditional is OFF.">Batter relief wt (flat)</label><input type="number" id="s-relief-weight" step="0.01" min="0" max="1"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="When ON, batter SP hand wt is routed per opposing SP hand (uses sp_weight_r vs sp_weight_l below) instead of the flat scalar above. Shadow-mode delta is always logged to server console with tag [sp-weight-hc-shadow]. Byte-identical model line output when OFF. Opener games always use the flat scalar."><input type="checkbox" id="s-use-hand-conditional-sp-weight" style="vertical-align:middle;margin-right:4px">Hand-conditional SP</label></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Hand-conditional SP weight when opposing SP is RHP. Empirical benchmark 0.865 from pitcher_game_log 2026-04→07 BF-per-hand analysis (docs/sp-weight-empirical-benchmark-2026-07-27.md).">SP wt vs RHP starter</label><input type="number" id="s-sp-weight-r" step="0.01" min="0.5" max="0.95"></div>
+    <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Hand-conditional SP weight when opposing SP is LHP. Empirical benchmark 0.649 (lower than R because managers PH RHBs and bring in RHP relievers against L starters).">SP wt vs LHP starter</label><input type="number" id="s-sp-weight-l" step="0.01" min="0.5" max="0.95"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Share of pitcher-side wOBA attributed to the starting pitcher. SP + Bullpen auto-pair to 1.0 on edit.">SP wOBA</label><input type="number" id="s-sp-pit-weight" step="0.01" min="0" max="1" oninput="pairSpBullpen('sp')"></div>
     <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px" title="Share of pitcher-side wOBA attributed to the bullpen. SP + Bullpen auto-pair to 1.0 on edit.">Bullpen wOBA</label><input type="number" id="s-relief-pit-weight" step="0.01" min="0" max="1" oninput="pairSpBullpen('relief')"></div>
       <div class="setting-row"><label title="Manager-assumption weights for strong-matched vs weak-matched reliever when the opposing lineup contains RHB. Strong + weak auto-pair to 1.0 on edit.">Bullpen vs RHB</label><div style="display:flex;gap:6px;flex:1"><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Strong</span><input type="number" id="s-bp-strong-r" step="0.01" min="0" max="1" oninput="pairBpWeights('r','strong')"></div><div style="display:flex;flex-direction:column;flex:1"><span style="font-size:10px;color:var(--text2);margin-bottom:2px">Weak</span><input type="number" id="s-bp-weak-r" step="0.01" min="0" max="1" oninput="pairBpWeights('r','weak')"></div></div></div>
@@ -4312,6 +4315,8 @@ const _SETTINGS_SCHEMA_ID_MAP = {
   w_pit: 's-w-pit', w_bat: 's-w-bat',
   w_proj: 's-w-proj', w_act: 's-w-act',
   sp_weight: 's-sp-weight', relief_weight: 's-relief-weight',
+  sp_weight_r: 's-sp-weight-r', sp_weight_l: 's-sp-weight-l',
+  use_hand_conditional_sp_weight: 's-use-hand-conditional-sp-weight',
   sp_pit_weight: 's-sp-pit-weight', relief_pit_weight: 's-relief-pit-weight',
   bp_strong_weight_r: 's-bp-strong-r', bp_weak_weight_r: 's-bp-weak-r',
   bp_strong_weight_l: 's-bp-strong-l', bp_weak_weight_l: 's-bp-weak-l',
@@ -4478,6 +4483,9 @@ async function loadSettings(){
     set('s-w-act',         s.w_act);
     set('s-sp-weight',     s.sp_weight);
     set('s-relief-weight', s.relief_weight);
+    set('s-sp-weight-r',   s.sp_weight_r);
+    set('s-sp-weight-l',   s.sp_weight_l);
+    { const el = document.getElementById('s-use-hand-conditional-sp-weight'); if (el) el.checked = (s.use_hand_conditional_sp_weight === 'true' || s.use_hand_conditional_sp_weight === true); }
     set('s-sp-pit-weight', s.sp_pit_weight);
     set('s-relief-pit-weight', s.relief_pit_weight);
     set('s-bp-strong-r',     s.bp_strong_weight_r);
@@ -4574,6 +4582,9 @@ async function saveSettings(){
     w_act:              get('s-w-act'),
     sp_weight:          get('s-sp-weight'),
     relief_weight:      get('s-relief-weight'),
+    sp_weight_r:        get('s-sp-weight-r'),
+    sp_weight_l:        get('s-sp-weight-l'),
+    use_hand_conditional_sp_weight: (document.getElementById('s-use-hand-conditional-sp-weight')||{}).checked ? 'true' : 'false',
     sp_pit_weight:      get('s-sp-pit-weight'),
     relief_pit_weight:  get('s-relief-pit-weight'),
         bp_strong_weight_r: get('s-bp-strong-r'),
