@@ -1297,7 +1297,15 @@ function getSignals(game, modelResult, settings, outSuppressed) {
   // moneylines are missing — there's nothing to calculate edge against.
   // mkt vs model comparison silently misbehaves on null and produces
   // bogus large edges (null > 0 is false; null > -100 is false; etc.).
-  const haveAnyML = game.market_away_ml != null && game.market_home_ml != null;
+  //
+  // Also fails-closed on structurally-impossible pairs (2026-07-28
+  // CLE-CIN DH incident: +136/+105 both positive, implied-sum 0.912).
+  // signalsForGame in jobs.js already nulls the runtime market_*_ml
+  // when this fires, so this check is belt-and-suspenders for any
+  // caller that computes signals off a raw game_log row.
+  const { checkMarketMLPairSanity } = require('../utils/market-sanity');
+  const _pairSanity = checkMarketMLPairSanity(game.market_away_ml, game.market_home_ml);
+  const haveAnyML = game.market_away_ml != null && game.market_home_ml != null && _pairSanity == null;
 
   // Null-market suppression for totals. When both primary AND xcheck
   // totals are missing, MARKET_TOTAL_DFLT used to mask this — producing
