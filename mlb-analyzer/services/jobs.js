@@ -14,6 +14,13 @@ const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
 const { calcCLV } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
+const { checkMarketMLPairSanity } = require('../utils/market-sanity');
+const {
+  parseEtWallClockStringMin,
+  parseKalshiHhmmMin,
+  parseIsoToEtMin,
+  checkSourceStartMatchesSchedule,
+} = require('../utils/dh-assignment-guard');
 
 // Cohort assignment by game_date. Shared by processGameSignals (auto-
 // emitted signals) AND routes/api.js POST /signals/manual (manual bet
@@ -404,13 +411,20 @@ function tryParse(str) {
 }
 
 // Sanity-check a game's two-outcome moneyline pair. Returns a reason string
-// when the lines look wrong, or null when they look sane. Two classes of
-// failure:
-//   - impossible:  same-sign pair (both favorites or both dogs)
+// when the lines look wrong, or null when they look sane. Failures:
+//   - impossible:  same-sign pair or implied-prob sum outside a real book's
+//                  vig band (delegated to checkMarketMLPairSanity)
 //   - suspicious:  either side's implied probability exceeds 0.80
 //                  (≈ -400 or worse — real but very rare, often a data bug)
 // Missing or zero lines skip the check entirely.
+//
+// Pre-fix (2026-07-28): the doc claimed to catch the same-sign case but
+// the code only fired on p>0.80, so +136/+105 (max implied 0.488) passed
+// silently and the incoherent pair fed a 1.0PP play. Now the
+// structural check runs first.
 function checkOddsSanity(awayML, homeML) {
+  const structural = checkMarketMLPairSanity(awayML, homeML);
+  if (structural) return structural;
   const a = parseFloat(awayML), h = parseFloat(homeML);
   if (isNaN(a) || isNaN(h) || a === 0 || h === 0) return null;
   const impP = x => x < 0 ? Math.abs(x) / (Math.abs(x) + 100) : 100 / (x + 100);
@@ -815,6 +829,43 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       if (bestA) { game.market_away_ml = bestA.ml; _venueByMarket.ml_away = bestA.venue; _venueStaleFlag = false; }
       if (bestH) { game.market_home_ml = bestH.ml; _venueByMarket.ml_home = bestH.venue; _venueStaleFlag = false; }
     }
+  }
+  // Signal-suppression gate (2026-07-28 CLE-CIN DH incident). Three
+  // failure classes; any one nulls the runtime market_*_ml so
+  // getSignals falls through its null-market suppression path.
+  // Runtime-only null; game_log row is NOT modified so post-lock
+  // immutability is preserved and the DB retains the raw values for
+  // audit.
+  //
+  //   1. Structural impossibility: pair fails checkMarketMLPairSanity
+  //      (both dogs, implied-sum wildly outside book vig band). Fires
+  //      on a bad venue-aware pair even when odds_flag_reason didn't
+  //      catch it (e.g. best-away from Poly + best-home from Kalshi
+  //      producing a pair no single venue ever quoted).
+  //   2. Hard-favorite divergence: checkBookDivergence stamped
+  //      "disagree on favorite" (Kalshi and xcheck pick opposite
+  //      sides above the pick'em noise threshold). Prior to this
+  //      fix, that flag was only informational — emitted a 1.0PP
+  //      play on 7/28 CLE-CIN against garbage.
+  //   3. DH-crossed source rejection: dh-assignment-guard stamped
+  //      "start-time mismatch" — the fresh source's ticker was
+  //      rejected because its embedded start_time didn't match
+  //      statsapi's game_time. The DB row may still hold a prior
+  //      last-good market via COALESCE, but that value is now
+  //      untrustworthy relative to the fresh source signal, so we
+  //      suppress until the next clean pass.
+  const _pairReason = checkMarketMLPairSanity(game.market_away_ml, game.market_home_ml);
+  const _favDisagree = /disagree on favorite/i.test(gameRow.odds_flag_reason || '');
+  const _dhCrossed = /start-time mismatch|DH-crossed|wrong-leg market/i.test(gameRow.odds_flag_reason || '');
+  if (_pairReason || _favDisagree || _dhCrossed) {
+    const reason = _pairReason
+      || (_dhCrossed ? 'DH-crossed source rejected' : null)
+      || 'sources disagree on favorite';
+    console.warn('[signal-suppress] ' + gameRow.game_date + '/' + gameRow.game_id
+      + ': ML signals suppressed — ' + reason
+      + ' (market_away_ml=' + game.market_away_ml + ' market_home_ml=' + game.market_home_ml + ')');
+    game.market_away_ml = null;
+    game.market_home_ml = null;
   }
   const stdModel = runModel(game, wobaIdx, settings, 'standard');
   // Phase 2 shadow: compute the opener-aware model whenever a side is
@@ -1533,8 +1584,31 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
       const snap = loadFreshSnapshotForGid(row.game_id);
       if (snap) { cmpRow = snap; servedFromSnapshot = true; }
     }
-    let newMarket = null, newVenue = null, newStale = 1;
+    // Market-sanity guard for the venue-aware pair (2026-07-28 CLE-CIN
+    // DH). _pickBestML runs per-side independently, so the two sides of a
+    // refresh over one active_row can silently combine into an incoherent
+    // pair. Compute both sides' winners here, check the pair, and skip
+    // the write if it fails — the row keeps its prior last-good baseline
+    // until the next cron. Counter surfaces in stats so an operator can
+    // notice when the guard fires broadly. Only runs on the venue-aware
+    // (tier-1) path; Kalshi-solo tier-2 is single-source and pair-
+    // coherent by construction.
+    let pairSuppressed = false;
     if (_venueAware && cmpRow) {
+      const winA = _pickBestML(cmpRow, 'away');
+      const winH = _pickBestML(cmpRow, 'home');
+      if (winA && winH) {
+        const pairReason = checkMarketMLPairSanity(winA.ml, winH.ml);
+        if (pairReason) {
+          pairSuppressed = true;
+          console.warn('[refresh-tail] ' + dateStr + '/' + row.game_id
+            + ' (signal_id ' + row.id + '): venue-pair rejected — ' + pairReason
+            + '; leaving prior baseline in place');
+        }
+      }
+    }
+    let newMarket = null, newVenue = null, newStale = 1;
+    if (_venueAware && cmpRow && !pairSuppressed) {
       const best = _pickBestML(cmpRow, row.signal_side);
       if (best) { newMarket = best.ml; newVenue = best.venue; newStale = 0; }
     }
@@ -3460,8 +3534,13 @@ const TOTAL_MAX_PLAUSIBLE = 14.5;
 // processGameSignals. Extracted from runOddsJob so the snapshot-replay
 // endpoint (POST /api/replay/odds) can re-run the same logic against a
 // captured upstream payload without hitting Unabated.
-function processOddsArray(dateStr, oddsRaw, settings) {
+function processOddsArray(dateStr, oddsRaw, settings, opts) {
   if (!Array.isArray(oddsRaw)) oddsRaw = [];
+  // DH-flag map from runOddsJob's write-blocks. Keyed by game_id →
+  // reason string(s) stamped when a source's ticker start-time didn't
+  // match statsapi's game_time. Stapled into odds_flag_reason below so
+  // signalsForGame's suppression regex catches DH-crossed games.
+  const dhFlagByGid = (opts && opts.dhFlagByGid) || {};
   // Deduplicate by game_id — keep first occurrence (Kalshi lines take priority)
   const seen = new Set();
   const odds = oddsRaw.filter(o => { if(seen.has(o.game_id)) return false; seen.add(o.game_id); return true; });
@@ -3507,6 +3586,14 @@ function processOddsArray(dateStr, oddsRaw, settings) {
     const haveMarket = _effAwayMl != null && _effHomeMl != null;
     const singleSource = haveMarket && (!o.xcheck_ml_source || o.xcheck_ml_source === o.ml_source);
     const reasons = [];
+    // DH-crossed writes rejected upstream get stamped FIRST so they
+    // surface even when the row also has other reasons (or when the
+    // fresh pass had no market at all because both sources were
+    // rejected). This is the marker signalsForGame's suppression
+    // regex matches on.
+    if (dhFlagByGid[o.game_id]) {
+      reasons.push(dhFlagByGid[o.game_id]);
+    }
     if (!haveMarket) {
       reasons.push('no sane odds');
     } else if (singleSource) {
@@ -3743,6 +3830,14 @@ async function runOddsJob(dateStr, opts) {
   opts = opts || {};
   try {
     const settings = getSettings();
+
+    // DH-crossed rejection accumulator (2026-07-28 CLE-CIN incident).
+    // Populated by the Kalshi + Poly write blocks when a source's
+    // ticker/event start_time doesn't match statsapi for the game_id
+    // being written. Consumed by the odds-flag block downstream to
+    // stamp odds_flag_reason; signalsForGame's regex then suppresses
+    // ML signals on the pattern. Per-cron only — rebuilt every pass.
+    const _dhFlagByGid = {};
 
     // Bootstrap statsapi schedule first. statsapi is the sole source of
     // truth for which games exist on the slate — the "game universe" is
@@ -3994,6 +4089,23 @@ async function runOddsJob(dateStr, opts) {
               skippedLocked++;
               continue;
             }
+            // DH-assignment guard (2026-07-28 CLE-CIN). Kalshi's ticker
+            // for a DH nightcap sometimes omits the "G2" suffix, so
+            // parseEventTicker assigns it game_number=1 and this write
+            // would overwrite the AFTERNOON row with the evening line.
+            // Verify the ticker's embedded HHMM matches statsapi's
+            // game_time within ±30 min. On mismatch: reject the write,
+            // stamp odds_flag_reason downstream, let processGameSignals'
+            // suppression gate catch it.
+            const _kalStartMin = parseKalshiHhmmMin(k.start_et);
+            const _schedStartMin = parseEtWallClockStringMin(existing && existing.game_time);
+            const _dhMismatch = checkSourceStartMatchesSchedule(
+              _kalStartMin, _schedStartMin, 'kalshi', gameId);
+            if (_dhMismatch) {
+              console.warn('[dh-guard] ' + _dhMismatch);
+              _dhFlagByGid[gameId] = (_dhFlagByGid[gameId] ? _dhFlagByGid[gameId] + ' | ' : '') + _dhMismatch;
+              continue;  // do not write Kalshi's price to this game_id
+            }
             // ML override only. Totals, spreads, sources for non-ML markets,
             // and every other field stay as Unabated/OddsAPI set them. ML
             // values are FEE-ADJUSTED (see CLV note above the helper).
@@ -4125,6 +4237,22 @@ async function runOddsJob(dateStr, opts) {
               + ' top-of-book incomplete (away=' + awayTopPrice
               + ' home=' + homeTopPrice + ') — skipping');
             continue;
+          }
+          // DH-assignment guard (2026-07-28). Symmetric with the Kalshi
+          // block above — Poly's clustering assigns game_number by
+          // start-time ordering, but if a cluster collapses (both events
+          // land within 90 min of each other) the loser is silently
+          // dropped and the winner may get labeled with the wrong
+          // game_number. Verify Poly's game_start_time_iso matches
+          // statsapi within ±30 min.
+          const _polyStartMin = parseIsoToEtMin(p.game_start_time_iso);
+          const _schedStartMinP = parseEtWallClockStringMin(existing && existing.game_time);
+          const _polyDhMismatch = checkSourceStartMatchesSchedule(
+            _polyStartMin, _schedStartMinP, 'polymarket', p.game_id);
+          if (_polyDhMismatch) {
+            console.warn('[dh-guard] ' + _polyDhMismatch);
+            _dhFlagByGid[p.game_id] = (_dhFlagByGid[p.game_id] ? _dhFlagByGid[p.game_id] + ' | ' : '') + _polyDhMismatch;
+            continue;  // do not write Poly's price to this game_id
           }
           o.market_away_ml = awayMl;
           o.market_home_ml = homeMl;
@@ -4633,7 +4761,7 @@ async function runOddsJob(dateStr, opts) {
       }
     }
 
-    const result = processOddsArray(dateStr, oddsRaw, settings);
+    const result = processOddsArray(dateStr, oddsRaw, settings, { dhFlagByGid: _dhFlagByGid });
     const updated = result.updated;
     const sourceLabel = result.source;
     q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + sourceLabel, updated);
