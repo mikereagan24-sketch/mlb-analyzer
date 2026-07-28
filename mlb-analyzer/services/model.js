@@ -40,7 +40,13 @@ const VENUE_ID_OVERRIDES = {
   // Estadio Alfredo Harp Helú — Mexico City series. ~7800 ft elevation.
   // Coors (~5200 ft) plays to ~1.10 park factor; scaling by elevation
   // (each ~1000 ft ≈ +2% factor) puts Mexico City around 1.20.
-  5340: { parkFactor: 1.20, name: 'Estadio Alfredo Harp Helú (Mexico City)' },
+  //
+  // lat/lng/tz added 2026-07-27 so runWeatherJob can pull weather at the
+  // override venue instead of PARKS[team]. Pre-fix, a Mexico City game
+  // between (say) SD@ARI would have pulled Phoenix weather. Now
+  // consulted by services/jobs.js runWeatherJob → fetchAndApply.
+  5340: { parkFactor: 1.20, name: 'Estadio Alfredo Harp Helú (Mexico City)',
+          lat: 19.4045, lng: -99.1132, tz: 'America/Mexico_City' },
 };
 
 const { normName, fuzzyLookup, stripSfx } = require('../utils/names');
@@ -2028,4 +2034,4 @@ function applyCatcherFramingDelta(rvPerGame, settings) {
   return rvPerGame * mute;
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx };
+module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };

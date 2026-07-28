@@ -64,6 +64,12 @@ const VENUE_OVERRIDES = {
   // over/under-projection vs the empirical sample, adjust pf here.
   ATH: [{ start: '2026-06-08', end: '2026-06-14',
           pf: 1.31, venue: 'Las Vegas Ballpark',
+          // lat/lng/tz added 2026-07-27 so runWeatherJob can pull weather
+          // at the override venue instead of falling through to PARKS[team].
+          // Pre-fix, the Vegas series' weather came from PARKS['ath'] (which
+          // was itself Oakland Coliseum). Fix stack: PARKS coords → Sacramento
+          // (correct home); this override coords → Vegas (correct series).
+          lat: 36.1240, lng: -115.3277, tz: 'America/Los_Angeles',
           note: '2,000 ft elevation + 340 ft foul lines (structural)' }],
 };
 

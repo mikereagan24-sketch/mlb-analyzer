@@ -3,13 +3,13 @@
 const cron = require('node-cron');
 const crypto = require('crypto');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule } = require('./scraper');
+const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
-const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP } = require('./model');
+const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
 const { calcCLV } = require('./clv');
@@ -3128,7 +3128,33 @@ async function runWeatherJob(date) {
     for (const game of games) {
       const parts = game.game_id.split('-');
       const homeKey = parts[1];
-      const park = PARKS[homeKey];
+      // Venue-override resolution for weather fetch. Precedence:
+      //   1. VENUE_ID_OVERRIDES[game.venue_id] — statsapi-tagged special
+      //      venue (Mexico City, 5340). Most specific signal.
+      //   2. pickVenueOverride(homeTeam, date) — date-scoped team override
+      //      (ATH Las Vegas series 2026-06-08..14).
+      //   3. PARKS[homeKey] — the team's default home park.
+      // The override carries { lat, lng, tz?, name? } and replaces PARKS
+      // for weather-fetch purposes only. Runs BEFORE the PARKS lookup so
+      // an override without lat/lng falls through gracefully. This closes
+      // the P2 bug where Vegas series games and Mexico City games pulled
+      // weather from the team's default home stadium, silently mispricing
+      // dozens of games per year.
+      const upperHome = (homeKey || '').toUpperCase();
+      const venueIdOv = (game.venue_id != null) ? VENUE_ID_OVERRIDES[game.venue_id] : null;
+      const teamDateOv = pickVenueOverride(upperHome, game.game_date);
+      let park = PARKS[homeKey];
+      let parkSource = 'home';
+      if (venueIdOv && venueIdOv.lat != null && venueIdOv.lng != null) {
+        park = Object.assign({}, park, { lat: venueIdOv.lat, lng: venueIdOv.lng, name: venueIdOv.name || park?.name });
+        parkSource = 'venue_id_override:' + game.venue_id;
+      } else if (teamDateOv && teamDateOv.lat != null && teamDateOv.lng != null) {
+        park = Object.assign({}, park, { lat: teamDateOv.lat, lng: teamDateOv.lng, name: teamDateOv.venue || park?.name });
+        parkSource = 'team_date_override:' + teamDateOv.venue;
+      }
+      if (parkSource !== 'home') {
+        console.log('[weather] '+game.game_id+' using '+parkSource+' (lat='+park.lat+', lng='+park.lng+')');
+      }
       if (!park) {
         skipReasonCounts.no_park++;
         skippedIds.push(game.game_id);
