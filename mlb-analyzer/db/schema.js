@@ -1564,6 +1564,16 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catc
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN temp_f REAL DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN temp_run_adj REAL DEFAULT 0"); } catch(e) {}
+// Weather contamination tag (2026-07-27). Text reason string when the
+// persisted wind_*/temp_f/wind_factor/temp_run_adj values are known to be
+// wrong (e.g. the 49 ATH home games pulled Oakland Coliseum weather
+// pre-Sutter-Health-fix). NULL = weather trusted. Backtests, calibration,
+// and cross-cohort sweeps should filter WHERE weather_contamination_reason
+// IS NULL when weather is a load-bearing input. Historical values are NOT
+// overwritten — contamination is tagged, not silently re-scored, so the
+// persisted values still faithfully record what the model actually saw at
+// signal-emit time.
+try { db.exec("ALTER TABLE game_log ADD COLUMN weather_contamination_reason TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}

@@ -31,8 +31,21 @@ const PARKS = {
   'ari': { lat:33.4453, lng:-112.0667,cfDir:45,  sens:0.2, name:'Chase Field' },
   'lad': { lat:34.0739, lng:-118.2400,cfDir:45,  sens:0.5, name:'Dodger Stadium' },
   'sfg': { lat:37.7786, lng:-122.3893,cfDir:90,  sens:0.3, name:'Oracle Park' },
-  'oak': { lat:37.7516, lng:-122.2005,cfDir:45,  sens:1.2, name:'RingCentral' },
-  'ath': { lat:37.7516, lng:-122.2005,cfDir:45,  sens:1.2, name:'RingCentral' },
+  // ATH plays at Sutter Health Park, West Sacramento in 2026 (not Oakland
+  // Coliseum). Prior coords 37.7516/-122.2005 pulled Oakland weather for
+  // every ATH home game — ~25-30°F cold-bias in July (Sacramento ~93°F vs
+  // Oakland ~68°F), which via temp_run_adj under-forecast runs by ~1.0-1.3
+  // per game across 49 home games since 2026-03-01. Three other files
+  // (scraper.js PARK_FACTORS, park-factors-woba.js WOBA_PARK_FACTORS,
+  // scraper.js PARK_TZ comment) already knew about the move; weather.js
+  // was the fourth-file blind spot. Fixed 2026-07-27.
+  //
+  // sens dropped 1.2 → 1.0 (default): Coliseum's 1.2 was calibrated to
+  // its specific wind pattern; Sutter Health is a different park with
+  // no measured sensitivity yet. cfDir stays 45° placeholder until the
+  // measurement pass includes Sutter Health (joins the priority list).
+  'oak': { lat:38.5804, lng:-121.5111,cfDir:45,  sens:1.0, name:'Sutter Health Park' },
+  'ath': { lat:38.5804, lng:-121.5111,cfDir:45,  sens:1.0, name:'Sutter Health Park' },
   'sea': { lat:47.5914, lng:-122.3325,cfDir:45,  sens:0.6, name:'T-Mobile Park' },
   'tex': { lat:32.7512, lng:-97.0832, cfDir:45,  sens:0.1, name:'Globe Life' },
   'hou': { lat:29.7573, lng:-95.3555, cfDir:45,  sens:0.1, name:'Minute Maid' },
