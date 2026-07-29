@@ -3075,7 +3075,8 @@ async function runWeatherJob(date) {
       writeCronLog('no_games', 'no games on slate');
       return { success: true, updated: 0, date: date, note: 'no games' };
     }
-    const { calcWindFactor, PARKS } = require('./weather');
+    const { calcWindFactor, PARKS, fetchWindAtCoords } = require('./weather');
+    const { PARK_TZ } = require('./weather')._internal;
     const { rollForwardPrior, isSealedDome } = require('./roof-prior');
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
@@ -3090,38 +3091,29 @@ async function runWeatherJob(date) {
     //                                         { empty_response, bad_index,
     //                                           non_finite_value, exception }.
     // dome / no_park are deterministic and handled by the outer loop.
-    const fetchAndApply = async (game, park, gameHour) => {
+    const fetchAndApply = async (game, park, tz, sourceLabel) => {
       try {
-        // Cache-bust query param so retries hit the upstream rather than
-        // any intermediary cache that returned the bad payload first time.
-        const url = 'https://api.open-meteo.com/v1/forecast?latitude='+park.lat+'&longitude='+park.lng
-          +'&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability'
-          +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
-          +'&start_date='+date+'&end_date='+date+'&_t='+Date.now();
-        const wd = await fetch(url, {
-          headers: { 'User-Agent': 'mlb-analyzer/1.0 (https://github.com/mikereagan24-sketch/mlb-analyzer)' },
-        }).then(r => r.json());
-        if (!wd || !wd.hourly || !Array.isArray(wd.hourly.time) || !wd.hourly.time.length) {
-          return { ok: false, reason: 'empty_response', transient: true,
-                   detail: JSON.stringify(wd).slice(0, 200) };
+        // Pre-2026-07-29: this block had its own inline Open-Meteo fetch
+        // and applied game.game_time's ET hour DIRECTLY as an index into
+        // the park-local hourly array — off by 1-3h for every non-ET
+        // park. The 2026-07-27 TZ fix in services/weather.fetchParkWind
+        // was ineffective because the cron never called that function.
+        // Now unified through fetchWindAtCoords so park-local ISO
+        // indexing applies to override coords too (Mexico City, Vegas,
+        // Sacramento). Retry + skipReasonCounts contracts unchanged.
+        const wx = await fetchWindAtCoords({
+          lat: park.lat, lng: park.lng, tz,
+          gameDate: game.game_date, gameTime: game.game_time,
+          sourceLabel: (sourceLabel || game.game_id),
+          cacheBust: true,
+        });
+        if (wx && wx.error) {
+          return { ok: false, reason: wx.error, transient: wx.transient !== false, detail: wx.detail };
         }
-        const idx = Math.min(gameHour, wd.hourly.time.length - 1);
-        if (idx < 0) {
-          return { ok: false, reason: 'bad_index', transient: true,
-                   detail: 'gameHour=' + gameHour };
-        }
-        const _speed  = wd.hourly.wind_speed_10m?.[idx];
-        const _dir    = wd.hourly.wind_direction_10m?.[idx];
-        const _temp   = wd.hourly.temperature_2m?.[idx];
-        const _precip = wd.hourly.precipitation_probability?.[idx];
-        if (![_speed, _dir, _temp, _precip].every(v => Number.isFinite(v))) {
-          return { ok: false, reason: 'non_finite_value', transient: true,
-                   detail: 'speed='+_speed+' dir='+_dir+' temp='+_temp+' precip='+_precip };
-        }
-        const speed = parseFloat(_speed.toFixed(1));
-        const dir   = Math.round(_dir);
-        const temp  = parseFloat(_temp.toFixed(1));
-        const precip = _precip;
+        const speed = parseFloat(wx.windSpeed.toFixed(1));
+        const dir   = Math.round(wx.windDir);
+        const temp  = parseFloat(wx.tempF.toFixed(1));
+        const precip = wx.precipProb;
         const windFactor = calcWindFactor(dir, speed, park);
         const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
         let roofStatus = 'open', roofMult = 1, roofConfidence = 'estimated';
@@ -3218,16 +3210,26 @@ async function runWeatherJob(date) {
       const venueIdOv = (game.venue_id != null) ? VENUE_ID_OVERRIDES[game.venue_id] : null;
       const teamDateOv = pickVenueOverride(upperHome, game.game_date);
       let park = PARKS[homeKey];
+      // Timezone resolution mirrors coord resolution precedence:
+      // override.tz > PARK_TZ[homeKey]. Threaded into fetchWindAtCoords
+      // so the park-local hour ISO is computed against the RIGHT tz
+      // (e.g. an ATH Vegas game uses America/Los_Angeles, an ATH Mexico
+      // City game would use America/Mexico_City). Pre-2026-07-29, the
+      // cron path silently used a naive-ET-hour index no matter what
+      // tz the park was in.
+      let tz = PARK_TZ[homeKey];
       let parkSource = 'home';
       if (venueIdOv && venueIdOv.lat != null && venueIdOv.lng != null) {
         park = Object.assign({}, park, { lat: venueIdOv.lat, lng: venueIdOv.lng, name: venueIdOv.name || park?.name });
+        if (venueIdOv.tz) tz = venueIdOv.tz;
         parkSource = 'venue_id_override:' + game.venue_id;
       } else if (teamDateOv && teamDateOv.lat != null && teamDateOv.lng != null) {
         park = Object.assign({}, park, { lat: teamDateOv.lat, lng: teamDateOv.lng, name: teamDateOv.venue || park?.name });
+        if (teamDateOv.tz) tz = teamDateOv.tz;
         parkSource = 'team_date_override:' + teamDateOv.venue;
       }
       if (parkSource !== 'home') {
-        console.log('[weather] '+game.game_id+' using '+parkSource+' (lat='+park.lat+', lng='+park.lng+')');
+        console.log('[weather] '+game.game_id+' using '+parkSource+' (lat='+park.lat+', lng='+park.lng+', tz='+tz+')');
       }
       if (!park) {
         skipReasonCounts.no_park++;
@@ -3242,18 +3244,9 @@ async function runWeatherJob(date) {
         skipReasonCounts.dome++;
         continue;
       }
-      let gameHour = 19;
-      if (game.game_time) {
-        const m = game.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);
-        if (m) {
-          let h = parseInt(m[1]), ap = m[3].toUpperCase();
-          if (ap === 'PM' && h !== 12) h += 12;
-          if (ap === 'AM' && h === 12) h = 0;
-          gameHour = h;
-        }
-      }
+      const sourceLabel = game.game_id + ' ' + parkSource;
 
-      let res = await fetchAndApply(game, park, gameHour);
+      let res = await fetchAndApply(game, park, tz, sourceLabel);
       if (!res.ok && res.transient) {
         // Retry once after 1s. The 2026-05-01 incident (3 games stale at
         // the 7AM PT cron) looked like transient Open-Meteo failures —
@@ -3262,7 +3255,7 @@ async function runWeatherJob(date) {
         // retries are actually saving us.
         console.warn('[weather] '+game.game_id+': '+res.reason+' on first attempt, retrying in 1s ('+res.detail+')');
         await new Promise(r => setTimeout(r, 1000));
-        res = await fetchAndApply(game, park, gameHour);
+        res = await fetchAndApply(game, park, tz, sourceLabel);
         if (res.ok) {
           skipReasonCounts.retry_succeeded++;
         }
