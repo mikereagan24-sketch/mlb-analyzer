@@ -259,108 +259,116 @@ function parkLocalHourIso(gameDate, gameTime, timeZone) {
 
 // Fetch wind at game time for a specific park using Open-Meteo (no API key needed)
 // Uses Node 20 built-in fetch
-async function fetchParkWind(homeTeam, gameDate, gameTime) {
-  const teamKey = (homeTeam || '').toLowerCase().replace(/[^a-z]/g, '');
-  const park = PARKS[teamKey];
-  if (!park) return null;
-
-  // Failure-mode observability (2026-07-29 ATH incident). All three
-  // fallback triggers now WARN with enough context to diagnose from a
-  // single log line. Pre-fix, mode 2 (unparseable gameTime) was silent:
-  // parkLocalHourIso returned null → naive-hour index fired → app
-  // persisted the wrong-hour temperature indefinitely with no visible
-  // signal. Mode 1 (no tz) and mode 3 (indexOf miss) already warned;
-  // this brings mode 2 into parity and adds a success INFO so an
-  // operator can distinguish "fell to fallback silently" from "didn't
-  // reach the code at all" on prod.
-  const tz = PARK_TZ[teamKey];
+// SHARED weather fetch. Takes pre-resolved coordinates + timezone so
+// callers that route through venue-override chains (runWeatherJob) get
+// the same park-local-hour ISO indexing as the direct-team path
+// (fetchParkWind).
+//
+// Returns {windSpeed, windDir, tempF, precipProb} on success — raw
+// hourly values the caller pairs with its own tempAdj formula and its
+// own wind-factor invocation. On failure returns {error, transient?,
+// detail?} matching runWeatherJob's existing skipReasonCounts keys
+// (empty_response, bad_index, non_finite_value, exception) so its
+// retry + cron_log accounting works unchanged.
+//
+// Instrumentation: mode1 (no tz), mode2 (unparseable gameTime), mode3
+// (indexOf miss) all WARN with raw context. Success emits INFO with
+// path=park_local_iso|naive_fallback and idx.
+//
+// Pre-fix (2026-07-29 ATH incident): runWeatherJob had its own inline
+// Open-Meteo fetch and its own gameHour = parseInt(...) narrow regex,
+// duplicating everything fetchParkWind did but WITHOUT the
+// parkLocalHourIso conversion. Every non-ET park got ET-hour indexed
+// into a park-local hourly array (off by 1-3h). Sacramento (ATH) hour
+// 21 PT = 9 PM Sacramento = 78°F, when correct hour 18 PT = 92°F.
+// The naive-hour bug the 0e1e48f TZ fix was meant to cure was never
+// actually cured on the cron path — the cron never called fetchParkWind.
+async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel, cacheBust }) {
+  const label = sourceLabel || 'unknown';
   if (!tz) {
-    console.warn(`[weather] mode1 no PARK_TZ entry for teamKey=${JSON.stringify(teamKey)} (homeTeam=${JSON.stringify(homeTeam)}); naive-hour fallback will fire — add teamKey to PARK_TZ`);
+    console.warn(`[weather] mode1 no tz for ${label}; naive-hour fallback will fire — pass tz from PARK_TZ or override.tz`);
   }
-
-  // Parse once via the widened parser (handles 12h AM/PM, 24h, and ISO —
-  // see parseGameTimeToEtHm). Both the target-ISO path and the naive-
-  // hour fallback read from the same parse result so they can't disagree.
   const parsedHm = parseGameTimeToEtHm(gameTime);
   if (!parsedHm) {
-    console.warn(`[weather] mode2 gameTime unparseable for ${homeTeam} on ${gameDate}: raw=${JSON.stringify(gameTime)} — naive-hour fallback will fire at DEFAULT hour 18. Widen parseGameTimeToEtHm if this is a legitimate new source format.`);
+    console.warn(`[weather] mode2 gameTime unparseable for ${label} on ${gameDate}: raw=${JSON.stringify(gameTime)} — naive-hour fallback will fire at DEFAULT hour 18. Widen parseGameTimeToEtHm if this is a legitimate new source format.`);
   }
   const gameHourNaive = parsedHm ? parsedHm.hour : 18;
   const targetIso = tz ? parkLocalHourIso(gameDate, gameTime, tz) : null;
 
+  const startDate = _shiftDate(gameDate, -1);
+  const endDate   = _shiftDate(gameDate, +1);
+  let url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
+    `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
+    `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
+    `&start_date=${startDate}&end_date=${endDate}`;
+  if (cacheBust) url += `&_t=${Date.now()}`;
+
+  let data;
   try {
-    // Request gameDate ± 1 day so cross-date wraps (a late-ET game at a
-    // PT park, or a very-early-ET matinee at an ET park with DST shifts)
-    // are still findable in the hourly array. Open-Meteo returns 24
-    // hours per date requested; 3 days = ~72 rows, cheap.
-    const startDate = _shiftDate(gameDate, -1);
-    const endDate   = _shiftDate(gameDate, +1);
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${park.lat}&longitude=${park.lng}` +
-      `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
-      `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
-      `&start_date=${startDate}&end_date=${endDate}`;
-    // User-Agent: some upstream APIs reject headerless server-side fetches.
-    // Open-Meteo's free tier rate-limit is per-IP, and Render shared IPs hit
-    // it; the UA helps the provider distinguish our traffic if we need to
-    // request a quota bump.
-    const data = await fetch(url, {
+    data = await fetch(url, {
       headers: { 'User-Agent': 'mlb-analyzer/1.0 (https://github.com/mikereagan24-sketch/mlb-analyzer)' },
     }).then(r => r.json());
-
-    // Validate response shape — fail loud rather than silently returning the
-    // 65°F / 0mph default cluster, which the cron then writes over real data.
-    if (!data || !data.hourly || !Array.isArray(data.hourly.time) || !data.hourly.time.length) {
-      console.warn(`[weather] empty/invalid response for ${homeTeam}: ${JSON.stringify(data).slice(0, 200)}`);
-      return null;
-    }
-
-    // Preferred path: exact string match against the park-local ISO hour we
-    // computed. Fallback path (targetIso null OR indexOf miss): naive-hour
-    // index into gameDate-only data. `_wxPath` labels which path fired so
-    // the success INFO log is self-describing.
-    let idx = -1;
-    let _wxPath = null;
-    if (targetIso) {
-      idx = data.hourly.time.indexOf(targetIso);
-      if (idx < 0) {
-        console.warn(`[weather] mode3 target ISO ${JSON.stringify(targetIso)} not found in hourly array for ${homeTeam} (array tz=${data.timezone}, samples=${JSON.stringify(data.hourly.time.slice(0, 3))}); naive-hour fallback firing at hour ${gameHourNaive}`);
-      } else {
-        _wxPath = 'park_local_iso';
-      }
-    }
-    if (idx < 0) {
-      const dayStart = data.hourly.time.findIndex(t => t.startsWith(gameDate + 'T'));
-      idx = dayStart >= 0
-        ? Math.min(dayStart + gameHourNaive, data.hourly.time.length - 1)
-        : Math.min(gameHourNaive, data.hourly.time.length - 1);
-      _wxPath = 'naive_fallback';
-    }
-    if (idx < 0) return null;
-    // Success INFO — one line per game per cron pass. Cheap; the failure
-    // WARNs would be uninterpretable without a corresponding INFO to
-    // confirm which games hit the good path.
-    console.log(`[weather] ${homeTeam} ${gameDate} gameTime=${JSON.stringify(gameTime)} path=${_wxPath} idx=${idx} hourly.time[idx]=${data.hourly.time[idx]}`);
-
-    const windSpeed = data.hourly.wind_speed_10m?.[idx];
-    const windDir   = data.hourly.wind_direction_10m?.[idx];
-    const tempF     = data.hourly.temperature_2m?.[idx];
-    const precipProb = data.hourly.precipitation_probability?.[idx];
-
-    // Require all four fields to be present and finite. A missing field is
-    // a data-quality problem, not a fact about the weather.
-    if (![windSpeed, windDir, tempF, precipProb].every(v => Number.isFinite(v))) {
-      console.warn(`[weather] missing fields for ${homeTeam}: speed=${windSpeed} dir=${windDir} temp=${tempF} precip=${precipProb}`);
-      return null;
-    }
-
-    const factor = calcWindFactor(windDir, windSpeed, park);
-    // Temp adjustment: research shows ~1 run per 50F from 65F baseline.
-    const tempAdj = Math.max(-1.3, Math.min(1.3, (tempF - 65) * 0.052)); // continuous: -1.3 at 40°F, 0 at 65°F baseline, +1.3 at 90°F
-    return { windSpeed, windDir, factor, tempF, tempAdj, precipProb, parkName: park.name, cfDir: park.cfDir };
   } catch (e) {
-    console.error('[weather] fetch failed for ' + homeTeam + ':', e.message);
+    return { error: 'exception', transient: true, detail: e.message };
+  }
+  if (!data || !data.hourly || !Array.isArray(data.hourly.time) || !data.hourly.time.length) {
+    return { error: 'empty_response', transient: true, detail: JSON.stringify(data).slice(0, 200) };
+  }
+
+  let idx = -1;
+  let wxPath = null;
+  if (targetIso) {
+    idx = data.hourly.time.indexOf(targetIso);
+    if (idx < 0) {
+      console.warn(`[weather] mode3 target ISO ${JSON.stringify(targetIso)} not found in hourly array for ${label} (array tz=${data.timezone}, samples=${JSON.stringify(data.hourly.time.slice(0, 3))}); naive-hour fallback firing at hour ${gameHourNaive}`);
+    } else {
+      wxPath = 'park_local_iso';
+    }
+  }
+  if (idx < 0) {
+    const dayStart = data.hourly.time.findIndex(t => t.startsWith(gameDate + 'T'));
+    idx = dayStart >= 0
+      ? Math.min(dayStart + gameHourNaive, data.hourly.time.length - 1)
+      : Math.min(gameHourNaive, data.hourly.time.length - 1);
+    wxPath = 'naive_fallback';
+  }
+  if (idx < 0) return { error: 'bad_index', transient: true, detail: `idx=-1 after all fallbacks (gameHour=${gameHourNaive})` };
+
+  const windSpeed = data.hourly.wind_speed_10m?.[idx];
+  const windDir   = data.hourly.wind_direction_10m?.[idx];
+  const tempF     = data.hourly.temperature_2m?.[idx];
+  const precipProb = data.hourly.precipitation_probability?.[idx];
+  if (![windSpeed, windDir, tempF, precipProb].every(v => Number.isFinite(v))) {
+    return { error: 'non_finite_value', transient: true, detail: `speed=${windSpeed} dir=${windDir} temp=${tempF} precip=${precipProb}` };
+  }
+
+  console.log(`[weather] ${label} ${gameDate} gameTime=${JSON.stringify(gameTime)} path=${wxPath} idx=${idx} hourly.time[idx]=${data.hourly.time[idx]}`);
+  return { windSpeed, windDir, tempF, precipProb };
+}
+
+async function fetchParkWind(homeTeam, gameDate, gameTime) {
+  const teamKey = (homeTeam || '').toLowerCase().replace(/[^a-z]/g, '');
+  const park = PARKS[teamKey];
+  if (!park) return null;
+  const tz = PARK_TZ[teamKey];
+  const wx = await fetchWindAtCoords({
+    lat: park.lat, lng: park.lng, tz,
+    gameDate, gameTime,
+    sourceLabel: (homeTeam || teamKey) + ' home',
+  });
+  if (!wx || wx.error) {
+    if (wx && wx.error) console.warn(`[weather] fetchParkWind: ${homeTeam} → ${wx.error}${wx.detail ? ' ('+wx.detail+')' : ''}`);
     return null;
   }
+  const factor = calcWindFactor(wx.windDir, wx.windSpeed, park);
+  // Continuous temp-adjustment (see PARKS comment). Note: runWeatherJob
+  // uses a DIFFERENT step-function tempAdj and writes it to game_log —
+  // the two formulas are intentionally not unified because the cron
+  // path's persisted values must not shift under this refactor. Only
+  // fetchParkWind's return-value callers (currently: none in prod;
+  // ad-hoc routes if any) see this continuous form.
+  const tempAdj = Math.max(-1.3, Math.min(1.3, (wx.tempF - 65) * 0.052));
+  return { windSpeed: wx.windSpeed, windDir: wx.windDir, factor, tempF: wx.tempF, tempAdj, precipProb: wx.precipProb, parkName: park.name, cfDir: park.cfDir };
 }
 
 // YYYY-MM-DD ± n days. Purely calendar math, no TZ needed.
@@ -374,6 +382,6 @@ function _shiftDate(dateStr, days) {
 }
 
 module.exports = {
-  fetchParkWind, calcWindFactor, PARKS,
+  fetchParkWind, fetchWindAtCoords, calcWindFactor, PARKS,
   _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, parseGameTimeToEtHm, _shiftDate },
 };
