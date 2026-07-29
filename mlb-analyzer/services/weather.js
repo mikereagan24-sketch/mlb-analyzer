@@ -135,24 +135,118 @@ function etWallClockToUtcMs(dateStr, hour, minute) {
   return naive - offsetMs;
 }
 
+// Widened game_time parser. Accepts every observed shape written to
+// game_log.game_time by the various bootstrap paths (statsapi, RotoWire,
+// manual) plus defensive fallbacks for shapes we haven't seen but that
+// a future feed might emit. Returns { hour, minute } in ET wall-clock —
+// this is the app's canonical convention (see scraper.js fmtET), and
+// downstream code treats the two integers as ET so downstream math
+// stays unchanged.
+//
+// Handled shapes:
+//   "9:40 PM ET"       — fmtET output, dominant (1334/1440 local rows)
+//   "12:10 PM ET"      — 2-digit hour, same content class (96 rows)
+//   "9:40 PM"          — no tz suffix (2 rows on manual path)
+//   "10:45 AM"         — 2-digit hour, no tz (1 row, DH manual)
+//   "21:40 ET"         — 24-hour with ET suffix (defensive; not yet observed)
+//   "21:40"            — 24-hour bare (defensive)
+//   "9:40:00 PM ET"    — includes seconds (defensive)
+//   "2026-07-29T21:40:00Z"  — full ISO in UTC (defensive; some bootstrap
+//                             paths could emit statsapi's gameDate raw)
+//   "2026-07-29T21:40:00-04:00"  — ISO with tz offset (defensive)
+//   "2026-07-29T21:40:00"  — naive ISO (assume ET per convention)
+//
+// Returns null when the input is null/empty/whitespace or doesn't match
+// any shape. Caller is expected to WARN with the raw input value so
+// unparseable inputs become debuggable at first sight.
+//
+// Pre-widening (2026-07-27), the parser was a single regex
+// `/(\d+):(\d+)\s*(AM|PM)/i` — brittle: it silently returned null for
+// 24-hour or ISO inputs, and the caller silently degraded to a naive
+// hour lookup indexed in the WRONG timezone (2026-07-29 ATH incident:
+// naive fallback indexed hour 21 in Pacific because gameTime was
+// treated as ET even though the code path returned null → PT-indexed
+// array hour 21 = 9 PM PT Sacramento = 79°F instead of the correct
+// hour 18 PT = 92°F). The fix pairs this widened parser with a WARN
+// on the null-return path (see fetchParkWind) so silent degradation
+// becomes noisy.
+function parseGameTimeToEtHm(gameTime) {
+  if (gameTime == null) return null;
+  const s = String(gameTime).trim();
+  if (s === '') return null;
+
+  // ISO-8601 with T separator (with or without tz offset / seconds).
+  // Parse via Date, then re-render in ET.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) {
+    // Naive ISOs (no Z, no offset) get treated as ET per the project's
+    // "game_time is ET" convention — otherwise `new Date(...)` would
+    // interpret them as local runtime tz, which on Render (UTC) or
+    // dev (PT) would silently shift by hours.
+    let iso = s;
+    if (!/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso)) {
+      // No tz marker: treat as ET wall-clock. Extract H/M directly
+      // (safer than fabricating an offset string, which drifts across
+      // DST boundaries).
+      const m = s.match(/^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2})/);
+      if (m) return { hour: parseInt(m[1], 10), minute: parseInt(m[2], 10) };
+      return null;
+    }
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour12: false,
+      hour: '2-digit', minute: '2-digit',
+    }).formatToParts(d);
+    const p = {};
+    for (const x of parts) p[x.type] = x.value;
+    const h = parseInt(p.hour, 10) === 24 ? 0 : parseInt(p.hour, 10);
+    const m = parseInt(p.minute, 10);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    return { hour: h, minute: m };
+  }
+
+  // 12-hour with AM/PM (with optional seconds and optional tz suffix)
+  const ampm = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)\b/i);
+  if (ampm) {
+    let h = parseInt(ampm[1], 10);
+    const min = parseInt(ampm[2], 10);
+    const ap = ampm[3].toUpperCase();
+    if (!Number.isFinite(h) || !Number.isFinite(min)) return null;
+    if (h < 1 || h > 12 || min < 0 || min > 59) return null;
+    if (ap === 'PM' && h !== 12) h += 12;
+    if (ap === 'AM' && h === 12) h = 0;
+    return { hour: h, minute: min };
+  }
+
+  // 24-hour bare or with a trailing timezone-ish suffix. Rejects
+  // ambiguous inputs (e.g. "9:40" without AM/PM would be treated
+  // 24-hour, but 24-hour convention normally has 2-digit hours; still
+  // accept it as a best-effort).
+  const h24 = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*[A-Z]{2,4})?$/);
+  if (h24) {
+    const h = parseInt(h24[1], 10);
+    const min = parseInt(h24[2], 10);
+    if (!Number.isFinite(h) || !Number.isFinite(min)) return null;
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return { hour: h, minute: min };
+  }
+
+  return null;
+}
+
 // Given (gameDate, gameTime-ET, timeZone), return "YYYY-MM-DDTHH:00" in the
 // park's local wall clock — the exact string shape Open-Meteo emits in
 // `hourly.time[]` when requested with `timezone=auto`. Enables direct
 // `indexOf` matching against the hourly array without arithmetic that could
 // drift on DST boundaries or cross-date late/early games.
 //
-// Returns null if gameTime doesn't parse.
+// Returns null if gameTime doesn't parse (see parseGameTimeToEtHm for
+// the accepted shapes).
 function parkLocalHourIso(gameDate, gameTime, timeZone) {
-  if (!gameTime) return null;
-  const m = gameTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
-  if (!m) return null;
-  let h = parseInt(m[1], 10);
-  const min = parseInt(m[2], 10);
-  const ap = m[3].toUpperCase();
-  if (ap === 'PM' && h !== 12) h += 12;
-  if (ap === 'AM' && h === 12) h = 0;
+  const hm = parseGameTimeToEtHm(gameTime);
+  if (!hm) return null;
 
-  const utcMs = etWallClockToUtcMs(gameDate, h, min);
+  const utcMs = etWallClockToUtcMs(gameDate, hm.hour, hm.minute);
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone, hour12: false,
     year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit',
@@ -169,31 +263,30 @@ async function fetchParkWind(homeTeam, gameDate, gameTime) {
   const teamKey = (homeTeam || '').toLowerCase().replace(/[^a-z]/g, '');
   const park = PARKS[teamKey];
   if (!park) return null;
+
+  // Failure-mode observability (2026-07-29 ATH incident). All three
+  // fallback triggers now WARN with enough context to diagnose from a
+  // single log line. Pre-fix, mode 2 (unparseable gameTime) was silent:
+  // parkLocalHourIso returned null → naive-hour index fired → app
+  // persisted the wrong-hour temperature indefinitely with no visible
+  // signal. Mode 1 (no tz) and mode 3 (indexOf miss) already warned;
+  // this brings mode 2 into parity and adds a success INFO so an
+  // operator can distinguish "fell to fallback silently" from "didn't
+  // reach the code at all" on prod.
   const tz = PARK_TZ[teamKey];
   if (!tz) {
-    console.warn(`[weather] no timezone mapping for ${teamKey}; falling back to naive-hour index`);
+    console.warn(`[weather] mode1 no PARK_TZ entry for teamKey=${JSON.stringify(teamKey)} (homeTeam=${JSON.stringify(homeTeam)}); naive-hour fallback will fire — add teamKey to PARK_TZ`);
   }
 
-  // Compute the park-local hour ISO we want to hit in the Open-Meteo array.
-  // gameTime is an ET wall clock ("7:05 PM ET"); Open-Meteo hourly.time
-  // strings are the park's LOCAL wall clock, so we convert once and match
-  // by string. Falls back to naive-hour indexing only when either the
-  // gameTime can't be parsed or the park has no TZ entry.
-  let targetIso = null;
-  let gameHourNaive = 18;
-  if (gameTime) {
-    const m = gameTime.match(/(\d+):(\d+)\s*(AM|PM)/i);
-    if (m) {
-      let h = parseInt(m[1], 10);
-      const ap = m[3].toUpperCase();
-      if (ap === 'PM' && h !== 12) h += 12;
-      if (ap === 'AM' && h === 12) h = 0;
-      gameHourNaive = h;
-    }
+  // Parse once via the widened parser (handles 12h AM/PM, 24h, and ISO —
+  // see parseGameTimeToEtHm). Both the target-ISO path and the naive-
+  // hour fallback read from the same parse result so they can't disagree.
+  const parsedHm = parseGameTimeToEtHm(gameTime);
+  if (!parsedHm) {
+    console.warn(`[weather] mode2 gameTime unparseable for ${homeTeam} on ${gameDate}: raw=${JSON.stringify(gameTime)} — naive-hour fallback will fire at DEFAULT hour 18. Widen parseGameTimeToEtHm if this is a legitimate new source format.`);
   }
-  if (tz) {
-    targetIso = parkLocalHourIso(gameDate, gameTime, tz);
-  }
+  const gameHourNaive = parsedHm ? parsedHm.hour : 18;
+  const targetIso = tz ? parkLocalHourIso(gameDate, gameTime, tz) : null;
 
   try {
     // Request gameDate ± 1 day so cross-date wraps (a late-ET game at a
@@ -222,27 +315,31 @@ async function fetchParkWind(homeTeam, gameDate, gameTime) {
     }
 
     // Preferred path: exact string match against the park-local ISO hour we
-    // computed. Fallback path (targetIso null): naive-hour index into
-    // gameDate-only data — retains the pre-fix behavior for the tiny
-    // no-TZ / no-gameTime cases, so this fix doesn't silently break parks
-    // absent from PARK_TZ.
+    // computed. Fallback path (targetIso null OR indexOf miss): naive-hour
+    // index into gameDate-only data. `_wxPath` labels which path fired so
+    // the success INFO log is self-describing.
     let idx = -1;
+    let _wxPath = null;
     if (targetIso) {
       idx = data.hourly.time.indexOf(targetIso);
       if (idx < 0) {
-        console.warn(`[weather] target ${targetIso} not found in hourly array for ${homeTeam}; falling back to naive hour ${gameHourNaive}`);
+        console.warn(`[weather] mode3 target ISO ${JSON.stringify(targetIso)} not found in hourly array for ${homeTeam} (array tz=${data.timezone}, samples=${JSON.stringify(data.hourly.time.slice(0, 3))}); naive-hour fallback firing at hour ${gameHourNaive}`);
+      } else {
+        _wxPath = 'park_local_iso';
       }
     }
     if (idx < 0) {
-      // Find first hourly.time entry whose date part matches gameDate, then
-      // step by gameHourNaive. Robust against the ± 1-day window we now
-      // request (hourly.time is not guaranteed to start at 00:00 of gameDate).
       const dayStart = data.hourly.time.findIndex(t => t.startsWith(gameDate + 'T'));
       idx = dayStart >= 0
         ? Math.min(dayStart + gameHourNaive, data.hourly.time.length - 1)
         : Math.min(gameHourNaive, data.hourly.time.length - 1);
+      _wxPath = 'naive_fallback';
     }
     if (idx < 0) return null;
+    // Success INFO — one line per game per cron pass. Cheap; the failure
+    // WARNs would be uninterpretable without a corresponding INFO to
+    // confirm which games hit the good path.
+    console.log(`[weather] ${homeTeam} ${gameDate} gameTime=${JSON.stringify(gameTime)} path=${_wxPath} idx=${idx} hourly.time[idx]=${data.hourly.time[idx]}`);
 
     const windSpeed = data.hourly.wind_speed_10m?.[idx];
     const windDir   = data.hourly.wind_direction_10m?.[idx];
@@ -278,5 +375,5 @@ function _shiftDate(dateStr, days) {
 
 module.exports = {
   fetchParkWind, calcWindFactor, PARKS,
-  _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, _shiftDate },
+  _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, parseGameTimeToEtHm, _shiftDate },
 };
