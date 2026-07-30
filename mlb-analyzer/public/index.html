@@ -1182,130 +1182,44 @@ async function rerunDate(){
   }catch(e){st.textContent='Error: '+e.message;}
 }
 async function pullWeather(btn){
+  // Delegates to POST /jobs/weather (runWeatherJob) — server owns PARKS,
+  // PARK_TZ, venue-override chain, park-local hour ISO indexing, roof
+  // resolution, and observability. Prior implementation duplicated all
+  // of the above in the browser with STALE data (Coliseum coords for
+  // ATH long after the 2026-07-27 Sutter Health fix) and NAIVE-HOUR
+  // indexing (same bug that ran in runWeatherJob until PR #208). Every
+  // click of the old version overwrote a slate of correctly-written
+  // cron rows with wrong-coord + wrong-hour values via PATCH
+  // /games/:date/:gameId/odds — silently, because that endpoint has no
+  // audit logging or marker column.
   const date=document.getElementById('games-date').value||todayStr();
   const st=document.getElementById('games-status');
   if(btn){btn.disabled=true;btn.textContent='Loading weather...';}
-  const PARKS={
-    'chc':{lat:41.9484,lng:-87.6553,cfDir:60,sens:2.0,name:'Wrigley',roofType:'open'},
-    'cws':{lat:41.8300,lng:-87.6339,cfDir:5,sens:1.0,name:'Guaranteed Rate',roofType:'open'},
-    'nyy':{lat:40.8296,lng:-73.9262,cfDir:45,sens:1.0,name:'Yankee Stadium',roofType:'open'},
-    'nym':{lat:40.7571,lng:-73.8458,cfDir:45,sens:1.0,name:'Citi Field',roofType:'open'},
-    'bos':{lat:42.3467,lng:-71.0972,cfDir:75,sens:1.5,name:'Fenway',roofType:'open'},
-    'det':{lat:42.3390,lng:-83.0485,cfDir:45,sens:1.0,name:'Comerica',roofType:'open'},
-    'cle':{lat:41.4962,lng:-81.6852,cfDir:45,sens:1.2,name:'Progressive',roofType:'open'},
-    'min':{lat:44.9817,lng:-93.2776,cfDir:45,sens:0.8,name:'Target Field',roofType:'open'},
-    'tor':{lat:43.6414,lng:-79.3894,cfDir:45,sens:0.7,name:'Rogers Centre',roofType:'retractable',roofOpensAbove:60},
-    'bal':{lat:39.2838,lng:-76.6218,cfDir:45,sens:1.0,name:'Camden Yards',roofType:'open'},
-    'was':{lat:38.8730,lng:-77.0074,cfDir:45,sens:1.0,name:'Nationals Park',roofType:'open'},
-    'atl':{lat:33.8908,lng:-84.4677,cfDir:45,sens:0.8,name:'Truist Park',roofType:'open'},
-    'mia':{lat:25.7781,lng:-80.2197,cfDir:45,sens:0.5,name:'loanDepot Park',roofType:'retractable',roofOpensAbove:999},
-    'phi':{lat:39.9061,lng:-75.1665,cfDir:45,sens:1.0,name:'Citizens Bank',roofType:'open'},
-    'pit':{lat:40.4469,lng:-80.0058,cfDir:30,sens:1.2,name:'PNC Park',roofType:'open'},
-    'cin':{lat:39.0979,lng:-84.5082,cfDir:45,sens:1.0,name:'Great American',roofType:'open'},
-    'mil':{lat:43.0280,lng:-87.9712,cfDir:45,sens:0.8,name:'American Family',roofType:'retractable',roofOpensAbove:60},
-    'stl':{lat:38.6226,lng:-90.1930,cfDir:25,sens:1.0,name:'Busch Stadium',roofType:'open'},
-    'col':{lat:39.7559,lng:-104.9942,cfDir:45,sens:0.5,name:'Coors Field',roofType:'open'},
-    'ari':{lat:33.4453,lng:-112.0667,cfDir:45,sens:0.5,name:'Chase Field',roofType:'retractable',roofOpensAbove:85},
-    'lad':{lat:34.0739,lng:-118.2400,cfDir:45,sens:0.8,name:'Dodger Stadium',roofType:'open'},
-    'sfg':{lat:37.7786,lng:-122.3893,cfDir:90,sens:1.8,name:'Oracle Park',roofType:'open'},
-    'ath':{lat:37.7516,lng:-122.2005,cfDir:45,sens:1.2,name:'RingCentral',roofType:'open'},
-    'sea':{lat:47.5914,lng:-122.3325,cfDir:45,sens:1.0,name:'T-Mobile',roofType:'retractable',roofOpensAbove:60},
-    'tex':{lat:32.7512,lng:-97.0832,cfDir:45,sens:0.7,name:'Globe Life',roofType:'retractable',roofOpensAbove:85},
-    'hou':{lat:29.7573,lng:-95.3555,cfDir:45,sens:0.6,name:'Minute Maid',roofType:'retractable',roofOpensAbove:85},
-    'laa':{lat:33.8003,lng:-117.8827,cfDir:45,sens:0.8,name:'Angel Stadium',roofType:'open'},
-    'kc':{lat:39.0517,lng:-94.4803,cfDir:45,sens:1.0,name:'Kauffman',roofType:'open'},
-    'kan':{lat:39.0517,lng:-94.4803,cfDir:45,sens:1.0,name:'Kauffman',roofType:'open'},
-    'sd':{lat:32.7076,lng:-117.1570,cfDir:45,sens:0.6,name:'Petco Park',roofType:'open'},
-    'tb':{lat:27.7683,lng:-82.6534,cfDir:0,sens:0,name:'Steinbrenner Field',roofType:'fixed_dome'}
-  };
-  // 10s timeout wrapper for both external fetch() and internal api() calls
-  async function fetchT(url,opts){
-    const c=new AbortController();const t=setTimeout(function(){c.abort();},10000);
-    try{return await fetch(url,Object.assign({},opts||{},{signal:c.signal}));}finally{clearTimeout(t);}
-  }
-  async function apiT(path,opts){
-    const c=new AbortController();const t=setTimeout(function(){c.abort();},10000);
-    try{return await api(path,Object.assign({},opts||{},{signal:c.signal}));}finally{clearTimeout(t);}
-  }
   try{
-    const games=await apiT('/games/'+date);
+    // Pull today's slate first, then tomorrow's — matches old
+    // behavior. Uses api() directly (no 10s AbortController): the
+    // server runWeatherJob fetches Open-Meteo per game with a retry
+    // and can run 15-20s on a full slate. Client abort would leave
+    // the server mid-run and misreport failure.
     const tom=new Date(date+'T12:00:00');tom.setDate(tom.getDate()+1);
     const tStr=tom.toISOString().split('T')[0];
-    const tmrwGames=await apiT('/games/'+tStr);
-    const list=[...(Array.isArray(games)?games:(games.games||[])),
-      ...(Array.isArray(tmrwGames)?tmrwGames:(tmrwGames.games||[])).map(g=>({...g,_date:tStr}))];
-    const log=[];let updated=0,skipped=0;
-    for(let i=0;i<list.length;i++){
-      const g=list[i];
-      const gDate=g._date||date;
-      const pk=(g.home_team||'').toLowerCase().replace(/[^a-z]/g,'');
-      const park=PARKS[pk];
-      if(!park){skipped++;continue;}
-      if(st) st.textContent='⛅ Fetching weather '+(i+1)+'/'+list.length+' — '+park.name+'...';
-      let gameHour=18;
-      if(g.game_time){const m=g.game_time.match(/(\d+):(\d+)\s*(AM|PM)/i);if(m){let h=parseInt(m[1]),ap=m[3].toUpperCase();if(ap==='PM'&&h!==12)h+=12;if(ap==='AM'&&h===12)h=0;gameHour=h;}}
-      const url='https://api.open-meteo.com/v1/forecast?latitude='+park.lat+'&longitude='+park.lng
-        +'&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability'
-        +'&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto'
-        +'&start_date='+gDate+'&end_date='+gDate;
-      const wd=await (await fetchT(url)).json();
-      const idx=Math.min(gameHour,((wd.hourly && wd.hourly.time)||[]).length-1);
-      const speed=parseFloat(((wd.hourly && wd.hourly.wind_speed_10m && wd.hourly.wind_speed_10m[idx])||0).toFixed(1));
-      const dir=Math.round((wd.hourly && wd.hourly.wind_direction_10m && wd.hourly.wind_direction_10m[idx])||0);
-      const temp=parseFloat(((wd.hourly && wd.hourly.temperature_2m && wd.hourly.temperature_2m[idx])||65).toFixed(1));
-      const windTo=(dir+180)%360;
-      const diff=windTo-park.cfDir;
-      const windFactor=speed<8?0:parseFloat((Math.cos(diff*Math.PI/180)*Math.min((speed-8)/24,0.75)*park.sens).toFixed(3));
-      const tempAdj=temp<55?-0.5:temp<70?0:temp<80?0.3:0.6;
-      const precipProb=(wd.hourly && wd.hourly.precipitation_probability && wd.hourly.precipitation_probability[idx])||0;
-      const gameMonth=new Date(date).getMonth()+1;
-      let roofClosed=false;
-      let roofStatus='open';
-      let roofConfidence='estimated';
-      if(park.roofType==='fixed_dome'){
-        roofClosed=true; roofStatus='closed'; roofConfidence='confirmed';
-      } else if(park.roofType==='retractable'){
-        if(park.defaultClosed){
-          roofClosed=!(temp<park.tempClose&&precipProb<park.precipClose);
-        } else if(park.closedBehavior==='hot'){
-          if(park.aprilDefault==='open'&&gameMonth<=4&&precipProb<park.precipClose){
-            roofClosed=false;
-          } else {
-            roofClosed=temp>=park.tempClose||precipProb>=park.precipClose;
-          }
-        } else if(park.closedBehavior==='rain_only'){
-          roofClosed=precipProb>=park.precipClose;
-        } else {
-          if(park.aprilDefault==='closed'&&gameMonth<=4){
-            roofClosed=!(temp>=park.tempClose&&precipProb<park.precipClose);
-          } else {
-            roofClosed=temp<park.tempClose||precipProb>=park.precipClose;
-          }
-        }
-        roofStatus=roofClosed?'closed':'open';
-        if(park.partialEnclosure&&roofClosed) roofStatus='partial';
-      }
-      const roofMult=roofStatus==='closed'?0:roofStatus==='partial'?0.5:1;
-      const effectiveWindFactor=windFactor*roofMult;
-      const effectiveTempAdj=roofStatus==='closed'?0:tempAdj*roofMult;
-      await apiT('/games/'+gDate+'/'+g.game_id+'/odds',{method:'PATCH',
-        body:JSON.stringify({wind_speed:speed,wind_dir:dir,wind_factor:effectiveWindFactor,temp_f:temp,temp_run_adj:effectiveTempAdj,roof_status:roofStatus,roof_confidence:roofConfidence})
-      });
-      const wLabel=windFactor>0.1?('OUT '+speed+'mph from '+dir+'deg'):windFactor<-0.1?('IN '+speed+'mph from '+dir+'deg'):('Cross/Calm '+speed+'mph');
-      const tLabel=temp<55?'cold '+temp+'F':temp>80?'hot '+temp+'F':'mild '+temp+'F';
-      log.push((g.game_id||'?').toUpperCase()+' ('+park.name+'): '+wLabel+' | '+tLabel+' | windAdj='+(windFactor*2).toFixed(2)+' tempAdj='+tempAdj);
-      updated++;
-    }
-    console.log('[weather]\n'+log.join('\n'));
-    if(st) st.textContent='⛅ Weather updated for '+updated+' parks'+(skipped?' ('+skipped+' skipped)':'');
+    if(st) st.textContent='⛅ Fetching weather for '+date+'...';
+    const j1=await api('/jobs/weather',{method:'POST',body:JSON.stringify({date})});
+    if(j1 && j1.success===false) throw new Error(j1.error||'weather job failed for '+date);
+    if(st) st.textContent='⛅ Fetching weather for '+tStr+'...';
+    const j2=await api('/jobs/weather',{method:'POST',body:JSON.stringify({date:tStr})});
+    if(j2 && j2.success===false) throw new Error(j2.error||'weather job failed for '+tStr);
+    const total=(j1.updated||0)+(j2.updated||0);
+    const skipped=(j1.skipped||0)+(j2.skipped||0);
+    if(st) st.textContent='⛅ Weather updated for '+total+' game(s)'+(skipped?' ('+skipped+' skipped)':'');
+    console.log('[weather]',{today:j1,tomorrow:j2});
     loadGamesFromDB();
     await rerunDate(date);
   }catch(e){
     console.error('[weather]',e);
-    const msg=(e && e.name==='AbortError')?'Weather fetch timed out (10s)':('Weather error: '+((e && e.message)||e));
-    if(st) st.textContent=msg;
+    if(st) st.textContent='Weather error: '+((e && e.message)||e);
   }finally{
-    if(btn){btn.textContent='Pull Weather';btn.disabled=false;}
+    if(btn){btn.textContent='⛅ Pull Weather';btn.disabled=false;}
   }
 }
 async function pullOdds(){
