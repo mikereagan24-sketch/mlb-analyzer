@@ -120,6 +120,24 @@ function bookmarklet() {
     { key: 'bat-act-rhp', split: 2, pos: 'B', sg: 2, label: 'Bat vs RHP' },
     { key: 'bat-act-lhp', split: 1, pos: 'B', sg: 2, label: 'Bat vs LHP' },
   ];
+  // Actuals iframe timeout. Was 45s originally — actuals tables are
+  // legitimately larger than projections and 45s was catching the FG
+  // page mid-render on slow days (2026-07-31: first pass 1/4, retry
+  // succeeded 4/4). 90s default gives real headroom; override via
+  // ?actualsTimeoutMs=N on the FG page URL when a specific slow day
+  // needs even more room — no bookmarklet re-drag needed for tuning.
+  var ACT_TIMEOUT_DEFAULT_MS = 90000;
+  function readActTimeoutMs() {
+    try {
+      var m = (window.location.search || '').match(/[?&]actualsTimeoutMs=(\d+)/);
+      if (m) {
+        var n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n >= 10000 && n <= 600000) return n;
+      }
+    } catch (e) {}
+    return ACT_TIMEOUT_DEFAULT_MS;
+  }
+  var ACT_TIMEOUT_MS = readActTimeoutMs();
   function fmtDate(d) {
     return d.getFullYear() + '-'
       + String(d.getMonth() + 1).padStart(2, '0') + '-'
@@ -189,32 +207,47 @@ function bookmarklet() {
     act:   { done: 0, ok: 0, err: 0, lastErr: null },
     roles: { fetched: 0, fetchErr: 0, uploaded: 0, uploadErr: 0, applied: 0, known: 0, lastErr: null, phase: 'fetch' },
   };
+  // Counter semantics (fixed 2026-07-31): `done` is "attempted (ok OR err)",
+  // `ok` is "uploaded", `err` is "failed". Prior render used `done` as
+  // the numerator for "uploaded" — when every attempt errored the line
+  // read "4/4 uploaded (4 err)" which is self-contradictory and hid a
+  // total failure behind a full-progress bar. Now the numerator is
+  // always `ok`; the errs are called out with the (err/attempted) count
+  // when > 0 so a partial success is visible on the same line.
   function renderProj() {
     var s = sectionState.proj;
     var st = s.done < PROJ_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
-    var detail = s.done + '/' + PROJ_SPECS.length + ' uploaded' + (s.err ? ' (' + s.err + ' err)' : '');
+    var detail = s.ok + '/' + PROJ_SPECS.length + ' uploaded'
+      + (s.err ? ' (' + s.err + ' err' + (s.done < PROJ_SPECS.length ? ' so far' : '') + ')' : '');
     setSection('proj', sectionLine('projections', st, detail, s.lastErr));
   }
   function renderAct() {
     var s = sectionState.act;
     var st = s.done < ACT_SPECS.length ? 'work' : (s.err ? (s.ok ? 'ok' : 'err') : 'ok');
-    var detail = s.done + '/' + ACT_SPECS.length + ' uploaded' + (s.err ? ' (' + s.err + ' err)' : '');
+    var detail = s.ok + '/' + ACT_SPECS.length + ' uploaded'
+      + (s.err ? ' (' + s.err + ' err' + (s.done < ACT_SPECS.length ? ' so far' : '') + ')' : '');
     setSection('act', sectionLine('actuals', st, detail, s.lastErr));
   }
   function renderRoles() {
     var s = sectionState.roles;
     var total = TEAM_ABBRS.length;
+    // Roles has two counters: fetched and uploaded (both bumped in ok AND err).
+    // Report the OK component (fetched - fetchErr, uploaded - uploadErr) as the
+    // numerator so a failing team doesn't inflate the success count.
     var st, detail;
     if (s.phase === 'fetch') {
+      var fetchOk = s.fetched - s.fetchErr;
       st = 'work';
-      detail = 'fetching ' + s.fetched + '/' + total + (s.fetchErr ? ' (' + s.fetchErr + ' err)' : '');
+      detail = 'fetching ' + fetchOk + '/' + total + (s.fetchErr ? ' (' + s.fetchErr + ' err so far)' : '');
     } else if (s.phase === 'upload') {
+      var uploadOk = s.uploaded - s.uploadErr;
       st = 'work';
-      detail = 'uploading ' + s.uploaded + '/' + total + (s.uploadErr ? ' (' + s.uploadErr + ' err)' : '');
+      detail = 'uploading ' + uploadOk + '/' + total + (s.uploadErr ? ' (' + s.uploadErr + ' err so far)' : '');
     } else { // 'done'
+      var uploadOkFinal = s.uploaded - s.uploadErr;
       var totalErr = s.fetchErr + s.uploadErr;
-      st = totalErr === 0 ? 'ok' : (s.uploaded > 0 ? 'ok' : 'err');
-      detail = s.applied + ' pitchers applied across ' + s.uploaded + '/' + total + ' teams'
+      st = totalErr === 0 ? 'ok' : (uploadOkFinal > 0 ? 'ok' : 'err');
+      detail = s.applied + ' pitchers applied across ' + uploadOkFinal + '/' + total + ' teams'
         + (totalErr ? ' (' + totalErr + ' err)' : '');
     }
     setSection('roles', sectionLine('roles', st, detail, s.lastErr));
@@ -310,10 +343,10 @@ function bookmarklet() {
       iframe.src = buildActualsIframeUrl(spec);
       document.body.appendChild(iframe);
       var timeout = setTimeout(function() {
-        finishAct(spec, false, 'timeout — no CSV export link within 45s (FG page may have blocked the iframe or failed to render)');
+        finishAct(spec, false, 'timeout — no CSV export link within ' + Math.round(ACT_TIMEOUT_MS / 1000) + 's (FG page may have blocked the iframe or failed to render)');
         try { iframe.parentNode && iframe.parentNode.removeChild(iframe); } catch (e) {}
         resolve();
-      }, 45000);
+      }, ACT_TIMEOUT_MS);
       var poll = setInterval(function() {
         var doc;
         try { doc = iframe.contentDocument; } catch (e) { return; }
