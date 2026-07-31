@@ -159,6 +159,62 @@ app.get('/health', (req, res) => {
   } catch (e) {
     out.roster_gate_error = e && e.message || String(e);
   }
+  // FanGraphs woba_data freshness. When the daily sync fails silently
+  // (2026-07-31: actuals timed out 1/4 on first pass; retry succeeded
+  // but the counter reported "4/4 uploaded (4 err)" so partial failure
+  // wasn't obvious), the model keeps using yesterday's numbers without
+  // any downstream signal. This surfaces staleness on its own by
+  // reporting the MAX(uploaded_at) age per canonical woba_data key.
+  //
+  // Threshold: STALE_HOURS=30. Daily sync is once per 24h; 6h grace
+  // covers late-cron drift + overnight sync windows. Ages above 30h
+  // land in stale_keys; ages 24-30h just show age_hours without
+  // flagging (the grace window).
+  //
+  // MISSING keys (never ingested) are called out separately — those
+  // block model computation entirely, not just stale data.
+  try {
+    const { q } = require('./db/schema');
+    const EXPECTED_KEYS = [
+      'bat-proj-lhp', 'bat-proj-rhp', 'pit-proj-lhb', 'pit-proj-rhb',
+      'bat-act-lhp',  'bat-act-rhp',  'pit-act-lhb',  'pit-act-rhb',
+    ];
+    const STALE_HOURS = 30;
+    const summary = (q.wobaKeySummary && q.wobaKeySummary.all()) || [];
+    const byKey = {};
+    for (const r of summary) byKey[r.data_key] = r;
+    const now = Date.now();
+    const per_key = {};
+    const missing_keys = [];
+    const stale_keys = [];
+    for (const k of EXPECTED_KEYS) {
+      const r = byKey[k];
+      if (!r) { missing_keys.push(k); per_key[k] = { present: false }; continue; }
+      const uploadedMs = r.uploaded_at ? Date.parse(r.uploaded_at + 'Z') || Date.parse(r.uploaded_at) : null;
+      const age_hours = uploadedMs ? Math.round((now - uploadedMs) / 3600000 * 10) / 10 : null;
+      per_key[k] = { present: true, rows: r.row_count, uploaded_at: r.uploaded_at, age_hours };
+      if (age_hours != null && age_hours > STALE_HOURS) stale_keys.push({ key: k, age_hours });
+    }
+    out.woba_freshness = {
+      expected: EXPECTED_KEYS.length,
+      present: EXPECTED_KEYS.length - missing_keys.length,
+      stale_threshold_hours: STALE_HOURS,
+      missing_keys,
+      stale_keys,
+      per_key,
+    };
+    // Elevate top-level status when the model would silently degrade.
+    // 'ok' otherwise. Explicit strings so an ops monitor can grep.
+    if (missing_keys.length || stale_keys.length) {
+      out.status = 'degraded';
+      out.status_reason = (out.status_reason ? out.status_reason + '; ' : '')
+        + 'woba_freshness: ' + (missing_keys.length ? missing_keys.length + ' missing key(s)' : '')
+        + (missing_keys.length && stale_keys.length ? ', ' : '')
+        + (stale_keys.length ? stale_keys.length + ' stale key(s) (>' + STALE_HOURS + 'h)' : '');
+    }
+  } catch (e) {
+    out.woba_freshness_error = e && e.message || String(e);
+  }
   res.json(out);
 });
 
