@@ -1132,7 +1132,7 @@ router.get('/dates', (req, res) => {
   res.json(rows.map(r => r.game_date));
 });
 
-router.post('/jobs/fix-signals', (req, res) => {
+router.post('/jobs/fix-signals', requireAdminToken, (req, res) => {
   try {
 //   1. Remove duplicate signals — keep highest ID per game+type+side
     db.prepare(`DELETE FROM bet_signals WHERE id NOT IN (
@@ -1349,7 +1349,7 @@ router.get('/backtest/lineup-sensitivity', (req, res) => {
 
 // weather route: see below
 
-router.post('/jobs/rosters', async (req, res) => {
+router.post('/jobs/rosters', requireAdminToken, async (req, res) => {
   console.log('[api] roster job fired');
   try {
     const result = await runRosterJob();
@@ -1588,7 +1588,7 @@ router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) 
 });
 
 // Catcher framing ingest: pull Savant leaderboard → catcher_framing table.
-router.post('/jobs/catcher-framing', async (req, res) => {
+router.post('/jobs/catcher-framing', requireAdminToken, async (req, res) => {
   console.log('[api] catcher-framing job fired');
   try {
     const result = await runCatcherFramingJob(req.body && req.body.year);
@@ -1604,7 +1604,7 @@ router.get('/catcher-framing', (req, res) => {
 
 // Historical (2023-2025) framing baseline ingest. Body may override
 // seasonStart / seasonEnd / minPitches; defaults 2023, 2025, 750.
-router.post('/jobs/catcher-framing-historical', async (req, res) => {
+router.post('/jobs/catcher-framing-historical', requireAdminToken, async (req, res) => {
   console.log('[api] catcher-framing-historical job fired');
   try {
     const b = req.body || {};
@@ -1623,7 +1623,7 @@ router.get('/catcher-framing-historical', (req, res) => {
 
 // Fielding Run Value ingest (non-catcher position players, Build B). Body
 // may override seasonStart / seasonEnd; defaults to the current season.
-router.post('/jobs/fielding-frv', async (req, res) => {
+router.post('/jobs/fielding-frv', requireAdminToken, async (req, res) => {
   console.log('[api] fielding-frv job fired');
   try {
     const b = req.body || {};
@@ -1641,7 +1641,7 @@ router.get('/fielding-frv', (req, res) => {
 // Standalone FanGraphs RosterResource pull. The same job runs as phase 2
 // of /jobs/rosters; this endpoint exists so an operator can refresh the
 // FG overlay without redoing the full statsapi roster pull.
-router.post('/jobs/fg-roles', async (req, res) => {
+router.post('/jobs/fg-roles', requireAdminToken, async (req, res) => {
   console.log('[api] fg-roles job fired');
   try {
     const result = await runFangraphsRolesJob();
@@ -2497,7 +2497,7 @@ function summarizeTargetWithWL(target, byCategory) {
 // Manual detection trigger — runs detectOpeners standalone for a date.
 // Useful after editing an opener_override row, or for backfilling
 // detection on past dates.
-router.post('/jobs/detect-openers', async (req, res) => {
+router.post('/jobs/detect-openers', requireAdminToken, async (req, res) => {
   try {
     const { date } = req.body || {};
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -2515,7 +2515,7 @@ router.post('/jobs/detect-openers', async (req, res) => {
 // (the flag stays false until every date in the 60-day window clears).
 // To force a full re-run after the flag has flipped, DELETE the
 // 'pitcher_usage_backfill_done' row from app_settings first.
-router.post('/jobs/pitcher-usage-backfill', async (req, res) => {
+router.post('/jobs/pitcher-usage-backfill', requireAdminToken, async (req, res) => {
   try {
     const result = await runPitcherUsageBackfill();
     res.json(result);
@@ -2531,19 +2531,19 @@ router.get('/rosters/:team', (req, res) => {
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
-router.post('/jobs/lineups', async (req, res) => {
+router.post('/jobs/lineups', requireAdminToken, async (req, res) => {
   const { date } = req.body;
   const result = await runLineupJob(date || null);
   res.json(result);
 });
 
-router.post('/jobs/scores', async (req, res) => {
+router.post('/jobs/scores', requireAdminToken, async (req, res) => {
   const { date } = req.body;
   const result = await runScoreJob(date || null);
   res.json(result);
 });
 
-router.post('/jobs/odds', async (req, res) => {
+router.post('/jobs/odds', requireAdminToken, async (req, res) => {
   const { date } = req.body;
   const result = await runOddsJob(date || null);
   res.json(result);
@@ -2555,7 +2555,7 @@ router.post('/jobs/odds', async (req, res) => {
 // catches games that just became eligible (total now posted). First-eligible
 // lock semantics live inside runMorningCaptureJob — re-invoking on the same
 // date never overwrites already-locked rows.
-router.post('/jobs/morning-capture', async (req, res) => {
+router.post('/jobs/morning-capture', requireAdminToken, async (req, res) => {
   const { date } = req.body;
   try {
     const result = await runMorningCaptureJob(date || null);
@@ -5399,7 +5399,7 @@ router.get('/debug/scores', async (req, res) => {
 
 // ===== BULK GAME UPSERT (historical backfill) =====
 // Manual weather pull for a date
-router.post('/jobs/weather', async (req, res) => {
+router.post('/jobs/weather', requireAdminToken, async (req, res) => {
   try {
     const { runWeatherJob } = require('../services/jobs');
     const dateStr = req.body.date || new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
