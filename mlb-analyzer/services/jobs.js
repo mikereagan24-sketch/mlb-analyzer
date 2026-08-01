@@ -3322,6 +3322,32 @@ function startCronJobs() {
     runScoreJob(yesterdayStr());
   }, { timezone: 'America/Los_Angeles' });
 
+  // --- 5:30AM PT FG wOBA sync: projections + actuals with retry/backoff ---
+  // Prior to 2026-08-01 there was NO automated FG wOBA sync — freshness
+  // depended entirely on the owner clicking the bookmarklet or hitting
+  // /jobs/refresh-fangraphs manually. When either failed silently (see
+  // 2026-07-31 counter bug where "4/4 uploaded (4 err)" hid a full-
+  // actuals failure) the model kept blending with stale actuals with
+  // no downstream signal.
+  //
+  // Retry policy: 3 attempts, backoff 15/30/60 min. On attempt 1 if
+  // ALL 4 actuals return an upstream-broken signal (HTTP 500 across
+  // the whole class), abort further retries — the failure is at FG's
+  // splits-leaders API (as of 2026-07-31/08-01) and hammering
+  // Cloudflare with 3 retries won't help, but WILL burn the Member
+  // session cookie's daily quota. Partial failures still get retried
+  // (transient rate limits often clear inside an hour). Total wall
+  // time cap: ~105 min including retries; last attempt completes
+  // ~7:15 AM PT so the 6AM/7AM/7:30AM downstream chain sees whatever
+  // did land.
+  //
+  // Freshness escalation in /health does the alarming — this cron
+  // just tries to keep the data current and logs cleanly.
+  cron.schedule('30 5 * * *', () => {
+    console.log('[cron] 5:30AM PT FG wOBA sync');
+    runFangraphsWobaSyncJob().catch(e => console.error('[cron-fg-woba] uncaught:', e && e.message));
+  }, { timezone: 'America/Los_Angeles' });
+
   // --- 6AM PT roster refresh: pull active 26-man rosters from statsapi ---
   // Catches IL transitions and activations from the previous day. Runs before
   // the 7AM morning refresh so updated rosters are available when bullpen-
@@ -6343,6 +6369,124 @@ async function runFangraphsRolesJob() {
   return { success: true, skipped: true, replaced_by: 'fg-daily-sync', message: msg };
 }
 
+// FG wOBA sync with retry + backoff. Fires from the 5:30AM PT cron above.
+// Also callable manually (POST /admin/refresh/fg-woba if wired) or for tests.
+//
+// Semantics:
+//   - Calls services/fangraphs.refreshAllFanGraphs(cookie) up to 3 times
+//   - Between attempts: 15 min, then 30 min (total wall time ~45 min for
+//     a hard failure). Wall time cap sized so the final attempt returns
+//     before the 7AM downstream chain runs.
+//   - Ingests each successful CSV via routes/api.ingestWobaCSV (lazy
+//     require to skirt the circular-import problem — see routes/api.js
+//     export comment).
+//   - Early-abort if attempt 1 shows every actual returning HTTP 500
+//     (upstream-broken pattern, as seen 2026-07-31→08-01). Retrying
+//     against a known-broken FG endpoint burns the Member session
+//     cookie's daily quota with zero chance of recovery; better to
+//     land what did succeed (projections) and let freshness escalate
+//     in /health.
+//   - Every attempt writes a cron_log entry with per-key outcome so
+//     /health.woba_freshness has a companion audit trail.
+//
+// Non-fatal failures throughout: this is a background sync, not a
+// blocking dependency. A bad run leaves the last-good woba_data in
+// place; the 30h/72h freshness escalation surfaces the staleness.
+const FG_SYNC_RETRY_DELAYS_MS = [15 * 60 * 1000, 30 * 60 * 1000];
+const FG_SYNC_KEYS_ACT = ['bat-act-lhp', 'bat-act-rhp', 'pit-act-lhb', 'pit-act-rhb'];
+
+async function runFangraphsWobaSyncJob(opts) {
+  opts = opts || {};
+  const maxAttempts = Number.isFinite(opts.maxAttempts) ? opts.maxAttempts : 3;
+  const cookieRow = q.getSetting.get('fangraphs_session_cookie');
+  const cookieValue = cookieRow && cookieRow.value ? String(cookieRow.value).trim() : '';
+  if (!cookieValue) {
+    const msg = 'fangraphs_session_cookie not configured; skipping FG wOBA sync';
+    console.warn('[fg-woba] ' + msg);
+    try { q.logCron.run('fg-woba', new Date().toISOString().slice(0, 10), 'error', msg, 0); }
+    catch (e) { /* non-fatal */ }
+    return { success: false, error: msg };
+  }
+
+  const { refreshAllFanGraphs } = require('./fangraphs');
+  // Lazy require to avoid circular-import at module load — jobs.js is
+  // required by routes/api.js at its top; requiring api at OUR top would
+  // land on a partial module. Cron callback fires long after both
+  // modules have loaded so this resolves correctly.
+  const { ingestWobaCSV } = require('../routes/api');
+
+  const dateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const attempts = [];
+  let lastResults = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    console.log('[fg-woba] attempt ' + attempt + '/' + maxAttempts + '...');
+    let results;
+    try {
+      results = await refreshAllFanGraphs(cookieValue);
+    } catch (e) {
+      console.error('[fg-woba] attempt ' + attempt + ' threw: ' + e.message);
+      attempts.push({ attempt, success: false, error: e.message });
+      lastResults = null;
+      if (attempt < maxAttempts) await _sleep(FG_SYNC_RETRY_DELAYS_MS[attempt - 1]);
+      continue;
+    }
+
+    lastResults = results;
+    // Ingest whatever succeeded regardless of overall attempt state — a
+    // 3/4 pass beats waiting for the 4/4 that may never come.
+    const ingested = [];
+    for (const r of results) {
+      if (!r.success) { ingested.push({ key: r.key, ok: false, error: r.error }); continue; }
+      try {
+        const inserted = ingestWobaCSV(r.key, r.csv, r.key + '.csv');
+        ingested.push({ key: r.key, ok: true, rows: inserted });
+      } catch (e) {
+        ingested.push({ key: r.key, ok: false, error: 'ingest failed: ' + e.message });
+      }
+    }
+    const okCount = ingested.filter(x => x.ok).length;
+    const errCount = ingested.length - okCount;
+    attempts.push({ attempt, success: errCount === 0, ok_keys: okCount, err_keys: errCount, per_key: ingested });
+    console.log('[fg-woba] attempt ' + attempt + ' done: ' + okCount + '/' + ingested.length + ' ingested');
+
+    // Full success — stop retrying.
+    if (errCount === 0) break;
+
+    // Upstream-broken short-circuit. If EVERY actuals request failed with
+    // a 5xx/HTTP-error pattern (not empty, not partial), FG's splits-
+    // leaders API is down for this Member session and retries within an
+    // hour won't help. Land what we got (projections), quit early.
+    const actResults = results.filter(r => FG_SYNC_KEYS_ACT.indexOf(r.name) >= 0);
+    const actAllHttpErr = actResults.length === FG_SYNC_KEYS_ACT.length
+      && actResults.every(r => !r.success && /HTTP\s+5\d\d|status\s*=\s*5\d\d|status:\s*5\d\d/i.test(String(r.error || '')));
+    if (attempt === 1 && actAllHttpErr) {
+      const msg = 'attempt 1: all 4 actuals returned upstream 5xx — FG splits-leaders API broken; skipping retries to preserve Member session';
+      console.warn('[fg-woba] ' + msg);
+      attempts.push({ attempt: attempt + 0.5, skipped: true, reason: 'upstream_broken_all_actuals_5xx' });
+      break;
+    }
+
+    if (attempt < maxAttempts) {
+      const delayMs = FG_SYNC_RETRY_DELAYS_MS[attempt - 1];
+      console.log('[fg-woba] partial success (' + okCount + '/' + ingested.length + '); retrying in ' + Math.round(delayMs / 60000) + ' min');
+      await _sleep(delayMs);
+    }
+  }
+
+  const finalOk = attempts.length && attempts[attempts.length - 1].success === true;
+  const status = finalOk ? 'success' : (attempts.some(a => a.ok_keys > 0) ? 'partial' : 'error');
+  const summary = 'attempts=' + attempts.length
+    + '; final=' + status
+    + (lastResults ? '; last ok_keys=' + (lastResults.filter(r => r.success).length) + '/' + lastResults.length : '');
+  try { q.logCron.run('fg-woba', dateStr, status, summary, (lastResults || []).filter(r => r.success).length); }
+  catch (e) { console.warn('[fg-woba] cron_log write failed (non-fatal): ' + e.message); }
+  console.log('[fg-woba] ' + summary);
+  return { success: finalOk, status, attempts };
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 // Defensive trigger: refresh rosters only when the most recent team_rosters
 // row is older than maxAgeHrs (default 24). Belt-and-suspenders for the case
 // where the 6AM cron didn't fire (server started up after the cron window,
@@ -6370,4 +6514,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

@@ -6975,5 +6975,12 @@ router.get('/admin/download-db', requireAdminToken, async (req, res) => {
 });
 
 module.exports = router;
+// Named exports on the router object so cron jobs in services/jobs.js can
+// reuse ingest logic without duplicating it. Lazy-required at cron trigger
+// time to avoid the top-level circular-import problem (routes/api requires
+// jobs at line 51; jobs requiring api back at load time would land on a
+// partial module — but a require inside the cron callback runs after both
+// modules have fully loaded and resolves correctly).
+module.exports.ingestWobaCSV = ingestWobaCSV;
 
 
