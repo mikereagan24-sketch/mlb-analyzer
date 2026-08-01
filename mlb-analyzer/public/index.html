@@ -2837,15 +2837,17 @@ function injectEditButtons(games, date) {
         setBtn.onclick = function() {
           var name = prompt('Bulk-guy name for ' + g.game_id + ' (' + side + ' side):');
           if (!name) return;
-          fetch('/api/opener-override', {
+          // Routed through api() (was bare fetch) so the 2026-08-02 admin
+          // token gate on /opener-override picks up X-Admin-Token from
+          // localStorage. Same functional flow.
+          api('/opener-override', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               game_date: date, game_id: g.game_id, side: side,
               is_opener: 1, bulk_guy: name.trim(), planned_batters: 4,
               set_by: 'ui', reason: 'manual bulk-guy ID',
             })
-          }).then(function(r){ return r.json(); }).then(function(){
+          }).then(function(){
             if (typeof loadGamesFromDB === 'function') loadGamesFromDB();
             else location.reload();
           });
@@ -2907,9 +2909,11 @@ function injectEditButtons(games, date) {
         const newLabel=newOpen===null?'Roof: unknown (tap to set)':newOpen?'Roof: Open (manual)':'Roof: Closed (manual)';
         bEl.className='roof-badge '+(newOpen===null?'roof-est':(newOpen?'roof-open':'roof-closed'));
         bEl.innerHTML='<span class="roof-icon">'+newIcon+'</span><span>'+newLabel+'</span>';
-        // Re-run model if roof status changed and we have wind/temp data
-        fetch('/api/games/'+gdate+'/'+gid+'/odds',{method:'PATCH',
-          headers:{'Content-Type':'application/json'},
+        // Re-run model if roof status changed and we have wind/temp data.
+        // Routed through api() (was bare fetch) so the 2026-08-02 admin
+        // token gate on the odds PATCH picks up X-Admin-Token from
+        // localStorage.
+        api('/games/'+gdate+'/'+gid+'/odds',{method:'PATCH',
           body:JSON.stringify({roof_closed:newOpen===false?1:0})
         }).catch(()=>{});
       };})(g.game_id,g.game_date,badge,rpInfo.name);
@@ -3005,9 +3009,15 @@ async function saveSP(gameId, date, side, rowId) {
   name = name.trim();
   if (!name) return;
   var body = {}; body[side+'_sp']=name; body[side+'_sp_hand']=hand;
-  var r = await fetch('/api/games/'+date+'/'+gameId+'/lineup',{
-    method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)
-  }).then(function(r){return r.json();});
+  // Routed through api() (was bare fetch) so the 2026-08-02 admin
+  // token gate on the lineup PATCH picks up X-Admin-Token from
+  // localStorage.
+  var r;
+  try {
+    r = await api('/games/'+date+'/'+gameId+'/lineup',{
+      method:'PATCH',body:JSON.stringify(body)
+    });
+  } catch (e) { alert('Save failed: ' + (e.message || e)); return; }
   if (r.success) { var el=document.getElementById(rowId); if(el) el.remove(); loadGamesFromDB(); }
   else alert('Save failed: '+r.error);
 }
