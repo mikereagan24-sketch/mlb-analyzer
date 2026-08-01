@@ -855,6 +855,19 @@ let _appPassword = sessionStorage.getItem('mlb_pwd') || '';
 async function api(path,opts={}){
   const headers={'Content-Type':'application/json'};
   if(_appPassword) headers['x-app-password']=_appPassword;
+  // Auto-include X-Admin-Token from localStorage when present. Ungated
+  // endpoints ignore it; gated endpoints accept it. This makes the
+  // 2026-08-02 /jobs/* sweep transparent for the owner (who already
+  // has the token stored for /settings) — buttons that call
+  // /jobs/lineups, /jobs/weather, /jobs/odds, /jobs/scores,
+  // /games/:date/rerun via api() continue to work without needing to
+  // switch each call site to adminPost. Token is already stored in
+  // localStorage as plaintext (see getAdminToken); sending it as a
+  // request header on internal calls is not a new exposure.
+  try {
+    const adminToken = localStorage.getItem('mlb_admin_token');
+    if (adminToken) headers['X-Admin-Token'] = adminToken;
+  } catch(_) { /* localStorage disabled — endpoint 401 becomes the signal */ }
   const r=await fetch('/api'+path,{headers,...opts});
   if(r.status===401){
     // Password required or wrong
