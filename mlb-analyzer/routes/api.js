@@ -506,7 +506,13 @@ router.use((req, res, next) => {
 // file error isolation: a failed fetch or failed parse doesn't block others.
 // ?dryRun=1 returns the header + first 5 data rows per file and writes
 // nothing — used to verify the column mapping before a live refresh.
-router.post('/jobs/refresh-fangraphs', async (req, res) => {
+// Gated with requireAdminToken (2026-08-02): endpoint pulls 8 CSVs
+// using the owner's paid FanGraphs Member session cookie. An ungated
+// endpoint let any caller trigger a full fetch — burning the
+// Cloudflare rate-limit budget the owner paid for, and letting a
+// caller enumerate FG's data behind the owner's authenticated session
+// via ?dryRun=1. Pre-fix, the endpoint accepted any (or no) token.
+router.post('/jobs/refresh-fangraphs', requireAdminToken, async (req, res) => {
   try {
     const row = q.getSetting.get('fangraphs_session_cookie');
     const cookieValue = row && row.value ? String(row.value).trim() : '';
