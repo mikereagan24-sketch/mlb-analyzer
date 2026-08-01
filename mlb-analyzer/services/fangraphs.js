@@ -132,7 +132,21 @@ async function fetchProjection(type, stats, cookieValue) {
     + '&stats=' + encodeURIComponent(stats)
     + '&pos=all&team=0&players=0&lg=all&download=1';
   const res = await fetch(url, { headers: baseHeaders(cookieValue) });
-  if (!res.ok) throw new Error('Projection fetch ' + type + '/' + stats + ' failed: HTTP ' + res.status);
+  if (!res.ok) {
+    // Symmetric with fetchActualSplit (2026-08-02): capture body on
+    // non-ok so an FG contract change / bot block surfaces its own
+    // reason instead of leaving us guessing from a bare status code.
+    let body500 = '';
+    try {
+      const t = await res.text();
+      try {
+        const j = JSON.parse(t);
+        body500 = j && j.error ? String(j.error) : t;
+      } catch (_) { body500 = t; }
+    } catch (_) { body500 = '<body read failed>'; }
+    throw new Error('Projection fetch ' + type + '/' + stats
+      + ' failed: HTTP ' + res.status + ' — ' + String(body500).slice(0, 400));
+  }
   const text = await res.text();
   let rows;
   try { rows = JSON.parse(text); }
@@ -195,7 +209,27 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     headers: Object.assign({}, baseHeaders(cookieValue), { 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error('Actual fetch split=' + splitCode + ' pos=' + position + ' failed: HTTP ' + res.status);
+  if (!res.ok) {
+    // Capture body on non-ok. Pre-2026-08-02 this discarded the body —
+    // we asked "does the 500 carry a message?" and couldn't answer
+    // because the code threw only the status. Now the first 400 chars
+    // of the response body (JSON.error field if present, else raw text)
+    // land in the error. If FG has changed the contract, they typically
+    // return a JSON body with { error: "unknown field X" } style;
+    // Cloudflare bot-block returns HTML with "Ray ID". Either way,
+    // the truncated body distinguishes the failure mode without
+    // needing another round-trip.
+    let body500 = '';
+    try {
+      const t = await res.text();
+      try {
+        const j = JSON.parse(t);
+        body500 = j && j.error ? String(j.error) : t;
+      } catch (_) { body500 = t; }
+    } catch (_) { body500 = '<body read failed>'; }
+    throw new Error('Actual fetch split=' + splitCode + ' pos=' + position
+      + ' failed: HTTP ' + res.status + ' — ' + String(body500).slice(0, 400));
+  }
   const json = await res.json();
   if (!json || !Array.isArray(json.data)) {
     throw new Error('Actual split=' + splitCode + ' pos=' + position + ' returned no data array. Top keys: ' + Object.keys(json||{}).join(','));
