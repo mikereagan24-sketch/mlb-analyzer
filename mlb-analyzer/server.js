@@ -159,58 +159,78 @@ app.get('/health', (req, res) => {
   } catch (e) {
     out.roster_gate_error = e && e.message || String(e);
   }
-  // FanGraphs woba_data freshness. When the daily sync fails silently
-  // (2026-07-31: actuals timed out 1/4 on first pass; retry succeeded
-  // but the counter reported "4/4 uploaded (4 err)" so partial failure
-  // wasn't obvious), the model keeps using yesterday's numbers without
-  // any downstream signal. This surfaces staleness on its own by
-  // reporting the MAX(uploaded_at) age per canonical woba_data key.
+  // FanGraphs woba_data freshness with escalating severity.
   //
-  // Threshold: STALE_HOURS=30. Daily sync is once per 24h; 6h grace
-  // covers late-cron drift + overnight sync windows. Ages above 30h
-  // land in stale_keys; ages 24-30h just show age_hours without
-  // flagging (the grace window).
+  // Threshold history:
+  //   ≤ WARN_HOURS  (30h)  → ok. Grace window covers late-cron drift.
+  //   > WARN_HOURS         → status='degraded'. Model still trustworthy on
+  //                          established players (per staleness analysis in
+  //                          docs/fg-actuals-staleness-2026-08.md).
+  //   > CRITICAL_HOURS (72h) → status='critical'. Two days of miss is now
+  //                          the observed norm (upstream FG splits-leaders
+  //                          returning 500 on 2026-07-31/08-01), not an
+  //                          outlier. Below-gate players stay projection-only
+  //                          (safe), but mid-sample players are drifting
+  //                          ~15-30 wOBA points per week — total-line impact
+  //                          crosses ~1 run/game for high-turnover lineups
+  //                          near this bound. Ops should page here, not just
+  //                          notice.
   //
-  // MISSING keys (never ingested) are called out separately — those
-  // block model computation entirely, not just stale data.
+  // The two-tier signal lets a monitor filter grep 'status: "critical"' for
+  // pages while 'status: "degraded"' can go to a lower-urgency channel.
   try {
     const { q } = require('./db/schema');
     const EXPECTED_KEYS = [
       'bat-proj-lhp', 'bat-proj-rhp', 'pit-proj-lhb', 'pit-proj-rhb',
       'bat-act-lhp',  'bat-act-rhp',  'pit-act-lhb',  'pit-act-rhb',
     ];
-    const STALE_HOURS = 30;
+    const WARN_HOURS = 30;
+    const CRITICAL_HOURS = 72;
     const summary = (q.wobaKeySummary && q.wobaKeySummary.all()) || [];
     const byKey = {};
     for (const r of summary) byKey[r.data_key] = r;
     const now = Date.now();
     const per_key = {};
     const missing_keys = [];
-    const stale_keys = [];
+    const stale_keys = [];      // > WARN, ≤ CRITICAL
+    const critical_keys = [];   // > CRITICAL
     for (const k of EXPECTED_KEYS) {
       const r = byKey[k];
       if (!r) { missing_keys.push(k); per_key[k] = { present: false }; continue; }
       const uploadedMs = r.uploaded_at ? Date.parse(r.uploaded_at + 'Z') || Date.parse(r.uploaded_at) : null;
       const age_hours = uploadedMs ? Math.round((now - uploadedMs) / 3600000 * 10) / 10 : null;
       per_key[k] = { present: true, rows: r.row_count, uploaded_at: r.uploaded_at, age_hours };
-      if (age_hours != null && age_hours > STALE_HOURS) stale_keys.push({ key: k, age_hours });
+      if (age_hours == null) continue;
+      if (age_hours > CRITICAL_HOURS)      critical_keys.push({ key: k, age_hours });
+      else if (age_hours > WARN_HOURS)     stale_keys.push({ key: k, age_hours });
     }
     out.woba_freshness = {
       expected: EXPECTED_KEYS.length,
       present: EXPECTED_KEYS.length - missing_keys.length,
-      stale_threshold_hours: STALE_HOURS,
+      warn_threshold_hours: WARN_HOURS,
+      critical_threshold_hours: CRITICAL_HOURS,
       missing_keys,
       stale_keys,
+      critical_keys,
       per_key,
     };
-    // Elevate top-level status when the model would silently degrade.
-    // 'ok' otherwise. Explicit strings so an ops monitor can grep.
-    if (missing_keys.length || stale_keys.length) {
+    // Severity precedence: critical > degraded > (unchanged). Missing keys
+    // are always critical (data path is broken, not just stale). Assigns
+    // to top-level status so an ops monitor can grep once.
+    const isCritical = missing_keys.length > 0 || critical_keys.length > 0;
+    const isDegraded = stale_keys.length > 0;
+    if (isCritical) {
+      out.status = 'critical';
+      out.status_reason = (out.status_reason ? out.status_reason + '; ' : '')
+        + 'woba_freshness: '
+        + (missing_keys.length ? missing_keys.length + ' MISSING key(s)' : '')
+        + (missing_keys.length && critical_keys.length ? ', ' : '')
+        + (critical_keys.length ? critical_keys.length + ' key(s) > ' + CRITICAL_HOURS + 'h' : '')
+        + (stale_keys.length ? ', ' + stale_keys.length + ' key(s) > ' + WARN_HOURS + 'h' : '');
+    } else if (isDegraded) {
       out.status = 'degraded';
       out.status_reason = (out.status_reason ? out.status_reason + '; ' : '')
-        + 'woba_freshness: ' + (missing_keys.length ? missing_keys.length + ' missing key(s)' : '')
-        + (missing_keys.length && stale_keys.length ? ', ' : '')
-        + (stale_keys.length ? stale_keys.length + ' stale key(s) (>' + STALE_HOURS + 'h)' : '');
+        + 'woba_freshness: ' + stale_keys.length + ' key(s) > ' + WARN_HOURS + 'h';
     }
   } catch (e) {
     out.woba_freshness_error = e && e.message || String(e);
