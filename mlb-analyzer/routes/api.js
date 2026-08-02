@@ -170,6 +170,122 @@ function requireOriginAllowlist(req, res, next) {
   return res.status(403).json({ error: 'Origin not allowed for this endpoint' });
 }
 
+// ── Bookmarklet signed-token machinery (2026-08-03) ──────────────────
+//
+// Replaces the origin-allowlist stopgap on /upload/{fg-json/:key,
+// rr-roles, :key?} with a per-bookmark HMAC-SHA256 token baked into
+// the bookmarklet source at mint time. See
+// docs/bookmarklet-signed-token-design.md for the design and the
+// 4 owner-approved parameters (30-day TTL, manual rotate only,
+// pit-proj-ip → admin-token, UI on Model tab).
+//
+// Design summary:
+//   - Token payload = base64url(JSON { iat, exp, kid, purpose })
+//   - Signature = HMAC-SHA256(payload, BOOKMARKLET_HMAC_KEY)
+//   - Token = payload + '.' + sig
+//   - Verified by requireBookmarkletToken middleware. On failure,
+//     returns 401 with a code (MISSING|MALFORMED|BAD_SIG|BAD_PURPOSE|
+//     REVOKED|EXPIRED) so the bookmarklet's overlay can surface a
+//     distinct message per failure mode.
+//   - Revocation via bookmarklet_active_kid in app_settings.
+//     Every mint bumps kid; any token with kid != current is
+//     rejected as REVOKED. No blocklist to maintain.
+//   - Origin allowlist stays as a fast-reject BEFORE the HMAC
+//     compute — obvious junk requests never touch crypto.
+
+const BOOKMARKLET_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days per owner (2026-08-03)
+
+function _bookmarkletHmacKey() {
+  const k = process.env.BOOKMARKLET_HMAC_KEY;
+  if (!k || k.length < 32) return null;
+  return k;
+}
+function _bookmarkletSign(payloadB64, key) {
+  return crypto.createHmac('sha256', key).update(payloadB64).digest('base64url');
+}
+function _bookmarkletActiveKid() {
+  const row = q.getSetting.get('bookmarklet_active_kid');
+  if (!row || !row.value) return 0;
+  const n = parseInt(row.value, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function _bookmarkletLastExpiresAt() {
+  const row = q.getSetting.get('bookmarklet_last_expires_at');
+  if (!row || !row.value) return null;
+  const n = parseInt(row.value, 10);
+  return Number.isFinite(n) ? n : null;
+}
+function _bookmarkletMint(hmacKey) {
+  // Bump kid on every mint — old bookmarks with the previous kid become
+  // REVOKED immediately. Only one active bookmark at a time. Owner
+  // ergonomic tradeoff: minting a fresh bookmark invalidates the one
+  // still sitting in the bookmarks bar until it's re-dragged.
+  const nextKid = _bookmarkletActiveKid() + 1;
+  q.setSetting.run('bookmarklet_active_kid', String(nextKid));
+  const now = Date.now();
+  const exp = now + BOOKMARKLET_TOKEN_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({
+    iat: Math.floor(now / 1000),
+    exp: Math.floor(exp / 1000),
+    kid: nextKid,
+    purpose: 'fg-upload',
+  })).toString('base64url');
+  const sig = _bookmarkletSign(payload, hmacKey);
+  q.setSetting.run('bookmarklet_last_expires_at', String(exp));
+  return {
+    token: payload + '.' + sig,
+    expires_at_ms: exp,
+    expires_at_iso: new Date(exp).toISOString(),
+    kid: nextKid,
+  };
+}
+function _bookmarkletVerify(token, hmacKey, currentKid) {
+  if (!token || typeof token !== 'string') return { ok: false, code: 'MISSING' };
+  const parts = token.split('.');
+  if (parts.length !== 2) return { ok: false, code: 'MALFORMED' };
+  const [payloadB64, sig] = parts;
+  const expectedSig = _bookmarkletSign(payloadB64, hmacKey);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expectedSig);
+  if (a.length !== b.length) return { ok: false, code: 'BAD_SIG' };
+  try {
+    if (!crypto.timingSafeEqual(a, b)) return { ok: false, code: 'BAD_SIG' };
+  } catch (_) { return { ok: false, code: 'BAD_SIG' }; }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+  } catch (_) {
+    return { ok: false, code: 'MALFORMED' };
+  }
+  if (payload.purpose !== 'fg-upload') return { ok: false, code: 'BAD_PURPOSE' };
+  if (payload.kid !== currentKid) return { ok: false, code: 'REVOKED' };
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.exp < nowSec) return { ok: false, code: 'EXPIRED' };
+  return { ok: true, payload };
+}
+function requireBookmarkletToken(req, res, next) {
+  const hmacKey = _bookmarkletHmacKey();
+  if (!hmacKey) {
+    const msg = 'Bookmarklet auth not configured (set BOOKMARKLET_HMAC_KEY env var, 32+ chars)';
+    console.warn('[bookmarklet-auth] ' + msg);
+    return res.status(503).json({ error: msg, code: 'NOT_CONFIGURED' });
+  }
+  const token = req.get('X-Bookmarklet-Token') || '';
+  const currentKid = _bookmarkletActiveKid();
+  const stamp = new Date().toISOString();
+  const ip = req.ip || (req.connection && req.connection.remoteAddress) || 'unknown';
+  const result = _bookmarkletVerify(token, hmacKey, currentKid);
+  if (!result.ok) {
+    console.warn('[bookmarklet-auth] ' + stamp + ' ip=' + ip
+      + ' path=' + req.path
+      + ' code=' + result.code
+      + ' active_kid=' + currentKid
+      + '  result=rejected');
+    return res.status(401).json({ error: result.code, code: result.code });
+  }
+  return next();
+}
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const FILE_KEY_TESTS = [
@@ -419,7 +535,7 @@ function ingestWobaCSV(key, csvText, filename) {
 // Body-size limit is set app-level in server.js (25mb) — no route-level
 // override needed, and any override here would be a no-op since the
 // app-level parser has already read/rejected the body by this point.
-router.post('/upload/fg-json/:key', requireOriginAllowlist, (req, res) => {
+router.post('/upload/fg-json/:key', requireOriginAllowlist, requireBookmarkletToken, (req, res) => {
   try {
     const key = req.params.key;
     const validKeys = ['bat-proj-lhp','bat-proj-rhp','pit-proj-lhb','pit-proj-rhb',
@@ -460,7 +576,7 @@ router.post('/upload/fg-json/:key', requireOriginAllowlist, (req, res) => {
 //
 // Per-team failures don't block other teams; returns per-team + total
 // counts so the bookmarklet's overlay can render honest coverage.
-router.post('/upload/rr-roles', requireOriginAllowlist, (req, res) => {
+router.post('/upload/rr-roles', requireOriginAllowlist, requireBookmarkletToken, (req, res) => {
   try {
     const body = req.body || {};
     const teams = Array.isArray(body.teams) ? body.teams : null;
@@ -541,7 +657,7 @@ router.post('/upload/rr-roles', requireOriginAllowlist, (req, res) => {
 // Manual CSV upload (Data Import UI drop-zone). Kept as the fallback path
 // even after FG Daily Sync — the owner can still drop a CSV if the
 // bookmarklet ever fails on a given day.
-router.post('/upload/:key?', requireOriginAllowlist, upload.single('file'), (req, res) => {
+router.post('/upload/:key?', requireOriginAllowlist, requireBookmarkletToken, upload.single('file'), (req, res) => {
 // Prevent browser caching on all API responses
 router.use((req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -632,7 +748,10 @@ router.get('/woba-status', (req, res) => {
 // Bulk-upload pitcher IP projections from a FanGraphs Steamer CSV.
 // Expected columns: Name, Team, IP, GS. Rows where an existing record has
 // is_override=1 are left untouched — manual overrides are sticky.
-router.post('/upload/pit-proj-ip', requireOriginAllowlist, upload.single('file'), (req, res) => {
+// UI-only drop-zone (not a bookmarklet target). Owner decision
+// 2026-08-03: use admin token, not origin allowlist. Symmetric with
+// other UI-only writes.
+router.post('/upload/pit-proj-ip', requireAdminToken, upload.single('file'), (req, res) => {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1442,6 +1561,58 @@ router.post('/jobs/rosters', requireAdminToken, async (req, res) => {
 //      pass1 / pass2 candidates and the final mlb_id. Lets the
 //      operator paste the four known cases and see exactly what the
 //      resolver sees.
+// Bookmarklet token endpoints (feat/bookmarklet-signed-token, 2026-08-03).
+//
+// POST /admin/bookmarklet/mint     — bumps kid, returns fresh token +
+//                                    expires_at + kid. Bookmarklet.html
+//                                    substitutes the token into the
+//                                    bookmarklet source client-side and
+//                                    renders a drag-link. Every mint
+//                                    invalidates the previously-active
+//                                    bookmark (kid++). Owner rotation
+//                                    ergonomic tradeoff documented in
+//                                    docs/bookmarklet-signed-token-design.md.
+// GET  /admin/bookmarklet/status   — returns { kid, active, expires_at,
+//                                    expired, expires_in_ms } — the
+//                                    Model tab UI displays this next to
+//                                    the "Rotate bookmarklet" button so
+//                                    owner sees when the current token
+//                                    lapses. No rotation cron per owner
+//                                    2026-08-03 decision — silent
+//                                    breakage is worse than the risk.
+router.post('/admin/bookmarklet/mint', requireAdminToken, (req, res) => {
+  const hmacKey = _bookmarkletHmacKey();
+  if (!hmacKey) return res.status(503).json({
+    error: 'BOOKMARKLET_HMAC_KEY env var not set (32+ chars required)',
+    code: 'NOT_CONFIGURED',
+  });
+  const minted = _bookmarkletMint(hmacKey);
+  res.json({
+    token: minted.token,
+    expires_at: minted.expires_at_iso,
+    expires_at_ms: minted.expires_at_ms,
+    kid: minted.kid,
+    ttl_days: Math.round(BOOKMARKLET_TOKEN_TTL_MS / (24 * 60 * 60 * 1000)),
+  });
+});
+router.get('/admin/bookmarklet/status', requireAdminToken, (req, res) => {
+  const hmacKey = _bookmarkletHmacKey();
+  const kid = _bookmarkletActiveKid();
+  const expMs = _bookmarkletLastExpiresAt();
+  const now = Date.now();
+  res.json({
+    kid,
+    active: kid > 0,
+    expires_at: expMs ? new Date(expMs).toISOString() : null,
+    expires_at_ms: expMs,
+    expires_in_ms: expMs ? (expMs - now) : null,
+    expires_in_days: expMs ? Math.round((expMs - now) / (24 * 60 * 60 * 1000) * 10) / 10 : null,
+    expired: expMs ? now > expMs : true,
+    configured: !!hmacKey,
+    ttl_days: Math.round(BOOKMARKLET_TOKEN_TTL_MS / (24 * 60 * 60 * 1000)),
+  });
+});
+
 router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) => {
   try {
     const teamsParam = (req.query.teams || '').trim();

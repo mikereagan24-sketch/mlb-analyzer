@@ -47,9 +47,10 @@
 <h2>Install</h2>
 <p>Drag this link to your bookmarks bar:</p>
 <div class="drag-row">
-  <a id="bm" class="drag" href="#">📊 FG Daily Sync</a>
+  <a id="bm" class="drag" href="#" style="pointer-events:none;opacity:0.5">🔒 minting token…</a>
 </div>
 <p class="muted">(If the link doesn't drag, right-click it → "Bookmark Link…".)</p>
+<p id="token-status" class="muted" style="margin-top:0.5rem">Token status will appear here after mint.</p>
 
 <h2>How to use</h2>
 <ol>
@@ -93,6 +94,14 @@ function bookmarklet() {
   var FG_JSON_URL = APP + '/api/upload/fg-json/';        // projections
   var UPLOAD_CSV_URL = APP + '/api/upload/';              // actuals (multipart CSV)
   var ROLES_URL = APP + '/api/upload/rr-roles';           // roles JSON
+  // Bookmarklet auth token (feat/bookmarklet-signed-token, 2026-08-03).
+  // Baked in at mint time by bookmarklet.html's client-side render logic
+  // (fetches /admin/bookmarklet/mint, string-replaces this placeholder,
+  // renders the drag-link with the substituted source). Every /upload
+  // POST sends this in X-Bookmarklet-Token. Server rejects on expired
+  // (>30d) or revoked (kid mismatch). Placeholder value is a sentinel
+  // the server can detect if someone drags an un-minted bookmark.
+  var BOOKMARKLET_TOKEN = '%%BOOKMARKLET_TOKEN_PLACEHOLDER%%';
 
   // ── FG endpoint specs ────────────────────────────────────────────────
   var PROJ_SPECS = [
@@ -258,6 +267,18 @@ function bookmarklet() {
   // body.error if the server sent JSON, else the status text, so the
   // overlay shows *why* a POST failed instead of a bare 'err'.
   function extractHttpError(status, body) {
+    // Bookmarklet-token auth codes get a friendly hint appended so the
+    // owner doesn't have to guess what "EXPIRED" or "REVOKED" means.
+    // Server responds { error: 'EXPIRED', code: 'EXPIRED' } etc. for
+    // token failures.
+    if (body && typeof body === 'object' && body.code) {
+      var hint = '';
+      if (body.code === 'EXPIRED') hint = ' — bookmark token has lapsed. Open the app Model tab and click "Rotate bookmarklet", then re-drag.';
+      else if (body.code === 'REVOKED') hint = ' — bookmark token has been rotated. Re-drag the fresh bookmark from the app Model tab.';
+      else if (body.code === 'MISSING' || body.code === 'MALFORMED' || body.code === 'BAD_SIG') hint = ' — this bookmark was not minted for this app. Re-drag from the app Model tab.';
+      else if (body.code === 'NOT_CONFIGURED') hint = ' — server-side BOOKMARKLET_HMAC_KEY not set. Contact the operator.';
+      return 'HTTP ' + status + ': ' + String(body.error || body.code).slice(0, 120) + hint;
+    }
     if (body && typeof body === 'object' && body.error) return 'HTTP ' + status + ': ' + String(body.error).slice(0, 120);
     if (typeof body === 'string' && body) return 'HTTP ' + status + ': ' + body.slice(0, 120);
     return 'HTTP ' + status;
@@ -304,7 +325,10 @@ function bookmarklet() {
           if (!Array.isArray(rows) || !rows.length) throw new Error('FG empty response');
           return fetch(FG_JSON_URL + spec.key, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Bookmarklet-Token': BOOKMARKLET_TOKEN,
+            },
             body: JSON.stringify({ rows: rows }),
           }).then(function(r) {
             return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
@@ -379,7 +403,11 @@ function bookmarklet() {
         }
         var fd = new FormData();
         fd.append('file', new Blob([csv], { type: 'text/csv' }), spec.key + '.csv');
-        fetch(UPLOAD_CSV_URL + spec.key, { method: 'POST', body: fd })
+        fetch(UPLOAD_CSV_URL + spec.key, {
+          method: 'POST',
+          headers: { 'X-Bookmarklet-Token': BOOKMARKLET_TOKEN },
+          body: fd,
+        })
           .then(function(r) {
             return safeReadBody(r).then(function(res) { return { status: r.status, ok: r.ok, body: res.body }; });
           })
@@ -497,7 +525,10 @@ function bookmarklet() {
         uploadChain = uploadChain.then(function() {
           return fetch(ROLES_URL, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Bookmarklet-Token': BOOKMARKLET_TOKEN,
+            },
             body: JSON.stringify({
               fetched_at: new Date().toISOString(),
               teams: [{ team: t.team, players: t.players }],
@@ -542,9 +573,84 @@ function bookmarklet() {
 
 // Build the javascript: href. Wrap with ()() so the function fires on click,
 // strip line indentation, and encodeURIComponent so special chars survive.
+// The token substitution happens BEFORE encoding so the encoded href
+// contains the real token, not the placeholder.
 var readableSrc = '(' + bookmarklet.toString() + ')()';
 var compactSrc = readableSrc.replace(/\n[ \t]+/g, '\n');
-document.getElementById('bm').href = 'javascript:' + encodeURIComponent(compactSrc);
+
+// Token mint flow (feat/bookmarklet-signed-token, 2026-08-03). Fetches
+// a fresh 30-day token from POST /admin/bookmarklet/mint, substitutes
+// the placeholder, and enables the drag-link. Requires admin token
+// (X-Admin-Token) — served through the same localStorage cache the app
+// uses. If no admin token stored yet, prompts once.
+function _getAdminToken() {
+  var stored = null;
+  try { stored = localStorage.getItem('mlb_admin_token'); } catch(_){}
+  if (stored) return stored;
+  var entered = window.prompt('Enter admin token (X-Admin-Token) to mint bookmarklet:');
+  if (!entered) return null;
+  try { localStorage.setItem('mlb_admin_token', entered); } catch(_){}
+  return entered;
+}
+function _fmtLocalDate(iso) {
+  try {
+    var d = new Date(iso);
+    return d.toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric' });
+  } catch(_) { return iso; }
+}
+function _renderTokenStatus(msg, isErr) {
+  var el = document.getElementById('token-status');
+  el.textContent = msg;
+  el.style.color = isErr ? '#c53030' : '#4a5568';
+}
+async function _mintAndRenderBookmarklet() {
+  var token = _getAdminToken();
+  if (!token) {
+    _renderTokenStatus('Cannot mint: admin token required.', true);
+    return;
+  }
+  try {
+    var r = await fetch('/api/admin/bookmarklet/mint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    });
+    if (r.status === 401) {
+      try { localStorage.removeItem('mlb_admin_token'); } catch(_){}
+      _renderTokenStatus('Admin token rejected. Reload the page and try again with a valid token.', true);
+      return;
+    }
+    if (r.status === 503) {
+      var body503 = await r.json().catch(()=>({error:'503'}));
+      _renderTokenStatus('Server not configured: ' + (body503.error || '503'), true);
+      return;
+    }
+    if (!r.ok) {
+      _renderTokenStatus('Mint failed: HTTP ' + r.status, true);
+      return;
+    }
+    var j = await r.json();
+    // Bake the token into the bookmarklet source and enable the drag link.
+    var withToken = compactSrc.replace('%%BOOKMARKLET_TOKEN_PLACEHOLDER%%', j.token);
+    var bm = document.getElementById('bm');
+    bm.href = 'javascript:' + encodeURIComponent(withToken);
+    bm.textContent = '📊 FG Daily Sync';
+    bm.style.pointerEvents = 'auto';
+    bm.style.opacity = '1';
+    document.getElementById('src').textContent = withToken;
+    _renderTokenStatus(
+      'Token minted. Expires ' + _fmtLocalDate(j.expires_at)
+      + '  (in ~' + j.ttl_days + ' days). Bookmark kid=' + j.kid + '.'
+      + '  Old bookmark (previous kid) is now REVOKED — re-drag this link.',
+      false
+    );
+  } catch (e) {
+    _renderTokenStatus('Mint failed: ' + (e.message || e), true);
+  }
+}
+_mintAndRenderBookmarklet();
+
+// The <details> source viewer shows the pre-substitution template so
+// developers can inspect the shape without seeing a real token.
 document.getElementById('src').textContent = readableSrc;
 </script>
 

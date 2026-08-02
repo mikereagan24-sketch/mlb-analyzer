@@ -509,6 +509,12 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <textarea id="s-fangraphs-cookie" placeholder="mikereagan24%7C..." rows="2" style="flex:1;font-family:monospace;font-size:11px;resize:vertical"></textarea>
       <button class="btn btn-ghost btn-sm" onclick="saveSettings()" style="align-self:flex-start">Save Cookie</button>
     </div>
+    <div class="slabel">FG Daily Sync Bookmarklet</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px">30-day signed token protects <code>/upload/*</code>. Rotate anytime — old bookmark becomes REVOKED, drag the fresh one from <a href="/bookmarklet.html" target="_blank">/bookmarklet.html</a>. No auto-rotation.</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+      <button class="btn btn-ghost btn-sm" onclick="rotateBookmarkletToken()">Rotate bookmarklet token</button>
+      <span id="bookmarklet-token-status" style="font-size:11px;color:var(--text2)">Loading...</span>
+    </div>
     <div class="slabel">Model weights</div>
 <div class="grid-2" style="gap:8px;margin-bottom:12px">
 <div><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Run multiplier (×N)</label><input type="number" id="s-run-mult" step="1"></div>
@@ -924,6 +930,66 @@ function changeAdminToken(){
   if(entered === null) return; // cancelled — leave existing alone
   if(entered === ''){ clearAdminToken(); return; }
   localStorage.setItem('mlb_admin_token', entered);
+}
+
+// Bookmarklet token status + rotate (feat/bookmarklet-signed-token, 2026-08-03).
+// Displays current expiry next to the "Rotate bookmarklet token" button.
+// Owner asked to see when the token lapses so they can plan a rotate.
+async function refreshBookmarkletTokenStatus() {
+  const el = document.getElementById('bookmarklet-token-status');
+  if (!el) return;
+  const token = localStorage.getItem('mlb_admin_token');
+  if (!token) { el.textContent = 'Set admin token to view status.'; return; }
+  try {
+    const r = await fetch('/api/admin/bookmarklet/status', {
+      headers: { 'X-Admin-Token': token },
+    });
+    if (r.status === 401) { el.textContent = 'Admin token rejected.'; el.style.color = '#c53030'; return; }
+    if (r.status === 503) { el.textContent = 'BOOKMARKLET_HMAC_KEY env var not configured on server.'; el.style.color = '#c53030'; return; }
+    const j = await r.json();
+    if (!j.configured) { el.textContent = 'Server not configured (set BOOKMARKLET_HMAC_KEY).'; el.style.color = '#c53030'; return; }
+    if (!j.active) { el.textContent = 'No bookmark minted yet. Click Rotate to mint the first.'; el.style.color = '#4a5568'; return; }
+    const expDate = new Date(j.expires_at).toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric' });
+    if (j.expired) {
+      el.textContent = 'EXPIRED (was ' + expDate + '). Rotate to mint fresh.';
+      el.style.color = '#c53030';
+    } else if (j.expires_in_days != null && j.expires_in_days < 3) {
+      el.textContent = 'Expires ' + expDate + ' (in ' + j.expires_in_days + 'd) — rotate soon. kid=' + j.kid;
+      el.style.color = '#d97706';
+    } else {
+      el.textContent = 'Expires ' + expDate + ' (in ' + (j.expires_in_days != null ? j.expires_in_days + 'd' : '?') + '). kid=' + j.kid;
+      el.style.color = 'var(--text2)';
+    }
+  } catch (e) {
+    el.textContent = 'Status fetch failed: ' + (e.message || e);
+    el.style.color = '#c53030';
+  }
+}
+async function rotateBookmarkletToken() {
+  const el = document.getElementById('bookmarklet-token-status');
+  const token = localStorage.getItem('mlb_admin_token');
+  if (!token) { alert('Set admin token first (via "admin token" button below).'); return; }
+  if (!confirm('Mint a fresh bookmarklet token?\n\nThis INVALIDATES the current bookmark — you\'ll need to open /bookmarklet.html and re-drag the freshly-minted one.')) return;
+  try {
+    const r = await fetch('/api/admin/bookmarklet/mint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    });
+    if (r.status === 401) { alert('Admin token rejected.'); return; }
+    if (r.status === 503) {
+      const b = await r.json().catch(()=>({error:'503'}));
+      alert('Server not configured: ' + (b.error || '503')); return;
+    }
+    if (!r.ok) { alert('Mint failed: HTTP ' + r.status); return; }
+    const j = await r.json();
+    const expDate = new Date(j.expires_at).toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric' });
+    if (el) { el.textContent = 'Minted. Expires ' + expDate + ' (in ~' + j.ttl_days + 'd). kid=' + j.kid + '. Re-drag from /bookmarklet.html.'; el.style.color = '#4a5568'; }
+    if (window.confirm('New bookmarklet minted (kid=' + j.kid + ', expires ' + expDate + ').\n\nOpen /bookmarklet.html to drag the fresh bookmark now?')) {
+      window.open('/bookmarklet.html', '_blank');
+    }
+  } catch (e) {
+    alert('Mint failed: ' + (e.message || e));
+  }
 }
 
 // Admin-token-aware GET. Same retry pattern as adminPost — handles
@@ -2588,7 +2654,7 @@ function sw(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.getAttribute('onclick')==="sw('"+name+"')"));
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('active',s.id==='sec-'+name));
   if(name==='backtest')loadCronLog();
-  if(name==='model')loadSettings();
+  if(name==='model'){loadSettings();refreshBookmarkletTokenStatus();}
   if(name==='data')refreshPitIPTable();
   if(name==='matchups'&&muSelectedGame)renderMatchupGame(muSelectedGame);
   if(name==='clv')loadClvTab();
@@ -2687,8 +2753,16 @@ async function uploadPitProjIP(){
   var fd=new FormData();
   fd.append('file', file);
   try{
+    // Direct fetch (not api()) because we need FormData/multipart, not
+    // JSON. Manually add both x-app-password AND X-Admin-Token — the
+    // 2026-08-03 upload/pit-proj-ip migration put this endpoint on
+    // requireAdminToken (owner decision — it's UI-only).
     var headers={};
     if(_appPassword) headers['x-app-password']=_appPassword;
+    try {
+      var adminToken=localStorage.getItem('mlb_admin_token');
+      if(adminToken) headers['X-Admin-Token']=adminToken;
+    } catch(_){}
     var r=await fetch('/api/upload/pit-proj-ip',{method:'POST',headers:headers,body:fd});
     var j=await r.json();
     if(!r.ok){ status.textContent='Error: '+(j.error||('HTTP '+r.status)); return; }
