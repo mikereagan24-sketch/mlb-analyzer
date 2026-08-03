@@ -36,14 +36,14 @@ these axes:
 | Body: `strSplitArr` | `[1]` | ? | Field may have renamed to `splitArr` |
 | Body: `strGroup` | `'season'` | ? | |
 | Body: `strPosition` | `'B'` | ? | |
-| Body: `strType` | `1` (number) for B, `'2'` (string) for P | ? | Documented quirk — check if still true |
+| Body: `strType` | `'2'` (string, both B and P) | ? | Was `1`/`'2'` split pre-2026-08-03; new handler wants `'2'` for both |
 | Body: `strStartDate` / `strEndDate` | ISO YYYY-MM-DD | ? | Format may have changed |
 | Body: `strSplitTeams` | `false` (boolean) | ? | May now expect string `'false'` |
 | Body: `dctFilters` | `[]` | ? | May have a required shape |
 | Body: `strStatType` | `'player'` | ? | |
 | Body: `strAutoPt` | `'true'` (string) | ? | |
 | Body: `arrPlayerId` / `strPlayerId` | `[]` / `'all'` | ? | |
-| Body: `arrWx*` weather filters | `[]` | ? | |
+| Body: `arrWx*` weather filters | `null` (all five) | ? | Was `[]` pre-2026-08-03; new handler crashes on `[]` |
 | Headers: Cookie | wordpress_logged_in_...| Same | Our cookie name is stable |
 | Headers: Referer | leaders/splits-leaderboards | ? | |
 | Headers: Origin | www.fangraphs.com | ? | |
@@ -51,6 +51,18 @@ these axes:
 | Headers: Any new (CSRF, x-fg-*, etc.) | none | ? | **Most likely change** — a session/CSRF token that a server can't emit is what would push us to owner-only |
 
 ## Step 3 — decide fix path
+
+**Common failure signature — type-strictness after FG rewrites**: On
+2026-08-03, FG rewrote splits-leaderboards and the new handler was
+STRICT on:
+- `arrWx*` fields must be `null`, not `[]` (old handler coerced)
+- `strType` must be `'2'` string for BOTH B and P (old handler
+  accepted number `1` for batters)
+- `strSplitTeams` must be boolean `false`, not the string `'false'`
+
+Every FG rewrite may repeat this. When actuals 500 and the URL is
+unchanged, **check types first**: JSON.stringify our body, then the
+browser's, then diff character-by-character.
 
 **If the change is a field/URL/method/format change**: update
 `fetchActualSplit` to match. Test with a fresh cookie + one split first
