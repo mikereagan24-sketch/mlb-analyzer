@@ -11,34 +11,29 @@ const PROJ_BASE  = 'https://www.fangraphs.com/api/projections';
 // Actuals API URL — resolved lazily at call time so a hot-config change
 // via env var (FG_ACTUALS_URL_OVERRIDE) doesn't require redeploy.
 //
-// 2026-08-03: FanGraphs rewrote /leaders/splits-leaderboards and the
-// new API returns unhandled ASP.NET exceptions ({"Message":"An error
-// has occurred."}) on our request shape (verified via the 500-body
-// capture from PR #212). FG's own site notes the previous version
-// stays available at /leaders/splits-leaderboards-legacy through the
-// end of the World Series (~2026-11-05). Owner confirmed the legacy
-// path.
+// URL history:
+//   2026-07-31 → 2026-08-02: FG rewrote /leaders/splits-leaderboards.
+//     New API returned unhandled ASP.NET exceptions ({"Message":"An
+//     error has occurred."}) on our request shape.
+//   2026-08-03 (PR #216, briefly): guessed the legacy page routed to
+//     /api/leaders/splits/splits-leaders-legacy. Wrong — that path
+//     404s. Merged then reverted same day.
+//   2026-08-03 (this PR): owner captured the working payload from
+//     FG's own frontend. Same URL, same method — the URL never
+//     changed. The failure was BODY-shape only: FG's rewritten
+//     handler expects null for the arrWx* fields (we sent []) and
+//     "2" string for strType on batters (we sent 1 number). Types
+//     that were silently coerced by the old handler now crash the
+//     new one. See fetchActualSplit below for the corrected body.
 //
-// Our request BODY shape (strSplitArr, strGroup, strType, etc.) was
-// built against the old API and per owner "may work unchanged." The
-// only unknown is the exact API endpoint the legacy PAGE hits — FG
-// doesn't publish it and my sandbox can't hit fangraphs.com to
-// capture it directly. Best-guess default below matches FG's typical
-// URL suffixing pattern (page adds -legacy → api adds -legacy). If
-// wrong, the 500 body capture from PR #212 will surface the actual
-// error, and FG_ACTUALS_URL_OVERRIDE lets owner swap URLs without a
-// redeploy.
-//
-// After 2026-11-05 the legacy path dies; see
-// docs/fg-splits-api-migration-2026-11.md for the migration steps.
-const ACTUAL_URL_DEFAULT = 'https://www.fangraphs.com/api/leaders/splits/splits-leaders-legacy';
+// FG_ACTUALS_URL_OVERRIDE stays as an escape hatch for the next FG
+// rewrite; not needed today.
+const ACTUAL_URL_DEFAULT = 'https://www.fangraphs.com/api/leaders/splits/splits-leaders';
 function _actualUrl() {
   return (process.env.FG_ACTUALS_URL_OVERRIDE || '').trim() || ACTUAL_URL_DEFAULT;
 }
-// Exposed as a constant name for existing references (backtest scripts
-// etc.) that may still read the module property. Reads the same env
-// var so behavior is consistent whether callers use the const or the
-// function.
+// Exposed as a constant name for any callers that may still read the
+// module property. Reads the same env var so behavior is consistent.
 const ACTUAL_URL = _actualUrl();
 const COOKIE_NAME = 'wordpress_logged_in_0cae6f5cb929d209043cb97f8c2eee44';
 
@@ -193,6 +188,29 @@ async function fetchProjection(type, stats, cookieValue) {
 
 // --- Actuals (POST returns JSON — transform to CSV) ---
 
+// 2-year trailing date window for the actuals query. Deliberate
+// signal-stability choice from the original 2026-04-21 introduction
+// (commit f00d40e, "feat(fangraphs): one-click refresh for 8 FG CSVs"
+// — description explicitly names "2-year trailing actuals"; module
+// docstring line 5 still says the same).
+//
+// Why 2 years and not single-season:
+//   - Platoon splits stabilize slowly. 2 years ≈ 2× the PA per hand,
+//     ~sqrt(2)×  less noise on the per-player estimate.
+//   - The minPA=60 (batters) and minBF=100 (pitchers) gates in
+//     model.blendWoba are calibrated against 2-year cumulative
+//     samples. Narrowing to single-season would push many part-time
+//     platoon players below the gate → fall back to pure projection
+//     → less actuals influence overall. Not a bug per se but a
+//     material shift in the blend's character on ~15-25% of the
+//     lineup pool at mid-season.
+//
+// Briefly narrowed to 03-01 → 11-01 current-season on 2026-08-03
+// while matching the captured payload byte-for-byte. Reverted same
+// day: the captured range reflected the operator's browser view at
+// capture time, not a required shape — FG's API accepts any date
+// range. Keep 2-year trailing to preserve the signal-stability
+// contract the blend was calibrated against.
 function twoYearDateRange() {
   const end = new Date();
   const start = new Date(end);
@@ -203,37 +221,39 @@ function twoYearDateRange() {
 
 async function fetchActualSplit(splitCode, position, cookieValue) {
   const { start, end } = twoYearDateRange();
-  // strType: 1 (number) for batters but "2" (STRING) for pitchers. This is
-  // what FanGraphs' own front-end sends — do not "fix" it to 2 (number) or
-  // the pitcher endpoint returns an empty data array.
+  // Body shape captured from FG's own frontend 2026-08-03 after the
+  // splits-leaderboards rewrite. Prior body caused unhandled ASP.NET
+  // exceptions ({"Message":"An error has occurred."}) because the new
+  // handler is strict on:
+  //   - arrWx* fields must be null, not [] (old handler coerced [])
+  //   - strType must be "2" (string) even for batters (old handler
+  //     accepted number 1 for batters; the pre-rewrite comment
+  //     "1 for batters, '2' for pitchers" no longer applies)
+  //   - strSplitTeams must be BOOLEAN false, not string 'false'
+  //     (defensive — we always used boolean, but easy to break)
+  // Every field below is present in the captured working payload.
+  // Owner note: strSplitArr comes in as [] from the captured browser
+  // view (their current filter), but our use-case requires the split
+  // ID → we pass [splitCode] so FG scopes to the split we want.
   const body = {
     strSplitArr: [splitCode],
     strGroup: 'season',
     strPosition: position,
-    strType: position === 'P' ? '2' : 1,
+    strType: '2',               // string "2" for BOTH B and P per captured payload
     strStartDate: start,
     strEndDate: end,
-    strSplitTeams: false,
+    strSplitTeams: false,       // boolean, NOT the string 'false'
     dctFilters: [],
     strStatType: 'player',
-    // strAutoPt is FG's body parameter for the API endpoint at line 11
-    // (ACTUAL_URL). However, that endpoint is not called during normal
-    // operation — actuals ingest happens via a browser bookmarklet that
-    // hits FG's web URL with the analogous `autoPt` query parameter.
-    // fetchActualSplit (and this strAutoPt setting) is reached only by
-    // admin diagnostic endpoints. Kept at 'true' to match what FG would
-    // return to non-authenticated browser sessions; the bookmarklet
-    // independently sets autoPt=false for the actual ingest. See
-    // docs/bookmarklet-actuals.txt for the canonical bookmarklet source.
     strAutoPt: 'true',
     arrPlayerId: [],
     strPlayerId: 'all',
     strSplitArrPitch: [],
-    arrWxTemperature: [],
-    arrWxPressure: [],
-    arrWxAirDensity: [],
-    arrWxElevation: [],
-    arrWxWindSpeed: [],
+    arrWxTemperature: null,     // null, not []  ← FG rewrite is strict
+    arrWxPressure:    null,
+    arrWxAirDensity:  null,
+    arrWxElevation:   null,
+    arrWxWindSpeed:   null,
   };
   // Read URL fresh at call time so FG_ACTUALS_URL_OVERRIDE env var swap
   // takes effect without a process restart. Cheap — one env-var read

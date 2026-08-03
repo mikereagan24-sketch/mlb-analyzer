@@ -155,14 +155,15 @@ function bookmarklet() {
   function buildActualsIframeUrl(spec) {
     var end = new Date(); end.setDate(end.getDate() - 1);
     var start = new Date(end); start.setFullYear(start.getFullYear() - 2); start.setDate(start.getDate() + 1);
-    // 2026-08-03: FG rewrote /leaders/splits-leaderboards; new page
-    // returns 500-class errors on our iframe render pattern. Legacy
-    // page preserved at /leaders/splits-leaderboards-legacy through
-    // end of World Series (~2026-11-05 sunset). Query-string params
-    // are the same shape — only the path adds -legacy. Migrate to
-    // the rewritten page before the sunset date; see
-    // docs/fg-splits-api-migration-2026-11.md.
-    return 'https://www.fangraphs.com/leaders/splits-leaderboards-legacy'
+    // The iframe path renders FG's own splits-leaderboards page and
+    // relies on its client-side JS to emit the export link. If that
+    // page loads in a browser today, this URL is correct. When FG
+    // rewrote the page in 2026-08 they kept the URL and only tightened
+    // API body validation — see services/fangraphs.js for the
+    // server-side type-coercion fix from that incident. Prior guess
+    // of splits-leaderboards-legacy (PR #216) was wrong; -legacy
+    // path 404s. Reverted here.
+    return 'https://www.fangraphs.com/leaders/splits-leaderboards'
       + '?splitArr=' + spec.split
       + '&autoPt=true&splitTeams=false&statType=player'
       + '&statgroup=' + spec.sg
