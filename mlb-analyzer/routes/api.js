@@ -738,6 +738,50 @@ router.post('/jobs/refresh-fangraphs', requireAdminToken, async (req, res) => {
   }
 });
 
+// POST /jobs/refresh-fangraphs-actuals — bookmarklet-authenticated
+// endpoint for the 4 actuals CSVs only. Retires the bookmarklet's
+// former iframe-based actuals path (2026-08-04): iframe rendered
+// FG's /leaders/splits-leaderboards page in a hidden frame and
+// polled for its client-side export-link render, which broke after
+// FG's 2026-07-31 rewrite in ways the iframe approach couldn't
+// diagnose. Server-side fetchActualSplit works cleanly against the
+// same rewritten API (per PR #217's body-shape fix). One
+// implementation, one place to fix, inherits every future FG
+// contract change automatically.
+//
+// AUTH: bookmarklet token (NOT admin token). The bookmarklet runs
+// on fangraphs.com, so it can access X-Bookmarklet-Token from its
+// baked-in constant but has no path to the app's X-Admin-Token in
+// localStorage on a different origin. Same pattern as /upload/*
+// (requireOriginAllowlist as fast-reject before HMAC verify).
+//
+// SCOPE: actuals only (4 CSVs). Projections + roles stay on their
+// existing bookmarklet paths since those work fine and don't need
+// the server round-trip.
+router.post('/jobs/refresh-fangraphs-actuals', requireOriginAllowlist, requireBookmarkletToken, async (req, res) => {
+  try {
+    const row = q.getSetting.get('fangraphs_session_cookie');
+    const cookieValue = row && row.value ? String(row.value).trim() : '';
+    if (!cookieValue) return res.status(400).json({
+      error: 'fangraphs_session_cookie not configured. Paste from Model tab.',
+    });
+    const { refreshFanGraphsActuals } = require('../services/fangraphs');
+    const fetched = await refreshFanGraphsActuals(cookieValue);
+    const results = fetched.map(r => {
+      if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
+      try {
+        const inserted = ingestWobaCSV(r.key, r.csv, r.name + '.csv');
+        return { name: r.name, key: r.key, success: true, rowCount: inserted };
+      } catch (e) {
+        return { name: r.name, key: r.key, success: false, error: 'ingest failed: ' + e.message };
+      }
+    });
+    res.json({ success: true, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/woba-status', (req, res) => {
   const rows = q.wobaKeySummary.all();
   const status = {};
