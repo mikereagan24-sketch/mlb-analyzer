@@ -188,32 +188,48 @@ async function fetchProjection(type, stats, cookieValue) {
 
 // --- Actuals (POST returns JSON — transform to CSV) ---
 
-// Derived date bounds for the actuals query. Owner spec 2026-08-03:
-// "season start through season end — make them derived, not hardcoded."
+// 2-year trailing date window for the actuals query. Deliberate
+// signal-stability choice from the original 2026-04-21 introduction
+// (commit f00d40e, "feat(fangraphs): one-click refresh for 8 FG CSVs"
+// — description explicitly names "2-year trailing actuals"; module
+// docstring line 5 still says the same).
 //
-// MLB regular season roughly late-March through early-October; postseason
-// through early-November. FG's own frontend used 03-01 → 11-01 in the
-// captured payload — comfortable wrappers that include spring training
-// data on the front and postseason on the back. Same year we're
-// currently in during the season; previous year during offseason
-// (Jan/Feb, when the just-ended season is the "current" one from an
-// FG-data perspective).
-function _seasonYear() {
-  const d = new Date();
-  const m = d.getUTCMonth(); // 0=Jan
-  // Jan/Feb → previous season year (regular season done in Nov, off-
-  // season data still targets that year). Mar onward → current year.
-  return m >= 2 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
+// Why 2 years and not single-season:
+//   - Platoon splits stabilize slowly. 2 years ≈ 2× the PA per hand,
+//     ~sqrt(2)× less noise on the per-player estimate.
+//   - The minPA=60 (batters) and minBF=100 (pitchers) gates in
+//     model.blendWoba are calibrated against 2-year cumulative
+//     samples. Narrowing to single-season would push many part-time
+//     platoon players below the gate → fall back to pure projection
+//     → less actuals influence overall. Material shift in blend
+//     character on ~15-25% of the lineup pool at mid-season.
+//
+// History:
+//   2026-04-21 (f00d40e): introduced with twoYearDateRange, deliberate.
+//   2026-08-03 (PR #217 / 0e6cf3f): narrowed to seasonDateRange
+//     (03-01 → 11-01) as part of matching the captured payload
+//     byte-for-byte. Row counts dropped ~15-25% below historical
+//     322-449 band → owner caught it. The captured range reflected
+//     the operator's browser view at capture time, not a required
+//     shape — FG's API accepts any date range.
+//   2026-08-03 (this PR): reverting to 2-year to preserve the
+//     signal-stability contract the minPA/minBF gates were
+//     calibrated against. A follow-up diagnostic
+//     (tmp/probe-fg-actuals-4combos.js) will confirm whether date
+//     range materially affects FG's response vs strAutoPt='true'
+//     being the true filter. If the probe shows date is decorative
+//     against the rewritten handler, we revisit — but the safe
+//     default in the meantime is the shape prod ran on for months.
+function twoYearDateRange() {
+  const end = new Date();
+  const start = new Date(end);
+  start.setFullYear(end.getFullYear() - 2);
+  const iso = d => d.toISOString().slice(0, 10);
+  return { start: iso(start), end: iso(end) };
 }
-function seasonDateRange() {
-  const y = _seasonYear();
-  return { start: y + '-03-01', end: y + '-11-01' };
-}
-// Kept for any callers that may still import it. Delegates.
-function twoYearDateRange() { return seasonDateRange(); }
 
 async function fetchActualSplit(splitCode, position, cookieValue) {
-  const { start, end } = seasonDateRange();
+  const { start, end } = twoYearDateRange();
   // Body shape captured from FG's own frontend 2026-08-03 after the
   // splits-leaderboards rewrite. Prior body caused unhandled ASP.NET
   // exceptions ({"Message":"An error has occurred."}) because the new

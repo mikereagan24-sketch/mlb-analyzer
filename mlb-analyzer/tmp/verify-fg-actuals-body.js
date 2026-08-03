@@ -85,12 +85,21 @@ const fg = require('../services/fangraphs');
   // strSplitArr — our code passes [splitCode] not [] from captured
   console.log('PASS  strSplitArr (our use case sends [splitCode] intentionally) got=' + JSON.stringify(body.strSplitArr));
 
-  // Dates — should match season year range 03-01 → 11-01
-  const dateRe = /^\d{4}-(0[3-9]|1[01])-01$/;
-  if (dateRe.test(body.strStartDate) && dateRe.test(body.strEndDate)) {
-    console.log('PASS  strStartDate/strEndDate derived: ' + body.strStartDate + ' → ' + body.strEndDate);
+  // Dates — should be 2-year trailing (start ≈ end - 2 years). Signal-
+  // stability choice from the original 2026-04-21 introduction; see the
+  // comment above twoYearDateRange in services/fangraphs.js. Match the
+  // captured payload only on TYPE (ISO YYYY-MM-DD), not on the specific
+  // 03-01→11-01 range the operator was viewing at capture time.
+  const isoRe = /^\d{4}-\d{2}-\d{2}$/;
+  const s = Date.parse(body.strStartDate);
+  const e = Date.parse(body.strEndDate);
+  const rangeDays = (e - s) / (24 * 3600 * 1000);
+  const twoYearOk = rangeDays > 729 && rangeDays < 732;  // ±1 leap-day slack
+  const shapesOk = isoRe.test(body.strStartDate) && isoRe.test(body.strEndDate);
+  if (shapesOk && twoYearOk) {
+    console.log('PASS  strStartDate/strEndDate 2-year trailing: ' + body.strStartDate + ' → ' + body.strEndDate + '  (' + Math.round(rangeDays) + 'd)');
   } else {
-    console.log('FAIL  strStartDate/strEndDate: got ' + body.strStartDate + ' → ' + body.strEndDate);
+    console.log('FAIL  strStartDate/strEndDate: got ' + body.strStartDate + ' → ' + body.strEndDate + '  (' + rangeDays + 'd, want ~730d)');
     fails++;
   }
 
