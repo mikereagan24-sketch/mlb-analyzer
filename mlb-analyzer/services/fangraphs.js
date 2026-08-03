@@ -307,17 +307,29 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
 // FanGraphs' rate limiter and put the user's Member account at risk. Serial
 // runs in ~5–10s total which is fine for a manual button press. Each task
 // has independent error handling so one failure doesn't block the others.
-async function refreshAllFanGraphs(cookieValue) {
-  const tasks = [
+//
+// Split into two task-list helpers so refreshFanGraphsActuals() can reuse
+// the same serial runner + error contract without duplicating the loop.
+// The bookmarklet's iframe-based actuals path was retired 2026-08-04 in
+// favor of a POST to /jobs/refresh-fangraphs-actuals which calls the
+// server-side path here — one implementation, one place to fix.
+function _projTasks(cookieValue) {
+  return [
     { name: 'bat-proj-lhp', fn: () => fetchProjection('rsteamer_vl_0', 'bat', cookieValue) },
     { name: 'bat-proj-rhp', fn: () => fetchProjection('rsteamer_vr_0', 'bat', cookieValue) },
     { name: 'pit-proj-lhb', fn: () => fetchProjection('rsteamer_vl_p_1', 'pit', cookieValue) },
     { name: 'pit-proj-rhb', fn: () => fetchProjection('rsteamer_vr_p_1', 'pit', cookieValue) },
+  ];
+}
+function _actTasks(cookieValue) {
+  return [
     { name: 'bat-act-lhp',  fn: () => fetchActualSplit(1, 'B', cookieValue) },
     { name: 'bat-act-rhp',  fn: () => fetchActualSplit(2, 'B', cookieValue) },
     { name: 'pit-act-lhb',  fn: () => fetchActualSplit(5, 'P', cookieValue) },
     { name: 'pit-act-rhb',  fn: () => fetchActualSplit(6, 'P', cookieValue) },
   ];
+}
+async function _runTasks(tasks) {
   const results = [];
   for (const t of tasks) {
     try {
@@ -332,6 +344,12 @@ async function refreshAllFanGraphs(cookieValue) {
     }
   }
   return results;
+}
+async function refreshAllFanGraphs(cookieValue) {
+  return _runTasks([..._projTasks(cookieValue), ..._actTasks(cookieValue)]);
+}
+async function refreshFanGraphsActuals(cookieValue) {
+  return _runTasks(_actTasks(cookieValue));
 }
 
 // Team-aggregated baserunning leaderboard from FanGraphs.
@@ -767,4 +785,4 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
   return out;
 }
 
-module.exports = { refreshAllFanGraphs, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
+module.exports = { refreshAllFanGraphs, refreshFanGraphsActuals, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
