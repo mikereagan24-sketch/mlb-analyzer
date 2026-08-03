@@ -8,7 +8,38 @@
 // Cookie name is a stable WordPress COOKIEHASH, not a secret.
 
 const PROJ_BASE  = 'https://www.fangraphs.com/api/projections';
-const ACTUAL_URL = 'https://www.fangraphs.com/api/leaders/splits/splits-leaders';
+// Actuals API URL — resolved lazily at call time so a hot-config change
+// via env var (FG_ACTUALS_URL_OVERRIDE) doesn't require redeploy.
+//
+// 2026-08-03: FanGraphs rewrote /leaders/splits-leaderboards and the
+// new API returns unhandled ASP.NET exceptions ({"Message":"An error
+// has occurred."}) on our request shape (verified via the 500-body
+// capture from PR #212). FG's own site notes the previous version
+// stays available at /leaders/splits-leaderboards-legacy through the
+// end of the World Series (~2026-11-05). Owner confirmed the legacy
+// path.
+//
+// Our request BODY shape (strSplitArr, strGroup, strType, etc.) was
+// built against the old API and per owner "may work unchanged." The
+// only unknown is the exact API endpoint the legacy PAGE hits — FG
+// doesn't publish it and my sandbox can't hit fangraphs.com to
+// capture it directly. Best-guess default below matches FG's typical
+// URL suffixing pattern (page adds -legacy → api adds -legacy). If
+// wrong, the 500 body capture from PR #212 will surface the actual
+// error, and FG_ACTUALS_URL_OVERRIDE lets owner swap URLs without a
+// redeploy.
+//
+// After 2026-11-05 the legacy path dies; see
+// docs/fg-splits-api-migration-2026-11.md for the migration steps.
+const ACTUAL_URL_DEFAULT = 'https://www.fangraphs.com/api/leaders/splits/splits-leaders-legacy';
+function _actualUrl() {
+  return (process.env.FG_ACTUALS_URL_OVERRIDE || '').trim() || ACTUAL_URL_DEFAULT;
+}
+// Exposed as a constant name for existing references (backtest scripts
+// etc.) that may still read the module property. Reads the same env
+// var so behavior is consistent whether callers use the const or the
+// function.
+const ACTUAL_URL = _actualUrl();
 const COOKIE_NAME = 'wordpress_logged_in_0cae6f5cb929d209043cb97f8c2eee44';
 
 function buildCookieHeader(cookieValue) {
@@ -204,7 +235,11 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     arrWxElevation: [],
     arrWxWindSpeed: [],
   };
-  const res = await fetch(ACTUAL_URL, {
+  // Read URL fresh at call time so FG_ACTUALS_URL_OVERRIDE env var swap
+  // takes effect without a process restart. Cheap — one env-var read
+  // per split per attempt.
+  const url = _actualUrl();
+  const res = await fetch(url, {
     method: 'POST',
     headers: Object.assign({}, baseHeaders(cookieValue), { 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
@@ -228,6 +263,7 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
       } catch (_) { body500 = t; }
     } catch (_) { body500 = '<body read failed>'; }
     throw new Error('Actual fetch split=' + splitCode + ' pos=' + position
+      + ' url=' + url
       + ' failed: HTTP ' + res.status + ' — ' + String(body500).slice(0, 400));
   }
   const json = await res.json();
