@@ -248,7 +248,20 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     strSplitArr: [splitCode],
     strGroup: 'season',
     strPosition: position,
-    strType: '2',               // string "2" for BOTH B and P per captured payload
+    // strType selects which FG stat panel comes back:
+    //   '1' = Standard/Dashboard panel — H, 2B, 3B, HR, BB, SO, AVG,
+    //          OBP, SLG, ERA, wOBA (for pitchers: wOBA-against), G
+    //   '2' = Advanced panel — batters get wRC/wRAA/wOBA/wRC+;
+    //          pitchers get FIP/xFIP/K-BB%/LOB% and NO wOBA-against
+    //   '3' = Batted Ball panel — GB%/FB%/Pull%/Hard% etc., no wOBA
+    // Batters keep '2' (existing behavior; captured payload; has wOBA).
+    // Pitchers use '1' because their Advanced panel drops wOBA — 4/4
+    // parseCSV failures with "No valid rows parsed" after the FG
+    // rewrite were this asymmetry: batter Advanced still has wOBA,
+    // pitcher Advanced doesn't. strType='1' returns wOBA for pitchers
+    // (verified 2026-08-04 via tmp/diag-fg-actuals-pitcher-strtype.js:
+    // pit-act-lhb strType='1' = 21 cols including wOBA, 713 rows).
+    strType: position === 'P' ? '1' : '2',
     strStartDate: start,
     strEndDate: end,
     strSplitTeams: false,       // boolean, NOT the string 'false'
