@@ -238,6 +238,30 @@ db.exec(`
     finished_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_psr_started_at ON parameter_sweep_runs (started_at DESC);
+  -- Backfill-job log. POST /api/admin/backfill/:task is async — it
+  -- inserts a row here with status='running' and returns the job_id
+  -- immediately (202). The task runner writes progress_json throttled
+  -- (~5s) and transitions to 'done' (results_json set) or 'error'
+  -- (error set) at completion. GET /admin/backfill/:job_id surfaces
+  -- the row.
+  --
+  -- Same started_at/finished_at PT convention as parameter_sweep_runs.
+  -- dry_run stored on the row (not just in params_json) so a
+  -- WHERE dry_run=0 filter can find live runs without a JSON walk.
+  CREATE TABLE IF NOT EXISTS backfill_jobs (
+    job_id TEXT PRIMARY KEY,
+    task TEXT NOT NULL,              -- 'sp_forecast_ip' | 'weather_contamination_ath' | 'weather_backfill_season' | ...
+    dry_run INTEGER NOT NULL,        -- 0 | 1
+    status TEXT NOT NULL,            -- 'running' | 'done' | 'error'
+    params_json TEXT NOT NULL,       -- request body ({from, to, dry_run, task-specific opts})
+    progress_json TEXT,              -- rolling counters, NULL until first onProgress tick
+    results_json TEXT,               -- final summary, NULL until done
+    error TEXT,                      -- error message when status='error'
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_bj_started_at ON backfill_jobs (started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_bj_task ON backfill_jobs (task, started_at DESC);
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -2255,6 +2279,44 @@ q.getRunningParameterSweepRuns = db.prepare(
 );
 q.markParameterSweepRunAbandoned = db.prepare(
   "UPDATE parameter_sweep_runs SET status='error', error=?, finished_at=? WHERE run_id=? AND status='running'"
+);
+
+// Backfill-job helpers. Mirror the parameter-sweep pattern above.
+q.insertBackfillJob = db.prepare(
+  "INSERT INTO backfill_jobs (job_id, task, dry_run, status, params_json, started_at) "
+  + "VALUES (?, ?, ?, 'running', ?, ?)"
+);
+q.updateBackfillJobProgress = db.prepare(
+  "UPDATE backfill_jobs SET progress_json=? WHERE job_id=? AND status='running'"
+);
+q.updateBackfillJobDone = db.prepare(
+  "UPDATE backfill_jobs SET status='done', results_json=?, progress_json=COALESCE(?, progress_json), finished_at=? WHERE job_id=?"
+);
+q.updateBackfillJobError = db.prepare(
+  "UPDATE backfill_jobs SET status='error', error=?, finished_at=? WHERE job_id=?"
+);
+q.getBackfillJob = db.prepare(
+  "SELECT * FROM backfill_jobs WHERE job_id=?"
+);
+q.listBackfillJobsByTask = db.prepare(
+  "SELECT job_id, task, dry_run, status, started_at, finished_at, error "
+  + "FROM backfill_jobs WHERE task=? ORDER BY started_at DESC LIMIT ?"
+);
+q.listRecentBackfillJobs = db.prepare(
+  "SELECT job_id, task, dry_run, status, started_at, finished_at, error "
+  + "FROM backfill_jobs ORDER BY started_at DESC LIMIT ?"
+);
+// In-flight lookup for live-run dedupe (dry runs stack freely — they
+// don't write, so concurrent operator explorations are safe).
+q.getRunningLiveBackfillJobs = db.prepare(
+  "SELECT job_id, task, params_json, started_at FROM backfill_jobs "
+  + "WHERE status='running' AND dry_run=0"
+);
+q.getRunningBackfillJobs = db.prepare(
+  "SELECT job_id, task, dry_run, params_json, started_at FROM backfill_jobs WHERE status='running'"
+);
+q.markBackfillJobAbandoned = db.prepare(
+  "UPDATE backfill_jobs SET status='error', error=?, finished_at=? WHERE job_id=? AND status='running'"
 );
 
 q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,role,hand,position,updated_at)

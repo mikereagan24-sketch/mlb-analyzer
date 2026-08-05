@@ -31,6 +31,17 @@ const { nowPtIso } = require('./services/jobs');
 try { cleanupOrphanedSweepRuns(q, nowPtIso); }
 catch (e) { console.warn('[sweep-cleanup] boot cleanup failed:', e && e.message); }
 
+// Same orphan-cleanup pattern for backfill_jobs. A hard crash mid-
+// backfill would leave the row status='running' forever; without
+// cleanup the live-run dedupe gate in POST /admin/backfill/:task
+// would block every subsequent live run until a manual UPDATE.
+// require() also eagerly registers all built-in backfill tasks (see
+// services/backfill-jobs.js bottom), so a GET /admin/backfill call
+// served right after listen() sees the full task list.
+const { cleanupOrphanedBackfillJobs } = require('./services/backfill-jobs');
+try { cleanupOrphanedBackfillJobs(q, nowPtIso); }
+catch (e) { console.warn('[backfill-cleanup] boot cleanup failed:', e && e.message); }
+
 // Empirical-spread ROI readout boot smoke. Exercises the full
 // buildReadout pipeline once on a 30-day window so a ReferenceError
 // or similar JS-level failure surfaces in the deploy log instead of
