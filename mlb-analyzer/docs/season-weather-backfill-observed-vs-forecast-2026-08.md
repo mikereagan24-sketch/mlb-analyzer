@@ -19,19 +19,32 @@ same code paths that run in production today. Rows tagged with
 pre-write snapshot after the runWeatherJob call, so they stay
 consistent with their tag.
 
-## The caveat: observed values, not forecast
+## The caveat: observed values, not forecast — applies to the WHOLE season
 
-Open-Meteo's hourly endpoint returns different data depending on
-whether the requested hour is in the past or the future:
+Open-Meteo has two separate endpoints:
 
-- **Future hours** → forecast values (what runWeatherJob normally
-  captures for T-hours pregame games).
-- **Past hours** → observed / reanalysis values (what runWeatherJob
-  captures when this backfill runs for historical dates).
+- **Forecast endpoint** (`api.open-meteo.com/v1/forecast`) — rolling
+  window, roughly the last ~2 weeks + 16 days forward. This is what
+  live production `runWeatherJob` uses.
+- **Archive endpoint** (`archive-api.open-meteo.com/v1/archive`) —
+  ERA5-based reanalysis, coverage back to 1940. Returns OBSERVED
+  weather (post-hoc reanalysis), not forecast.
+
+An early Phase A design routed only "old" dates (pre-mid-May, outside
+the forecast window) through the archive endpoint. That would have
+produced an **inhomogeneous** dataset — early-season rows on ERA5
+observed values, mid-season rows on rolling-forecast values — which
+would confound any Phase C attribution analysis that treats the
+column as a single stochastic quantity.
+
+**The whole window now routes through the archive endpoint.** Every
+backfilled row holds observed weather regardless of how recent the
+date is. Homogeneity beats emit-time fidelity for calibration.
 
 Signals were emitted against a **forecast** live at signal-emit time.
 After the backfill, the stored columns hold the **observed** values
-for the same park-local hour. These are not the same number.
+for the same park-local hour. These are not the same number, and the
+delta is systematic across the whole season, not just older dates.
 
 For most games the delta is small (fractions of a degree, wind under
 1 mph off). For games with fast-moving fronts the delta can push a

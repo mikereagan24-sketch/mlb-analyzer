@@ -283,7 +283,7 @@ function parkLocalHourIso(gameDate, gameTime, timeZone) {
 // 21 PT = 9 PM Sacramento = 78°F, when correct hour 18 PT = 92°F.
 // The naive-hour bug the 0e1e48f TZ fix was meant to cure was never
 // actually cured on the cron path — the cron never called fetchParkWind.
-async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel, cacheBust }) {
+async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel, cacheBust, archive }) {
   const label = sourceLabel || 'unknown';
   if (!tz) {
     console.warn(`[weather] mode1 no tz for ${label}; naive-hour fallback will fire — pass tz from PARK_TZ or override.tz`);
@@ -297,10 +297,36 @@ async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel
 
   const startDate = _shiftDate(gameDate, -1);
   const endDate   = _shiftDate(gameDate, +1);
-  let url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
-    `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
-    `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
-    `&start_date=${startDate}&end_date=${endDate}`;
+  // archive=true routes through Open-Meteo's ERA5-based reanalysis
+  // endpoint (archive-api.open-meteo.com/v1/archive) instead of the
+  // rolling forecast endpoint. Rationale:
+  //   - forecast endpoint serves a short window (roughly last ~2 weeks
+  //     + forward 16d); older dates return {} or hourly nulls, which
+  //     the caller sees as empty_response / non_finite_value.
+  //   - Season backfill (services/backfill-tasks/weather-backfill-season.js)
+  //     needs coverage back to March; only the archive endpoint has it.
+  //   - Archive is OBSERVED, not forecast. The backfill task's doc
+  //     (docs/season-weather-backfill-observed-vs-forecast-2026-08.md)
+  //     spells out the hindsight-bias implications for downstream
+  //     consumers.
+  // The archive endpoint doesn't expose precipitation_probability
+  // (probability is a forecast concept; observations record
+  // precipitation amount instead), so archive mode drops the field
+  // and the caller treats precipProb as 0. The retractable-roof
+  // heuristic that reads precipProb is dead code today (see
+  // jobs.js:3134 comment; no park carries roofType).
+  let url;
+  if (archive) {
+    url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}` +
+      `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m` +
+      `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
+      `&start_date=${startDate}&end_date=${endDate}`;
+  } else {
+    url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
+      `&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,precipitation_probability` +
+      `&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=auto` +
+      `&start_date=${startDate}&end_date=${endDate}`;
+  }
   if (cacheBust) url += `&_t=${Date.now()}`;
 
   let data;
@@ -337,8 +363,21 @@ async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel
   const windSpeed = data.hourly.wind_speed_10m?.[idx];
   const windDir   = data.hourly.wind_direction_10m?.[idx];
   const tempF     = data.hourly.temperature_2m?.[idx];
-  const precipProb = data.hourly.precipitation_probability?.[idx];
-  if (![windSpeed, windDir, tempF, precipProb].every(v => Number.isFinite(v))) {
+  // Archive endpoint doesn't return precipitation_probability;
+  // substitute 0 so the caller's return-shape contract stays constant
+  // across modes (callers unconditionally read .precipProb).
+  const precipProb = archive ? 0 : data.hourly.precipitation_probability?.[idx];
+  // Finite-value validation is mode-aware: forecast requires all four
+  // fields (unchanged pre-refactor behavior), archive requires only
+  // the three fields the archive endpoint actually returns. The
+  // forecast branch MUST keep its precipProb validation — a null
+  // precipProb from the forecast endpoint has always been a signal
+  // that the response is malformed / partial, and we don't loosen
+  // that in exchange for archive-mode support.
+  const requiredFinite = archive
+    ? [windSpeed, windDir, tempF]
+    : [windSpeed, windDir, tempF, precipProb];
+  if (!requiredFinite.every(v => Number.isFinite(v))) {
     return { error: 'non_finite_value', transient: true, detail: `speed=${windSpeed} dir=${windDir} temp=${tempF} precip=${precipProb}` };
   }
 

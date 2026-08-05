@@ -152,7 +152,13 @@ registerBackfillTask({
         //    as production does. This is the correctness anchor.
         let jobRes = null;
         try {
-          jobRes = await runWeatherJob(date);
+          // archive:true routes fetchWindAtCoords onto Open-Meteo's
+          // archive-api. Applies to the ENTIRE window (not just old
+          // dates) so the season dataset stays homogeneous — mixing
+          // observed archive vs rolling-forecast responses would
+          // corrupt Phase C attribution. See the doc for the
+          // observed-vs-forecast hindsight-bias implication.
+          jobRes = await runWeatherJob(date, { archive: true });
         } catch (e) {
           console.warn('[weather-backfill] runWeatherJob(' + date + ') threw:', e.message);
           fetchFailures.exception += before.length;
@@ -229,10 +235,19 @@ registerBackfillTask({
       // row and compare would-be new temp_f bucket to stored temp_f
       // bucket. Does NOT recompute temp_run_adj (that would duplicate
       // the roof gating — the exact correctness risk we're avoiding).
+      //
+      // The WHERE clause excludes contaminated rows so the dry-run
+      // projections match the live path's write scope (contaminated
+      // rows are snapshot-restored on the live path). Earlier
+      // iteration of this file omitted the filter, which inflated
+      // dry-run crossing counts by ~30 ATH rows whose Coliseum-to-
+      // Sutter-Health delta is dramatic (+15-24°F); confirmed in the
+      // 2026-08-05 dry-run before this fix.
       const rows = db.prepare(
         "SELECT game_id, game_date, game_time, home_team, venue_id, "
         + "  temp_f, temp_run_adj, roof_status "
-        + "FROM game_log WHERE game_date = ? AND COALESCE(is_removed, 0) = 0"
+        + "FROM game_log WHERE game_date = ? AND COALESCE(is_removed, 0) = 0 "
+        + "  AND weather_contamination_reason IS NULL"
       ).all(date);
       for (const g of rows) {
         totalRowsSeen++;
@@ -267,6 +282,7 @@ registerBackfillTask({
             gameDate: g.game_date, gameTime: g.game_time,
             sourceLabel: 'weather-backfill dry ' + g.game_id,
             cacheBust: true,
+            archive: true,
           });
         } catch (e) {
           fetchFailures.exception++;
