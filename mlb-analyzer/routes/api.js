@@ -2769,6 +2769,165 @@ function summarizeTargetWithWL(target, byCategory) {
   };
 }
 
+// ============================================================
+// Admin backfill endpoint — task-keyed prod-write dispatcher.
+//
+// Motivation: refresh-db.sh only pulls a snapshot DOWN. Any local
+// backfill runs against that snapshot are wiped on the next pull. Two
+// prior "backfills" (April-May sp_forecast_ip fill; ATH weather
+// contamination tags) never landed in prod for that reason. This
+// endpoint runs inside the Render container so writes hit the live DB.
+//
+// Design:
+//   POST /admin/backfill/:task   → 202 + { job_id, ... }
+//   GET  /admin/backfill/:job_id → row hydrate (status/progress/results)
+//   GET  /admin/backfill?task=X&limit=N → recent-job list for idempotency
+//                                          checks
+//
+// Body: { from, to, dry_run?, ...task-specific }
+//   dry_run defaults TRUE. A live run requires dry_run:false explicitly
+//   in the body — no other opt-in — so a mis-clicked curl can never
+//   write. Payload shape is the same across dry and live; task runners
+//   emit projected-change counts in the summary regardless, so the
+//   operator can compare projected-vs-actual after flipping.
+//
+// Runbook: pull a backup via GET /api/admin/download-db BEFORE any
+// live (dry_run:false) run. The 202 response echoes this instruction.
+//
+// Concurrency: dry runs stack freely (read-only), but only one LIVE
+// backfill can run at a time (single-instance event-loop protection,
+// same as parameter-sweep).
+//
+// Idempotency: the responsibility of each task runner. Ports of the
+// two source scripts use IS NULL / COALESCE gates so a re-run of an
+// already-completed window is a no-op.
+//
+// Boot cleanup: any row left status='running' at process start is
+// abandoned to status='error' by server.js (see
+// cleanupOrphanedBackfillJobs).
+// ============================================================
+router.post('/admin/backfill/:task', requireAdminToken, async (req, res) => {
+  try {
+    const { getBackfillTask, runBackfillJob } = require('../services/backfill-jobs');
+    const taskName = req.params.task;
+    const task = getBackfillTask(taskName);
+    if (!task) {
+      const { listBackfillTasks } = require('../services/backfill-jobs');
+      return res.status(400).json({
+        error: 'unknown backfill task: ' + taskName,
+        available_tasks: listBackfillTasks(),
+      });
+    }
+    const b = req.body || {};
+    if (!b.from || !/^\d{4}-\d{2}-\d{2}$/.test(b.from)) {
+      return res.status(400).json({ error: 'from (YYYY-MM-DD) required' });
+    }
+    if (!b.to || !/^\d{4}-\d{2}-\d{2}$/.test(b.to)) {
+      return res.status(400).json({ error: 'to (YYYY-MM-DD) required' });
+    }
+    if (b.from > b.to) {
+      return res.status(400).json({ error: 'from must be <= to' });
+    }
+    // Explicit-live gate. dry_run defaults TRUE; a live run requires
+    // dry_run:false in the body. Anything else (including omitted
+    // or truthy) is treated as dry.
+    const dryRun = b.dry_run !== false;
+
+    // Live-run dedupe. Live runs mutate; the second write while the
+    // first is mid-transaction can corrupt counters or double-tag.
+    // Dry runs stack because they don't write.
+    if (!dryRun) {
+      const inFlight = q.getRunningLiveBackfillJobs.all();
+      if (inFlight.length) {
+        const cur = inFlight[0];
+        let curParams = null;
+        try { curParams = JSON.parse(cur.params_json); } catch (e) { /* best-effort */ }
+        return res.status(409).json({
+          error: 'a live backfill is already in flight; only one live backfill at a time',
+          in_flight: {
+            job_id: cur.job_id,
+            task: cur.task,
+            started_at: cur.started_at,
+            params: curParams,
+          },
+          hint: 'poll GET /api/admin/backfill/' + cur.job_id + ' until status="done", then retry',
+        });
+      }
+    }
+
+    const jobId = crypto.randomUUID();
+    const params = Object.assign({}, b, { dry_run: dryRun });
+    const startedAt = nowPtIso();
+    q.insertBackfillJob.run(jobId, taskName, dryRun ? 1 : 0, JSON.stringify(params), startedAt);
+
+    // Dispatch on setImmediate so the 202 goes out before the task
+    // starts consuming the event loop — matches parameter-sweep.
+    setImmediate(() => {
+      runBackfillJob(db, q, nowPtIso, jobId, taskName, params);
+    });
+
+    res.status(202).json({
+      job_id: jobId,
+      task: taskName,
+      status: 'running',
+      dry_run: dryRun,
+      started_at: startedAt,
+      params,
+      poll_url: '/api/admin/backfill/' + jobId,
+      runbook: dryRun
+        ? 'Dry run — no writes. Re-POST with { "dry_run": false } to execute; '
+          + 'pull a backup via GET /api/admin/download-db BEFORE the live run.'
+        : 'LIVE run in flight — writes ARE landing in prod. '
+          + 'You should have pulled a backup via GET /api/admin/download-db first.',
+    });
+  } catch (e) {
+    console.error('[backfill] dispatch error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List-with-filter comes BEFORE the :job_id GET so the literal path
+// isn't captured as a job_id. Registration order matters in Express.
+router.get('/admin/backfill', requireAdminToken, (req, res) => {
+  try {
+    const { listBackfillTasks } = require('../services/backfill-jobs');
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 20));
+    const rows = req.query.task
+      ? q.listBackfillJobsByTask.all(req.query.task, limit)
+      : q.listRecentBackfillJobs.all(limit);
+    res.json({
+      available_tasks: listBackfillTasks(),
+      count: rows.length,
+      jobs: rows.map(r => Object.assign({}, r, { dry_run: !!r.dry_run })),
+    });
+  } catch (e) {
+    console.error('[backfill] list error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/admin/backfill/:job_id', requireAdminToken, (req, res) => {
+  try {
+    const row = q.getBackfillJob.get(req.params.job_id);
+    if (!row) return res.status(404).json({ error: 'job_id not found' });
+    res.json({
+      job_id:      row.job_id,
+      task:        row.task,
+      dry_run:     !!row.dry_run,
+      status:      row.status,
+      started_at:  row.started_at,
+      finished_at: row.finished_at,
+      params:      row.params_json   ? tryParse(row.params_json)   : null,
+      progress:    row.progress_json ? tryParse(row.progress_json) : null,
+      results:     row.results_json  ? tryParse(row.results_json)  : null,
+      error:       row.error || null,
+    });
+  } catch (e) {
+    console.error('[backfill] read error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Manual detection trigger — runs detectOpeners standalone for a date.
 // Useful after editing an opener_override row, or for backfilling
 // detection on past dates.
