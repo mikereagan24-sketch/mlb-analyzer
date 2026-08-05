@@ -2983,9 +2983,16 @@ async function runScoreJob(dateStr) {
 
 
 // Run weather for all games on a given date. Returns { success, updated, date }.
-async function runWeatherJob(date) {
+async function runWeatherJob(date, opts) {
   const startTs = Date.now();
-  console.log('[weather] running for '+date);
+  // opts.archive (default false) forces fetchWindAtCoords onto
+  // Open-Meteo's archive-api endpoint. Only backfill callers set this
+  // (services/backfill-tasks/weather-backfill-season.js); the cron
+  // path never passes opts, so opts.archive is undefined → the
+  // fetchWindAtCoords URL branch stays byte-identical to pre-refactor
+  // behavior. Verified by test tmp/verify-cron-path-byte-identical.js.
+  const archive = !!(opts && opts.archive);
+  console.log('[weather] running for '+date + (archive ? ' [archive=true]' : ''));
   let updated = 0;
   const skippedIds = [];
   // Per-reason tally so the cron_log row can answer "how many games hit
@@ -3106,6 +3113,7 @@ async function runWeatherJob(date) {
           gameDate: game.game_date, gameTime: game.game_time,
           sourceLabel: (sourceLabel || game.game_id),
           cacheBust: true,
+          archive,
         });
         if (wx && wx.error) {
           return { ok: false, reason: wx.error, transient: wx.transient !== false, detail: wx.detail };
