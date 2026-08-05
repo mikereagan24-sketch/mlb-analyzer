@@ -45,12 +45,17 @@
 <p class="lede">One click on a logged-in FanGraphs page updates wOBA projections, wOBA actuals, and RosterResource pitcher roles.</p>
 
 <h2>Install</h2>
-<p>Drag this link to your bookmarks bar:</p>
+<p>Drag this link to your bookmarks bar <em>after</em> minting:</p>
 <div class="drag-row">
-  <a id="bm" class="drag" href="#" style="pointer-events:none;opacity:0.5">🔒 minting token…</a>
+  <a id="bm" class="drag" href="#" style="pointer-events:none;opacity:0.5">🔒 mint first (see button below)</a>
 </div>
 <p class="muted">(If the link doesn't drag, right-click it → "Bookmark Link…".)</p>
-<p id="token-status" class="muted" style="margin-top:0.5rem">Token status will appear here after mint.</p>
+
+<div style="margin-top:1.2rem">
+  <button id="mint-btn" type="button" style="padding:8px 14px;background:#dc2626;color:#fff;border:0;border-radius:4px;cursor:pointer;font:inherit;font-weight:600">Mint fresh bookmarklet</button>
+  <p class="muted" style="margin-top:0.4rem;font-size:11px;line-height:1.45">Only click if you need a new bookmark. Minting invalidates the current one — your existing bookmark stops working and you'll have to re-drag from the fresh link above.</p>
+</div>
+<p id="token-status" class="muted" style="margin-top:0.75rem">Loading current bookmarklet status…</p>
 
 <h2>How to use</h2>
 <ol>
@@ -526,16 +531,17 @@ function bookmarklet() {
 var readableSrc = '(' + bookmarklet.toString() + ')()';
 var compactSrc = readableSrc.replace(/\n[ \t]+/g, '\n');
 
-// Token mint flow (feat/bookmarklet-signed-token, 2026-08-03). Fetches
-// a fresh 30-day token from POST /admin/bookmarklet/mint, substitutes
-// the placeholder, and enables the drag-link. Requires admin token
-// (X-Admin-Token) — served through the same localStorage cache the app
-// uses. If no admin token stored yet, prompts once.
+// Page-load flow (fix/bookmarklet-mint-explicit-only, 2026-08-05).
+// Prior behavior auto-called mint on every page load, silently
+// revoking whichever bookmark was working. Now: page load calls the
+// read-only /admin/bookmarklet/status endpoint (never bumps kid);
+// minting fires ONLY when the user clicks the mint button below and
+// confirms the "this will revoke your existing bookmarklet" dialog.
 function _getAdminToken() {
   var stored = null;
   try { stored = localStorage.getItem('mlb_admin_token'); } catch(_){}
   if (stored) return stored;
-  var entered = window.prompt('Enter admin token (X-Admin-Token) to mint bookmarklet:');
+  var entered = window.prompt('Enter admin token (X-Admin-Token) to check bookmarklet status:');
   if (!entered) return null;
   try { localStorage.setItem('mlb_admin_token', entered); } catch(_){}
   return entered;
@@ -551,7 +557,73 @@ function _renderTokenStatus(msg, isErr) {
   el.textContent = msg;
   el.style.color = isErr ? '#c53030' : '#4a5568';
 }
+
+// Read-only status fetch. Called on page load. GET, no side effects,
+// does NOT bump kid — verify by loading the page twice and checking
+// the displayed kid stays identical.
+async function _loadBookmarkletStatus() {
+  var token = _getAdminToken();
+  if (!token) {
+    _renderTokenStatus('Cannot load status: admin token required.', true);
+    return;
+  }
+  try {
+    var r = await fetch('/api/admin/bookmarklet/status', {
+      headers: { 'X-Admin-Token': token },
+    });
+    if (r.status === 401) {
+      try { localStorage.removeItem('mlb_admin_token'); } catch(_){}
+      _renderTokenStatus('Admin token rejected. Reload and try again with a valid token.', true);
+      return;
+    }
+    if (r.status === 503) {
+      var b503 = await r.json().catch(function(){return {error:'503'};});
+      _renderTokenStatus('Server not configured: ' + (b503.error || '503'), true);
+      return;
+    }
+    if (!r.ok) {
+      _renderTokenStatus('Status fetch failed: HTTP ' + r.status, true);
+      return;
+    }
+    var j = await r.json();
+    if (!j.configured) {
+      _renderTokenStatus('Server not configured (BOOKMARKLET_HMAC_KEY unset). Cannot mint.', true);
+      return;
+    }
+    if (!j.active) {
+      _renderTokenStatus('No bookmark minted yet. Click "Mint fresh bookmarklet" above to mint the first.  (This page did NOT mint — status is read-only.)', false);
+      return;
+    }
+    var expDate = _fmtLocalDate(j.expires_at);
+    var days = j.expires_in_days;
+    var expiryDetail = expDate + (days != null ? ' (in ' + days + 'd)' : '');
+    var suffix;
+    if (j.expired) suffix = ' — EXPIRED. Mint fresh to restore.';
+    else if (days != null && days < 3) suffix = ' — rotate soon.';
+    else suffix = '';
+    _renderTokenStatus(
+      'Current bookmark: kid=' + j.kid + ', expires ' + expiryDetail + suffix
+      + '  (This page did NOT mint — status is read-only.)',
+      j.expired
+    );
+  } catch (e) {
+    _renderTokenStatus('Status fetch failed: ' + (e.message || e), true);
+  }
+}
+
+// Mint on explicit button click. Requires confirmation with plain
+// language about revocation so a stray click can't repeat the prior
+// silent-revoke bug (root cause: prior version fired mint on page
+// load with no user gesture).
 async function _mintAndRenderBookmarklet() {
+  var ok = window.confirm(
+    'This will REVOKE your existing bookmarklet.\n\n'
+    + 'The bookmark already in your browser will stop working the moment '
+    + 'this mint completes. You will need to re-drag the freshly-minted '
+    + 'link from the top of this page.\n\n'
+    + 'Continue?'
+  );
+  if (!ok) return;
   var token = _getAdminToken();
   if (!token) {
     _renderTokenStatus('Cannot mint: admin token required.', true);
@@ -568,7 +640,7 @@ async function _mintAndRenderBookmarklet() {
       return;
     }
     if (r.status === 503) {
-      var body503 = await r.json().catch(()=>({error:'503'}));
+      var body503 = await r.json().catch(function(){return {error:'503'};});
       _renderTokenStatus('Server not configured: ' + (body503.error || '503'), true);
       return;
     }
@@ -586,16 +658,21 @@ async function _mintAndRenderBookmarklet() {
     bm.style.opacity = '1';
     document.getElementById('src').textContent = withToken;
     _renderTokenStatus(
-      'Token minted. Expires ' + _fmtLocalDate(j.expires_at)
-      + '  (in ~' + j.ttl_days + ' days). Bookmark kid=' + j.kid + '.'
-      + '  Old bookmark (previous kid) is now REVOKED — re-drag this link.',
+      'Token minted. kid=' + j.kid + ', expires ' + _fmtLocalDate(j.expires_at)
+      + ' (in ~' + j.ttl_days + ' days). Previous bookmark is now REVOKED — re-drag the fresh link above.',
       false
     );
   } catch (e) {
     _renderTokenStatus('Mint failed: ' + (e.message || e), true);
   }
 }
-_mintAndRenderBookmarklet();
+
+// Wire the mint button — click-only, no auto-fire.
+document.getElementById('mint-btn').addEventListener('click', _mintAndRenderBookmarklet);
+
+// Read-only status fetch runs on load. This does NOT hit /mint and
+// does NOT bump kid.
+_loadBookmarkletStatus();
 
 // The <details> source viewer shows the pre-substitution template so
 // developers can inspect the shape without seeing a real token.
