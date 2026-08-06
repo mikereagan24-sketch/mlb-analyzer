@@ -30,7 +30,16 @@ const PARKS = {
   'col': { lat:39.7559, lng:-104.9942,cfDir:45,  sens:0.5, name:'Coors Field' },
   'ari': { lat:33.4453, lng:-112.0667,cfDir:45,  sens:0.2, name:'Chase Field' },
   'lad': { lat:34.0739, lng:-118.2400,cfDir:45,  sens:0.5, name:'Dodger Stadium' },
+  // 'sfg' and 'sf' both resolve to Oracle Park. runWeatherJob parses
+  // game_id as `parts[1]` off the "away-home" convention, and SF's
+  // game_ids end in `-sf`, so PARKS[homeKey] with homeKey='sf' must
+  // resolve. The 2026-08-05 season backfill uncovered that 46 SF home
+  // games had silently no_park-skipped for the full season because
+  // only 'sfg' was mapped. Both keys point to the same object so any
+  // reader gets consistent lat/lng/cfDir/sens/name. Same shape as the
+  // existing oak/ath alias below.
   'sfg': { lat:37.7786, lng:-122.3893,cfDir:90,  sens:0.3, name:'Oracle Park' },
+  'sf':  { lat:37.7786, lng:-122.3893,cfDir:90,  sens:0.3, name:'Oracle Park' },
   // ATH plays at Sutter Health Park, West Sacramento in 2026 (not Oakland
   // Coliseum). Prior coords 37.7516/-122.2005 pulled Oakland weather for
   // every ATH home game — ~25-30°F cold-bias in July (Sacramento ~93°F vs
@@ -109,6 +118,7 @@ const PARK_TZ = {
   ari:'America/Phoenix',    // MT year-round, NO DST
   lad:'America/Los_Angeles', laa:'America/Los_Angeles',
   sd: 'America/Los_Angeles', sfg:'America/Los_Angeles',
+  sf: 'America/Los_Angeles',   // alias — see PARKS['sf'] note above
   sea:'America/Los_Angeles', oak:'America/Los_Angeles',
   ath:'America/Los_Angeles',
 };

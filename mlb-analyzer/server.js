@@ -246,6 +246,50 @@ app.get('/health', (req, res) => {
   } catch (e) {
     out.woba_freshness_error = e && e.message || String(e);
   }
+  // Park-map coverage check. Any scheduled game whose home key doesn't
+  // resolve in services/weather.js PARKS silently no_park-skips in
+  // runWeatherJob — buries the failure in cron_log skip_reasons where
+  // it hid for a full season on SF-home games (game_ids end in `-sf`
+  // but only PARKS['sfg'] was mapped). This surfaces every unresolved
+  // key across today + tomorrow so the miss can't hide again. Sets
+  // status='degraded' when the list is non-empty; not critical
+  // (individual game weather is degradable), but the operator should
+  // know before the next slate scores.
+  try {
+    const { q } = require('./db/schema');
+    const { PARKS } = require('./services/weather');
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const tomorrow = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      return d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    })();
+    const rows = (q.getGamesByDate.all(today) || []).concat(q.getGamesByDate.all(tomorrow) || []);
+    const unresolvedByKey = {};
+    for (const g of rows) {
+      const parts = (g.game_id || '').split('-');
+      const homeKey = (parts[1] || '').toLowerCase();
+      if (!homeKey) continue;
+      if (!PARKS[homeKey]) {
+        if (!unresolvedByKey[homeKey]) unresolvedByKey[homeKey] = [];
+        unresolvedByKey[homeKey].push({ game_date: g.game_date, game_id: g.game_id });
+      }
+    }
+    const unresolvedList = Object.entries(unresolvedByKey).map(([key, games]) => ({ key, games }));
+    out.park_map_gaps = {
+      dates_checked: [today, tomorrow],
+      total_games_checked: rows.length,
+      unresolved_home_keys: unresolvedList,
+    };
+    if (unresolvedList.length > 0) {
+      if (out.status === 'ok') out.status = 'degraded';
+      out.status_reason = (out.status_reason ? out.status_reason + '; ' : '')
+        + 'park_map_gaps: ' + unresolvedList.length + ' unresolved home key(s) '
+        + '(' + unresolvedList.map(u => u.key + '×' + u.games.length).join(', ') + ')';
+    }
+  } catch (e) {
+    out.park_map_gaps_error = e && e.message || String(e);
+  }
   res.json(out);
 });
 
