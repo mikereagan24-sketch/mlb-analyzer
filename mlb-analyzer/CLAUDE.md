@@ -153,6 +153,57 @@ Pre-flight for any PR that adds a new `bet_signals` writer:
    (e.g. `POST /signals/manual`), that's fine — the ruling only
    binds automated writers. User writes are the source of truth.
 
+## Skewed-residual analysis discipline (2026-08-06)
+
+**Run-total residuals are right-skewed with a hard floor around 4-6
+total runs and a long upper tail (20+ run blowouts happen).
+MEAN-based residual analysis on this data systematically reads as
+under-forecast bias even when the model is per-game centered. Always
+report median AND sign-split alongside mean, and check whether the
+finding survives removing blowouts, before proposing any level or
+temp-curve correction.**
+
+Reason: Phase C1 produced two confident wrong conclusions in a single
+2026-08-06 session — a "global under-forecast of ~0.9 runs" reading
+from mean residual = +0.815 (median was +0.190, sign-split 51/49,
+non-blowout mean −0.309), and a "temp slope of 0.0197 runs/°F"
+reading from OLS on individual rows (median-based bucket slope was
+−0.00054, effectively zero). Both would have driven changes that
+removed the working Under-lean (Unders emit 258:113 over Overs in
+the same window and lose −4.6% ROI vs Overs' −9.5%). See
+`docs/retraction-c1-mean-bias-findings-2026-08-06.md` for the full
+retraction and `docs/shadow-mode-90f-ceiling-2026-08-06.md` for the
+one open temp-curve question (90°F+ ceiling) that survived the
+distributional cross-check.
+
+Required for any run-total residual analysis:
+
+1. **Mean AND median** side-by-side, overall and per bucket. A big
+   mean-median gap indicates skew, not bias.
+2. **Sign-split** (% with residual > 0 vs < 0). A calibrated model
+   should be near 50/50 even if the mean is nonzero. Under 55% or
+   over 45% is the informative range; near 50 is centered.
+3. **Trimmed mean** (5%/5% and 10%/10%). If the untrimmed and
+   trimmed means diverge by more than ~0.3 runs, the mean is
+   tail-driven.
+4. **Blowout-excluded mean.** Drop rows with `actual_total ≥ 15`
+   (top-decile-of-outcomes for MLB) and re-report the mean. If the
+   sign flips or the magnitude collapses, the "bias" was blowout
+   attribution.
+5. **For SLOPE fits**, cross-check OLS-on-individual-rows against
+   weighted-OLS-on-bucket-medians. If slopes differ materially, the
+   OLS slope is capturing intercept-shift-across-buckets from tail
+   skew, not a genuine relationship.
+6. **Signal-side check.** If a proposed change would flip signal
+   distribution (e.g. more Overs by fixing a supposed under-forecast),
+   verify the target side is currently outperforming the emitted side
+   in the same window before recommending. A "fix" that removes a
+   working feature is a net loss regardless of the residual math.
+
+The reference analysis template is
+`tmp/temp-attribution-c1-distributional-2026-08-06.js` — copy its
+statistics block for any future residual-driven proposal.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
