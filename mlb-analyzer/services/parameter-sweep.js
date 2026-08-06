@@ -346,9 +346,17 @@ function loadWobaSnapshot(db, snapshotDate) {
 // per-combination inner loop reuses this — only the model settings
 // change between combos, not the game data.
 function loadGames(db, fromDate, toDate) {
+  // Contamination filter (2026-08-06): the parameter sweep reruns
+  // runModel per combo on historical rows; a row whose persisted
+  // weather is known-wrong feeds biased inputs into EVERY combo
+  // equally, but the biased contribution can favor different combos
+  // depending on how the weather term interacts with the parameter
+  // being swept. Cleaner to exclude the rows entirely so the sweep
+  // sees only trusted weather inputs.
   return db.prepare(
     "SELECT * FROM game_log WHERE game_date >= ? AND game_date <= ? "
     + "AND model_total IS NOT NULL "  // skip games the model never finished
+    + "AND weather_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 }

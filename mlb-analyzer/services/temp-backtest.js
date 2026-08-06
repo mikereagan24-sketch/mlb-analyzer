@@ -361,10 +361,17 @@ function runTempBacktest(opts) {
     DEFENSE_FRV_ENABLED: false,
   });
 
+  // Contamination filter (2026-08-06): excludes rows whose persisted
+  // wind_*/temp_f/temp_run_adj values are known-wrong per the
+  // weather_contamination_reason tag. The 56 ATH Coliseum/Vegas rows
+  // and the pacific/mountain/central naive-hour cohorts feed
+  // demonstrably biased weather into runModel; leaving them in would
+  // silently re-introduce the bias this backfill was meant to remove.
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
+    + "AND weather_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 

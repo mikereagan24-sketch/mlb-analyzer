@@ -384,10 +384,14 @@ function runRunMultTotalsBacktest(opts) {
 
   const liveRunMult = Number(baseSettings.RUN_MULT != null ? baseSettings.RUN_MULT : 48);
 
+  // Contamination filter (2026-08-06): rerun uses temp_run_adj +
+  // wind_factor to compute runs-adjusted totals; contaminated rows
+  // would feed known-wrong weather into the run_mult sweep.
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
+    + "AND weather_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 

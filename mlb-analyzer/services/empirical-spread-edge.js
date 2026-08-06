@@ -175,12 +175,19 @@ function cellKey(homeWinProb, modelTotal) {
 // report / job pass — it's a few-hundred-row table scan and small
 // arithmetic, but it's silly to repeat per-game.
 function buildCellIndex(db) {
+  // Contamination filter (2026-08-06): the cell index keys on
+  // (win_prob, model_total). model_total was computed at emit time
+  // using the row's stored weather; a contaminated row lands in the
+  // WRONG cell (its biased model_total sends it to a different
+  // bucket than a clean-weather twin would). Excluding contaminated
+  // rows keeps the empirical margin distribution clean.
   const rows = db.prepare(
       "SELECT model_home_ml, model_away_ml, model_total, home_score, away_score "
     + "FROM game_log "
     + "WHERE home_score IS NOT NULL AND away_score IS NOT NULL "
     + "  AND model_home_ml IS NOT NULL AND model_away_ml IS NOT NULL "
-    + "  AND model_total IS NOT NULL"
+    + "  AND model_total IS NOT NULL "
+    + "  AND weather_contamination_reason IS NULL"
   ).all();
   const cells = new Map();
   for (const c of ALL_CELLS) cells.set(c, []);
@@ -421,6 +428,13 @@ function generateEmpiricalSpreadSignals(db, date) {
   const cellIndex = buildCellIndex(db);
 
   // Games tonight with spread coverage AND a model line.
+  // NOTE: intentionally NOT filtering weather_contamination_reason
+  // here. This is the LIVE signal emission path — filtering would
+  // suppress signal generation for currently-tagged games. Historical
+  // contamination is caught DOWNSTREAM in empirical-spread-roi (which
+  // JOINs to game_log with the filter) so the reported ROI stays
+  // clean, while the raw signal history keeps every emission the
+  // model actually produced.
   const games = db.prepare(
       "SELECT g.game_date, g.game_id, g.away_team, g.home_team, "
     + "       g.model_home_ml, g.model_away_ml, g.model_total "

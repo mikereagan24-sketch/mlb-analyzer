@@ -190,6 +190,11 @@ function fetchGradedRows(db, fromDate, toDate) {
       AND e.pair_id IS NOT NULL
       AND (? IS NULL OR e.game_date >= ?)
       AND (? IS NULL OR e.game_date <= ?)
+      -- Contamination filter (2026-08-06): pairs with the market
+      -- capture; contaminated weather biased the model's spread
+      -- edge at emit time, so the resulting signal decisions and
+      -- the ROI attributed to them are weather-biased.
+      AND g.weather_contamination_reason IS NULL
     ORDER BY e.game_date, e.game_id, e.pair_id, e.capture_track,
              e.side, e.generated_at DESC
   `).all(fromDate || null, fromDate || null, toDate || null, toDate || null);
@@ -572,6 +577,13 @@ function fetchMarketRows(db, fromDate, toDate) {
     WHERE e.outcome IS NOT NULL
       AND (? IS NULL OR e.game_date >= ?)
       AND (? IS NULL OR e.game_date <= ?)
+      -- Contamination filter (2026-08-06): the ROI readout is used to
+      -- judge model calibration; rows whose game_log weather is
+      -- tagged as known-wrong emitted their signal with biased
+      -- inputs and would skew the reported ROI. The g.* JOIN above
+      -- carries the tag; excluding IS NOT NULL rows keeps only
+      -- trusted-weather signals in the calibration window.
+      AND g.weather_contamination_reason IS NULL
     ORDER BY e.game_date, e.game_id, e.market_type, e.capture_track,
              e.generated_at DESC
   `).all(fromDate || null, fromDate || null, toDate || null, toDate || null);

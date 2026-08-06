@@ -272,10 +272,16 @@ function runFrvBacktest(opts) {
     CATCHER_FRAMING_ENABLED: true, DEFENSE_FRV_ENABLED: false,
   });
 
+  // Contamination filter (2026-08-06): FRV backtest reruns runModel
+  // per cfgB/cfgC on historical rows; contaminated weather would feed
+  // biased temp_run_adj/wind_factor into both configs, muddying the
+  // signal this backtest is trying to isolate (fielding-run-value on
+  // vs off).
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
+    + "AND weather_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 
