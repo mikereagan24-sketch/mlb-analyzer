@@ -108,6 +108,17 @@ registerBackfillTask({
     const { pickVenueOverride } = require('../scraper');
     const { isSealedDome } = require('../roof-prior');
 
+    // Optional home_team filter. When set (e.g. 'SF' after the
+    // 2026-08-06 sf/sfg PARKS-alias fix), scopes the backfill to
+    // dates where that team plays home. runWeatherJob still writes
+    // every game on those dates (unavoidable — it's a per-date job),
+    // and non-target-team rows get identical archive values written
+    // over identical stored values (idempotent for data; only bumps
+    // weather_quality_at). Dry-run's row-level SELECT also honors
+    // the filter so projections match live scope. Case-insensitive
+    // compare against game_log.home_team stored case.
+    const homeTeamFilter = params.home_team ? String(params.home_team).toUpperCase() : null;
+
     // Total-scope planning read: how many rows are in play, and how
     // many are already contaminated (and will be skipped).
     const planning = db.prepare(
@@ -116,8 +127,9 @@ registerBackfillTask({
       + "  SUM(CASE WHEN weather_contamination_reason IS NOT NULL THEN 1 ELSE 0 END) AS contaminated, "
       + "  SUM(CASE WHEN weather_contamination_reason IS NULL THEN 1 ELSE 0 END) AS in_scope "
       + "FROM game_log WHERE game_date >= ? AND game_date <= ? AND COALESCE(is_removed, 0) = 0"
-    ).get(params.from, params.to);
-    onProgress({ phase: 'planning', ...planning });
+      + (homeTeamFilter ? " AND UPPER(home_team) = ?" : "")
+    ).get(...(homeTeamFilter ? [params.from, params.to, homeTeamFilter] : [params.from, params.to]));
+    onProgress({ phase: 'planning', home_team_filter: homeTeamFilter, ...planning });
 
     // Crossing histogram + failure buckets. Same shape for dry / live
     // so operator diffs are apples-to-apples.
@@ -126,7 +138,19 @@ registerBackfillTask({
     const fetchFailures = { empty_response: 0, bad_index: 0, non_finite_value: 0, exception: 0, other: 0 };
     const skipReasons   = { dome: 0, no_park: 0, contaminated: 0, no_temp_stored: 0 };
     const sampleRows    = [];    // first 10 changed rows for eyeball
-    const dates = eachDate(params.from, params.to);
+    // Filter dates to only those where the target home_team plays home
+    // (when a home_team filter is set). Cuts runWeatherJob invocations
+    // from ~158 to ~50 for a single-team backfill.
+    let dates = eachDate(params.from, params.to);
+    if (homeTeamFilter) {
+      const rows = db.prepare(
+        "SELECT DISTINCT game_date FROM game_log "
+        + "WHERE game_date >= ? AND game_date <= ? "
+        + "  AND UPPER(home_team) = ? AND COALESCE(is_removed, 0) = 0"
+      ).all(params.from, params.to, homeTeamFilter);
+      const dateSet = new Set(rows.map(r => r.game_date));
+      dates = dates.filter(d => dateSet.has(d));
+    }
     let processed = 0;
     let totalRowsSeen = 0;
     let liveWritesUpdated = 0;
@@ -248,7 +272,8 @@ registerBackfillTask({
         + "  temp_f, temp_run_adj, roof_status "
         + "FROM game_log WHERE game_date = ? AND COALESCE(is_removed, 0) = 0 "
         + "  AND weather_contamination_reason IS NULL"
-      ).all(date);
+        + (homeTeamFilter ? " AND UPPER(home_team) = ?" : "")
+      ).all(...(homeTeamFilter ? [date, homeTeamFilter] : [date]));
       for (const g of rows) {
         totalRowsSeen++;
         if (g.temp_f == null && g.temp_run_adj == null) {
@@ -330,6 +355,7 @@ registerBackfillTask({
       task: 'weather_backfill_season',
       dry_run: dryRun,
       window: { from: params.from, to: params.to, dates: dates.length },
+      home_team_filter: homeTeamFilter,
       planning,
       rows_seen: totalRowsSeen,
       live_writes_updated: liveWritesUpdated,
