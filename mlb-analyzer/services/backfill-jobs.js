@@ -157,3 +157,4 @@ module.exports = {
 require('./backfill-tasks/sp-forecast-ip');
 require('./backfill-tasks/weather-contamination-ath');
 require('./backfill-tasks/weather-backfill-season');
+require('./backfill-tasks/weather-contamination-naive-hour');

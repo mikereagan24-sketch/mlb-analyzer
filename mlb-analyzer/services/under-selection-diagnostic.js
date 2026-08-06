@@ -294,10 +294,15 @@ function runUnderSelectionDiagnostic(opts) {
   // FRV explicitly off.
   const cfg = Object.assign({}, baseSettings, { DEFENSE_FRV_ENABLED: false });
 
+  // Contamination filter (2026-08-06): the under-selection diagnostic
+  // re-runs runModel per game and slices ROI by roof / park_factor /
+  // model_total; contaminated rows would inject biased weather into
+  // slices the diagnostic is trying to interpret cleanly.
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
+    + "AND weather_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 

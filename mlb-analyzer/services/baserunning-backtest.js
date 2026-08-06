@@ -577,10 +577,16 @@ function runBaserunningBacktest(opts) {
       / Object.values(denominatorByTeam).length
     : null;
 
+  // Contamination filter (2026-08-06): line 744 calls model.runModel
+  // per game with cfg { with-BSR vs without-BSR }; contaminated
+  // weather would feed biased temp_run_adj/wind_factor into both
+  // config branches equally, muddying the BSR isolation this
+  // backtest is trying to measure.
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
+    + "AND weather_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 
