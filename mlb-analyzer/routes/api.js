@@ -2770,6 +2770,99 @@ function summarizeTargetWithWL(target, byCategory) {
 }
 
 // ============================================================
+// Admin read-only query endpoint — whitelisted SELECTs, JSON out.
+//
+// Motivation: verification of backfill / calibration work has been
+// "pull the 550 MB DB and grep locally". Most of what we actually
+// need is a handful of rows or a single COUNT. This endpoint runs
+// a whitelisted, parameterized query server-side and returns JSON.
+//
+// The whitelist lives in services/admin-queries.js. Every entry
+// declares its SQL, its param schema, and a description. This route
+// resolves the entry, parses/validates params against the schema,
+// binds them via better-sqlite3 positional params, caps the result
+// at MAX_ROWS, and returns:
+//   { query: { name, sql, params }, rows: [...], count, truncated }
+//
+// GET /admin/query           — list available queries + their param specs.
+// GET /admin/query/:name?…   — run a query with query-string params.
+//
+// Read-only. The whitelist checks each SQL starts with SELECT/WITH
+// at module load, and better-sqlite3's .all() path is used which
+// won't execute UPDATE/DELETE/INSERT semantics against .prepare().
+// Admin-token gated via the same requireAdminToken middleware as
+// the write endpoints.
+// ============================================================
+router.get('/admin/query', requireAdminToken, (req, res) => {
+  try {
+    const { listQueries } = require('../services/admin-queries');
+    res.json({
+      queries: listQueries(),
+      note: 'GET /api/admin/query/<name>?<param>=<value> — capped at 1000 rows per response.',
+    });
+  } catch (e) {
+    console.error('[admin-query] list error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/admin/query/:name', requireAdminToken, (req, res) => {
+  try {
+    const { getQuery, parseParam, MAX_ROWS } = require('../services/admin-queries');
+    const entry = getQuery(req.params.name);
+    if (!entry) {
+      const { listQueries } = require('../services/admin-queries');
+      return res.status(404).json({
+        error: 'unknown query: ' + req.params.name,
+        available_queries: listQueries().map(q => q.name),
+      });
+    }
+
+    // Parse & validate each declared param.
+    const parsed = {};
+    const errors = [];
+    for (const spec of entry.params) {
+      const r = parseParam(req.query[spec.name], spec);
+      if (!r.ok) errors.push(r.error);
+      else parsed[spec.name] = r.value;
+    }
+    if (errors.length) {
+      return res.status(400).json({
+        error: 'param validation failed',
+        details: errors,
+        expected_params: entry.params,
+      });
+    }
+
+    // Build bind array per bindOrder.
+    const binds = entry.bindOrder.map(n => parsed[n]);
+
+    // Execute. .all() runs SELECTs; if a whitelist entry were ever
+    // non-SELECT, better-sqlite3 would throw at prepare/run time.
+    const stmt = db.prepare(entry.sql);
+    let rows;
+    try {
+      rows = stmt.all.apply(stmt, binds);
+    } catch (e) {
+      return res.status(500).json({ error: 'query execution failed: ' + e.message });
+    }
+
+    const truncated = rows.length > MAX_ROWS;
+    if (truncated) rows = rows.slice(0, MAX_ROWS);
+
+    res.json({
+      query: { name: entry.name, description: entry.description, sql: entry.sql, params: parsed },
+      count: rows.length,
+      truncated,
+      rows,
+    });
+  } catch (e) {
+    console.error('[admin-query] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
 // Admin backfill endpoint — task-keyed prod-write dispatcher.
 //
 // Motivation: refresh-db.sh only pulls a snapshot DOWN. Any local
