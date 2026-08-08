@@ -28,6 +28,7 @@
 
 const { db } = require('../db/schema');
 const fetch = require('node-fetch');
+const { PARKS, computeEffectiveWeather } = require('./weather');
 
 // All 7 retractable-roof venue_ids — verified empirically against
 // statsapi for Apr-Jun 2026. SEA (680) IS included here: the
@@ -95,7 +96,8 @@ function selectCandidates(opts) {
   const cutoff = new Date(Date.now() - lookbackDays * 86400000)
     .toISOString().slice(0, 10);
   return db.prepare(
-    'SELECT game_date, game_id, game_pk, venue_id, roof_status, roof_confidence '
+    'SELECT game_date, game_id, game_pk, venue_id, roof_status, roof_confidence, '
+    + 'wind_speed, wind_dir, temp_f, wind_factor, temp_run_adj '
     + 'FROM game_log WHERE venue_id IN (' + placeholders + ') '
     + 'AND game_pk IS NOT NULL AND game_date >= ? '
     + 'ORDER BY game_date'
@@ -115,6 +117,7 @@ async function runRoofStatusCorrect(opts) {
     candidates: 0,
     fetched: 0,
     updated: 0,
+    weather_recomputed: 0,  // subset of updated where wind_factor / temp_run_adj were rewritten
     nochange: 0,
     nodata: 0,        // completed-but-blank-condition OR not-yet-final
     fetch_errors: 0,  // network / JSON failures (each counted; row stays)
@@ -158,6 +161,27 @@ async function runRoofStatusCorrect(opts) {
       summary.nochange++;
       continue;
     }
+    // Recompute wind_factor + temp_run_adj under the corrected roof
+    // state. Without this, a game flipped open→closed keeps its
+    // open-roof-computed weather signals (wind_factor nonzero,
+    // temp_run_adj nonzero) even though the sealed dome would have
+    // zeroed them at write time — the exact bug this corrector was
+    // silently causing on 7 of 23 ARI corrections. Only recompute
+    // when raw weather is present (rows written pre-weather-job stay
+    // untouched: they have no wind_speed/wind_dir/temp_f to gate).
+    const homeKey = String(r.game_id).split('-')[1];
+    const park = PARKS[homeKey];
+    const hasRawWeather = park
+      && r.wind_speed != null && r.wind_dir != null && r.temp_f != null;
+    let newWindFactor = null, newTempAdj = null;
+    if (hasRawWeather) {
+      const eff = computeEffectiveWeather({
+        windSpeed: r.wind_speed, windDir: r.wind_dir, tempF: r.temp_f,
+        roofStatus: res.roof, venueId: r.venue_id, park,
+      });
+      newWindFactor = eff.windFactor;
+      newTempAdj = eff.tempRunAdj;
+    }
     updates.push({
       game_date: r.game_date,
       game_id:   r.game_id,
@@ -166,6 +190,11 @@ async function runRoofStatusCorrect(opts) {
       after:     res.roof + '/actual',
       condition: res.condition,
       roof:      res.roof,
+      recomputeWeather: hasRawWeather,
+      oldWindFactor: r.wind_factor,
+      oldTempAdj: r.temp_run_adj,
+      newWindFactor,
+      newTempAdj,
     });
     await new Promise(rs => setTimeout(rs, 50));
   }
@@ -177,21 +206,37 @@ async function runRoofStatusCorrect(opts) {
 
   // One tx for the whole batch. 'actual' wins over any prior value —
   // it's the canonical answer per the confidence precedence (actual >
-  // announced > estimated/prior).
-  const updateStmt = db.prepare(
+  // announced > estimated/prior). Weather columns (wind_factor,
+  // temp_run_adj) are rewritten under the corrected roof gate when
+  // raw weather is present; rows with NULL raw weather get the
+  // roof-only variant.
+  const updateStmtBoth = db.prepare(
+    "UPDATE game_log SET roof_status = ?, roof_confidence = 'actual', "
+    + 'wind_factor = ?, temp_run_adj = ? '
+    + 'WHERE game_date = ? AND game_id = ?'
+  );
+  const updateStmtRoofOnly = db.prepare(
     "UPDATE game_log SET roof_status = ?, roof_confidence = 'actual' "
     + 'WHERE game_date = ? AND game_id = ?'
   );
   const tx = db.transaction((rows) => {
     for (const u of rows) {
-      const info = updateStmt.run(u.roof, u.game_date, u.game_id);
+      const info = u.recomputeWeather
+        ? updateStmtBoth.run(u.roof, u.newWindFactor, u.newTempAdj, u.game_date, u.game_id)
+        : updateStmtRoofOnly.run(u.roof, u.game_date, u.game_id);
       if (info.changes) {
         summary.updated++;
-        summary.rows.push({
+        if (u.recomputeWeather) summary.weather_recomputed++;
+        const logRow = {
           game_date: u.game_date, game_id: u.game_id,
           park: ROOF_VENUES[u.venue_id] || ('venue_' + u.venue_id),
           before: u.before, after: u.after, condition: u.condition,
-        });
+        };
+        if (u.recomputeWeather) {
+          logRow.wind_factor = { before: u.oldWindFactor, after: u.newWindFactor };
+          logRow.temp_run_adj = { before: u.oldTempAdj, after: u.newTempAdj };
+        }
+        summary.rows.push(logRow);
       }
     }
   });
@@ -206,6 +251,7 @@ async function runRoofStatusCorrect(opts) {
   console.log('[roof-correct] candidates=' + summary.candidates
     + ' fetched=' + summary.fetched
     + ' updated=' + summary.updated
+    + ' weather_recomputed=' + summary.weather_recomputed
     + ' nochange=' + summary.nochange
     + ' nodata=' + summary.nodata
     + ' fetch_errors=' + summary.fetch_errors);
