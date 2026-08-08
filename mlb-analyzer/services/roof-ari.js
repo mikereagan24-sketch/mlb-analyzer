@@ -2,23 +2,34 @@
 
 // D-backs roof-status ingest (Node, runs on Render).
 //
-// Mirrors scripts/scrape-ari-roof.sh + scripts/ingest_roof_status.py in
-// one Node module so the prod app (Node-only on Render) can ingest the
-// official D-backs roof page directly, before runWeatherJob fires.
+// Fetches the official D-backs roof page and writes per-game announced
+// roof_status into game_log before runWeatherJob fires.
 //
 // Flow per call (runRoofStatusIngest(date)):
 //   1. fetch https://www.mlb.com/dbacks/ballpark/information/roof
-//   2. parse the server-rendered <td> cells → rows of
-//        { game_date: 'YYYY-MM-DD', opponent, status: 'open'|'closed', game_time }
-//      Same parser logic as the shell script (matches a date cell of
-//      shape "Sunday, Jun 19" → YYYY = current calendar year, then reads
-//      time / opponent / status from the next cells; falls back to
-//      scanning ±5 cells for status if the table column order shifts).
-//   3. For each scraped row, UPDATE game_log SET roof_status,
-//      roof_confidence='announced' WHERE venue_id=15 AND game_date=?.
-//      A scraped row with no matching game_log entry is reported as
-//      unmatched and NOT written — guards against wrong-year labels at
-//      the off-season boundary.
+//   2. Extract the Next.js __NEXT_DATA__ JSON block from the raw HTML
+//      and walk the tree to the Contentful entry with
+//      slug='ari-table-roof-status'. rawData.tableHeadStrings names the
+//      columns (Date | Time | Opponent | Roof); rawData.tableBodyStrings
+//      is a <tr>-per-game HTML fragment. Parsed row-wise, header-indexed.
+//   3. Roof values are UPPERCASE ("CLOSED"/"OPEN") for announced games
+//      and "--" for not-yet-announced forward games in the homestand
+//      table. "--" rows are DELIBERATELY SKIPPED — they fall through to
+//      the ARI prior tier (which for venue 15 is null → default-open in
+//      runWeatherJob, preserving the pre-scraper behavior). Writing "--"
+//      as open would silently produce the same bug we're fixing.
+//   4. For each recognized row (CLOSED/OPEN), UPDATE game_log SET
+//      roof_status, roof_confidence='announced' WHERE venue_id=15 AND
+//      game_date=?. Scraped rows with no matching game_log entry are
+//      reported as unmatched and NOT written — guards against wrong-year
+//      labels at the off-season boundary.
+//
+// Pre-2026-08 the page shipped server-rendered <td> cells and the
+// scraper regex'd them directly. MLB rebuilt as a client-rendered
+// Next.js app; the raw HTML now has one <td> and zero opponent names.
+// The full table is still present, but only inside the __NEXT_DATA__
+// hydration payload — hence the parse switches to JSON. See
+// docs/roof-ari-nextdata-migration-2026-08 for the diagnosis.
 //
 // SAFETY (called from runWeatherJob — must never break the weather job):
 //   - HTTP / parse failure → return { success: false, ... }. Do NOT throw.
@@ -26,11 +37,13 @@
 //     announced value with empty data).
 //   - Empty scraped set → return { success: true, scraped: 0, updated: 0 }
 //     with reason 'empty_scrape'. Existing roof_status preserved.
+//     Health check (see empty-scrape branch below) escalates to
+//     console.error with the '[roof-ari-health]' grep tag when there
+//     are upcoming home games it should have covered.
 //   - Confidence guard: never DOWNGRADES. If a row already has
-//     roof_confidence='actual' (post-game ground truth, hypothetically
-//     a future enhancement) and the scrape would write 'announced',
-//     the actual stays. Currently no upstream writes 'actual', so this
-//     is purely defensive.
+//     roof_confidence='actual' (post-game ground truth, written by
+//     roof-correct.js) and the scrape would write 'announced', the
+//     actual stays.
 //
 // Returns a summary object with { success, scraped, updated, nochange,
 // unmatched, errors }. Caller logs; nothing thrown.
@@ -47,69 +60,134 @@ const MONTH_NUM = {
   Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12',
 };
 
-// Date-cell shape: "Sunday, Jun 19" — weekday, space-comma, mon abbr,
-// day-of-month. Anchored so we don't false-match other table cells.
-const DATE_CELL_RE = /^[A-Za-z]+,\s+[A-Z][a-z]+\s+[0-9]+$/;
+// Contentful slug of the roof-status table in the __NEXT_DATA__ tree.
+// Stable across the last several editorial republishes; if MLB ever
+// renames it, the walker returns null and the empty-scrape health check
+// fires (which is the actionable signal).
+const ROOF_TABLE_SLUG = 'ari-table-roof-status';
 
+// "Mon, Aug. 3" | "Sunday, Jun 19" | "Tues, June 16" → "YYYY-MM-DD".
+// Tolerates the trailing-period-on-month-abbr form the Next.js copy
+// uses ("Aug.") as well as the plain form the old server-rendered
+// copy used ("Aug"). Returns null when the cell doesn't parse.
 function dateCellToIso(cell, year) {
-  // cell shapes seen on prod: "Mon, June 15", "Tues, June 16",
-  // "Sunday, Jun 19" — variable weekday abbr, variable month length.
-  // Prefix-match the month to its first 3 chars to handle both
-  // "Jun" and "June" (same approach as the shell script's awk).
-  const after = cell.replace(/^[A-Za-z]+,\s+/, '');
+  if (!cell) return null;
+  const after = String(cell).trim().replace(/^[A-Za-z]+,\s+/, '');
   const parts = after.split(/\s+/);
   if (parts.length < 2) return null;
-  const monKey = String(parts[0]).slice(0, 3);
+  const monRaw = String(parts[0]).replace(/\.$/, '');
+  const monKey = monRaw.slice(0, 3);
   const mm = MONTH_NUM[monKey.charAt(0).toUpperCase() + monKey.slice(1).toLowerCase()];
   if (!mm) return null;
-  const dd = String(parts[1]).padStart(2, '0');
-  return `${year}-${mm}-${dd}`;
+  const dayNum = parseInt(parts[1], 10);
+  if (!(dayNum >= 1 && dayNum <= 31)) return null;
+  return `${year}-${mm}-${String(dayNum).padStart(2, '0')}`;
 }
 
-// Parse the raw HTML response into structured rows. Same shape the
-// shell script's awk stage produced. Order-preserving dedupe at the
-// end (the roof table is embedded twice — hydrated DOM + JSON payload).
-function parseRoofHtml(html, year) {
-  if (!html) return [];
-  // Unescape the JSON-hydration cells the same way the shell did so
-  // both copies of the table parse identically.
-  const unesc = html
-    .replace(/\\u003c/g, '<')
-    .replace(/\\u003e/g, '>')
-    .replace(/\\n/g, ' ')
-    .replace(/\\t/g, ' ')
-    .replace(/\\u0026/g, '&');
+// Locate the __NEXT_DATA__ <script>...</script> block and parse its
+// JSON body. Returns null on any failure; caller falls through to
+// empty-scrape handling.
+function extractNextData(html) {
+  if (!html) return null;
+  const rx = /<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/;
+  const m = html.match(rx);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch (e) { return null; }
+}
 
-  const cells = [];
-  const td = /<td>([^<]*)<\/td>/g;
-  let m;
-  while ((m = td.exec(unesc)) !== null) cells.push(m[1]);
-  if (!cells.length) return [];
-
-  const out = [];
-  for (let i = 0; i < cells.length; i++) {
-    const line = cells[i];
-    if (!DATE_CELL_RE.test(line)) continue;
-    const gdate = dateCellToIso(line, year);
-    if (!gdate) continue;
-    const gtime = cells[i + 1];
-    const opp   = cells[i + 2];
-    let status  = cells[i + 3];
-    // Fallback scan: column order occasionally shifts; status is the
-    // only cell that's ever exactly "Open" or "Closed", so search
-    // forward up to 5 cells if the strict slot didn't hit.
-    if (status !== 'Open' && status !== 'Closed') {
-      for (let j = i + 1; j <= i + 5 && j < cells.length; j++) {
-        if (cells[j] === 'Open' || cells[j] === 'Closed') { status = cells[j]; break; }
-      }
-    }
-    if (status === 'Open' || status === 'Closed') {
-      out.push({ game_date: gdate, opponent: opp, status: status.toLowerCase(), game_time: gtime });
-    }
+// Walk the __NEXT_DATA__ tree for the first Contentful entry whose
+// slug matches ROOF_TABLE_SLUG. The exact path is
+// props.pageProps.page.slots["Left Rail"][1].slots["Main Column"][1]
+// today, but slug-lookup is stable against layout reshuffles.
+function findRoofTableEntry(node) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.slug === ROOF_TABLE_SLUG && node.rawData) return node;
+  if (Array.isArray(node)) {
+    for (const n of node) { const r = findRoofTableEntry(n); if (r) return r; }
+    return null;
   }
-  // Order-preserving dedupe on game_date — the table appears twice in
-  // the page, identical rows collapse to one. Keeping order makes the
-  // log output reproducible.
+  for (const k of Object.keys(node)) {
+    const r = findRoofTableEntry(node[k]);
+    if (r) return r;
+  }
+  return null;
+}
+
+// Parse an HTML fragment like "<tr><td>..</td><td>..</td></tr>..." into
+// an array of cell-arrays, one per <tr>. <td> bodies are trimmed;
+// nested markup isn't expected (the table is pure text), so a simple
+// [^<]* body match is safe.
+function parseTableRows(fragment) {
+  const rows = [];
+  if (!fragment) return rows;
+  const trRx = /<tr>([\s\S]*?)<\/tr>/g;
+  const tdRx = /<td>([^<]*)<\/td>/g;
+  let tm;
+  while ((tm = trRx.exec(fragment)) !== null) {
+    const cells = [];
+    let cm;
+    while ((cm = tdRx.exec(tm[1])) !== null) cells.push(cm[1].trim());
+    if (cells.length) rows.push(cells);
+  }
+  return rows;
+}
+
+// Header row → { Date, Time, Opponent, Roof } → column indexes. Reading
+// by header name makes us resilient to column reordering (any of the
+// four columns can move without breaking us; a missing column returns
+// -1 and the parser exits with 0 rows so the health check fires).
+function parseHeaderIndexes(headerFragment) {
+  const cols = [];
+  if (!headerFragment) return { date: -1, time: -1, opponent: -1, roof: -1 };
+  const thRx = /<th>([^<]*)<\/th>/g;
+  let hm;
+  while ((hm = thRx.exec(headerFragment)) !== null) cols.push(hm[1].trim().toLowerCase());
+  return {
+    date:     cols.indexOf('date'),
+    time:     cols.indexOf('time'),
+    opponent: cols.indexOf('opponent'),
+    roof:     cols.indexOf('roof'),
+  };
+}
+
+// Parse the raw HTML response into structured rows:
+//   [{ game_date: 'YYYY-MM-DD', opponent, status: 'open'|'closed', game_time }, ...]
+// Only rows with a recognized status ('open'/'closed', any case) are
+// returned. "--" placeholders (forward-dated games the D-backs haven't
+// announced yet) and blank / unknown values are DELIBERATELY skipped
+// so they fall through to the prior tier — writing them as open would
+// silently produce the same "closed reality, model reads open" bug.
+// Signature preserved so callers/tests don't need to change; `year` is
+// used to complete the month-day dates the page ships.
+function parseRoofHtml(html, year) {
+  const data = extractNextData(html);
+  if (!data) return [];
+  const entry = findRoofTableEntry(data);
+  if (!entry || !entry.rawData) return [];
+  const idx = parseHeaderIndexes(entry.rawData.tableHeadStrings);
+  if (idx.date < 0 || idx.roof < 0) return [];
+  const rows = parseTableRows(entry.rawData.tableBodyStrings);
+  const maxIdx = Math.max(idx.date, idx.time, idx.opponent, idx.roof);
+  const out = [];
+  for (const cells of rows) {
+    if (cells.length <= maxIdx) continue;
+    const gdate = dateCellToIso(cells[idx.date], year);
+    if (!gdate) continue;
+    const roofRaw = String(cells[idx.roof] || '').trim().toLowerCase();
+    let status;
+    if (roofRaw === 'closed') status = 'closed';
+    else if (roofRaw === 'open') status = 'open';
+    else continue;  // "--" or anything else → skip, fall through to prior/default
+    out.push({
+      game_date: gdate,
+      opponent:  idx.opponent >= 0 ? cells[idx.opponent] : '',
+      status,
+      game_time: idx.time >= 0 ? cells[idx.time] : '',
+    });
+  }
+  // Order-preserving dedupe on game_date — belt-and-suspenders in case
+  // MLB ever double-embeds the table (they historically did — old
+  // scraper's DOM + hydration copies).
   const seen = new Set();
   const dedup = [];
   for (const r of out) {
@@ -180,7 +258,35 @@ async function runRoofStatusIngest(date) {
   summary.scraped = scraped.length;
   if (!scraped.length) {
     summary.errors.push('empty_scrape');
-    console.warn('[roof-ari] empty scrape — leaving existing roof_status untouched');
+    // Health check: an empty scrape is only actionable when there are
+    // upcoming ARI home games it SHOULD have covered. Off-season / no-
+    // slate windows return 0 scraped and 0 expected legitimately.
+    // Do NOT tag upcoming rows as contaminated — that mutates the
+    // scoring path; the right response is to fix the scraper. The
+    // '[roof-ari-health]' tag is intentionally distinct from the
+    // regular '[roof-ari]' log prefix so ops can grep the alert
+    // without pulling in success-path noise.
+    let expected = 0;
+    try {
+      const runDate = date || new Date().toISOString().slice(0, 10);
+      const endDate = new Date(new Date(runDate).getTime() + 14 * 86400000)
+        .toISOString().slice(0, 10);
+      const row = db.prepare(
+        'SELECT COUNT(*) AS n FROM game_log '
+        + 'WHERE venue_id = ? AND game_date >= ? AND game_date <= ?'
+      ).get(CHASE_VENUE_ID, runDate, endDate);
+      expected = (row && row.n) || 0;
+    } catch (e) {
+      console.warn('[roof-ari-health] expected-count query failed (non-fatal): ' + e.message);
+    }
+    summary.expected_upcoming = expected;
+    if (expected > 0) {
+      console.error('[roof-ari-health] ALERT scraped=0 expected>=' + expected
+        + ' upcoming ARI home games in next 14 days from ' + (date || 'today')
+        + ' — scraper likely broken (roof_status left untouched)');
+    } else {
+      console.warn('[roof-ari] empty scrape (no upcoming ARI home games — likely off-season)');
+    }
     return summary;
   }
 
