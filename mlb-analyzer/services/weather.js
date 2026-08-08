@@ -430,7 +430,49 @@ function _shiftDate(dateStr, days) {
     + String(dt.getUTCDate()).padStart(2, '0');
 }
 
+// Step-function temperature-to-run adjustment written to game_log's
+// temp_run_adj column. Distinct from fetchParkWind's linear form above
+// (that one is intentionally kept separate; see the comment at
+// tempAdj on line 419). This step function is the ONE that lands in
+// the DB, so every write path that persists temp_run_adj must go
+// through this exact formula.
+function tempRunAdjFromTempF(tempF) {
+  if (tempF == null || !isFinite(tempF)) return null;
+  return tempF < 55 ? -0.5 : tempF < 70 ? 0 : tempF < 80 ? 0.3 : 0.6;
+}
+
+// Compute the effective (stored) wind_factor and temp_run_adj from raw
+// weather inputs, applying the roof-state gate exactly as
+// services/jobs.js:runWeatherJob does at initial write time.
+// Callers that reclassify a game's roof AFTER weather has been written
+// (services/roof-correct.js) must reuse this to keep the stored effective
+// values consistent with the corrected roof — otherwise wind_factor /
+// temp_run_adj stay computed under the wrong roof state.
+//
+// Args:
+//   windSpeed, windDir, tempF — raw weather from open-meteo (as stored
+//     in game_log.wind_speed / wind_dir / temp_f).
+//   roofStatus — 'open' | 'closed' | 'partial' (any case).
+//   venueId    — used to check sealed-dome status via roof-prior.
+//   park       — the PARKS entry (needs cfDir, sens) for wind attribution.
+// Returns: { windFactor, tempRunAdj } — the values to persist.
+function computeEffectiveWeather({ windSpeed, windDir, tempF, roofStatus, venueId, park }) {
+  const { isSealedDome } = require('./roof-prior');
+  const rawWindFactor = (park && windSpeed != null && windDir != null)
+    ? calcWindFactor(windDir, windSpeed, park)
+    : 0;
+  const rawTempAdj = tempRunAdjFromTempF(tempF);
+  const rawTempAdjNum = rawTempAdj == null ? 0 : rawTempAdj;
+  const st = String(roofStatus || 'open').toLowerCase();
+  const roofMult = st === 'closed' ? 0 : st === 'partial' ? 0.5 : 1;
+  const sealedClosed = st === 'closed' && isSealedDome(venueId);
+  const windFactor = sealedClosed ? 0 : rawWindFactor * roofMult;
+  const tempRunAdj = sealedClosed ? 0 : rawTempAdjNum * roofMult;
+  return { windFactor, tempRunAdj };
+}
+
 module.exports = {
   fetchParkWind, fetchWindAtCoords, calcWindFactor, PARKS,
+  tempRunAdjFromTempF, computeEffectiveWeather,
   _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, parseGameTimeToEtHm, _shiftDate },
 };

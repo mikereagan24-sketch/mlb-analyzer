@@ -3082,9 +3082,9 @@ async function runWeatherJob(date, opts) {
       writeCronLog('no_games', 'no games on slate');
       return { success: true, updated: 0, date: date, note: 'no games' };
     }
-    const { calcWindFactor, PARKS, fetchWindAtCoords } = require('./weather');
+    const { PARKS, fetchWindAtCoords, computeEffectiveWeather } = require('./weather');
     const { PARK_TZ } = require('./weather')._internal;
-    const { rollForwardPrior, isSealedDome } = require('./roof-prior');
+    const { rollForwardPrior } = require('./roof-prior');
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
     const month = new Date(date).getMonth() + 1;
@@ -3122,9 +3122,7 @@ async function runWeatherJob(date, opts) {
         const dir   = Math.round(wx.windDir);
         const temp  = parseFloat(wx.tempF.toFixed(1));
         const precip = wx.precipProb;
-        const windFactor = calcWindFactor(dir, speed, park);
-        const tempAdj = temp < 55 ? -0.5 : temp < 70 ? 0 : temp < 80 ? 0.3 : 0.6;
-        let roofStatus = 'open', roofMult = 1, roofConfidence = 'estimated';
+        let roofStatus = 'open', roofConfidence = 'estimated';
         // Resolution precedence (highest wins): actual > announced > prior
         // (estimated) > config heuristic > default-open.
         //
@@ -3147,7 +3145,6 @@ async function runWeatherJob(date, opts) {
         if (announcedRoof === 'open' || announcedRoof === 'closed' || announcedRoof === 'partial') {
           roofStatus = announcedRoof;
           roofConfidence = game.roof_confidence;
-          roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
         } else {
           // Forward-prior fallback. rollForwardPrior returns null for
           // venues without a rule (ARI venue 15 included — it expects
@@ -3158,7 +3155,6 @@ async function runWeatherJob(date, opts) {
           if (prior && (prior.status === 'open' || prior.status === 'closed')) {
             roofStatus = prior.status;
             roofConfidence = prior.confidence || 'estimated';
-            roofMult = roofStatus === 'closed' ? 0 : 1;
           } else if (park.roofType === 'retractable') {
             let closed = false;
             if (park.defaultClosed) closed = !(temp < park.tempClose && precip < park.precipClose);
@@ -3168,23 +3164,19 @@ async function runWeatherJob(date, opts) {
             else closed = temp < park.tempClose || precip >= park.precipClose;
             roofStatus = closed ? 'closed' : 'open';
             if (park.partialEnclosure && closed) roofStatus = 'partial';
-            roofMult = roofStatus === 'closed' ? 0 : roofStatus === 'partial' ? 0.5 : 1;
           }
         }
-        // Weather neutralization on CLOSED roofs is gated on the park
-        // being a true sealed dome (SEALED_DOME_VENUE_IDS in
-        // services/roof-prior.js). Six of the seven retractables are
-        // sealed — statsapi shows wind=0 / controlled temp when
-        // closed, so effWind / effTemp must be zeroed. SEA (680) is
-        // the verified exception: its roof covers but doesn't enclose,
-        // so closed SEA games still report real wind (e.g. 12 mph In
-        // From LF) and outside-matching temps. At SEA, record the
-        // closed status but keep the reported weather applied.
-        // Partial-enclosure parks keep the 0.5 multiplier from the
-        // config branch.
-        const sealedClosed = roofStatus === 'closed' && isSealedDome(game.venue_id);
-        const effWind = sealedClosed ? 0 : windFactor * roofMult;
-        const effTemp = sealedClosed ? 0 : tempAdj * roofMult;
+        // Effective wind_factor / temp_run_adj = raw weather gated by
+        // roof state. Sealed-closed → 0 (six of seven retractables);
+        // SEA closed also zeros because roofMult is 0 for closed —
+        // the sealed vs unsealed distinction only matters if that
+        // branch ever changed. Partial → x0.5. Open → x1. Shared
+        // helper is the SINGLE source of truth for this gate (also
+        // used by services/roof-correct.js when correcting a
+        // previously-mis-classified game).
+        const { windFactor: effWind, tempRunAdj: effTemp } =
+          computeEffectiveWeather({ windSpeed: speed, windDir: dir, tempF: temp,
+            roofStatus, venueId: game.venue_id, park });
         if (q.updateWindData) {
           q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, roofConfidence, date, game.game_id);
         } else {
