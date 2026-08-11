@@ -1154,6 +1154,27 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   ).all(gameRow.game_date, gameRow.game_id);
   const existingByKey = {};
   for (const r of existingRows) existingByKey[r.signal_type + '|' + r.signal_side] = r;
+  // Emit-time model snapshot threaded into every UPSERT below.
+  // (feat/emit-time-model-snapshot, 2026-08-11.) Captures WHICH model
+  // drove the signal + BOTH model outputs at emit so retrospective
+  // analyses can distinguish emit-time from snapshot state on game_log's
+  // model_* / opener_model_* columns (which are rewritten every
+  // processGameSignals cycle). Values are per-game, not per-signal, so
+  // computed once above the loop.
+  //   'opener'     — opener-aware model won the tie at line ~893
+  //   'suppressed' — USE_OPENER_LOGIC on AND openerModel computed but
+  //                  _suppressed; std used as fallback. Distinguishes
+  //                  forced-fallback from "opener never attempted".
+  //   'std'        — everything else (flag off, or no opener side).
+  const _modelLineSource = (model === openerModel)
+    ? 'opener'
+    : (useOpenerLogic && openerModel && openerModel._suppressed)
+      ? 'suppressed'
+      : 'std';
+  const _stdModelTotalAtEmit = (stdModel && !stdModel._suppressed && stdModel.estTot != null)
+    ? parseFloat(stdModel.estTot.toFixed(2)) : null;
+  const _openerModelTotalAtEmit = (openerModel && !openerModel._suppressed && openerModel.estTot != null)
+    ? parseFloat(openerModel.estTot.toFixed(2)) : null;
   for (const sig of signals) {
     // Venue-aware market baseline for the STORED market_line + PnL grading.
     // When the venue override landed on the game object, use game.market_*
@@ -1275,6 +1296,12 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       // the same gl row. Nulls collapse to empty strings inside the
       // helper so hash is stable pre-lineup-population.
       lineup_hash: _lineupHash,
+      // Emit-time model snapshot — see _modelLineSource comment above
+      // for the enum semantics. Frozen once bet_locked_at is set by the
+      // upsertSignal WHERE guard.
+      model_line_source:          _modelLineSource,
+      model_total_at_emit:        _stdModelTotalAtEmit,
+      opener_model_total_at_emit: _openerModelTotalAtEmit,
     });
     // Refresh audit trail. Records action='insert' on first sight and
     // action='refresh' on every subsequent pass that changes a tracked

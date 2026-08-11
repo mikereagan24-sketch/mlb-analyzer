@@ -2103,19 +2103,53 @@ const q = {
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN lineup_hash TEXT").run(); } catch(e) {}
     return true;
   })(),
+  // Emit-time model context (feat/emit-time-model-snapshot, 2026-08-11).
+  // Captures WHICH model drove the emit and BOTH model outputs at the
+  // moment the current baseline (market_line / model_line / edge_pct)
+  // was written. Rewritten on every unlocked re-emit alongside the
+  // baseline; frozen once bet_locked_at is set (upsertSignal's WHERE
+  // guard covers the whole DO UPDATE, so these columns are protected
+  // by the same lock).
+  //
+  // Why: game_log.model_* and game_log.opener_model_* are rewritten
+  // every processGameSignals cycle (jobs.js:966-978). They reflect
+  // CURRENT snapshot state, not emit-time state. Any retrospective
+  // analysis correlating those columns with historical bet outcomes
+  // is measuring "current model vs outcome," not "emit-time model vs
+  // outcome" — the exact issue that inflated an earlier opener-Under
+  // finding from a strict +1.6% to an apparent +12.28% headline (see
+  // fix/manual-bet-modal-use-eff-model audit notes).
+  //
+  //   model_line_source        — 'std' | 'opener' | 'suppressed'
+  //   model_total_at_emit      — stdModel.estTot at emit time
+  //   opener_model_total_at_emit — openerModel.estTot at emit; NULL when
+  //                                the game wasn't opener-flagged or
+  //                                openerModel wasn't computed.
+  //
+  // NOTE: manual-log inserts (routes/api.js POST /signals/manual) do
+  // NOT populate these columns — a manual log wasn't an auto emit, so
+  // NULL is the correct semantics.
+  _emitTimeSnapshotMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_line_source TEXT").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_total_at_emit REAL").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN opener_model_total_at_emit REAL").run(); } catch(e) {}
+    return true;
+  })(),
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
       category, market_line, model_line, edge_pct, outcome, pnl, cohort,
       companion_spread_line, companion_spread_price, companion_spread_outcome,
       companion_spread_pnl, companion_spread_src, edge_suspect,
-      price_venue, venue_stale
+      price_venue, venue_stale,
+      model_line_source, model_total_at_emit, opener_model_total_at_emit
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
       @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
       @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
       @companion_spread_pnl, @companion_spread_src, @edge_suspect,
-      @price_venue, @venue_stale
+      @price_venue, @venue_stale,
+      @model_line_source, @model_total_at_emit, @opener_model_total_at_emit
     )
   `),
   // Refresh-aware UPSERT (feat/upsert-signal-refresh, 2026-07-08).
@@ -2147,29 +2181,41 @@ const q = {
       category, market_line, model_line, edge_pct, outcome, pnl, cohort,
       companion_spread_line, companion_spread_price, companion_spread_outcome,
       companion_spread_pnl, companion_spread_src, edge_suspect,
-      price_venue, venue_stale, lineup_hash, updated_at
+      price_venue, venue_stale, lineup_hash,
+      model_line_source, model_total_at_emit, opener_model_total_at_emit,
+      updated_at
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
       @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
       @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
       @companion_spread_pnl, @companion_spread_src, @edge_suspect,
-      @price_venue, @venue_stale, @lineup_hash, datetime('now')
+      @price_venue, @venue_stale, @lineup_hash,
+      @model_line_source, @model_total_at_emit, @opener_model_total_at_emit,
+      datetime('now')
     )
     ON CONFLICT(game_date, game_id, signal_type, signal_side) DO UPDATE SET
-      market_line   = excluded.market_line,
-      model_line    = excluded.model_line,
-      edge_pct      = excluded.edge_pct,
-      category      = excluded.category,
-      signal_label  = excluded.signal_label,
-      price_venue   = excluded.price_venue,
-      venue_stale   = excluded.venue_stale,
-      edge_suspect  = excluded.edge_suspect,
-      lineup_hash   = excluded.lineup_hash,
-      outcome       = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.outcome ELSE excluded.outcome END,
-      pnl           = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.pnl     ELSE excluded.pnl     END,
-      is_active     = 1,
-      notes         = NULL,
-      updated_at    = datetime('now')
+      market_line                = excluded.market_line,
+      model_line                 = excluded.model_line,
+      edge_pct                   = excluded.edge_pct,
+      category                   = excluded.category,
+      signal_label               = excluded.signal_label,
+      price_venue                = excluded.price_venue,
+      venue_stale                = excluded.venue_stale,
+      edge_suspect               = excluded.edge_suspect,
+      lineup_hash                = excluded.lineup_hash,
+      -- Emit-time model snapshot refreshes with the baseline it drove.
+      -- Unlocked re-emit → new baseline + new snapshot land together.
+      -- Locked rows: the WHERE guard below skips the whole DO UPDATE, so
+      -- the snapshot stays frozen alongside market_line / model_line /
+      -- edge_pct at the values seen when the bet was locked.
+      model_line_source          = excluded.model_line_source,
+      model_total_at_emit        = excluded.model_total_at_emit,
+      opener_model_total_at_emit = excluded.opener_model_total_at_emit,
+      outcome                    = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.outcome ELSE excluded.outcome END,
+      pnl                        = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.pnl     ELSE excluded.pnl     END,
+      is_active                  = 1,
+      notes                      = NULL,
+      updated_at                 = datetime('now')
     WHERE bet_signals.bet_locked_at IS NULL
   `),
   // Deactivate a row whose signal no longer emits. Applies to BOTH locked
