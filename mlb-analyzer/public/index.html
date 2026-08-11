@@ -4714,7 +4714,11 @@ function calcManualEdge(){
   var ap = window._appSettings || {};
   function roundScore(e){ return Math.round(e * 100 / 0.5) * 0.5; }
   if (type === 'ML') {
-    var modelLine = side === 'away' ? game.model_away_ml : game.model_home_ml;
+    // Use effective (opener-aware) model line — matches every other UI
+    // read path (row boxes / expanded card / conf mode / helpers at
+    // ~line 696). Direct game.model_*_ml reads showed the standard-
+    // model line on opener games, diverging from the score card.
+    var modelLine = side === 'away' ? effAwayML(game) : effHomeML(game);
     var mktLine = isNaN(mkt) ? (side === 'away' ? game.market_away_ml : game.market_home_ml) : mkt;
     var betLine = isNaN(bet) ? mktLine : bet;
     var e = iP(modelLine || 0) - iP(betLine);
@@ -4729,7 +4733,7 @@ function calcManualEdge(){
     edgeTxt = 'bet ' + (betLine > 0 ? '+' : '') + betLine + ' vs model ' + (modelLine > 0 ? '+' : '') + modelLine + ' = raw ' + (e * 100).toFixed(2) + 'pp';
     scoreTxt = score.toFixed(1) + 'pp' + hl;
   } else {
-    var modelTot = parseFloat(game.model_total) || 8.5;
+    var modelTot = parseFloat(effTotal(game)) || 8.5;
     var mktTot = isNaN(mkt) ? (game.market_total || 8.5) : mkt;
     var betTot = isNaN(bet) ? mktTot : bet;
     var betPrice = isNaN(price) ? -110 : price;
