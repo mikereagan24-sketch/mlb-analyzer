@@ -1175,6 +1175,18 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     ? parseFloat(stdModel.estTot.toFixed(2)) : null;
   const _openerModelTotalAtEmit = (openerModel && !openerModel._suppressed && openerModel.estTot != null)
     ? parseFloat(openerModel.estTot.toFixed(2)) : null;
+  // Home/away ML at emit. The pair is what pins spread-edge cell
+  // classification (via noVigHomeProb); without both frozen, the cell
+  // that scored a spread play is not reconstructable post-emit.
+  // stdModel is the source of truth for these — opener-model ML at
+  // emit is not persisted separately; if an operator wants opener-
+  // aware ML at emit later, they can derive it from
+  // opener_model_total_at_emit + the same-day sp_forecast_ip snapshot.
+  // Stored as INTEGER American odds (matching bet_signals.model_line).
+  const _stdModelHomeMlAtEmit = (stdModel && !stdModel._suppressed && stdModel.hML != null && Number.isFinite(stdModel.hML))
+    ? Math.round(stdModel.hML) : null;
+  const _stdModelAwayMlAtEmit = (stdModel && !stdModel._suppressed && stdModel.aML != null && Number.isFinite(stdModel.aML))
+    ? Math.round(stdModel.aML) : null;
   for (const sig of signals) {
     // Venue-aware market baseline for the STORED market_line + PnL grading.
     // When the venue override landed on the game object, use game.market_*
@@ -1298,10 +1310,13 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       lineup_hash: _lineupHash,
       // Emit-time model snapshot — see _modelLineSource comment above
       // for the enum semantics. Frozen once bet_locked_at is set by the
-      // upsertSignal WHERE guard.
+      // upsertSignal WHERE guard. home/away ML at emit is what makes
+      // spread-edge cell classification pinnable on graded games.
       model_line_source:          _modelLineSource,
       model_total_at_emit:        _stdModelTotalAtEmit,
       opener_model_total_at_emit: _openerModelTotalAtEmit,
+      model_home_ml_at_emit:      _stdModelHomeMlAtEmit,
+      model_away_ml_at_emit:      _stdModelAwayMlAtEmit,
     });
     // Refresh audit trail. Records action='insert' on first sight and
     // action='refresh' on every subsequent pass that changes a tracked

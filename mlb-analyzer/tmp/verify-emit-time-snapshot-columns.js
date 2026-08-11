@@ -34,11 +34,14 @@ function cleanup() {
 // (1) & (2): confirm the migration landed.
 const cols = db.prepare("PRAGMA table_info(bet_signals)").all().map(c => c.name);
 console.log('=== bet_signals columns after boot ===');
-console.log('  model_line_source          present:', cols.includes('model_line_source'));
-console.log('  model_total_at_emit        present:', cols.includes('model_total_at_emit'));
-console.log('  opener_model_total_at_emit present:', cols.includes('opener_model_total_at_emit'));
-if (!cols.includes('model_line_source') || !cols.includes('model_total_at_emit') || !cols.includes('opener_model_total_at_emit')) {
-  console.error('FAIL: missing columns');
+const expected = [
+  'model_line_source', 'model_total_at_emit', 'opener_model_total_at_emit',
+  'model_home_ml_at_emit', 'model_away_ml_at_emit',
+];
+for (const c of expected) console.log('  ' + c.padEnd(30) + ' present:', cols.includes(c));
+const missing = expected.filter(c => !cols.includes(c));
+if (missing.length) {
+  console.error('FAIL: missing columns:', missing.join(', '));
   process.exit(2);
 }
 
@@ -56,12 +59,18 @@ q.upsertSignal.run({
   model_line_source: 'opener',
   model_total_at_emit: 7.55,
   opener_model_total_at_emit: 7.42,
+  model_home_ml_at_emit: -138,
+  model_away_ml_at_emit: 121,
 });
-let row = db.prepare("SELECT market_line, model_line, edge_pct, model_line_source, model_total_at_emit, opener_model_total_at_emit, bet_locked_at FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
+let row = db.prepare("SELECT market_line, model_line, edge_pct, model_line_source, model_total_at_emit, opener_model_total_at_emit, model_home_ml_at_emit, model_away_ml_at_emit, bet_locked_at FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
   .get(TEST_DATE, TEST_GAME_ID, 'Total', 'under');
 console.log('\n=== After initial emit (opener source) ===');
 console.log(' ', row);
-if (row.model_line_source !== 'opener' || row.model_total_at_emit !== 7.55 || row.opener_model_total_at_emit !== 7.42) {
+if (row.model_line_source !== 'opener'
+    || row.model_total_at_emit !== 7.55
+    || row.opener_model_total_at_emit !== 7.42
+    || row.model_home_ml_at_emit !== -138
+    || row.model_away_ml_at_emit !== 121) {
   console.error('FAIL: initial emit values did not land');
   cleanup(); process.exit(3);
 }
@@ -80,12 +89,18 @@ q.upsertSignal.run({
   model_line_source: 'std',
   model_total_at_emit: 7.60,
   opener_model_total_at_emit: null,
+  model_home_ml_at_emit: -145,
+  model_away_ml_at_emit: 127,
 });
-row = db.prepare("SELECT market_line, model_line, edge_pct, model_line_source, model_total_at_emit, opener_model_total_at_emit FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
+row = db.prepare("SELECT market_line, model_line, edge_pct, model_line_source, model_total_at_emit, opener_model_total_at_emit, model_home_ml_at_emit, model_away_ml_at_emit FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
   .get(TEST_DATE, TEST_GAME_ID, 'Total', 'under');
-console.log('\n=== After unlocked re-emit (source flipped opener→std) ===');
+console.log('\n=== After unlocked re-emit (source flipped opener→std, ML shifted) ===');
 console.log(' ', row);
-if (row.model_line_source !== 'std' || row.model_total_at_emit !== 7.60 || row.opener_model_total_at_emit !== null) {
+if (row.model_line_source !== 'std'
+    || row.model_total_at_emit !== 7.60
+    || row.opener_model_total_at_emit !== null
+    || row.model_home_ml_at_emit !== -145
+    || row.model_away_ml_at_emit !== 127) {
   console.error('FAIL: unlocked re-emit should have refreshed snapshot');
   cleanup(); process.exit(4);
 }
@@ -105,12 +120,18 @@ q.upsertSignal.run({
   model_line_source: 'opener',
   model_total_at_emit: 999,
   opener_model_total_at_emit: 999,
+  model_home_ml_at_emit: 999,
+  model_away_ml_at_emit: 999,
 });
-row = db.prepare("SELECT market_line, model_line, edge_pct, model_line_source, model_total_at_emit, opener_model_total_at_emit, bet_locked_at FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
+row = db.prepare("SELECT market_line, model_line, edge_pct, model_line_source, model_total_at_emit, opener_model_total_at_emit, model_home_ml_at_emit, model_away_ml_at_emit, bet_locked_at FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type=? AND signal_side=?")
   .get(TEST_DATE, TEST_GAME_ID, 'Total', 'under');
 console.log('\n=== After LOCK + re-emit (snapshot MUST NOT move) ===');
 console.log(' ', row);
-if (row.model_line_source !== 'std' || row.model_total_at_emit !== 7.60 || row.market_line !== 8.5) {
+if (row.model_line_source !== 'std'
+    || row.model_total_at_emit !== 7.60
+    || row.market_line !== 8.5
+    || row.model_home_ml_at_emit !== -145
+    || row.model_away_ml_at_emit !== 127) {
   console.error('FAIL: locked row snapshot moved — post-lock immutability broken');
   cleanup(); process.exit(5);
 }
