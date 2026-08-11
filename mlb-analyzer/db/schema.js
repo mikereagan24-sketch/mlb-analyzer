@@ -2120,11 +2120,19 @@ const q = {
   // finding from a strict +1.6% to an apparent +12.28% headline (see
   // fix/manual-bet-modal-use-eff-model audit notes).
   //
-  //   model_line_source        — 'std' | 'opener' | 'suppressed'
-  //   model_total_at_emit      — stdModel.estTot at emit time
+  //   model_line_source          — 'std' | 'opener' | 'suppressed'
+  //   model_total_at_emit        — stdModel.estTot at emit time
   //   opener_model_total_at_emit — openerModel.estTot at emit; NULL when
   //                                the game wasn't opener-flagged or
   //                                openerModel wasn't computed.
+  //   model_home_ml_at_emit      — stdModel.hML at emit (American odds).
+  //   model_away_ml_at_emit      — stdModel.aML at emit (American odds).
+  //     ↑ home/away ML pair is what pins the spread-edge cell
+  //     classification (via noVigHomeProb); without both, the cell
+  //     that scored a spread play is not reconstructable post-emit.
+  //     Measured cell-migration rate on unpinned games: ~11% overall
+  //     with 82% of flips at the 0.575 wp boundary (2026-08-11 audit;
+  //     tmp/quantify-spread-cell-drift.js).
   //
   // NOTE: manual-log inserts (routes/api.js POST /signals/manual) do
   // NOT populate these columns — a manual log wasn't an auto emit, so
@@ -2133,6 +2141,8 @@ const q = {
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_line_source TEXT").run(); } catch(e) {}
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_total_at_emit REAL").run(); } catch(e) {}
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN opener_model_total_at_emit REAL").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_home_ml_at_emit INTEGER").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_away_ml_at_emit INTEGER").run(); } catch(e) {}
     return true;
   })(),
   insertSignal: db.prepare(`
@@ -2142,14 +2152,16 @@ const q = {
       companion_spread_line, companion_spread_price, companion_spread_outcome,
       companion_spread_pnl, companion_spread_src, edge_suspect,
       price_venue, venue_stale,
-      model_line_source, model_total_at_emit, opener_model_total_at_emit
+      model_line_source, model_total_at_emit, opener_model_total_at_emit,
+      model_home_ml_at_emit, model_away_ml_at_emit
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
       @category, @market_line, @model_line, @edge_pct, @outcome, @pnl, @cohort,
       @companion_spread_line, @companion_spread_price, @companion_spread_outcome,
       @companion_spread_pnl, @companion_spread_src, @edge_suspect,
       @price_venue, @venue_stale,
-      @model_line_source, @model_total_at_emit, @opener_model_total_at_emit
+      @model_line_source, @model_total_at_emit, @opener_model_total_at_emit,
+      @model_home_ml_at_emit, @model_away_ml_at_emit
     )
   `),
   // Refresh-aware UPSERT (feat/upsert-signal-refresh, 2026-07-08).
@@ -2183,6 +2195,7 @@ const q = {
       companion_spread_pnl, companion_spread_src, edge_suspect,
       price_venue, venue_stale, lineup_hash,
       model_line_source, model_total_at_emit, opener_model_total_at_emit,
+      model_home_ml_at_emit, model_away_ml_at_emit,
       updated_at
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
@@ -2191,6 +2204,7 @@ const q = {
       @companion_spread_pnl, @companion_spread_src, @edge_suspect,
       @price_venue, @venue_stale, @lineup_hash,
       @model_line_source, @model_total_at_emit, @opener_model_total_at_emit,
+      @model_home_ml_at_emit, @model_away_ml_at_emit,
       datetime('now')
     )
     ON CONFLICT(game_date, game_id, signal_type, signal_side) DO UPDATE SET
@@ -2211,6 +2225,8 @@ const q = {
       model_line_source          = excluded.model_line_source,
       model_total_at_emit        = excluded.model_total_at_emit,
       opener_model_total_at_emit = excluded.opener_model_total_at_emit,
+      model_home_ml_at_emit      = excluded.model_home_ml_at_emit,
+      model_away_ml_at_emit      = excluded.model_away_ml_at_emit,
       outcome                    = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.outcome ELSE excluded.outcome END,
       pnl                        = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.pnl     ELSE excluded.pnl     END,
       is_active                  = 1,
