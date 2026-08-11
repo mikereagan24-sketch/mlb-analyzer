@@ -19,10 +19,24 @@
 //   < WP_BALANCED_LOW           = Underdog home
 //   [WP_BALANCED_LOW, WP_HIGH)  = Balanced / slight favorite home
 //   >= WP_HIGH                  = Strong favorite home
+//
+// STABILITY NOTE (2026-08-11 audit —
+//   docs/spread-edge-cell-stability-2026-08-11.md):
+// Both `Strong fav / Low total` and `Strong fav / High total` are the
+// least stable of the six cells. ~22% of graded games sit within ±2pp
+// of the 0.575 wp cut, and 82% of measured cell migration on nightly
+// re-runs happens across that specific boundary. Their per-cell
+// empirical cover rates should be read with more skepticism than the
+// deeper cells; a parameter tune can migrate ~10% of the sample there
+// in a single recompute. PR #232's model_home_ml_at_emit /
+// model_away_ml_at_emit pin this prospectively for signal-emitting
+// games; historical drift is what it is.
 const WP_BALANCED_LOW = 0.500;
 const WP_HIGH         = 0.575;
 
 // Total bucket boundary (model_total). Below = Low, at/above = High.
+// ~21% of graded games sit within ±0.25 runs of 8.5; drift across this
+// axis is real but smaller (8 of 45 measured flips) than wp drift.
 const TOTAL_THRESHOLD = 8.5;
 
 // Spread lines surfaced per side. Kalshi publishes 1.5..9.5 in 1-run

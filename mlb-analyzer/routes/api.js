@@ -1004,6 +1004,14 @@ router.get('/games/:date', (req, res) => {
             edge_pp:            p.edge_pp,
             empirical_pct:      p.empirical_pct,
             kalshi_implied_pct: p.implied_pct,
+            // Per-line tail hit count — how many games in the parent
+            // cell actually fell in THIS side's tail (margin > L for lay,
+            // < -L for take). Displayed next to the pp figure so the UI
+            // reveals when a specific line rests on a small tail inside
+            // an otherwise-large cell. Passes the SUPPRESS_TAIL_HIT_FLOOR
+            // (=15) gate via the low_sample filter above; still shown so
+            // the reader can distinguish n=17 from n=90.
+            tail_hit:           p.tail_hit != null ? p.tail_hit : null,
           })),
         };
       }

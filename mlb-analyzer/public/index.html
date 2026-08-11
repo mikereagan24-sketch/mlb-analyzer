@@ -194,6 +194,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .emp-spread-pick{display:flex;justify-content:space-between;gap:8px;padding:2px 0;font-size:11px}
 .emp-spread-pick-bet{color:var(--text);font-weight:500}
 .emp-spread-pick-edge{color:#a855f7;font-weight:600;font-variant-numeric:tabular-nums}
+.emp-spread-pick-n{color:var(--text3);font-weight:400;font-size:10px;margin-left:4px;font-variant-numeric:tabular-nums}
 /* Paired market: both lay and take cleared the API gate. The dotted
    border-left visually groups the two legs of the same line as one
    market. */
@@ -1513,11 +1514,16 @@ function renderGameGrid(games,date){
         function pickRow(p){
           var ask=(p.yes_ask_ml!=null && p.yes_ask_ml>0?'+':'')+(p.yes_ask_ml==null?'n/a':p.yes_ask_ml);
           var edge=(p.edge_pp>=0?'+':'')+(p.edge_pp==null?'n/a':p.edge_pp.toFixed(1))+'pp';
+          // Per-line tail hit count. SUPPRESS_TAIL_HIT_FLOOR is 15 in
+          // the engine, so a line inside an n=165 cell can rest on 20
+          // games; the header cell n alone doesn't reveal that. Shown
+          // in parens after the pp figure.
+          var nStr=(p.tail_hit!=null)?(' <span class="emp-spread-pick-n">n='+p.tail_hit+'</span>'):'';
           // take = '+L' (opp +runline), lay = '-L' (favorite lays).
           var sign=(p.side==='take')?'+':'-';
           var bet=p.spread_team+' '+sign+(p.spread_line==null?'?':p.spread_line.toFixed(1))+' '+ask;
           var sideCls=(p.side==='take')?' emp-spread-pick-take':'';
-          return '<div class="emp-spread-pick'+sideCls+'"><span class="emp-spread-pick-bet">'+bet+'</span><span class="emp-spread-pick-edge">'+edge+'</span></div>';
+          return '<div class="emp-spread-pick'+sideCls+'"><span class="emp-spread-pick-bet">'+bet+'</span><span class="emp-spread-pick-edge">'+edge+nStr+'</span></div>';
         }
         var rows=groups.map(function(g){
           if(g.length===1) return pickRow(g[0]);
