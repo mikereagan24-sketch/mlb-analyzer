@@ -3,28 +3,45 @@
 // Ballpark data: lat, lng, outfield_dir (compass degrees FROM home plate TOWARD CF),
 // sensitivity (0-2 scale; Wrigley=2 most wind-sensitive, typical=1)
 const PARKS = {
-  // cfDir corrected 2026-07-22 (audit/park-cf-bearings): was 60°.
-  // Wikipedia's Wrigley Field infobox and multiple ballpark-survey
-  // references put home-plate-to-CF at ~33° NNE. Old 60° underweighted
-  // the aligned in/out signal by ~10-15% at the highest-sensitivity
-  // park in the league (sens=2.0). See docs/park-bearings-audit.md
-  // for the audit and the 26 other parks still on unverified 45°.
-  'chc': { lat:41.9484, lng:-87.6553, cfDir:33,  sens:2.0, name:'Wrigley Field' },
+  // Bearings history:
+  //   2026-07-22 (audit/park-cf-bearings): chc corrected from 60° → 33°
+  //     via Wikipedia + ballpark-survey references (Wrigley home→CF).
+  //   2026-08-11 (audit/park-cf-bearings batch 2): 10 parks measured
+  //     directly from home-plate and CF-fence lat/lng, bearings via
+  //     great-circle atan2. chc refined 33° → 38° from measured coords.
+  //     9 parks moved off the 45° placeholder: phi, kan (+kc alias),
+  //     det, cle, nyy, bal, was, cin, ath (+oak alias). lat/lng on
+  //     those parks also updated from ~1km-Open-Meteo-grid coords to
+  //     measured home-plate. The most surprising corrections:
+  //       DET  45° → 151° SSE (Comerica is one of the few south-facing
+  //                            MLB parks; +106° delta)
+  //       CLE  45° → 359° N   (Progressive is due-north-facing; -46°
+  //                            shortest-arc delta)
+  //       CIN  45° → 122° ESE (Great American faces the river +77°)
+  //       NYY  45° → 75° ENE  (Yankee Stadium +30°)
+  //       PHI  45° → 8° N     (Citizens Bank near-due-north, -37°)
+  //     KAN's 45° placeholder was accidentally within 1° of measured
+  //     (46°); the update is functionally a no-op there but the lat/
+  //     lng gets pinned to home plate for consistency.
+  //   15 unique parks still on unverified 45° after batch 2: nym, min,
+  //   tor, atl, mia, mil, col, ari, lad, sea, tex, hou, laa, sd, tb.
+  //   See docs/park-bearings-audit.md.
+  'chc': { lat:41.94792028864351, lng:-87.6558333825289,  cfDir:38,  sens:2.0, name:'Wrigley Field' },
   'cws': { lat:41.8300, lng:-87.6339, cfDir:5,   sens:1.0, name:'Guaranteed Rate' },
-  'nyy': { lat:40.8296, lng:-73.9262, cfDir:45,  sens:1.0, name:'Yankee Stadium' },
+  'nyy': { lat:40.82949062712526, lng:-73.92695841016014, cfDir:75,  sens:1.0, name:'Yankee Stadium' },
   'nym': { lat:40.7571, lng:-73.8458, cfDir:45,  sens:0.3, name:'Citi Field' },
   'bos': { lat:42.3467, lng:-71.0972, cfDir:75,  sens:1.5, name:'Fenway Park' },
-  'det': { lat:42.3390, lng:-83.0485, cfDir:45,  sens:1.2, name:'Comerica Park' },
-  'cle': { lat:41.4962, lng:-81.6852, cfDir:45,  sens:1.2, name:'Progressive Field' },
+  'det': { lat:42.339461081107764, lng:-83.048978867262,  cfDir:151, sens:1.2, name:'Comerica Park' },
+  'cle': { lat:41.49554793391344, lng:-81.68529019867165, cfDir:359, sens:1.2, name:'Progressive Field' },
   'min': { lat:44.9817, lng:-93.2776, cfDir:45,  sens:0.8, name:'Target Field' },
   'tor': { lat:43.6414, lng:-79.3894, cfDir:45,  sens:0.4, name:'Rogers Centre' },
-  'bal': { lat:39.2838, lng:-76.6218, cfDir:45,  sens:1.0, name:'Camden Yards' },
-  'was': { lat:38.8730, lng:-77.0074, cfDir:45,  sens:1.0, name:'Nationals Park' },
+  'bal': { lat:39.2835019755712, lng:-76.62192251082257,  cfDir:24,  sens:1.0, name:'Camden Yards' },
+  'was': { lat:38.87257142688703, lng:-77.00773522543847, cfDir:27,  sens:1.0, name:'Nationals Park' },
   'atl': { lat:33.8908, lng:-84.4677, cfDir:45,  sens:0.8, name:'Truist Park' },
   'mia': { lat:25.7781, lng:-80.2197, cfDir:45,  sens:0.1, name:'LoanDepot Park' },
-  'phi': { lat:39.9061, lng:-75.1665, cfDir:45,  sens:1.5, name:'Citizens Bank' },
+  'phi': { lat:39.90558890172053, lng:-75.16660702298513, cfDir:8,   sens:1.5, name:'Citizens Bank' },
   'pit': { lat:40.4469, lng:-80.0058, cfDir:30,  sens:1.2, name:'PNC Park' },
-  'cin': { lat:39.0979, lng:-84.5082, cfDir:45,  sens:1.0, name:'Great American' },
+  'cin': { lat:39.097471625086264, lng:-84.5070384836874, cfDir:122, sens:1.0, name:'Great American' },
   'mil': { lat:43.0280, lng:-87.9712, cfDir:45,  sens:0.2, name:'American Family' },
   'stl': { lat:38.6226, lng:-90.1930, cfDir:25,  sens:1.0, name:'Busch Stadium' },
   'col': { lat:39.7559, lng:-104.9942,cfDir:45,  sens:0.5, name:'Coors Field' },
@@ -51,16 +68,17 @@ const PARKS = {
   //
   // sens dropped 1.2 → 1.0 (default): Coliseum's 1.2 was calibrated to
   // its specific wind pattern; Sutter Health is a different park with
-  // no measured sensitivity yet. cfDir stays 45° placeholder until the
-  // measurement pass includes Sutter Health (joins the priority list).
-  'oak': { lat:38.5804, lng:-121.5111,cfDir:45,  sens:1.0, name:'Sutter Health Park' },
-  'ath': { lat:38.5804, lng:-121.5111,cfDir:45,  sens:1.0, name:'Sutter Health Park' },
+  // no measured sensitivity yet. cfDir + lat/lng measured 2026-08-11
+  // (batch 2 of audit/park-cf-bearings) from home-plate + CF-fence
+  // coordinates: bearing = 42° NE, only 3° off the 45° placeholder.
+  'oak': { lat:38.58020291363677, lng:-121.51406478832237, cfDir:42, sens:1.0, name:'Sutter Health Park' },
+  'ath': { lat:38.58020291363677, lng:-121.51406478832237, cfDir:42, sens:1.0, name:'Sutter Health Park' },
   'sea': { lat:47.5914, lng:-122.3325,cfDir:45,  sens:0.6, name:'T-Mobile Park' },
   'tex': { lat:32.7512, lng:-97.0832, cfDir:45,  sens:0.1, name:'Globe Life' },
   'hou': { lat:29.7573, lng:-95.3555, cfDir:45,  sens:0.1, name:'Minute Maid' },
   'laa': { lat:33.8003, lng:-117.8827,cfDir:45,  sens:0.8, name:'Angel Stadium' },
-  'kan': { lat:39.0517, lng:-94.4803, cfDir:45,  sens:1.3, name:'Kauffman' },
-  'kc':  { lat:39.0517, lng:-94.4803, cfDir:45,  sens:1.3, name:'Kauffman' },
+  'kan': { lat:39.051245928408854, lng:-94.48082370618096, cfDir:46, sens:1.3, name:'Kauffman' },
+  'kc':  { lat:39.051245928408854, lng:-94.48082370618096, cfDir:46, sens:1.3, name:'Kauffman' },
   'sd':  { lat:32.7076, lng:-117.1570,cfDir:45,  sens:0.4, name:'Petco Park' },
   'tb':  { lat:27.7683, lng:-82.6534, cfDir:45,  sens:0.5, name:'Tropicana' },
 };
