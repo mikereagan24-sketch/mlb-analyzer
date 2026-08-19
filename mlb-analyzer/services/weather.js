@@ -23,30 +23,50 @@ const PARKS = {
   //     KAN's 45° placeholder was accidentally within 1° of measured
   //     (46°); the update is functionally a no-op there but the lat/
   //     lng gets pinned to home plate for consistency.
-  //   15 unique parks still on unverified 45° after batch 2: nym, min,
-  //   tor, atl, mia, mil, col, ari, lad, sea, tex, hou, laa, sd, tb.
-  //   See docs/park-bearings-audit.md.
+  //   2026-08-18 (audit/park-cf-bearings batch 3): the remaining 7
+  //     open-air parks measured off the 45° placeholder — nym, min,
+  //     atl, col, lad, laa, sd. Same method: home-plate and CF-fence
+  //     coords from Google Maps satellite, great-circle atan2, lat/
+  //     lng pinned to home plate. Home→CF distances all 395-415 ft
+  //     as sanity check. Corrections:
+  //       ATL  45° → 159° SSE (Truist faces south; +114° — largest
+  //                            correction in either batch)
+  //       MIN  45° → 90° E   (Target Field due-east; +45°)
+  //       COL  45° → 3° N    (Coors Field north-facing; -43°)
+  //       SD   45° → 0° N    (Petco due-north; -45°)
+  //       NYM  45° → 14° NNE (Citi Field; -31°)
+  //       LAD  45° → 25° NNE (Dodger Stadium; -20°)
+  //       LAA  45° → 44° NE  (Angel Stadium essentially on the
+  //                            placeholder; -1° — the only park
+  //                            where the placeholder happened to be
+  //                            approximately right)
+  //   8 parks remain on the 45° placeholder — all retractable-roof
+  //   or fixed-dome (tor, mia, mil, ari, sea, tex, hou, tb). Closed
+  //   roofs mean no wind reaches the field, so cfDir is unused for
+  //   those cohorts; leaving the placeholder is intentional. All
+  //   open-air parks now have measured bearings, which unblocks the
+  //   per-park sens audit. See docs/park-bearings-audit.md.
   'chc': { lat:41.94792028864351, lng:-87.6558333825289,  cfDir:38,  sens:2.0, name:'Wrigley Field' },
   'cws': { lat:41.8300, lng:-87.6339, cfDir:5,   sens:1.0, name:'Guaranteed Rate' },
   'nyy': { lat:40.82949062712526, lng:-73.92695841016014, cfDir:75,  sens:1.0, name:'Yankee Stadium' },
-  'nym': { lat:40.7571, lng:-73.8458, cfDir:45,  sens:0.3, name:'Citi Field' },
+  'nym': { lat:40.75659049940357, lng:-73.84602873744261, cfDir:14, sens:0.3, name:'Citi Field' },
   'bos': { lat:42.3467, lng:-71.0972, cfDir:75,  sens:1.5, name:'Fenway Park' },
   'det': { lat:42.339461081107764, lng:-83.048978867262,  cfDir:151, sens:1.2, name:'Comerica Park' },
   'cle': { lat:41.49554793391344, lng:-81.68529019867165, cfDir:359, sens:1.2, name:'Progressive Field' },
-  'min': { lat:44.9817, lng:-93.2776, cfDir:45,  sens:0.8, name:'Target Field' },
+  'min': { lat:44.981717162370394, lng:-93.27829383556069, cfDir:90, sens:0.8, name:'Target Field' },
   'tor': { lat:43.6414, lng:-79.3894, cfDir:45,  sens:0.4, name:'Rogers Centre' },
   'bal': { lat:39.2835019755712, lng:-76.62192251082257,  cfDir:24,  sens:1.0, name:'Camden Yards' },
   'was': { lat:38.87257142688703, lng:-77.00773522543847, cfDir:27,  sens:1.0, name:'Nationals Park' },
-  'atl': { lat:33.8908, lng:-84.4677, cfDir:45,  sens:0.8, name:'Truist Park' },
+  'atl': { lat:33.891126700858116, lng:-84.4678868457582, cfDir:159, sens:0.8, name:'Truist Park' },
   'mia': { lat:25.7781, lng:-80.2197, cfDir:45,  sens:0.1, name:'LoanDepot Park' },
   'phi': { lat:39.90558890172053, lng:-75.16660702298513, cfDir:8,   sens:1.5, name:'Citizens Bank' },
   'pit': { lat:40.4469, lng:-80.0058, cfDir:30,  sens:1.2, name:'PNC Park' },
   'cin': { lat:39.097471625086264, lng:-84.5070384836874, cfDir:122, sens:1.0, name:'Great American' },
   'mil': { lat:43.0280, lng:-87.9712, cfDir:45,  sens:0.2, name:'American Family' },
   'stl': { lat:38.6226, lng:-90.1930, cfDir:25,  sens:1.0, name:'Busch Stadium' },
-  'col': { lat:39.7559, lng:-104.9942,cfDir:45,  sens:0.5, name:'Coors Field' },
+  'col': { lat:39.75570889434178, lng:-104.99420013642896, cfDir:3, sens:0.5, name:'Coors Field' },
   'ari': { lat:33.4453, lng:-112.0667,cfDir:45,  sens:0.2, name:'Chase Field' },
-  'lad': { lat:34.0739, lng:-118.2400,cfDir:45,  sens:0.5, name:'Dodger Stadium' },
+  'lad': { lat:34.0734220619125, lng:-118.24022795237009, cfDir:25, sens:0.5, name:'Dodger Stadium' },
   // 'sfg' and 'sf' both resolve to Oracle Park. runWeatherJob parses
   // game_id as `parts[1]` off the "away-home" convention, and SF's
   // game_ids end in `-sf`, so PARKS[homeKey] with homeKey='sf' must
@@ -76,10 +96,10 @@ const PARKS = {
   'sea': { lat:47.5914, lng:-122.3325,cfDir:45,  sens:0.6, name:'T-Mobile Park' },
   'tex': { lat:32.7512, lng:-97.0832, cfDir:45,  sens:0.1, name:'Globe Life' },
   'hou': { lat:29.7573, lng:-95.3555, cfDir:45,  sens:0.1, name:'Minute Maid' },
-  'laa': { lat:33.8003, lng:-117.8827,cfDir:45,  sens:0.8, name:'Angel Stadium' },
+  'laa': { lat:33.799920691495615, lng:-117.88316982446123, cfDir:44, sens:0.8, name:'Angel Stadium' },
   'kan': { lat:39.051245928408854, lng:-94.48082370618096, cfDir:46, sens:1.3, name:'Kauffman' },
   'kc':  { lat:39.051245928408854, lng:-94.48082370618096, cfDir:46, sens:1.3, name:'Kauffman' },
-  'sd':  { lat:32.7076, lng:-117.1570,cfDir:45,  sens:0.4, name:'Petco Park' },
+  'sd':  { lat:32.70705001125514, lng:-117.15706906729568, cfDir:0, sens:0.4, name:'Petco Park' },
   'tb':  { lat:27.7683, lng:-82.6534, cfDir:45,  sens:0.5, name:'Tropicana' },
 };
 
