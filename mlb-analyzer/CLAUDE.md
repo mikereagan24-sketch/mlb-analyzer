@@ -204,6 +204,51 @@ The reference analysis template is
 `tmp/temp-attribution-c1-distributional-2026-08-06.js` — copy its
 statistics block for any future residual-driven proposal.
 
+## Subset sign-flip rule (2026-08-19)
+
+**A finding from a conditional subset (typically n ≈ 25-30) can
+invert the sign of the effect visible in the full sample. Any
+subset-derived directional claim — "under-forecast at this park",
+"sens too low", "Over side outperforms", "this cohort responds
+more strongly" — must be cross-checked against the unconditioned
+population before reading direction from it.**
+
+Reason: the 2026-08-19 per-park sens-audit intercepts flagged five
+parks as having positive residual at wind_vec=0 (was +3.11, pit
++3.06, nym +2.28, nyy +2.10, bal +1.93) on the wind ≥ 8 mph
+subset (n ≈ 25-30 per park). Cross-checked on the ET open-air
+population without the wind restriction (n ≈ 50 per park, blowouts
+excluded), four collapsed to near-zero medians and one (nyy)
+FLIPPED SIGN — no-blowout median −1.09, sign split 43% positive,
+all four measures agreeing on a mild over-forecast. The subset
+intercept was noise-inflated not just in magnitude but in direction.
+
+The mechanism: small conditional subsets aren't just noisy versions
+of the population. The conditioning variable can systematically
+re-sort the tail — windy games happen to be the ones where the
+model over-attributes something else (bullpen, temp, park drift),
+and that over-attribution rides the subset. This is separate from
+the mean-skew phenomenon (though they compound); a median-first
+analysis on the SUBSET alone will not save you.
+
+Required for any subset-derived directional finding:
+
+1. **Re-measure on the unconditioned population** (same universe,
+   drop the subset filter). Report central tendency and sign there.
+2. **If sign flips** — stop. The subset finding is likely
+   conditional-selection artifact. Do not propose a fix based on
+   the subset's direction.
+3. **If sign holds but magnitude collapses** — the subset was
+   reading a real direction but overestimating. Adjust
+   interpretation, don't ship the subset's numerical estimate.
+4. **If sign holds and magnitude holds** — the finding is likely
+   genuine. Even then, prefer the unconditioned estimate for any
+   downstream calibration; the subset is at best a corroborator.
+
+This compounds with the skewed-residual discipline above: run
+median-first on the FULL sample first, then on the subset if you
+must, and reconcile the two before acting.
+
 ## Read-only investigation proceeds without asking (2026-08-18)
 
 **File reads, greps, globs, and read-only DB queries via the admin query
