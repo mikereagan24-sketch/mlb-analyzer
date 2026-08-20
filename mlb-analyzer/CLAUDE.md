@@ -204,6 +204,28 @@ The reference analysis template is
 `tmp/temp-attribution-c1-distributional-2026-08-06.js` — copy its
 statistics block for any future residual-driven proposal.
 
+## Read-only investigation proceeds without asking (2026-08-18)
+
+**File reads, greps, globs, and read-only DB queries via the admin query
+endpoint (`GET /api/admin/query/<name>`) should proceed without asking.**
+Don't stop to ask "want me to check X?" before looking at something — just
+look and report. This includes reading `PLAN.md`, tracing a symbol across
+files, inspecting `services/*` to confirm current behavior, or pulling a
+2KB JSON slice from the admin query endpoint to verify a claim.
+
+Reserve confirmation requests for actions that change state:
+
+- File edits, new files, deletions
+- Git commits, pushes, branch operations
+- Prod writes (settings flips, `POST /admin/*`, DB mutations)
+- Anything touching the pricing hot path
+- Settings changes (`app_settings`, schema keys)
+
+Rationale: investigation is cheap and reversible; the confirmation-tax on
+read-only lookups slows every task without protecting anything. The
+existing standing rules ("verify what's in the merge diff", "grep for
+duplicate implementations") assume active investigation as the default.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
