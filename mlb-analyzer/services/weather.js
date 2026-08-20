@@ -126,7 +126,7 @@ function calcWindFactor(windDir, windSpeed, park) {
   // At 10mph aligned: factor ≈ 0.25 * sens → * 2.0 in model = ~0.5 runs at sens=1
   // At 15mph aligned: factor ≈ 0.50 * sens → ~1.0 runs at sens=1, ~2.0 at Wrigley
   // At 20mph aligned: factor ≈ 0.75 * sens → ~1.5 runs at sens=1, ~3.0 at Wrigley
-  const speedFactor = Math.min((windSpeed - 8) / 24, 0.75); // 0 at 8mph, 0.75 at 32mph
+  const speedFactor = Math.min((windSpeed - 8) / 24, 0.75); // 0 at 8mph, saturates at 0.75 from 26mph up
   const factor = alignment * speedFactor * park.sens;
   return parseFloat(factor.toFixed(3));
 }
