@@ -261,15 +261,24 @@ const TEMP_CONFIGS = [
   { key: 'LIN2', label: 'steeper continuous (tempF-65)*0.10 clamped +/-1.5', fn: tempLin2 },
 ];
 
-// Roof gating — exactly mirrors services/jobs.js:2280.
-//   closed → 0; partial → ×0.5; open / null / undefined → ×1.
-// (The cron defaults roofStatus to 'open' for non-retractable parks
-//  at line 2267, so null in the DB is only for legacy rows pre the
-//  weather cron. Treating null as open matches the cron default.)
-function gateByRoof(rawTempAdj, roofStatus) {
-  if (roofStatus === 'closed') return 0;
-  if (roofStatus === 'partial') return rawTempAdj * 0.5;
-  return rawTempAdj;
+// Roof gating — DELEGATES to services/weather.js:roofChannelMults so
+// this sweep gates temp exactly as the production write path does.
+// It used to inline `closed → 0`, which silently diverged on
+// 2026-08-20 when the gate went per-channel: an unsealed-closed park
+// (SEA) now keeps its temp_run_adj in prod, and a backtest that
+// zeroed it would have been measuring the gate rather than the temp
+// formula it exists to compare. Needs venueId for the canopy-allowlist
+// check — game rows come from `SELECT *` so venue_id is present, and a
+// null venueId fails safe to "not a canopy" (temp ×0 when closed),
+// matching the production gate exactly.
+//   closed → ×1 only at a canopy venue (SEA), else ×0;
+//   partial → ×0.5; open / null / undefined → ×1.
+// (The cron defaults roofStatus to 'open' for non-retractable parks,
+//  so null in the DB is only for legacy rows pre the weather cron.
+//  Treating null as open matches the cron default.)
+function gateByRoof(rawTempAdj, roofStatus, venueId) {
+  const { roofChannelMults } = require('./weather');
+  return rawTempAdj * roofChannelMults(roofStatus, venueId).tempMult;
 }
 
 function tempBucketKey(tempF) {
@@ -407,7 +416,7 @@ function runTempBacktest(opts) {
     let anySuppressed = false;
     for (const c of TEMP_CONFIGS) {
       const rawTemp = c.fn(tempF);
-      const effTemp = gateByRoof(rawTemp, roofStatus);
+      const effTemp = gateByRoof(rawTemp, roofStatus, gameRow.venue_id);
       const cfgGame = Object.assign({}, baseGame, { temp_run_adj: effTemp });
       const mr = model.runModel(cfgGame, wobaIdx, cfg, 'standard');
       if (mr && mr._suppressed) anySuppressed = true;

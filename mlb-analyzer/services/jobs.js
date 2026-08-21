@@ -3209,13 +3209,23 @@ async function runWeatherJob(date, opts) {
           }
         }
         // Effective wind_factor / temp_run_adj = raw weather gated by
-        // roof state. Sealed-closed → 0 (six of seven retractables);
-        // SEA closed also zeros because roofMult is 0 for closed —
-        // the sealed vs unsealed distinction only matters if that
-        // branch ever changed. Partial → x0.5. Open → x1. Shared
-        // helper is the SINGLE source of truth for this gate (also
-        // used by services/roof-correct.js when correcting a
-        // previously-mis-classified game).
+        // roof state, PER CHANNEL (see weather.js:roofChannelMults for
+        // the table and the evidence behind it):
+        //   closed at a canopy venue (SEA) → wind x0, temp x1. The
+        //                    roof covers but doesn't seal, so ambient
+        //                    temp reaches the field and zeroing
+        //                    temp_run_adj there was wrong.
+        //   closed anywhere else → wind x0, temp x0. Sealed
+        //                    retractables, fixed domes, and NULL /
+        //                    unrecognized venue_id all land here; this
+        //                    is the fail-safe default.
+        //   partial        → x0.5 both (dead branch — no park carries
+        //                    roofType, so this never fires today)
+        //   open           → x1 both
+        // Shared helper is the SINGLE source of truth for this gate —
+        // also used by services/roof-correct.js when correcting a
+        // previously-mis-classified game, and by
+        // services/temp-backtest.js so its sweep gates identically.
         const { windFactor: effWind, tempRunAdj: effTemp } =
           computeEffectiveWeather({ windSpeed: speed, windDir: dir, tempF: temp,
             roofStatus, venueId: game.venue_id, park });
