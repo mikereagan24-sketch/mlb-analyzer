@@ -487,6 +487,46 @@ function tempRunAdjFromTempF(tempF) {
 // values consistent with the corrected roof — otherwise wind_factor /
 // temp_run_adj stay computed under the wrong roof state.
 //
+// THE GATE IS PER-CHANNEL (2026-08-20). Wind and temperature are gated
+// separately, because a closed roof does not do the same thing to both.
+// Before this change a single `roofMult` zeroed both channels for any
+// closed game, which made isSealedDome dead code and — for SEA — was
+// wrong on the temp channel. Full scoping: docs/sea-canopy-roof-scope-2026-08-20.md
+//
+//   closed anywhere NOT on the canopy allowlist (sealed retractables,
+//     fixed domes like Tropicana, unrecognized or NULL venue_id):
+//     wind x0, temp x0. The building is climate-controlled. Verified
+//     against statsapi over the 2026 season: on closed games HOU
+//     reports 73F on all 64, TEX 74F on all 56, MIA 72F on all 59,
+//     and all six retractables report 0 mph wind on 100% of closed
+//     games. This is also the fail-safe default.
+//
+//   closed at a canopy venue (UNSEALED_ROOF_VENUE_IDS — SEA today):
+//     wind x0, temp x1. The roof covers the field but the park stays
+//     open at the sides, so ambient temperature reaches the field.
+//     Measured over 50 closed SEA games spanning 2023-2026: statsapi's
+//     game-time temp minus ERA5 outdoor reanalysis at the same
+//     park-local hour has median +0.2F on closed games, against +0.3F
+//     on the 255 open games. A closed SEA game is thermally outdoors,
+//     so its temp_run_adj must survive the gate.
+//
+//     Wind stays x0 here NOT because 0 was measured, but because the
+//     multiplier cannot be measured from available data: statsapi
+//     reports 0 mph on 70% of closed SEA games while ERA5 shows a
+//     median 8.1 mph outdoors at the same hour, so those zeros are
+//     nulls rather than readings, and the 15 games that do carry a
+//     non-zero reading are statistically indistinguishable from open
+//     games (permutation p=0.34). Do NOT substitute a hand-picked
+//     value here — read
+//     docs/unsealed-roof-wind-multiplier-open-question-2026-08-20.md
+//     first.
+//
+//   partial: x0.5 on both. Dead branch today — no park carries
+//     roofType, so runWeatherJob never emits 'partial'. Left at the
+//     historical value rather than given a new one.
+//
+//   open (and any unrecognized status): x1 on both.
+//
 // Args:
 //   windSpeed, windDir, tempF — raw weather from open-meteo (as stored
 //     in game_log.wind_speed / wind_dir / temp_f).
@@ -494,23 +534,43 @@ function tempRunAdjFromTempF(tempF) {
 //   venueId    — used to check sealed-dome status via roof-prior.
 //   park       — the PARKS entry (needs cfDir, sens) for wind attribution.
 // Returns: { windFactor, tempRunAdj } — the values to persist.
+// Per-channel roof multipliers — the single table every consumer of the
+// roof gate must read. Exported because computeEffectiveWeather is not
+// the only caller that needs it: services/temp-backtest.js sweeps
+// temp_run_adj formulas and has to gate temp EXACTLY as the production
+// write path does, or its per-config deltas measure the gate instead of
+// the formula. Anything else that gates weather by roof state belongs
+// here too rather than reimplementing the table.
+function roofChannelMults(roofStatus, venueId) {
+  const { isUnsealedRoof } = require('./roof-prior');
+  const st = String(roofStatus || 'open').toLowerCase();
+  if (st === 'closed') {
+    // Temp survives ONLY at venues on the explicit canopy allowlist.
+    // Everything else — sealed retractables, fixed domes, unrecognized
+    // or NULL venue_id — keeps the historical temp x0. Do not invert
+    // SEALED_DOME_VENUE_IDS to derive this; it lists retractables only,
+    // and Tropicana Field is a fixed dome that is not in it.
+    return { windMult: 0, tempMult: isUnsealedRoof(venueId) ? 1 : 0 };
+  }
+  if (st === 'partial') return { windMult: 0.5, tempMult: 0.5 };
+  return { windMult: 1, tempMult: 1 };
+}
+
 function computeEffectiveWeather({ windSpeed, windDir, tempF, roofStatus, venueId, park }) {
-  const { isSealedDome } = require('./roof-prior');
   const rawWindFactor = (park && windSpeed != null && windDir != null)
     ? calcWindFactor(windDir, windSpeed, park)
     : 0;
   const rawTempAdj = tempRunAdjFromTempF(tempF);
   const rawTempAdjNum = rawTempAdj == null ? 0 : rawTempAdj;
-  const st = String(roofStatus || 'open').toLowerCase();
-  const roofMult = st === 'closed' ? 0 : st === 'partial' ? 0.5 : 1;
-  const sealedClosed = st === 'closed' && isSealedDome(venueId);
-  const windFactor = sealedClosed ? 0 : rawWindFactor * roofMult;
-  const tempRunAdj = sealedClosed ? 0 : rawTempAdjNum * roofMult;
-  return { windFactor, tempRunAdj };
+  const { windMult, tempMult } = roofChannelMults(roofStatus, venueId);
+  return {
+    windFactor: rawWindFactor * windMult,
+    tempRunAdj: rawTempAdjNum * tempMult,
+  };
 }
 
 module.exports = {
   fetchParkWind, fetchWindAtCoords, calcWindFactor, PARKS,
-  tempRunAdjFromTempF, computeEffectiveWeather,
+  tempRunAdjFromTempF, computeEffectiveWeather, roofChannelMults,
   _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, parseGameTimeToEtHm, _shiftDate },
 };
