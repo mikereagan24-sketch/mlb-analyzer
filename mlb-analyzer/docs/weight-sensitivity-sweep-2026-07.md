@@ -3,6 +3,27 @@
 > **Measurement pass only. NO parameter changes shipped.** Recommendations
 > are gated and holdout-validated per brief.
 
+> **REFRAMED 2026-08-21 — read before acting on anything below.** This
+> sweep scored candidates by re-emitting signals and grading them. That
+> design measures **which bets get placed, not how well they are
+> priced**: `calcPnl` never sees the model's numbers, so a signal
+> emitted on the same side at two parameter values has a byte-identical
+> pnl and stake at both. The reported ROI deltas are therefore
+> **composition effects**, driven by near-floor signals crossing the
+> emit threshold, whose own CIs span zero by wide margins.
+>
+> This applies directly to the headline: **"combo 7" (`W_PIT=0.35` +
+> `SP_WEIGHT=0.75`), Val ROI −3.13% → +12.15%. That +15.28pp is a
+> selection effect and must not be piloted on the strength of it.** The
+> same applies to the PA_WEIGHTS / BP-handedness "noise catch" readings,
+> and to the SP_PIT_WEIGHT "inert" finding — inert on selection is not
+> the same as inert on price.
+>
+> Validating any of these needs a calibration metric over all games
+> (claimed vs realised edge, Brier, log loss), not ROI over emitted
+> signals. See `docs/sweep-selection-effect-2026-08-21.md` and the
+> "Sweep ROI measures selection, not pricing" rule in `CLAUDE.md`.
+
 ## TL;DR
 
 - **Baseline sanity: PASS** — harness reproduces prod Val ROI within 1.87pp

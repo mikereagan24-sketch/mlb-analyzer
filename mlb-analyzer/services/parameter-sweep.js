@@ -470,6 +470,139 @@ function scoreGames(settings, games, uiThresholds) {
   return { by_category_emit: byCatEmit, by_category_highlight: byCatHighlight, signals };
 }
 
+// ---------------------------------------------------------------------
+// SELECTION-EFFECT DECOMPOSITION  (2026-08-21)
+//
+// A sweep of this design CANNOT measure pricing. calcPnl reads only the
+// side bet, the market line and the final score — never the model's
+// numbers — and wageredFor reads only the market line. So a signal
+// emitted on the same side at two different parameter values has a
+// BYTE-IDENTICAL pnl and stake at both. The only channels by which a
+// swept parameter can move ROI are:
+//
+//   1. which signals clear SIGNAL_EMIT_FLOOR_PP   (composition)
+//   2. which side gets bet                        (side flips)
+//
+// Both are SELECTION. Consequently the headline ROI delta of any combo
+// is driven entirely by the near-floor signals churning in and out of
+// the sample, which are the least reliable bets in it.
+//
+// These functions surface that on every run rather than leaving it to
+// be rediscovered. See the "Sweep ROI measures selection, not pricing"
+// rule in CLAUDE.md and docs/sweep-selection-effect-2026-08-21.md.
+// ---------------------------------------------------------------------
+
+// Market-type key. NOT category: in a tight game both sides can carry
+// negative American odds, so a genuine away->home switch keeps
+// category='favs' and would masquerade as the same bet.
+function signalKey(s) {
+  const bucket = (s.category === 'favs' || s.category === 'dogs') ? 'ML' : 'TOT';
+  return s.game_date + '|' + s.game_id + '|' + bucket;
+}
+
+function roiOfSignals(arr) {
+  let pnl = 0, wag = 0;
+  for (const s of arr) { pnl += s.pnl; wag += s.wagered; }
+  return wag > 0 ? Math.round((pnl / wag) * 10000) / 100 : null;
+}
+
+// Deterministic LCG — sweep output must reproduce across runs.
+function _lcg(seed) {
+  let x = seed >>> 0;
+  return () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
+}
+
+// Percentile bootstrap CI on ROI. Resamples SIGNALS, not dates: this is
+// deliberately the NARROWER interval, because the point being made is
+// that even the optimistic interval spans zero.
+function roiBootstrapCI(arr, B, seed) {
+  if (!arr || !arr.length) return null;
+  const rnd = _lcg(seed || 20260821);
+  const reps = [];
+  for (let b = 0; b < (B || 1000); b++) {
+    let pnl = 0, wag = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const s = arr[Math.floor(rnd() * arr.length)];
+      pnl += s.pnl; wag += s.wagered;
+    }
+    if (wag > 0) reps.push((pnl / wag) * 100);
+  }
+  if (!reps.length) return null;
+  reps.sort((a, b) => a - b);
+  return {
+    lo: Math.round(reps[Math.floor(0.025 * reps.length)] * 100) / 100,
+    hi: Math.round(reps[Math.floor(0.975 * reps.length)] * 100) / 100,
+  };
+}
+
+// Decompose one combo's signal set against the baseline's.
+//   stay   — same game+market in both. A changed bet here is a side flip.
+//   enter  — cleared the floor under the combo but not the baseline.
+//   leave  — the reverse.
+// d_stay is zero unless a side flipped; that is the arithmetic proof
+// that the combo did not reprice anything it kept.
+function decomposeVsBaseline(comboSignals, baselineSignals) {
+  const cm = new Map(), bm = new Map();
+  for (const s of (comboSignals || [])) cm.set(signalKey(s), s);
+  for (const s of (baselineSignals || [])) bm.set(signalKey(s), s);
+  const stayK = [...cm.keys()].filter(k => bm.has(k));
+  const enter = [...cm.keys()].filter(k => !bm.has(k)).map(k => cm.get(k));
+  const leave = [...bm.keys()].filter(k => !cm.has(k)).map(k => bm.get(k));
+  const stayC = stayK.map(k => cm.get(k));
+  const stayB = stayK.map(k => bm.get(k));
+  let changed = 0;
+  for (const k of stayK) {
+    const a = cm.get(k), b = bm.get(k);
+    if (a.category !== b.category || a.outcome !== b.outcome
+      || a.pnl !== b.pnl || a.wagered !== b.wagered) changed++;
+  }
+  const rC = roiOfSignals(stayC), rB = roiOfSignals(stayB);
+  return {
+    n_stay: stayK.length,
+    n_enter: enter.length,
+    n_leave: leave.length,
+    n_changed_bet: changed,
+    roi_stay_combo: rC,
+    roi_stay_baseline: rB,
+    d_stay: (rC == null || rB == null) ? null : Math.round((rC - rB) * 100) / 100,
+    roi_enter: roiOfSignals(enter),
+    roi_enter_ci95: roiBootstrapCI(enter, 1000, 1001),
+    roi_leave: roiOfSignals(leave),
+    roi_leave_ci95: roiBootstrapCI(leave, 1000, 2002),
+  };
+}
+
+// Core = signals emitted by the baseline AND every combo. A fixed bet
+// set, so its ROI can only move if a side flipped. If core_roi_span is
+// 0, every point of headline ROI movement in the whole sweep is
+// composition.
+function coreSignalStats(results, baselineSignals) {
+  const base = baselineSignals || [];
+  let core = new Set(base.map(signalKey));
+  for (const r of results) {
+    const ks = new Set(((r.train && r.train.signals) || []).map(signalKey));
+    core = new Set([...core].filter(k => ks.has(k)));
+  }
+  const roiFor = (sigs) => {
+    const m = new Map();
+    for (const s of (sigs || [])) m.set(signalKey(s), s);
+    return roiOfSignals([...core].map(k => m.get(k)).filter(Boolean));
+  };
+  const perCombo = results.map(r => roiFor((r.train && r.train.signals) || []));
+  const vals = perCombo.filter(v => v != null);
+  const span = vals.length ? Math.round((Math.max(...vals) - Math.min(...vals)) * 100) / 100 : null;
+  return {
+    core_n: core.size,
+    baseline_n: base.length,
+    core_share_pct: base.length ? Math.round(1000 * core.size / base.length) / 10 : null,
+    core_roi_baseline: roiFor(base),
+    core_roi_span: span,
+    interpretation: span === 0
+      ? 'core span is 0 — every point of headline ROI movement in this sweep is composition, not pricing'
+      : 'core span is non-zero — check n_changed_bet; side flips are the only way this can happen',
+  };
+}
+
 // Partition a date-sorted scoreableGames list into train (earlier
 // fraction) and test (later) by DATE — never by game count within a
 // date. A whole day's slate goes to one side or the other, so the
@@ -785,8 +918,26 @@ async function runParameterSweep(db, baseSettings, opts) {
   if (testGames.length < targetMinSample * 2) {
     notes.push('test-set has only ' + testGames.length + ' games — test-set ROI for the target bucket will be thin; treat top-K test numbers as directional only until the snapshot corpus grows');
   }
+  // Selection-effect decomposition. Cheap (operates on already-scored
+  // signal tables) and reported unconditionally, so no future sweep
+  // repeats the W_PROJ/W_ACT mistake of reading a composition shift as
+  // a pricing effect.
+  const baseTrainSignals = baselineTrainScored.signals || [];
+  for (const r of results) {
+    r.vs_baseline_train = decomposeVsBaseline((r.train && r.train.signals) || [], baseTrainSignals);
+    if (r.test && r.test.signals) {
+      r.vs_baseline_test = decomposeVsBaseline(r.test.signals, baselineTestScored.signals || []);
+    }
+  }
+  const selectionEffect = coreSignalStats(results, baseTrainSignals);
+  console.log('[sweep] selection-effect: core_n=' + selectionEffect.core_n
+    + '/' + selectionEffect.baseline_n + ' (' + selectionEffect.core_share_pct + '%)'
+    + '  core_roi_span=' + selectionEffect.core_roi_span
+    + ' -> ' + selectionEffect.interpretation);
+
   return {
     mode,
+    selection_effect: selectionEffect,
     optimize_for: optimizeFor,
     bet_selection: betSelection,
     ui_highlight_thresholds: uiThresholds,
@@ -847,6 +998,10 @@ module.exports = {
   targetBucketsFor,
   isLowSample,
   scoreGames,
+  signalKey,
+  decomposeVsBaseline,
+  coreSignalStats,
+  roiBootstrapCI,
   estimateRuntimeSec,
   cleanupOrphanedSweepRuns,
   loadUiHighlightThresholds,
