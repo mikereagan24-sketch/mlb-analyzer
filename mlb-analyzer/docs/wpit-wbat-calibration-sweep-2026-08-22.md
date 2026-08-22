@@ -55,10 +55,21 @@ probabilities de-vigged from both sides.
 | **model, production W_PIT=0.40** | **0.68975** |
 | market, de-vigged | **0.68310** |
 
-The model is genuinely informative — 0.00286 better than the base rate.
-The market is 0.00951 better. **The model captures about 30% of the
-market's information advantage.** That is the honest frame for
-everything below: a model with real but partial signal.
+> **CORRECTED 2026-08-22 by `docs/edge-honesty-scope-2026-08-22.md`.**
+> These were point estimates reported without intervals. With
+> date-clustered CIs: model − base rate is **−0.00286, CI [−0.00983,
+> +0.00458] — NOT significant**, and model − market is **+0.00665, CI
+> [+0.00025, +0.01286] — significant, model worse**.
+>
+> So the correct statement is: **the model is significantly worse than
+> the market, and is not demonstrably better than predicting a constant
+> 51.65%.** The "genuinely informative" and "captures ~30% of the
+> market's information advantage" claims below are **withdrawn** — the
+> 30% was a ratio whose numerator is not distinguishable from zero.
+
+~~The model is genuinely informative — 0.00286 better than the base rate.
+The market is 0.00951 better. The model captures about 30% of the
+market's information advantage.~~ (withdrawn — see box above)
 
 ## 2. Log loss across the grid
 
@@ -172,6 +183,13 @@ Slope of realised excess on claimed edge, production settings, n=790:
 
 **−0.313, 95% CI [−0.907, +0.548]**
 
+> **Interval corrected 2026-08-22.** That CI came from an
+> observation-level bootstrap. Date-clustering is correct (same-slate
+> games share market state) and widens it to **[−1.032, +0.392]**. The
+> conclusion is unchanged — spans 0, excludes 1.0 — but the interval was
+> optimistic. Full scope, including 18 subgroup cuts of which **none**
+> reach significance: `docs/edge-honesty-scope-2026-08-22.md`.
+
 Read carefully:
 
 - The CI **spans zero**, so the claimed edge is **not shown to be
@@ -244,6 +262,10 @@ that the region above 0.5 is ruled out. Do not move to 0.30 on a
 3. **Chase the edge slope, not the parameters** (§6). If claimed edge is
    at most half real, that caps what any weight retune can deliver, and
    it is the more valuable thing to fix.
+   **Done — `docs/edge-honesty-scope-2026-08-22.md`.** Result: no regime
+   is honest (0 of 18 cuts reach significance), the 8pp cap gets no
+   support from it, and the higher-powered question is whether the model
+   beats a constant at all — which it does not demonstrably do.
 
 ## Related
 
