@@ -328,9 +328,16 @@ carry negative American odds, so a genuine away→home switch keeps
 
 Use a calibration metric over **all games**, not ROI over emitted
 signals: claimed edge vs realised frequency, Brier score, or log loss.
-`scripts/edge-calibration-curve.js` is the existing example of the right
-shape. A metric computed on model outputs rather than on the emitted
-subset is immune to this whole problem — as is any target that is not
+**`scripts/calibration-sweep.js` is the harness for this** — it takes the
+parameter name as an argument, scores every game at every grid value,
+asserts an identical game set throughout, and reports log loss / Brier /
+ECE / claimed-vs-realised edge slope with the same folds, bootstrap and
+Val:Fit discipline. First use:
+`docs/wpit-wbat-calibration-sweep-2026-08-22.md`, which ruled out
+`W_PIT >= 0.80` — a rejection no ROI sweep here could have supported.
+`scripts/edge-calibration-curve.js` is the older read-only example. A
+metric computed on model outputs rather than on the emitted subset is
+immune to this whole problem — as is any target that is not
 ROI at all (the 2026-07-07 bullpen blend sweep ranked on 30-team mean
 wOBA spread, which is why it is unaffected).
 

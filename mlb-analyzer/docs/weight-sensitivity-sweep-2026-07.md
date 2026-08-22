@@ -23,6 +23,15 @@
 > (claimed vs realised edge, Brier, log loss), not ROI over emitted
 > signals. See `docs/sweep-selection-effect-2026-08-21.md` and the
 > "Sweep ROI measures selection, not pricing" rule in `CLAUDE.md`.
+>
+> **Partly re-derived 2026-08-22.** `W_PIT/W_BAT` has since been swept on
+> a calibration target: production 0.40 survives (indistinguishable from
+> the 0.30 optimum, inside a flat 0.20-0.50 plateau) and **W_PIT >= 0.80
+> is now ruled out with CIs excluding zero**. So combo 7's `W_PIT=0.35`
+> leg is at least in a defensible region, but its ROI evidence still
+> means nothing. Its `SP_WEIGHT=0.75` leg is **not yet re-derived** and
+> should not be piloted until it is —
+> `docs/wpit-wbat-calibration-sweep-2026-08-22.md`.
 
 ## TL;DR
 
