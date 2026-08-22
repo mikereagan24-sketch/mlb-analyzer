@@ -514,4 +514,12 @@ function runFrvBacktest(opts) {
 // harness that omits them makes DEFENSE_FRV_ENABLED silently inert and
 // reports a false 'no effect'. Duplicate copies still live in
 // baserunning-backtest.js and runmult-totals-backtest.js.
-module.exports = { runFrvBacktest, computeTeamFieldingRunsPerGame };
+// computeFramingRvPerGame exported 2026-08-22 so the calibration harness can
+// populate game.{away,home}CatcherFramingRvPerGame the way prod does. Without
+// it every CATCHER_FRAMING_* parameter reads undefined under the harness and
+// reports a false "inert" -- the same false negative DEFENSE_FRV_ENABLED hit.
+// NOTE: this function is duplicated verbatim in baserunning-backtest.js:65,
+// runmult-totals-backtest.js:106, temp-backtest.js:66 and
+// under-selection-diagnostic.js:57, with a sixth state-aware variant inline
+// in jobs.js:~700. Consolidating them is filed, not done here.
+module.exports = { runFrvBacktest, computeTeamFieldingRunsPerGame, computeFramingRvPerGame };

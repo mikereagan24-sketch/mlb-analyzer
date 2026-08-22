@@ -4,6 +4,14 @@
 > **71 live model parameters. 11 carry current evidence. 11 rest on
 > evidence now known to be invalid. 49 were never evaluated at all.**
 > (Counts verified against `getSettings()` output; 11 + 11 + 49 = 71.)
+>
+> **UPDATE 2026-08-22** — first three targets evaluated
+> (`docs/three-targets-hfa-cap-framing-2026-08-22.md`). `HFA_BOOST` and
+> `CATCHER_FRAMING_MUTE` both came back **defensible** and move to
+> "current evidence"; the edge-cap trio was **misclassified** here (ROI
+> is the right instrument for a suppression mechanism) and its 8pp level
+> is now measured as the worst of nine tested. Running count:
+> **14 current / 8 known-invalid / 49 never evaluated.**
 
 Scope: everything `getSettings()` hands `runModel`. "Evidence" means an
 argument that the value is *right*, not a record that it *is* the value —
@@ -40,9 +48,9 @@ support them.**
 
 | parameter | live | evidence | invalidity |
 |---|---|---|---|
-| `SIGNAL_EDGE_HARD_CAP_PP` | **0.08** | `ship-hard-cap-0.08` ROI backtest | **ROI-selection.** And the 2026-08-22 edge-honesty scope looked specifically for support for the 8pp level and **found none** — above-cap honesty is not worse than below-cap |
-| `SIGNAL_EDGE_SOFT_CAP_PP` | 0.06 | same | ROI-selection |
-| `SIGNAL_EDGE_CAP_ENABLED` | true | same | ROI-selection |
+| `SIGNAL_EDGE_HARD_CAP_PP` | **0.08** | `ship-hard-cap-0.08` ROI backtest | ~~ROI-selection~~ **MISCLASSIFIED — corrected 2026-08-22.** The cap *suppresses* (`model.js:1546 continue`), so selection **is** its mechanism and ROI measures it directly. The gap was always the 8pp level, not the instrument. **Now measured: 8pp is the worst of 9 levels tested** — it suppresses the only positive edge band (8-10pp, +15.1% ROI) and costs 1.41pp vs no cap. Code's own data-driven default is **0.25** |
+| `SIGNAL_EDGE_SOFT_CAP_PP` | 0.06 | same | **Inert on P&L** — only sets the advisory `edge_suspect` flag; never changes emission or staking |
+| `SIGNAL_EDGE_CAP_ENABLED` | true | same | Selection mechanism, correctly measured by ROI (see above) |
 | `UI_HIGHLIGHT_TOT_OVERS_ENABLED`\* | false | "backtest showed no edge in overs" | ROI-selection |
 | `PA_WEIGHTS` | 9-slot vector | July sweep — "Val movement without fit signal, noise catch" | ROI-selection |
 | `BP_STRONG_WEIGHT_R/L`, `BP_WEAK_WEIGHT_R/L` | 0.55/0.35, 0.45/0.65 | July sweep, "marginal at one endpoint" | ROI-selection |
@@ -68,10 +76,18 @@ later targeted search finding no support for the level.
 `PYTH_EXP` was explicitly **deferred** after a gate-d failure (#179) and
 never returned to.
 
-**`HFA_BOOST` = 0.017** — deserves its own line. It is unexamined *and*
-the component diagnostic found the home-field advantage itself is not
-statistically established in this corpus: home win rate 51.71%, **0.96 SE
-from 50.0%**. A hardcoded boost for an effect we cannot demonstrate.
+**`HFA_BOOST` = 0.017** — ~~unexamined~~ **EVALUATED 2026-08-22, and this
+entry was wrong.** See `docs/three-targets-hfa-cap-framing-2026-08-22.md` §1.
+
+This page called it "a hardcoded boost for an effect we cannot
+demonstrate," which ran two separate claims together. The *effect* is
+indeed not established in this corpus (home win rate 51.83%, under 1 SE
+from 50%). But the *parameter* sits at the **argmin of the log-loss
+curve** and within 0.0003 of the mean-matching value (implied 0.01673 vs
+live 0.01700), and it **halves ECE** (0.0147 -> 0.0074). AUC and edge
+slope are identical to five decimals — a constant shift cannot reorder
+anything, so this is a *pure calibration* parameter and calibration is
+the only axis it can move. **Keep. Moved to section A.**
 
 **Weather** — `WIND_SCALE` 2.0. Note the 8 mph deadband in
 `calcWindFactor` discards ~54% of games and remains an open question
@@ -81,8 +97,10 @@ from 50.0%**. A hardcoded boost for an effect we cannot demonstrate.
 `MIN_PA`'s *cliff* was fixed 2026-08-21 (piecewise shrinkage to 150 PA);
 the threshold value 60 itself was never justified.
 
-**Framing / defense mutes** — `CATCHER_FRAMING_MUTE` **1.0** (schema
-default is **0.65** — a live divergence with no rationale) ·
+**Framing / defense mutes** — `CATCHER_FRAMING_MUTE` **1.0**
+(**EVALUATED 2026-08-22**: better than the schema default 0.65 on all
+five metrics; Δ -0.00007, not significant. Divergence is benign — keep
+1.0 and align the schema default) ·
 `CATCHER_FRAMING_TAKES_PER_GAME` 58 · `CATCHER_FRAMING_ABS_FACTOR` 0.8 ·
 `CATCHER_FRAMING_MIN_PITCHES_2026` 750 · `DEFENSE_FRV_MUTE` 0.5 ·
 `DEFENSE_FRV_OPPS_PER_GAME` 25
@@ -148,10 +166,18 @@ Two things follow, and they point opposite ways:
 
 ## Housekeeping found while compiling
 
-`getSettings()` returns **`odds_api_key`** inside the object handed to
-`runModel` — a credential in the model settings blob. Harmless in
-practice, but it means any log or dump of the settings object leaks it.
-Worth removing from that return.
+~~`getSettings()` returns **`odds_api_key`**~~ — **DONE 2026-08-22.**
+Moved to a dedicated `getOddsApiKey()` accessor; the two genuine
+consumers updated; `GET /api/settings` reads `app_settings` directly so
+the UI was unaffected. `getSettings()` now returns exactly **71** keys —
+the live parameter count, with no secret riding along.
+
+**New, and more serious:** every calibration A/B run before 2026-08-22
+scored with **catcher framing silently absent** — the inputs are
+caller-populated and the harness never set them. The corrected OFF-arm
+baseline moves 0.68975 -> 0.68951 and the edge slope -0.313 -> -0.243.
+Deltas are probably intact; the absolute figures on four other pages are
+not. See `docs/three-targets-hfa-cap-framing-2026-08-22.md` §4.
 
 ## Related
 

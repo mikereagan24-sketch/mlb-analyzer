@@ -375,8 +375,19 @@ function getSettings() {
       if (raw == null) return _d('kalshi_direct_totals_enabled', false);
       return raw === true || raw === 'true' || raw === '1' || raw === 1;
     })(),
-    odds_api_key: s['odds_api_key'] || null,
   };
+}
+
+// Credential accessor, deliberately NOT part of getSettings().
+//
+// getSettings() builds the object handed to runModel(); anything on it is
+// liable to be logged, dumped into a sweep manifest, or serialised into a
+// debug payload. A secret has no business riding along with model
+// parameters, and runModel has never read it. Callers that genuinely need
+// the key ask for it explicitly.
+function getOddsApiKey() {
+  const row = db.prepare("SELECT value FROM app_settings WHERE key = 'odds_api_key'").get();
+  return (row && row.value) || null;
 }
 
 function getWobaIndex() {
@@ -4031,7 +4042,7 @@ async function runOddsJob(dateStr, opts) {
     } catch(e) {
       console.log('[odds] Unabated failed: '+e.message+' → falling back to Odds API');
       try {
-        unabatedRows = await fetchOddsAPI(settings.odds_api_key, dateStr);
+        unabatedRows = await fetchOddsAPI(getOddsApiKey(), dateStr);
       } catch(e2) {
         console.log('[odds] Odds API also failed: '+e2.message);
         unabatedRows = []; // proceed with pure-Kalshi/Poly slate
@@ -6600,4 +6611,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

@@ -6297,9 +6297,8 @@ router.delete('/signals/:id', requireAdminToken, (req, res) => {
 router.get('/debug/odds-raw', async (req, res) => {
   try {
     const { fetchOddsAPI } = require('../services/scraper');
-    const { getSettings } = require('../services/jobs');
-    const settings = getSettings();
-    const results = await fetchOddsAPI(settings.odds_api_key, req.query.date || '2026-04-14');
+    const { getOddsApiKey } = require('../services/jobs');
+    const results = await fetchOddsAPI(getOddsApiKey(), req.query.date || '2026-04-14');
     res.json({ count: results.length, results: results.map(r=>({
       game_id: r.game_id, away: r.market_away_ml, home: r.market_home_ml,
       total: r.market_total, source: r.source
