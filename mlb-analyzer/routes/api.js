@@ -3421,6 +3421,34 @@ router.post('/admin/refresh/baserunning', requireAdminToken, async (req, res) =>
 //   Optional: ?no_source=1 skips per-pick source detection (faster
 //   for very wide windows; default does the detection capped at 1000
 //   picks).
+// GET /api/admin/feature-gates
+//
+// Machine-readable answer to "which features are off, and why". Every
+// gate declares its criterion, whether that criterion is ROI-based
+// (and therefore selection-contaminated per the 2026-08-21 rule), its
+// evaluation window, and whether a decision was ever recorded.
+//
+// ?attention=1 returns only the gates needing attention — an elapsed
+// window with no decision, a precondition that has since cleared while
+// the gate stayed shut, or no criterion ever written down.
+//
+// The same evaluation is logged every morning by the 6AM cron so a
+// stale gate surfaces without anyone asking. See
+// docs/feature-gate-inventory-2026-08-23.md.
+router.get('/admin/feature-gates', requireAdminToken, (req, res) => {
+  try {
+    const { evaluateGates } = require('../services/feature-gate-registry');
+    const out = evaluateGates(db, req.query.today ? { today: String(req.query.today) } : {});
+    if (req.query.attention === '1' || req.query.attention === 'true') {
+      out.gates = out.gates.filter(g => g.needs_attention);
+    }
+    res.json(out);
+  } catch (e) {
+    console.error('[admin/feature-gates] error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/admin/clv-stats', requireAdminToken, (req, res) => {
   try {
     const from = req.query.from;
