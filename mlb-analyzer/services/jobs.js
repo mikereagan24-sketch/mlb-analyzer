@@ -3407,6 +3407,17 @@ function startCronJobs() {
   // lineups → rerun.
   cron.schedule('0 6 * * *', async () => {
     console.log('[cron] 6AM PT roster refresh');
+    // Feature-gate health. Runs FIRST and unconditionally so a stale
+    // gate announces itself every morning whether or not the rest of the
+    // chain succeeds. This is the ARI-scraper lesson generalised: that
+    // scraper hid for most of a season because nothing reported its own
+    // silence, and a gate that quietly outlives its evaluation window is
+    // the same failure with a different shape. Non-fatal by construction
+    // — a registry problem must never abort the morning chain.
+    try {
+      const { logGateHealth } = require('./feature-gate-registry');
+      logGateHealth(db);
+    } catch (e) { console.warn('[gate-health] skipped (non-fatal): ' + (e && e.message)); }
     try { await runRosterJob(); }
     catch(e) { console.error('[cron-roster] failed:', e && e.message); }
     // Season-cumulative roster (statsapi fullSeason) — backtest-only
