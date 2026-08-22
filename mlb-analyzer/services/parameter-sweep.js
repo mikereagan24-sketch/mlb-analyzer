@@ -449,10 +449,18 @@ function scoreGames(settings, games, uiThresholds) {
 
       signals.push({
         game_id:     sg.game.game_id,
+        // game_date is required by any consumer doing date-clustered
+        // resampling or chronological folds — game_id alone is not
+        // unique across dates (it is <away>-<home>, which repeats every
+        // series). Added 2026-08-21 for the W_PROJ/W_ACT sweep harness
+        // so it can score once per grid value and then resample the
+        // signal table, instead of re-running runModel per bootstrap rep.
+        game_date:   sg.snapshotDate,
         category:    cat,
         edge_pp:     Number(s.edge),
         outcome:     r.outcome,
         pnl:         Math.round(pnl * 100) / 100,
+        wagered:     Math.round(wagered * 100) / 100,
         highlighted: !!highlighted,
       });
     }
@@ -828,6 +836,13 @@ module.exports = {
   SWEEP_PARAMS,
   // exposed for the route + tests
   splitTrainTest,
+  // Exposed 2026-08-21 so offline stats harnesses (rolling folds,
+  // date-clustered bootstrap) can build the same scoreable-game corpus
+  // the in-server sweep uses, rather than reimplementing the snapshot
+  // binding and pre-screen and drifting from it.
+  loadGames,
+  loadWobaSnapshot,
+  preScreenGame,
   targetMetric,
   targetBucketsFor,
   isLowSample,

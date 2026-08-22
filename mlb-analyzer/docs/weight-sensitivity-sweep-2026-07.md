@@ -336,8 +336,21 @@ weight-tuning pass.
 
 ## Phase-3-blocked weights (restated as pending, not measured)
 
+> **STATUS UPDATE 2026-08-21 — `W_PROJ / W_ACT` is no longer blocked and
+> has now been measured.** Phase 3 shipped: `woba_data_snapshot` carries
+> per-date rows (verified as-of-morning) and `services/parameter-sweep.js`
+> binds each game to its own game-date snapshot. Swept at full discipline
+> on 814 games; **no candidate is distinguishable from production** —
+> 0/9 bootstrap CIs exclude zero, 0/9 hold a sign across five folds.
+> See `docs/wproj-wact-snapshot-sweep-2026-08-21.md`.
+> **`BULLPEN_W_PROJ / BULLPEN_W_ACT` remains unmeasured** — it routes
+> through a different blend (`db/schema.js:3294`) with a different
+> actuals gate, so nothing from that pass transfers.
+
 - **`W_PROJ / W_ACT`** — projected vs actual wOBA blend
+  *(measured 2026-08-21; no distinguishable effect)*
 - **`BULLPEN_W_PROJ / BULLPEN_W_ACT`** — projected vs actual bullpen wOBA blend
+  *(still pending)*
 
 Reason: today's `woba_data` is season-cumulative — "actuals" include
 future games relative to the game_date being scored. Tuning `W_ACT`
