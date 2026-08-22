@@ -115,6 +115,42 @@ untested. That should be run before hand-conditional is judged —
 No flip criterion is written yet, per instruction: wiring is verified,
 evidence is on the table, the criterion follows the standard in §3.
 
+### Follow-up 2026-08-23: prod set to the benchmark, and a correction
+
+**Correction to how this was characterised.** Wiring the key did *not*
+put 0.7 into live pricing. With `use_hand_conditional_sp_weight` false,
+`model.js:1210` sets `awayChosenOverride = null` and the live path uses
+the scalar `SP_WEIGHT = 0.8`; only `awayAltOverride` — the **shadow**
+comparison — reads the hand-conditional values. Verified: 0 of 790 games
+change. So the wiring fix was already price-preserving.
+
+What it *did* change is the **shadow record**: from the wiring fix
+onward, shadow deltas were computed against 0.7 rather than the 0.649
+the model had always used. Minor, but a real discontinuity in the series
+the shadow watch is accumulating.
+
+Separately, the "worse on all five metrics" result was the
+`USE_HAND_CONDITIONAL_SP_WEIGHT false→true` A/B — **it measured the
+flag, not 0.7 vs 0.649.** With the flag off, 0.7 vs 0.649 is a literal
+zero-difference.
+
+**Action taken.** Prod `sp_weight_l` set **0.7 → 0.649** (POST
+`/api/settings`, verified after: `sp_weight_l = "0.649"`).
+`sp_weight_r` was already 0.865 and needed no change. This makes the
+wiring fix behaviour-preserving on **both** paths and keeps the shadow
+series on one constant.
+
+0.649 is also the empirical benchmark from `pitcher_game_log` BF data,
+so this is a return to the documented value rather than a new choice.
+**Moving to 0.7 is now a separate proposed change** to be evaluated on
+its own merits under the §3 standard — not something that arrives as a
+side effect of a wiring fix.
+
+**Consequence for the pending evaluation:** the recorded
+hand-conditional A/B used 0.7 in its ON arm and therefore no longer
+describes prod. It needs re-running against 0.649 before hand-conditional
+is judged.
+
 ## 3. A gate standard that can actually be met
 
 **The problem, stated plainly.** Effects here run ~0.0005–0.001 log loss
