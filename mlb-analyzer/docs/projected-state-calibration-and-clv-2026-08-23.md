@@ -214,6 +214,26 @@ The actual record, over the 273 locked ML bets:
 | record | **126W – 142L** |
 | total P&L | **−420.47** |
 
+> **QUALIFIED 2026-08-23 by `docs/one-click-bet-logging-design-2026-08-23.md`.**
+> `GET /api/backtest` (`routes/api.js:1415`) backfills
+> `closing_line = market_line` for any resolved signal lacking one. As a
+> result **211 of these 273 rows have `closing_line == market_line`**,
+> and for a locked row `market_line` is frozen at lock time — so those
+> rows measure *bet price vs the card's line at lock*, not vs the close.
+> Split:
+>
+> | | n | mean CLV |
+> |---|---|---|
+> | genuine capture (`closing != market`) | 62 | **+2.218pp** |
+> | backfilled (`closing == market`) | 211 | +0.356pp |
+> | pooled (reported below) | 273 | +0.779pp |
+>
+> The +0.779pp and t=4.01 stand as computed, but they blend two
+> different quantities and should not be read as a single
+> closing-line-value figure. The vig conclusion is unaffected: even
+> +2.218pp on the genuine subset is around the ~2.25pp per-side vig,
+> i.e. roughly breakeven, on n=62.
+
 **The CLV is real.** The picks genuinely beat the closing line, and not
 by luck at t=4.01. So how is the P&L negative?
 
