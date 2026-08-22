@@ -143,12 +143,36 @@ const SETTINGS_SCHEMA = {
     help: 'Batting component weight.' },
 
   // --- Projection vs actual blend ------------------------------------------
-  w_proj: { type: 'number', min: 0.0, max: 1.0, default: 0.70,
-    help: 'Steamer projection weight in batter wOBA blend.' },
-  w_act: { type: 'number', min: 0.0, max: 1.0, default: 0.30,
+  // Bounds are ASYMMETRIC ON PURPOSE, and are exact complements of each
+  // other under the sum invariant (2026-08-21):
+  //
+  //   w_proj in [0.20, 1.00]  ->  invariant implies w_act = 1 - w_proj
+  //   w_act  in [0.00, 0.80]  ->  which is exactly w_act's range
+  //
+  // so every bound-legal value of either weight has a bound-legal
+  // partner, with no dead zone at either end.
+  //
+  // Why w_proj is floored at 0.20 but w_act is not:
+  //   w_act = 0 (pure projection) IS the model's own behaviour — every
+  //   batter below MIN_PA is priced off the projection alone, so
+  //   forbidding it in settings would contradict the model.
+  //   w_proj = 0 (pure actuals) is NEVER the model's behaviour at any
+  //   sample size, and season actuals stay materially noisier than the
+  //   projection they would be replacing: measured spread of
+  //   (actual - projection) wOBA is SD 0.041 at 60-90 PA and still
+  //   0.017 at 450+ PA. A 0 floor let an operator put full weight on
+  //   the noisier input at every sample size at once.
+  //
+  // This bound is not an empirical optimum — the 2026-08-21 sweep found
+  // ROI flat and indistinguishable across 0.1..0.9
+  // (docs/wproj-wact-snapshot-sweep-2026-08-21.md). It only fences off
+  // the region no measurement supports and the model never uses.
+  w_proj: { type: 'number', min: 0.20, max: 1.0, default: 0.70,
+    help: 'Steamer projection weight in batter wOBA blend. Floored at 0.20: pure actuals is never how the model itself prices any batter, and season actuals are the noisier input at every sample size.' },
+  w_act: { type: 'number', min: 0.0, max: 0.80, default: 0.30,
     invariant: (v, all) => Math.abs(v + Number(all.w_proj) - 1.0) < 0.02,
     invariantMsg: 'w_proj + w_act must equal 1.0',
-    help: 'FanGraphs actuals weight.' },
+    help: 'FanGraphs actuals weight. Capped at 0.80 as the exact complement of the w_proj floor.' },
 
   // --- Run scoring environment ---------------------------------------------
   run_mult: { type: 'number', min: 30, max: 60, default: 45.5,

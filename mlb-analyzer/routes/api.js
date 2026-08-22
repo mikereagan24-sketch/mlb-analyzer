@@ -49,7 +49,7 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
 const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
-const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats } = require('../services/model');
+const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats, weightOr } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
@@ -5090,8 +5090,11 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     if (!game) return res.status(404).json({ error: 'Game not found' });
     const wobaIdx = getWobaIndex();
     const settings = getSettings();
-    const W_PROJ = settings.W_PROJ || 0.65;
-    const W_ACT  = settings.W_ACT  || 0.35;
+    // weightOr, not `|| 0.65`: zero is falsy, and this display path must
+    // resolve the weights EXACTLY as services/model.js:blendWoba does or
+    // the Matchups tab shows a different blend than the model priced.
+    const W_PROJ = weightOr(settings.W_PROJ, 0.65);
+    const W_ACT  = weightOr(settings.W_ACT,  0.35);
       // Treat null/undefined/'' as missing — see note in services/jobs.js.
       const num = (v,d) => {
         if (v == null || v === '') return d;
@@ -6005,7 +6008,7 @@ router.get('/debug/bullpen', (req, res) => {
       console.warn('[bullpen-report] override overlay failed (non-fatal): ' + e.message);
     }
     const actIdx={}; for(const r of actRows) actIdx[norm(r.player_name)]=r;
-    const sets=getSettings(); const WP=sets.W_PROJ||0.65, WA=sets.W_ACT||0.35;
+    const sets=getSettings(); const WP=weightOr(sets.W_PROJ,0.65), WA=weightOr(sets.W_ACT,0.35);
     const starterLast=sp?norm(sp).split(' ').pop():'';
     const pitchers=projRows.map(proj=>{
       const nameClean=proj.player_name.replace(/ [A-Z]{2,3}$/,'');
