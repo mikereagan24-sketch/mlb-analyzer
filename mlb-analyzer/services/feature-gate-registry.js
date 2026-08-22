@@ -174,9 +174,17 @@ const GATES = [
         + 'UPDATE: all three keys are now mapped and the flag activates (789/790 games change vs 0/790 before). '
         + 'First A/B is directionally WORSE on all five metrics (delta log loss +0.00009, CI [-0.00032, +0.00054]; '
         + 'ECE 0.0155 vs 0.0114) and the sign test is 2/5 windows favourable — Tier 4 on the proposed standard. '
-        + 'CAVEAT: that ON arm used sp_weight_l=0.7, which was prod at the time. Prod is now 0.649 (the benchmark), '
-        + 'so the pending evaluation is the 0.649 variant and the recorded result does not apply to it. '
-        + 'Re-run scripts/calibration-ab.js USE_HAND_CONDITIONAL_SP_WEIGHT false true against the new prod value.' },
+        + 'RE-RUN 2026-08-22 against the benchmark sp_weight_l=0.649 (now prod): VERDICT UNCHANGED. '
+        + 'delta log loss +0.00008 CI [-0.00040, +0.00059], sign test 2/5 windows favourable, directionally WORSE '
+        + 'on all five metrics (ECE 0.0142 vs 0.0114 off; AUC 0.5485 vs 0.5494; edge slope -0.320 vs -0.313). '
+        + 'The benchmark does NOT rescue it — 0.649 beats 0.7 on ECE (0.0142 vs 0.0155), consistent with being the '
+        + 'empirically derived value, but both lose to the flag being off. TIER 4. Leave off. '
+        + 'SHADOW DISCONTINUITY, quantified: the hand-conditional deltas are CONSOLE-LOG ONLY — nothing persists '
+        + 'them (game_log.sp_weight_used holds SP_PIT_WEIGHT from the IP forecast, a different quantity per the '
+        + 'CLAUDE.md SP_WEIGHT vs SP_PIT_WEIGHT rule), so there is no series to pool or restart. The window in '
+        + 'which 0.7 was ever READ is bounded by PR #257 merging (2026-08-22T21:53Z) and prod being set to 0.649 '
+        + '(~22:12Z): <= 19 minutes, shortened further by Render deploy lag, with at most one hourly cron boundary '
+        + '(22:00Z) inside. No restart needed.' },
 
   { id: 'ui_highlight_tot_overs_enabled', key: 'ui_highlight_tot_overs_enabled', on_expected: false,
     criterion: 'Backtest showed no edge in overs.',
