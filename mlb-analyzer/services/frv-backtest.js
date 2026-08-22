@@ -507,4 +507,11 @@ function runFrvBacktest(opts) {
   return out;
 }
 
-module.exports = { runFrvBacktest };
+// computeTeamFieldingRunsPerGame is exported (2026-08-23) so calibration
+// harnesses can populate the SAME caller-computed FRV input that
+// services/jobs.js builds before calling runModel. runModel reads
+// game.{away,home}FieldingRunsPerGame — it does not compute them — so a
+// harness that omits them makes DEFENSE_FRV_ENABLED silently inert and
+// reports a false 'no effect'. Duplicate copies still live in
+// baserunning-backtest.js and runmult-totals-backtest.js.
+module.exports = { runFrvBacktest, computeTeamFieldingRunsPerGame };

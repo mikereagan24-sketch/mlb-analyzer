@@ -92,9 +92,18 @@ const GATES = [
     decision: { date: '2026-07-05', outcome: 'enabled', ref: 'docs/framing-mute-semantics-2026-07-05.md' } },
 
   { id: 'park_neutral_inputs_enabled', key: 'park_neutral_inputs_enabled', on_expected: true,
-    criterion: 'Help text says "Do not flip on without an A/B". It was flipped on; the A/B is not recorded anywhere I can find.',
-    criterion_type: 'none', window_end: null, decision: null,
-    note: 'ON in prod with no recorded A/B. Either the A/B exists somewhere unindexed or it was flipped on judgement.' },
+    criterion: 'Calibration A/B: log loss / Brier / ECE over all games, with vs without.',
+    criterion_type: 'calibration', window_end: null,
+    decision: { date: '2026-08-23', outcome: 'validated_directionally_not_significant',
+                ref: 'docs/gate-evaluations-2026-08-23.md' },
+    note: 'CORRECTION to the 2026-08-23 inventory, which filed this as forgotten. An A/B DOES exist — PR #142, '
+        + 'scripts/backtest-park-neutral.js, +3.32pp totals ROI. Two problems with it: it is ROI-based (therefore '
+        + 'selection-contaminated) and it PREDATES a correction to the feature itself (the 2026-07-02 audit found '
+        + 'over-neutralization of ~2.2pp on extreme-park hitters; the actuals-only fix landed at model.js:381 and '
+        + 'was never re-validated). Re-run on calibration 2026-08-23: the flag moves p(home) on 84.4% of games and '
+        + 'is better on ALL FIVE metrics (log loss 0.68975 vs 0.69029, Brier, ECE, AUC, edge slope), but '
+        + 'delta log loss -0.00055 CI [-0.00117, +0.00012] does not clear zero. Directionally validated, not '
+        + 'statistically established. No case to turn it off.' },
 
   { id: 'signal_venue_aware_enabled', key: 'signal_venue_aware_enabled', on_expected: true,
     criterion: 'Best net at-size price across Poly + Kalshi with fillable-at-stake guard.',
@@ -131,17 +140,34 @@ const GATES = [
   // ---- settings-gated, currently OFF ----
   { id: 'defense_frv_enabled', key: 'defense_frv_enabled', on_expected: false,
     criterion: 'Default OFF — "requires the fielding_frv table to be populated".',
-    criterion_type: 'precondition', precondition: 'fielding_frv_populated', window_end: null, decision: null,
-    note: 'THE PRECONDITION HAS CLEARED — fielding_frv is populated and fielding_frv_snapshot has tens of thousands '
-        + 'of rows. The key is not even present in app_settings, so it is running on the schema default. Nobody '
-        + 'decided to leave it off; the stated blocker simply stopped being true and nothing noticed.' },
+    criterion_type: 'calibration', precondition: 'fielding_frv_populated',
+    window_end: '2026-09-30', decision: null,
+    note: 'PRECONDITION CLEARED (fielding_frv populated; the key is not even in app_settings, so it runs on the '
+        + 'schema default). EVALUATION WRITTEN AND RUN 2026-08-23 rather than flipping: scripts/calibration-ab.js '
+        + 'DEFENSE_FRV_ENABLED false true. Result — the flag moves p(home) on 100% of games (mean |dp| 0.0083) and '
+        + 'is better on ALL FIVE metrics, with the largest edge-slope improvement measured anywhere (-0.313 -> '
+        + '-0.218), but delta log loss -0.00087 CI [-0.00211, +0.00065] does not clear zero. '
+        + 'FLIP CRITERION: delta_log_loss CI excludes zero on the negative side, on >= 1200 games. '
+        + 'WINDOW: re-evaluate 2026-09-30. Do not flip before then. '
+        + 'NOTE the first run reported the flag as INERT — a harness artifact, because runModel reads '
+        + 'game.{away,home}FieldingRunsPerGame which the caller populates and the harness did not. '
+        + 'scripts/calibration-ab.js now hard-fails on that class rather than reporting a false negative.' },
 
   { id: 'use_hand_conditional_sp_weight', key: 'use_hand_conditional_sp_weight', on_expected: false,
-    criterion: 'Phase 1 shadow watch → flip → accumulate. Shadow deltas logged whenever sp_weight_r/l differ from sp_weight.',
-    criterion_type: 'none', precondition: 'hand_conditional_shadow_accumulating', window_end: null, decision: null,
-    note: 'Shadow logging is live (sp_weight_r=0.865, sp_weight_l=0.7 both differ from sp_weight=0.8) and firing on '
-        + 'essentially every game. No flip criterion was ever written down — no threshold, no window, no owner. '
-        + 'Note sp_weight_l is 0.7 in prod against an empirical benchmark of 0.649.' },
+    criterion: 'BLOCKED — the flag is not wired. No criterion can apply until it can be flipped.',
+    criterion_type: 'none', precondition: 'hand_conditional_shadow_accumulating',
+    window_end: null, decision: null,
+    blocked_reason: 'getSettings() never maps use_hand_conditional_sp_weight (nor sp_weight_r / sp_weight_l), '
+                  + 'so model.js reads undefined and the flag is permanently false regardless of app_settings.',
+    note: 'NOT "awaiting a decision" — UNFLIPPABLE. services/jobs.js:getSettings() returns an explicit hand-mapped '
+        + 'whitelist, and USE_HAND_CONDITIONAL_SP_WEIGHT is not in it, so model.js reads undefined and '
+        + '!!undefined === false ALWAYS. No app_settings value can turn this on. SP_WEIGHT_R and SP_WEIGHT_L are '
+        + 'also unmapped, so model.js falls back to its hardcoded 0.865 / 0.649 — which means the operator-tuned '
+        + 'sp_weight_l=0.7 in app_settings is silently ignored. Shadow logging still fires because the alt path '
+        + 'uses those hardcoded constants. This is the UI-parity rule inverted: schema key + UI control + '
+        + 'app_settings value, with no getSettings mapping to read them. FIX FIRST (map all three keys in '
+        + 'getSettings, verify sp_weight_l takes effect), THEN write a flip criterion. Writing one now would be '
+        + 'premature — there is nothing to flip.' },
 
   { id: 'ui_highlight_tot_overs_enabled', key: 'ui_highlight_tot_overs_enabled', on_expected: false,
     criterion: 'Backtest showed no edge in overs.',
@@ -181,13 +207,15 @@ const GATES = [
   { id: 'sp_weight_l', key: 'sp_weight_l', numeric: true,
     criterion: 'Hand-conditional SP_WEIGHT vs LHP. Empirical benchmark 0.649.',
     criterion_type: 'calibration', window_end: null, decision: null,
-    note: 'Prod is 0.7 against a benchmark of 0.649 from pitcher_game_log BF data. Inert while '
-        + 'use_hand_conditional_sp_weight is off, but it is the value that goes live on flip.' },
+    note: 'Prod app_settings says 0.7; the empirical benchmark is 0.649. NEITHER IS READ — getSettings() does not '
+        + 'map sp_weight_l, so model.js uses its hardcoded 0.649 fallback. The stored 0.7 has never had any '
+        + 'effect. Same root cause as use_hand_conditional_sp_weight.' },
 
   // ---- non-settings gates ----
   { id: 'bsr_baserunning', key: null,
-    criterion: 'Accuracy delta vs SE band AND CLV delta vs noise band; 60 snapshot days + 500 forward games.',
-    criterion_type: 'roi', window_end: '2026-09-14', decision: null,
+    criterion: 'RE-SPEC 2026-08-23: calibration (log loss over all games) PRIMARY, accuracy (margin MAE) second, '
+             + 'CLV demoted to context and split by same-side vs churn. Was: accuracy + CLV with CLV weighted heaviest.',
+    criterion_type: 'calibration', window_end: '2026-09-14', decision: null,
     precondition: 'bsr_snapshots_60d',
     note: 'Gate window 2026-08-13..2026-09-14. CLV prong is selection-contaminated — 330 of 348 bets are the same '
         + 'side in both configs and contribute exactly zero, so the delta is 41 marginal bets. And the gate weights '
@@ -244,7 +272,11 @@ function evaluateGates(db, opts) {
     const elapsed = !!(g.window_end && today > g.window_end);
 
     let status;
-    if (g.decision) status = STATUS.DECIDED;
+    // An explicit `blocked_reason` wins over everything: a gate that
+    // CANNOT be flipped is not awaiting a decision, and reporting it as
+    // such would send someone to make a decision they cannot act on.
+    if (g.blocked_reason) status = STATUS.BLOCKED;
+    else if (g.decision) status = STATUS.DECIDED;
     else if (elapsed) status = STATUS.ELAPSED_NO_DECISION;
     else if (g.window_end) status = STATUS.IN_WINDOW;
     else if (precondMet === true) status = STATUS.AWAITING_DECISION;
@@ -265,10 +297,14 @@ function evaluateGates(db, opts) {
       precondition: g.precondition || null,
       precondition_met: precondMet,
       decision: g.decision || null,
+      blocked_reason: g.blocked_reason || null,
       status,
       needs_attention: status === STATUS.ELAPSED_NO_DECISION
         || status === STATUS.AWAITING_DECISION
-        || status === STATUS.NO_CRITERION,
+        || status === STATUS.NO_CRITERION
+        // A gate blocked by a WIRING defect is a bug, not a decision to
+        // wait on — surface it rather than letting it look correctly shut.
+        || !!g.blocked_reason,
       note: g.note || null,
     });
   }
