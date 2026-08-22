@@ -403,12 +403,18 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
   <option value="v5">v5 (legacy schema, partial display)</option>
   <option value="v5+v6">v6 + v5 combined</option>
 </select>
+<span style="color:var(--text2);margin-left:8px">mode</span>
+<select id="bt-mode" style="width:170px" onchange="loadBacktest()">
+  <option value="all" selected>All Signals</option>
+  <option value="logged">Logged Bets Only</option>
+</select>
 <button class="btn btn-primary btn-sm" onclick="loadBacktest()">Run backtest</button>
 <button class="btn btn-ghost btn-sm" onclick="exportCSV()">Export CSV</button>
 <button class="btn btn-sm" onclick="openManualModal()" style="margin-left:8px">+ Log Manual Bet</button>
 </div>
 </div>
 <div id="bt-results">
+<div id="bt-logged-clv" style="margin-bottom:1rem"></div>
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
 <!-- Runline Companion Analysis (Step 3 of 3 in runline workstream).
      Populated by renderRunlineCompanion() inside loadBacktest. Hidden
@@ -1605,8 +1611,113 @@ async function renderPlayVenueFlags(games, date){
     const el = document.getElementById('gcpv-' + g.game_id);
     if (!el) continue;
     const row = byGid[g.game_id];
-    el.innerHTML = (g.signals || []).map(s => playVenueLineFor(s, row, g)).join('');
+    el.innerHTML = (g.signals || []).map(s => playVenueLineFor(s, row, g) + logBetControlFor(s, g)).join('');
   }
+}
+
+// ---------------------------------------------------------------------
+// ONE-CLICK BET LOGGING (feat/one-click-bet-logging, 2026-08-23)
+//
+// One click logs the bet at the line the card is already showing. No
+// modal on the happy path; correction is optional and after the fact.
+//
+// WHICH LINE. sig.market_line, which IS the venue-best net at-size price
+// across Poly + Kalshi — signal_venue_aware_enabled is true in prod, so
+// signals are priced through services/odds-comparison.js with a
+// fillable-at-stake guard. It is also the right freshness: market_line
+// refreshes on every odds pass until odds_locked_at or bet_locked_at
+// freezes it, so on a pre-lineup card it is the line available now, not
+// a stale or post-lock value. price_venue / venue_stale are rendered
+// alongside because venue_stale=1 means no fillable venue-best baseline
+// was obtained and it fell back to Kalshi-direct — exactly the case
+// where the displayed line is least likely to be the fill.
+//
+// WHICH ENDPOINT. POST /signals/:id/bet-line, NOT /signals/manual.
+// /signals/manual creates rows and its ON CONFLICT overwrites
+// market_line, model_line, edge_pct and category from current values —
+// clobbering the emit-time baseline, against the post-lock immutability
+// rule — and it never writes the *_at_emit snapshot columns. The
+// bet-line endpoint touches only bet_line, bet_locked_at and clv, all on
+// the immutability whitelist. The modal path stays reachable for the
+// genuinely different case of logging a bet on a game that emitted no
+// signal. See docs/one-click-bet-logging-design-2026-08-23.md.
+function logBetControlFor(sig, g) {
+  if (!sig || sig.id == null) return '';
+  var id = sig.id;
+  var logged = sig.bet_line != null;
+  var venueBits = '';
+  if (sig.venue_stale) {
+    venueBits = ' <span title="No fillable venue-best baseline — fell back to Kalshi-direct. The shown line is least likely to be your fill." style="color:var(--amber,#e90);font-size:10px">⚠ stale venue</span>';
+  } else if (sig.price_venue) {
+    venueBits = ' <span style="color:var(--text3);font-size:10px">@' + escapeHtml(String(sig.price_venue)) + '</span>';
+  }
+  var fmt = function (v) { return v == null ? '?' : (Number(v) > 0 ? '+' : '') + v; };
+  if (!logged) {
+    if (sig.market_line == null) {
+      return '<div class="ocl-row" style="font-size:11px;color:var(--text3);margin:2px 0 6px 14px">no line to log</div>';
+    }
+    return '<div class="ocl-row" id="ocl-' + id + '" style="margin:2px 0 6px 14px">'
+      + '<button class="btn btn-sm" style="font-size:11px;padding:2px 8px" '
+      + 'onclick="oneClickLogBet(' + id + ',' + Number(sig.market_line) + ')">'
+      + 'Log ' + fmt(sig.market_line) + '</button>' + venueBits + '</div>';
+  }
+  // Logged: show what was logged, click to adjust. clv only exists once a
+  // closing line has landed, so it is rendered conditionally.
+  var clvBit = (sig.clv != null)
+    ? ' <span style="color:' + (sig.clv >= 0 ? 'var(--green)' : '#e05') + ';font-size:10px">CLV '
+      + (sig.clv >= 0 ? '+' : '') + sig.clv + '</span>' : '';
+  return '<div class="ocl-row" id="ocl-' + id + '" style="margin:2px 0 6px 14px;font-size:11px">'
+    + '<span style="color:var(--green)">✓ logged ' + fmt(sig.bet_line) + '</span>' + venueBits + clvBit
+    + ' <a href="#" style="font-size:10px;color:var(--text3)" '
+    + 'onclick="event.preventDefault();adjustLoggedBet(' + id + ',' + Number(sig.bet_line) + ')">adjust</a></div>';
+}
+
+// One click, no confirmation. Verifies the write landed before reporting
+// success — same read-back guard lockBetLine uses, which exists because
+// a lock once returned success without persisting.
+async function oneClickLogBet(sigId, line) {
+  var el = document.getElementById('ocl-' + sigId);
+  if (el) el.innerHTML = '<span style="font-size:11px;color:var(--text3)">logging…</span>';
+  try {
+    var r = await api('/signals/' + sigId + '/bet-line', {
+      method: 'POST', body: JSON.stringify({ bet_line: Number(line) })
+    });
+    if (!r || !r.success) throw new Error((r && r.error) || 'log failed');
+    var verified = null;
+    try { verified = await api('/signals/' + sigId); } catch (_) {}
+    if (!verified || Number(verified.bet_line) !== Number(line)) {
+      if (el) el.innerHTML = '<span style="font-size:11px;color:#e05">LOG FAILED — not persisted. '
+        + 'Check /api/audit/by-game/&lt;date&gt;/&lt;game_id&gt;.</span>';
+      return;
+    }
+    if (el) {
+      var clvBit = (r.clv != null)
+        ? ' <span style="color:' + (r.clv >= 0 ? 'var(--green)' : '#e05') + ';font-size:10px">CLV '
+          + (r.clv >= 0 ? '+' : '') + r.clv + '</span>' : '';
+      el.innerHTML = '<span style="font-size:11px;color:var(--green)">✓ logged '
+        + (Number(line) > 0 ? '+' : '') + line + '</span>' + clvBit
+        + ' <a href="#" style="font-size:10px;color:var(--text3)" '
+        + 'onclick="event.preventDefault();adjustLoggedBet(' + sigId + ',' + Number(line) + ')">adjust</a>';
+    }
+  } catch (e) {
+    if (el) el.innerHTML = '<span style="font-size:11px;color:#e05">error: ' + escapeHtml(e.message || String(e)) + '</span>';
+  }
+}
+
+// Correction after the fact — the operator often gets a different line
+// than the card showed. Same endpoint; it overwrites bet_line/
+// bet_locked_at and recomputes clv, so re-posting is idempotent.
+function adjustLoggedBet(sigId, current) {
+  var el = document.getElementById('ocl-' + sigId);
+  if (!el) return;
+  el.innerHTML = '<input id="ocl-in-' + sigId + '" type="number" value="' + current
+    + '" style="width:70px;font-size:11px" onkeydown="if(event.key===\'Enter\')oneClickLogBet(' + sigId + ',this.value)">'
+    + ' <button class="btn btn-sm" style="font-size:11px;padding:2px 8px" '
+    + 'onclick="oneClickLogBet(' + sigId + ',document.getElementById(\'ocl-in-' + sigId + '\').value)">save</button>'
+    + ' <a href="#" style="font-size:10px;color:var(--text3)" '
+    + 'onclick="event.preventDefault();oneClickLogBet(' + sigId + ',' + current + ')">cancel</a>';
+  var inp = document.getElementById('ocl-in-' + sigId);
+  if (inp) { inp.focus(); inp.select(); }
 }
 
 function playVenueLineFor(sig, row, g){
@@ -4149,6 +4260,69 @@ function signalMeetsBacktestThreshold(s, thr) {
   return false;
 }
 
+// Logged-bets CLV panel. Rendered only in mode=logged — CLV is
+// meaningless over the full signal population, since a signal with no
+// bet_line has no CLV by construction.
+//
+// SEGMENTED BY PROVENANCE ON PURPOSE. GET /api/backtest backfills
+// closing_line = market_line for resolved signals lacking a close, and
+// for a locked row market_line is frozen at lock time. So rows where
+// closing_line === market_line measure "did I beat the line the card
+// showed me", not "did I beat the close". Pooling the two understates
+// real CLV by roughly 3x (211 backfilled at +0.36pp vs 62 genuine
+// captures at +2.22pp as of 2026-08-23). Both are shown, never summed
+// into a single headline.
+// See docs/one-click-bet-logging-design-2026-08-23.md.
+function renderLoggedClv(d, mode) {
+  var host = document.getElementById('bt-logged-clv');
+  if (!host) return;
+  if (mode !== 'logged' || !d || !d.clv) { host.innerHTML = ''; return; }
+  if (d.clv.error) {
+    host.innerHTML = '<div class="notice err">CLV block failed: ' + escapeHtml(d.clv.error) + '</div>';
+    return;
+  }
+  var pp = function (v) { return v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(2) + 'pp'; };
+  var pct = function (v) { return v == null ? '—' : Number(v).toFixed(1) + '%'; };
+  var col = function (v) { return v == null ? 'var(--text2)' : (v >= 0 ? 'var(--green)' : '#e05'); };
+  function row(label, a, hint) {
+    if (!a) return '<tr><td>' + escapeHtml(label) + '</td><td colspan="5" style="color:var(--text3)">no rows</td></tr>';
+    // beat = actual win rate minus the closing price's implied. Positive
+    // means the bets won more often than the closing market expected.
+    var beat = (a.win_rate_pct == null) ? null : (a.win_rate_pct - a.close_implied_pct);
+    return '<tr>'
+      + '<td>' + escapeHtml(label) + (hint ? ' <span style="color:var(--text3);font-size:10px">' + hint + '</span>' : '') + '</td>'
+      + '<td style="text-align:right">' + a.n + '</td>'
+      + '<td style="text-align:right;color:' + col(a.mean_clv_pp) + '">' + pp(a.mean_clv_pp) + '</td>'
+      + '<td style="text-align:right">' + a.wins + '-' + a.losses + '</td>'
+      + '<td style="text-align:right">' + pct(a.win_rate_pct) + '</td>'
+      + '<td style="text-align:right;color:var(--text3)">' + pct(a.bet_implied_pct) + ' / ' + pct(a.close_implied_pct) + '</td>'
+      + '<td style="text-align:right;color:' + col(beat) + '">' + (beat == null ? '—' : pp(beat)) + '</td>'
+      + '</tr>';
+  }
+  var c = d.clv;
+  var h = '<div class="card"><div class="card-head">Logged-bet CLV'
+    + ' <span style="color:var(--text3);font-size:11px">— ML only; bet_line vs closing_line</span></div>'
+    + '<table class="tbl" style="font-size:12px"><thead><tr>'
+    + '<th>segment</th><th style="text-align:right">n</th><th style="text-align:right">mean CLV</th>'
+    + '<th style="text-align:right">W-L</th><th style="text-align:right">win%</th>'
+    + '<th style="text-align:right">implied bet / close</th><th style="text-align:right">vs close</th>'
+    + '</tr></thead><tbody>'
+    + row('ALL logged', c.overall)
+    + '<tr><td colspan="7" style="padding-top:6px;color:var(--text3);font-size:11px">by closing-line provenance</td></tr>'
+    + row('genuine capture', c.by_provenance && c.by_provenance.genuine_capture, 'real close')
+    + row('backfilled', c.by_provenance && c.by_provenance.backfilled_from_market, 'closing_line = market_line — beat-the-card, not beat-the-close')
+    + '<tr><td colspan="7" style="padding-top:6px;color:var(--text3);font-size:11px">by timing (18h threshold)</td></tr>'
+    + row('day before', c.by_timing && c.by_timing.day_before)
+    + row('same day', c.by_timing && c.by_timing.same_day)
+    + row('unknown', c.by_timing && c.by_timing.unknown)
+    + '</tbody></table>'
+    + '<div style="font-size:11px;color:var(--text3);padding:6px 0 0">'
+    + '“vs close” is win% minus the closing price’s implied probability — positive means the bets won more often than the closing market expected. '
+    + 'Provenance is a proxy: a genuine close that happens to equal the frozen market_line is misfiled as backfilled.'
+    + '</div></div>';
+  host.innerHTML = h;
+}
+
 async function loadBacktest(){
   const from=document.getElementById('bt-from').value;
   const to=document.getElementById('bt-to').value;
@@ -4161,7 +4335,16 @@ async function loadBacktest(){
     // and downstream consumers (runline, signal tracking) all see the
     // same filtered slice.
     const apiCohort = cohort === 'v5+v6' ? 'all' : cohort;
-    const d=await api('/backtest?from='+from+'&to='+to+'&cohort='+encodeURIComponent(apiCohort));
+    // Logged-bets mode (feat/one-click-bet-logging). Restricts the whole
+    // section to bets actually placed. Grading is unchanged — pnl is
+    // already computed through calcPnl with bet_line and
+    // wageredForSignal already prefers bet_line — so this changes the
+    // POPULATION, not the math.
+    const modeEl = document.getElementById('bt-mode');
+    const btMode = modeEl ? modeEl.value : 'all';
+    const d=await api('/backtest?from='+from+'&to='+to+'&cohort='+encodeURIComponent(apiCohort)
+      + '&mode=' + encodeURIComponent(btMode));
+    renderLoggedClv(d, btMode);
     let signals = d.signals || [];
     if (cohort === 'v5+v6') {
       signals = signals.filter(s => s.cohort === 'v5' || s.cohort === 'v6');

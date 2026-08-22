@@ -20,7 +20,7 @@
 // Read-only — no writes. No model or signal-generation changes here.
 
 const { db, q } = require('../db/schema');
-const { calcCLV } = require('./clv');
+const { calcCLV, americanToImplied } = require('./clv');
 
 // ---------- helpers ----------
 
@@ -329,4 +329,106 @@ function buildClvStats(opts) {
   };
 }
 
-module.exports = { buildClvStats, calcCLV, timingBucket, detectClosingSource };
+// Logged-bet CLV block for GET /api/backtest?mode=logged (2026-08-23).
+//
+// Distinct from buildClvStats: that one owns the CLV tab over a date
+// range; this one summarises an already-selected set of logged rows the
+// backtest route has in hand, so it does no querying of its own beyond
+// optional provenance detection.
+//
+// PROVENANCE SEGMENTATION IS THE POINT. GET /api/backtest backfills
+// closing_line = market_line for resolved signals lacking one
+// (routes/api.js), and for a locked row market_line is frozen at lock
+// time. So a row where closing_line === market_line is measuring
+// "did I beat the line the card showed me", NOT "did I beat the close".
+// Both are useful; averaging them together is not. 211 of 273 rows were
+// in the backfilled bucket as of 2026-08-23 (+0.356pp) against 62
+// genuine captures (+2.218pp), so pooling understates real CLV by ~3x.
+// See docs/one-click-bet-logging-design-2026-08-23.md.
+//
+// `closing_line !== market_line` is a PROXY for genuine capture, not
+// true provenance — a real close that happens to equal the frozen
+// market_line is misfiled as backfilled. detectClosingSource() does the
+// real thing against the capture tables; it is used when
+// opts.detectSource is set, and is capped by the caller.
+function buildLoggedBetClv(rows, opts) {
+  const o = opts || {};
+  const mk = () => ({ n: 0, clvSum: 0, wins: 0, losses: 0, betImpliedSum: 0, closeImpliedSum: 0 });
+  const roll = (a) => {
+    if (!a.n) return null;
+    const decided = a.wins + a.losses;
+    return {
+      n: a.n,
+      mean_clv_pp: Math.round((a.clvSum / a.n) * 1000) / 1000,
+      wins: a.wins,
+      losses: a.losses,
+      win_rate_pct: decided ? Math.round((a.wins / decided) * 10000) / 100 : null,
+      // Breakeven implied by the price actually taken, and by the close.
+      // Actual win rate above bet_implied means the bet beat its own
+      // price; above close_implied means it beat the closing price.
+      bet_implied_pct: Math.round((a.betImpliedSum / a.n) * 10000) / 100,
+      close_implied_pct: Math.round((a.closeImpliedSum / a.n) * 10000) / 100,
+    };
+  };
+
+  const overall = mk();
+  const byProvenance = { genuine_capture: mk(), backfilled_from_market: mk() };
+  const byTiming = { day_before: mk(), same_day: mk(), unknown: mk() };
+  const bySource = {};
+  const picks = [];
+
+  for (const r of rows) {
+    // CLV is ML-only by design (see routes/api.js: Total CLV is NULLed).
+    if (r.signal_type !== 'ML') continue;
+    if (r.clv == null || r.bet_line == null || r.closing_line == null) continue;
+    const provenance = (Number(r.closing_line) === Number(r.market_line))
+      ? 'backfilled_from_market' : 'genuine_capture';
+    const timing = timingBucket(r);
+    const betImp = americanToImplied(Number(r.bet_line));
+    const closeImp = americanToImplied(Number(r.closing_line));
+    const bump = (a) => {
+      a.n++;
+      a.clvSum += Number(r.clv);
+      if (r.outcome === 'win') a.wins++;
+      else if (r.outcome === 'loss') a.losses++;
+      a.betImpliedSum += betImp;
+      a.closeImpliedSum += closeImp;
+    };
+    bump(overall);
+    bump(byProvenance[provenance]);
+    bump(byTiming[timing] || byTiming.unknown);
+
+    let source = null;
+    if (o.detectSource) {
+      try { source = detectClosingSource(r); } catch (e) { source = null; }
+      if (source) {
+        if (!bySource[source]) bySource[source] = mk();
+        bump(bySource[source]);
+      }
+    }
+    picks.push({
+      game_date: r.game_date, game_id: r.game_id, signal_side: r.signal_side,
+      bet_line: r.bet_line, closing_line: r.closing_line, market_line: r.market_line,
+      clv: r.clv, outcome: r.outcome, pnl: r.pnl,
+      provenance, timing, closing_source: source,
+    });
+  }
+
+  const proj = (m) => {
+    const out = {};
+    for (const k of Object.keys(m)) out[k] = roll(m[k]);
+    return out;
+  };
+  return {
+    overall: roll(overall),
+    by_provenance: proj(byProvenance),
+    by_timing: proj(byTiming),
+    by_closing_source: o.detectSource ? proj(bySource) : null,
+    picks,
+    note: 'provenance is a proxy: closing_line === market_line implies the '
+        + 'GET /api/backtest backfill rather than a captured close. Pooling '
+        + 'the two buckets mixes beat-the-close with beat-the-card.',
+  };
+}
+
+module.exports = { buildClvStats, buildLoggedBetClv, calcCLV, timingBucket, detectClosingSource };
