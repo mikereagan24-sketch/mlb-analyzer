@@ -86,6 +86,7 @@ const {
 //     since they only fire on missing-data games.
 const SWEEP_PARAMS = [
   'W_PROJ_W_ACT', 'W_PIT_W_BAT', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
+  'BAT_HAND_SP_PAIRED',
   'RUN_MULT', 'TOT_SLOPE',
 ];
 
@@ -118,6 +119,29 @@ function applySweepOverrides(baseSettings, overrides) {
   }
   if ('BAT_HAND_SP' in overrides) s.SP_WEIGHT     = overrides.BAT_HAND_SP;
   if ('BAT_HAND_RELIEF' in overrides) s.RELIEF_WEIGHT = overrides.BAT_HAND_RELIEF;
+  // BAT_HAND_SP_PAIRED — sweep the platoon split while HOLDING THE TOTAL
+  // BATTER WEIGHT AT 1.0 (2026-08-22).
+  //
+  // perBatterEW computes `batW = vsStart * spW + vsOpp * relW`, and
+  // settings-schema.js requires sp_weight + relief_weight == 1.0. The two
+  // keys above override each weight INDEPENDENTLY, so sweeping
+  // BAT_HAND_SP alone silently changes the SUM: at BAT_HAND_SP=0.1 with
+  // RELIEF_WEIGHT left at its production 0.20, batter wOBA is scaled by
+  // 0.30 rather than re-split. That is a LEVEL SHIFT, not a platoon
+  // reweight, and at the low end it drives aRuns/hRuns into their
+  // Math.max(0, ...) floor so the model emits a constant probability.
+  //
+  // Observed directly: a BAT_HAND_SP calibration sweep returned log loss
+  // 0.69261 at BOTH 0.10 and 0.20 — identical to the always-predict-the-
+  // base-rate value — with ECE 0.0005, i.e. a degenerate constant model,
+  // plus a non-monotone spike to 0.74418 at 0.40.
+  //
+  // Use this key to ask "what is the right platoon split?". Use the bare
+  // BAT_HAND_SP only to probe out-of-schema level behaviour deliberately.
+  if ('BAT_HAND_SP_PAIRED' in overrides) {
+    s.SP_WEIGHT     = overrides.BAT_HAND_SP_PAIRED;
+    s.RELIEF_WEIGHT = 1 - overrides.BAT_HAND_SP_PAIRED;
+  }
   if ('RUN_MULT'  in overrides) s.RUN_MULT  = overrides.RUN_MULT;
   if ('TOT_SLOPE' in overrides) s.TOT_SLOPE = overrides.TOT_SLOPE;
   return s;

@@ -24,14 +24,32 @@
 > signals. See `docs/sweep-selection-effect-2026-08-21.md` and the
 > "Sweep ROI measures selection, not pricing" rule in `CLAUDE.md`.
 >
-> **Partly re-derived 2026-08-22.** `W_PIT/W_BAT` has since been swept on
-> a calibration target: production 0.40 survives (indistinguishable from
-> the 0.30 optimum, inside a flat 0.20-0.50 plateau) and **W_PIT >= 0.80
-> is now ruled out with CIs excluding zero**. So combo 7's `W_PIT=0.35`
-> leg is at least in a defensible region, but its ROI evidence still
-> means nothing. Its `SP_WEIGHT=0.75` leg is **not yet re-derived** and
-> should not be piloted until it is —
-> `docs/wpit-wbat-calibration-sweep-2026-08-22.md`.
+> **RE-DERIVED 2026-08-22. COMBO 7 IS RETIRED — do not pilot it.**
+>
+> Both legs have now been re-run on a calibration target.
+>
+> `W_PIT=0.35` survives as a *value*: production 0.40 is
+> indistinguishable from the 0.30 optimum inside a flat 0.20-0.50
+> plateau, and 0.35 is in it. **W_PIT >= 0.80 is ruled out** with CIs
+> excluding zero. `docs/wpit-wbat-calibration-sweep-2026-08-22.md`.
+>
+> `SP_WEIGHT=0.75` fails on **three** counts
+> (`docs/sp-weight-calibration-sweep-2026-08-22.md`):
+> 1. its ROI evidence is a selection effect;
+> 2. **it was confounded** — this sweep set `BAT_HAND_SP` while leaving
+>    `RELIEF_WEIGHT` at 0.20, which breaks the
+>    `sp_weight + relief_weight = 1.0` schema invariant. `SP_WEIGHT=0.75`
+>    is therefore a **0.95x batter-wOBA level shift, not a platoon
+>    reweight**. It never tested what it claimed to;
+> 3. on a properly paired sweep, **no SP_WEIGHT value on the grid is
+>    distinguishable from production** — the whole 0.10-0.90 range spans
+>    0.00126 of log loss.
+>
+> **The confound applies to every cell of this sweep that moved
+> `BAT_HAND_SP` or `BAT_HAND_RELIEF` independently** — the univariate
+> pass, and 20 of the 25 pairs in joint mode. Those are level effects
+> wearing a platoon-split label. Use the new `BAT_HAND_SP_PAIRED` key
+> for any future question about the split.
 
 ## TL;DR
 
