@@ -277,11 +277,29 @@ function buildRosterGatedIdx(idx, teamHint, rosterSet) {
 // projection term is preserved raw. When null / 1.0 / neutralization
 // toggle is off, both terms flow through unchanged (byte-identical to
 // pre-PR #142 behavior).
+// Resolve a blend-weight argument to a number. Mirrors the `num` helper
+// inside runModel (services/model.js:627) and the `!= null` idiom in
+// db/schema.js:3294 (the bullpen blend): null/undefined/''/NaN fall back
+// to the default, and a legitimate **0 is preserved**.
+//
+// This existed as `wProj || 0.65` until 2026-08-21. Zero is falsy, so a
+// caller asking for zero weight silently got the legacy default instead
+// and the two weights stopped summing to 1 — 0.65/1.00 at W_PROJ=0 and
+// 1.00/0.35 at W_PROJ=1, inflating a 0.345 batter to 0.560. Production
+// (0.45/0.55) never tripped it, but settings-schema.js allows
+// w_proj=0/w_act=1 and the sum invariant accepts it.
+// See docs/blendwoba-zero-weight-open-question-2026-08-21.md
+function weightOr(v, dflt) {
+  if (v == null || v === '') return dflt;
+  const n = Number(v);
+  return isNaN(n) ? dflt : n;
+}
+
 function blendWoba(proj, act, minSample, wProj, wAct, wobaParkFactor) {
   const hp = proj && !isNaN(proj.woba);
   const ha = act && !isNaN(act.woba) && act.sample >= minSample;
-  const wp = wProj || 0.65;
-  const wa = wAct  || 0.35;
+  const wp = weightOr(wProj, 0.65);
+  const wa = weightOr(wAct,  0.35);
   // Neutralize ONLY the actuals term. A null / 1.0 factor is a no-op.
   const actWoba = (ha && wobaParkFactor != null && wobaParkFactor !== 1.0)
     ? neutralizeWoba(act.woba, wobaParkFactor)
@@ -2042,4 +2060,4 @@ function applyCatcherFramingDelta(rvPerGame, settings) {
   return rvPerGame * mute;
 }
 
-module.exports = { normName,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };
+module.exports = { normName,weightOr,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };
