@@ -154,12 +154,15 @@ const GATES = [
         + 'scripts/calibration-ab.js now hard-fails on that class rather than reporting a false negative.' },
 
   { id: 'use_hand_conditional_sp_weight', key: 'use_hand_conditional_sp_weight', on_expected: false,
-    criterion: 'BLOCKED — the flag is not wired. No criterion can apply until it can be flipped.',
+    criterion: 'Calibration A/B (scripts/calibration-ab.js). Tier-2 sign-test standard: favourable windows at '
+             + 'sign-test p <= 0.05, >=4 of 5 metrics favourable, pooled CI upper bound < +0.001 log loss.',
     criterion_type: 'none', precondition: 'hand_conditional_shadow_accumulating',
     window_end: null, decision: null,
-    blocked_reason: 'getSettings() never maps use_hand_conditional_sp_weight (nor sp_weight_r / sp_weight_l), '
-                  + 'so model.js reads undefined and the flag is permanently false regardless of app_settings.',
-    note: 'NOT "awaiting a decision" — UNFLIPPABLE. services/jobs.js:getSettings() returns an explicit hand-mapped '
+    // blocked_reason CLEARED 2026-08-23 — the three keys are now mapped in
+    // getSettings() and the flag activates (789/790 games change, was
+    // 0/790). Wiring verified byte-identical on the live path.
+    // docs/getsettings-whitelist-audit-2026-08-23.md
+    note: 'WIRING FIXED 2026-08-23; first evidence is UNFAVOURABLE. Was UNFLIPPABLE: getSettings() returns an explicit hand-mapped '
         + 'whitelist, and USE_HAND_CONDITIONAL_SP_WEIGHT is not in it, so model.js reads undefined and '
         + '!!undefined === false ALWAYS. No app_settings value can turn this on. SP_WEIGHT_R and SP_WEIGHT_L are '
         + 'also unmapped, so model.js falls back to its hardcoded 0.865 / 0.649 — which means the operator-tuned '
@@ -167,7 +170,12 @@ const GATES = [
         + 'uses those hardcoded constants. This is the UI-parity rule inverted: schema key + UI control + '
         + 'app_settings value, with no getSettings mapping to read them. FIX FIRST (map all three keys in '
         + 'getSettings, verify sp_weight_l takes effect), THEN write a flip criterion. Writing one now would be '
-        + 'premature — there is nothing to flip.' },
+        + 'premature — there is nothing to flip. '
+        + 'UPDATE: all three keys are now mapped and the flag activates (789/790 games change vs 0/790 before). '
+        + 'First A/B is directionally WORSE on all five metrics (delta log loss +0.00009, CI [-0.00032, +0.00054]; '
+        + 'ECE 0.0155 vs 0.0114) and the sign test is 2/5 windows favourable — Tier 4 on the proposed standard. '
+        + 'CAVEAT before judging: that ON arm used the stored sp_weight_l=0.7, NOT the empirical benchmark 0.649. '
+        + 'Run the benchmark variant before deciding.' },
 
   { id: 'ui_highlight_tot_overs_enabled', key: 'ui_highlight_tot_overs_enabled', on_expected: false,
     criterion: 'Backtest showed no edge in overs.',
