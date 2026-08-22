@@ -214,6 +214,29 @@ function getSettings() {
     SIGNAL_EMIT_FLOOR_PP: num('signal_emit_floor_pp', _d('signal_emit_floor_pp', 0.01)),
     SP_WEIGHT:      num('sp_weight',         _d('sp_weight', 0.77)),
     RELIEF_WEIGHT:     num('relief_weight',     _d('relief_weight', 0.23)),
+    // Hand-conditional SP_WEIGHT (feat/sp-weight-hand-conditional).
+    // Previously NOT surfaced here — the SAME defect class as
+    // CATCHER_FRAMING_ENABLED below, which carries the same note.
+    // model.js:763 read settings.USE_HAND_CONDITIONAL_SP_WEIGHT as
+    // undefined, so `!!undefined` made the flag permanently false and NO
+    // app_settings value could enable it. SP_WEIGHT_R / SP_WEIGHT_L were
+    // unmapped too, so model.js fell back to its hardcoded 0.865 / 0.649
+    // and the operator-tuned sp_weight_l=0.7 sitting in app_settings had
+    // never taken effect on anything.
+    //
+    // Wiring these is byte-identical on the LIVE pricing path while
+    // use_hand_conditional_sp_weight is false: with the flag off,
+    // model.js uses the scalar SP_WEIGHT for the chosen path and the
+    // hand-conditional values only for the SHADOW (alt) comparison. So
+    // this changes shadow deltas, not prices. Verified, not assumed —
+    // see docs/getsettings-whitelist-audit-2026-08-23.md.
+    USE_HAND_CONDITIONAL_SP_WEIGHT: (function() {
+      const raw = s['use_hand_conditional_sp_weight'];
+      if (raw == null) return _d('use_hand_conditional_sp_weight', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
+    SP_WEIGHT_R:       num('sp_weight_r',       _d('sp_weight_r', 0.865)),
+    SP_WEIGHT_L:       num('sp_weight_l',       _d('sp_weight_l', 0.649)),
     SP_PIT_WEIGHT:     num('sp_pit_weight',     _d('sp_pit_weight', 0.80)),
     RELIEF_PIT_WEIGHT: num('relief_pit_weight', _d('relief_pit_weight', 0.20)),
     BP_STRONG_WEIGHT_R: num('bp_strong_weight_r', _d('bp_strong_weight_r', 0.55)),

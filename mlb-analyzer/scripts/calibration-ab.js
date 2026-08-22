@@ -233,6 +233,47 @@ console.log('');
 const dOn = ll(keep, pOn) - ll(keep, pOff);
 const ciOn = diffCI(pOn, pOff);
 const sig = (c) => (c.lo > 0 && c.hi > 0) || (c.lo < 0 && c.hi < 0);
+// ---------------------------------------------------------------------
+// WINDOW SIGN TEST (2026-08-23)
+//
+// A CI excluding zero is not reachable in one season for effects of the
+// size this model produces (~0.0005-0.001 log loss against SE ~0.0006-
+// 0.001 — roughly 4x the data needed). A bar that cannot be met is a bar
+// that guarantees permanent deferral.
+//
+// The sign test is the honest alternative: split the corpus into K
+// non-overlapping chronological windows and ask only which arm wins each
+// one. It DISCARDS MAGNITUDE, which is exactly where the noise lives, and
+// under a null of no effect P(all K windows agree in one direction) =
+// 0.5^K — so K=5 gives p=0.031 and K=4 gives p=0.0625, both reachable
+// inside a single season.
+//
+// Caveat carried in the output: windows inside one season are not fully
+// independent (same rosters, same model version, correlated market
+// regime), so treat 0.5^K as a floor on the p-value, not an exact one.
+const K = Number(process.env.SIGN_TEST_WINDOWS || 5);
+{
+  const ds = [...new Set(keep.map(i => rows[i].d))].sort();
+  const wins = [];
+  for (let w = 0; w < K; w++) {
+    const lo = Math.floor(w * ds.length / K), hi = Math.floor((w + 1) * ds.length / K);
+    const set = new Set(ds.slice(lo, hi));
+    const idxs = keep.filter(i => set.has(rows[i].d));
+    if (!idxs.length) { wins.push(null); continue; }
+    wins.push(ll(idxs, pOn) - ll(idxs, pOff));   // negative = ON better
+  }
+  const valid = wins.filter(x => x != null);
+  const nBetter = valid.filter(x => x < 0).length;
+  const allSame = valid.length > 0 && (nBetter === valid.length || nBetter === 0);
+  const pFloor = Math.pow(0.5, valid.length);
+  console.log('=== window sign test (K=' + K + ') ===');
+  console.log('  per-window d logLoss (negative = ON better):');
+  console.log('   ' + wins.map((x, i) => 'W' + (i + 1) + ' ' + (x == null ? 'n/a' : (x >= 0 ? '+' : '') + x.toFixed(5))).join('   '));
+  console.log('  ON better in ' + nBetter + ' / ' + valid.length + ' windows'
+    + (allSame ? '   *** UNANIMOUS (sign-test p <= ' + pFloor.toFixed(3) + ') ***' : '   (not unanimous)'));
+  console.log('');
+}
+
 console.log('=== the question: does ON beat OFF? ===');
 console.log('  d logLoss (ON - OFF) = ' + f5(dOn) + '   95% CI [' + f5(ciOn.lo) + ', ' + f5(ciOn.hi) + ']');
 console.log('  -> ' + (sig(ciOn)
