@@ -1394,6 +1394,16 @@ router.post('/jobs/fix-signals', requireAdminToken, (req, res) => {
 router.get('/backtest', (req, res) => {
   try {
     const { from, to, cohort } = req.query;
+    // mode=logged restricts every aggregate to bets that were actually
+    // placed (bet_line IS NOT NULL). Grading already prefers bet_line —
+    // pnl is computed through calcPnl with bet_line, and the wagered
+    // expressions below COALESCE(bet_line, market_line) — so logged mode
+    // changes the POPULATION, not the math. Default 'all' is byte-
+    // identical to the pre-2026-08-23 behaviour.
+    const mode = (req.query.mode || 'all').toString();
+    const loggedOnly = mode === 'logged';
+    const loggedPred   = loggedOnly ? ' AND bet_line IS NOT NULL' : '';
+    const loggedPredBS = loggedOnly ? ' AND bs.bet_line IS NOT NULL' : '';
     // Model version floor: 2026-04-09 is when the current parameter set was
     // established. Signals from earlier dates were produced by older model
     // versions and must never appear in backtest output, no matter what
@@ -1447,7 +1457,7 @@ router.get('/backtest', (req, res) => {
       " ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END)" +
       "  / NULLIF(SUM(CASE WHEN outcome NOT IN ('pending','push') THEN 1 ELSE 0 END) * 100.0, 0) * 100, 2) as roi" +
       " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome != 'pending'" +
-      cohortPred +
+      cohortPred + loggedPred +
       " GROUP BY category ORDER BY category"
     ).all(fromDate, toDate, ...cohortParams);
 
@@ -1468,7 +1478,7 @@ router.get('/backtest', (req, res) => {
       "   WHEN signal_type='ML' THEN ABS(COALESCE(bet_line,market_line))" +
       "   ELSE 110.0 END), 0) * 100, 2) as roi" +
       " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome NOT IN ('pending','push')" +
-      cohortPred
+      cohortPred + loggedPred
     ).get(fromDate, toDate, ...cohortParams);
 
     const signals = db.prepare(
@@ -1488,11 +1498,33 @@ router.get('/backtest', (req, res) => {
       // was invisible until grade time. See
       // docs/locked-bet-visibility-fix-2026-07-06.md.
       "   AND (bs.is_active = 1 OR bs.outcome != 'pending' OR bs.bet_line IS NOT NULL)" +
-      cohortPredBS +
+      cohortPredBS + loggedPredBS +
       " ORDER BY bs.game_date, bs.id"
     ).all(fromDate, toDate, ...cohortParams);
 
-    res.json({ overall, byCategory, signals, cohort: cohortArg });
+    // Logged-bet CLV block. Only for mode=logged — it is the number that
+    // distinguishes betting the day before from betting at close, and it
+    // is meaningless over the full signal population (no bet_line => no
+    // CLV). Segmented by closing-line PROVENANCE because this same route
+    // backfills closing_line = market_line above, and for a locked row
+    // market_line is frozen at lock — so those rows measure
+    // beat-the-card, not beat-the-close. See
+    // docs/one-click-bet-logging-design-2026-08-23.md.
+    //
+    // detectSource runs two capture-table lookups per pick, so it is
+    // gated on a small population. Logged bets are in the low hundreds,
+    // affordable here where it would not be over all signals.
+    let clv = null;
+    if (loggedOnly) {
+      try {
+        const { buildLoggedBetClv } = require('../services/clv-stats');
+        clv = buildLoggedBetClv(signals, { detectSource: signals.length <= 600 });
+      } catch (e) {
+        console.warn('[backtest] logged-bet CLV block failed (non-fatal): ' + e.message);
+        clv = { error: e.message };
+      }
+    }
+    res.json({ overall, byCategory, signals, cohort: cohortArg, mode, clv });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
