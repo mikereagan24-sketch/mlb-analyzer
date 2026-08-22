@@ -174,8 +174,9 @@ const GATES = [
         + 'UPDATE: all three keys are now mapped and the flag activates (789/790 games change vs 0/790 before). '
         + 'First A/B is directionally WORSE on all five metrics (delta log loss +0.00009, CI [-0.00032, +0.00054]; '
         + 'ECE 0.0155 vs 0.0114) and the sign test is 2/5 windows favourable — Tier 4 on the proposed standard. '
-        + 'CAVEAT before judging: that ON arm used the stored sp_weight_l=0.7, NOT the empirical benchmark 0.649. '
-        + 'Run the benchmark variant before deciding.' },
+        + 'CAVEAT: that ON arm used sp_weight_l=0.7, which was prod at the time. Prod is now 0.649 (the benchmark), '
+        + 'so the pending evaluation is the 0.649 variant and the recorded result does not apply to it. '
+        + 'Re-run scripts/calibration-ab.js USE_HAND_CONDITIONAL_SP_WEIGHT false true against the new prod value.' },
 
   { id: 'ui_highlight_tot_overs_enabled', key: 'ui_highlight_tot_overs_enabled', on_expected: false,
     criterion: 'Backtest showed no edge in overs.',
@@ -214,10 +215,16 @@ const GATES = [
 
   { id: 'sp_weight_l', key: 'sp_weight_l', numeric: true,
     criterion: 'Hand-conditional SP_WEIGHT vs LHP. Empirical benchmark 0.649.',
-    criterion_type: 'calibration', window_end: null, decision: null,
-    note: 'Prod app_settings says 0.7; the empirical benchmark is 0.649. NEITHER IS READ — getSettings() does not '
-        + 'map sp_weight_l, so model.js uses its hardcoded 0.649 fallback. The stored 0.7 has never had any '
-        + 'effect. Same root cause as use_hand_conditional_sp_weight.' },
+    criterion_type: 'calibration', window_end: null,
+    decision: { date: '2026-08-23', outcome: 'set_to_benchmark_0.649_behavior_preserving',
+                ref: 'docs/getsettings-whitelist-audit-2026-08-23.md' },
+    note: 'RESOLVED 2026-08-23. History: app_settings held 0.7 while getSettings() did not map the key, so '
+        + 'model.js used its hardcoded 0.649 and the stored 0.7 never took effect. Wiring the key would have made '
+        + '0.7 live on the SHADOW path (live pricing is unaffected while use_hand_conditional_sp_weight is false — '
+        + 'verified 0/790 games change). Prod app_settings set to 0.649 so the wiring fix is behavior-preserving on '
+        + 'BOTH paths and the shadow record stays on one constant. 0.649 is also the empirical benchmark from '
+        + 'pitcher_game_log BF data. Moving to 0.7 is now a SEPARATE proposed change to be evaluated on its own '
+        + 'merits, not a side effect of a wiring fix.' },
 
   // ---- non-settings gates ----
   { id: 'bsr_baserunning', key: null,
