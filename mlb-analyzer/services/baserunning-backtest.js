@@ -595,6 +595,14 @@ function runBaserunningBacktest(opts) {
   const missingTeams = new Set();
 
   // Accuracy accumulators
+  // Calibration accumulators (2026-08-23 re-spec). Computed over EVERY
+  // scored game with the SAME set for both arms, so composition cannot
+  // move them — unlike the CLV prong, whose bet set differs by config.
+  // See docs/bsr-gate-respec-2026-08-23.md.
+  let calibN = 0, calibLLWithout = 0, calibLLWith = 0, calibBrWithout = 0, calibBrWith = 0;
+  const calibBinWithout = Array.from({ length: 10 }, () => ({ n: 0, p: 0, y: 0 }));
+  const calibBinWith    = Array.from({ length: 10 }, () => ({ n: 0, p: 0, y: 0 }));
+  const calibPerDate = [];
   let nAcc = 0, sumAbsErrWithout = 0, sumAbsErrWith = 0;
   let sumErrWithout = 0, sumErrWith = 0;
   // For SE on |err| — sample variance of per-game abs-err deltas.
@@ -791,6 +799,23 @@ function runBaserunningBacktest(opts) {
 
     const homeWpWithout = pythagHomeWp(aRuns, hRuns, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
     const homeWpWith    = pythagHomeWp(aRunsAdj, hRunsAdj, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
+
+    // CALIBRATION — every scored game, identical set for both arms.
+    {
+      const y = actualMargin > 0 ? 1 : 0;   // MLB finals do not tie
+      const cl = (q) => Math.min(1 - 1e-9, Math.max(1e-9, q));
+      const qWo = cl(homeWpWithout), qW = cl(homeWpWith);
+      calibN++;
+      calibLLWithout += -(y * Math.log(qWo) + (1 - y) * Math.log(1 - qWo));
+      calibLLWith    += -(y * Math.log(qW)  + (1 - y) * Math.log(1 - qW));
+      calibBrWithout += (qWo - y) * (qWo - y);
+      calibBrWith    += (qW  - y) * (qW  - y);
+      const bWo = Math.min(9, Math.floor(qWo * 10)), bW = Math.min(9, Math.floor(qW * 10));
+      calibBinWithout[bWo].n++; calibBinWithout[bWo].p += qWo; calibBinWithout[bWo].y += y;
+      calibBinWith[bW].n++;     calibBinWith[bW].p += qW;      calibBinWith[bW].y += y;
+      calibPerDate.push({ d: gameRow.game_date, qWo, qW, y });
+    }
+
 
     const sideWithout = chooseMlSide(1 - homeWpWithout, homeWpWithout,
       morning.away_price_ml, morning.home_price_ml, EMIT_FLOOR);
@@ -992,6 +1017,68 @@ function runBaserunningBacktest(opts) {
     games_skipped_no_snapshot: forwardHonest ? gamesSkippedNoSnapshot : undefined,
     missing_teams: Array.from(missingTeams).sort(),
     baserunning_coverage,
+    // ---------------------------------------------------------------
+    // CALIBRATION (2026-08-23 re-spec, PRIMARY going forward)
+    //
+    // The 2026-08-21 selection finding invalidated the CLV prong as a
+    // decision metric: CLV per bet is f(morning price, close price) and
+    // does not depend on the model, so for any game where both configs
+    // signal the same side the CLV is byte-identical. With
+    // bet_set_diff.same_side typically ~95% of the population, the CLV
+    // delta is produced almost entirely by a few dozen marginal
+    // near-floor bets. Waiting longer grows that churn sample; it does
+    // not make the metric measure pricing.
+    //
+    // These targets are computed over EVERY scored game with the same
+    // set under both arms, so composition cannot move them. Paired,
+    // date-clustered bootstrap on the log-loss difference.
+    // docs/bsr-gate-respec-2026-08-23.md
+    calibration: (function () {
+      if (!calibN) return { n: 0, note: 'no scored games' };
+      const llWo = calibLLWithout / calibN, llW = calibLLWith / calibN;
+      const brWo = calibBrWithout / calibN, brW = calibBrWith / calibN;
+      const eceOf = (bins) => {
+        let e = 0;
+        for (const b of bins) if (b.n) e += (b.n / calibN) * Math.abs(b.p / b.n - b.y / b.n);
+        return e;
+      };
+      // Deterministic LCG — gate output must reproduce across runs.
+      let seed = 20260823;
+      const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+      const byD = new Map();
+      for (const r of calibPerDate) { if (!byD.has(r.d)) byD.set(r.d, []); byD.get(r.d).push(r); }
+      const ds = [...byD.keys()];
+      const reps = [];
+      for (let b = 0; b < 2000; b++) {
+        let a = 0, c = 0, n = 0;
+        for (let k = 0; k < ds.length; k++) {
+          for (const r of byD.get(ds[Math.floor(rnd() * ds.length)])) {
+            a += -(r.y * Math.log(r.qW) + (1 - r.y) * Math.log(1 - r.qW));
+            c += -(r.y * Math.log(r.qWo) + (1 - r.y) * Math.log(1 - r.qWo));
+            n++;
+          }
+        }
+        if (n) reps.push(a / n - c / n);
+      }
+      reps.sort((x, y) => x - y);
+      const lo = reps[Math.floor(0.025 * reps.length)], hi = reps[Math.floor(0.975 * reps.length)];
+      const excludesZero = (lo > 0 && hi > 0) || (lo < 0 && hi < 0);
+      const r4 = (v) => Number(v.toFixed(5));
+      return {
+        n: calibN,
+        without: { log_loss: r4(llWo), brier: r4(brWo), ece: r4(eceOf(calibBinWithout)) },
+        with:    { log_loss: r4(llW),  brier: r4(brW),  ece: r4(eceOf(calibBinWith)) },
+        delta_log_loss: r4(llW - llWo),
+        delta_log_loss_ci95: [r4(lo), r4(hi)],
+        significant: excludesZero,
+        verdict: excludesZero
+          ? (llW < llWo ? 'BsR IMPROVES calibration (significant)' : 'BsR DEGRADES calibration (significant)')
+          : 'not distinguishable',
+        interpretation: 'PRIMARY GATE METRIC as of the 2026-08-23 re-spec. delta_log_loss = with − without; '
+          + 'NEGATIVE = BsR improves. Computed over all scored games, identical set both arms, so unlike the '
+          + 'clv block below this cannot be moved by bet-set composition. Judge on the CI, not the point estimate.',
+      };
+    })(),
     accuracy: {
       n_games: nAcc,
       without: {
@@ -1006,6 +1093,13 @@ function runBaserunningBacktest(opts) {
       delta_se_runs: seDelta != null ? Number(seDelta.toFixed(4)) : null,
       interpretation: 'delta_mean_abs_err = with − without. NEGATIVE = BsR improves accuracy. Compare |delta| against delta_se_runs: |delta| > 2*SE is a meaningful improvement.',
     },
+    // DEMOTED to secondary by the 2026-08-23 re-spec — retained because
+    // it is informative about the marginal bets, not because it can
+    // decide the gate. Read bet_set_diff first: same_side bets have a
+    // delta of exactly ZERO by construction.
+    clv_role: 'SECONDARY / CONTEXT ONLY as of 2026-08-23. Selection-contaminated: CLV per bet does not depend on '
+      + 'the model, so same_side bets contribute exactly 0 to the delta and only the churn can move it. '
+      + 'Use calibration.delta_log_loss as the gate metric.',
     clv: {
       without: Object.assign({}, projectClv(clvWithout), { noise_band_pp: clvNoiseBandWithout }),
       with:    Object.assign({}, projectClv(clvWith),    { noise_band_pp: clvNoiseBandWith }),
