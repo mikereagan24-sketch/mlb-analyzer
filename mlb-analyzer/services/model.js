@@ -295,16 +295,101 @@ function weightOr(v, dflt) {
   return isNaN(n) ? dflt : n;
 }
 
-function blendWoba(proj, act, minSample, wProj, wAct, wobaParkFactor) {
+// Sample size at which season actuals reach FULL weight for a BATTER.
+// Between MIN_PA and this floor the actuals weight ramps in; at or above
+// it the blend is bit-for-bit what it has always been.
+//
+// Picked on SHAPE, not by sweeping — per the 2026-08-21 sweep null, an
+// ROI search over this constant would be fitting noise
+// (docs/wproj-wact-snapshot-sweep-2026-08-21.md). The shape comes from
+// how fast season actuals stop disagreeing with the projection. Spread
+// of (actual - projection) wOBA, pooled over 4 mid-season snapshots:
+//
+//     60-90 PA   SD 0.0409      <- the old hard gate handed FULL weight here
+//     90-120     SD 0.0404
+//     120-150    SD 0.0355
+//     150-200    SD 0.0269      <- knee: falls ~25% then flattens
+//     200-300    SD 0.0272
+//     300-450    SD 0.0259
+//     450+       SD 0.0173
+//
+// 150 is where the steep decline ends and the curve flattens. Anything
+// in 150-200 would do; the constant is deliberately not tuned finer than
+// the data can distinguish.
+//
+// BATTERS ONLY. The pitcher curve has the same shape shifted right and
+// has NOT flattened by 150 (100-130 BF SD 0.0537, 150-200 SD 0.0427,
+// 200-300 SD 0.0364, 450+ SD 0.0215), so a pitcher floor would be
+// ~300 BF, not 150. getPitcherWoba deliberately passes no floor and is
+// byte-identical everywhere. See the doc for the follow-up.
+const BATTER_ACT_FULL_WEIGHT_PA = 150;
+
+// Smoothstep on [0,1]. Continuous in value AND first derivative at both
+// ends, so neither boundary introduces a kink — same shape argued for
+// the wind deadband in
+// docs/wind-deadband-cliff-open-question-2026-08-19.md.
+function _smoothstep(t) {
+  if (!(t > 0)) return 0;
+  if (t >= 1) return 1;
+  return t * t * (3 - 2 * t);
+}
+
+// blendWoba(proj, act, minSample, wProj, wAct, wobaParkFactor, shrinkFloor)
+//
+// shrinkFloor (optional): sample size at which the actuals term reaches
+// full weight. Omitted / null / <= minSample  =>  no shrinkage, exactly
+// the pre-2026-08-21 behaviour.
+//
+// THE CLIFF THIS REMOVES. The actuals gate used to be hard: a batter at
+// minSample-1 PA was priced off the projection alone, and at minSample+1
+// PA jumped straight to the full W_ACT blend. At MIN_PA=60 and
+// W_ACT=0.55 that is a step change of 0.55 x (actual - projection) in a
+// single plate appearance, on the noisiest actuals the model will ever
+// use (SD 0.041 at 60-90 PA). There is no mechanism that switches on at
+// 60 PA; information accrues continuously.
+//
+// THE RAMP. With a floor, the actuals weight is scaled by
+// s = smoothstep((sample - minSample) / (shrinkFloor - minSample)):
+//
+//     waEff = wa * s
+//     wpEff = wp + wa * (1 - s)
+//
+// Three properties that matter, all by construction rather than by
+// arithmetic luck:
+//   1. At s = 1 the weights are the caller's own wp / wa objects
+//      untouched, so the blend above the floor is BIT-IDENTICAL. Note
+//      `1 - wa` would NOT be: 1 - 0.55 is 0.44999999999999996, not 0.45.
+//   2. wpEff + waEff == wp + wa at every s, so the ramp cannot change
+//      the total weight, only its split.
+//   3. At s = 0, wpEff = wp + wa and waEff = 0 => pure projection,
+//      which is exactly what the sub-minSample path already returns.
+//      The join at minSample is therefore continuous, which is the
+//      whole point.
+// The projection weight is consequently floored at wp (0.45 in prod)
+// and rises to wp + wa (1.0) as the sample shrinks to minSample.
+function blendWoba(proj, act, minSample, wProj, wAct, wobaParkFactor, shrinkFloor) {
   const hp = proj && !isNaN(proj.woba);
   const ha = act && !isNaN(act.woba) && act.sample >= minSample;
   const wp = weightOr(wProj, 0.65);
   const wa = weightOr(wAct,  0.35);
+  // Shrinkage factor. Guarded so a floor at or below the gate, a missing
+  // floor, or a non-finite sample all degrade to the historical blend.
+  let s = 1;
+  if (ha && shrinkFloor != null && Number(shrinkFloor) > minSample && Number.isFinite(act.sample)) {
+    s = _smoothstep((act.sample - minSample) / (Number(shrinkFloor) - minSample));
+  }
   // Neutralize ONLY the actuals term. A null / 1.0 factor is a no-op.
   const actWoba = (ha && wobaParkFactor != null && wobaParkFactor !== 1.0)
     ? neutralizeWoba(act.woba, wobaParkFactor)
     : (ha ? act.woba : null);
-  if (hp && ha) return { woba: proj.woba*wp + actWoba*wa, source:'blend' };
+  if (hp && ha) {
+    // s === 1 uses wp/wa directly: byte-identity above the floor must not
+    // depend on floating-point arithmetic happening to round back.
+    if (s === 1) return { woba: proj.woba*wp + actWoba*wa, source:'blend' };
+    const waEff = wa * s;
+    const wpEff = wp + wa * (1 - s);
+    return { woba: proj.woba*wpEff + actWoba*waEff, source:'blend' };
+  }
   if (hp)      return { woba: proj.woba, source:'steamer' };
   if (ha)      return { woba: actWoba,   source:'actual' };
   return null;
@@ -392,12 +477,12 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, 
   const bL = blendWoba(
     fuzzyLookup(lookupIdx['bat-proj-lhp'], name, teamHint),
     fuzzyLookup(lookupIdx['bat-act-lhp'], name, teamHint),
-    minPA, wProj, wAct, pf
+    minPA, wProj, wAct, pf, BATTER_ACT_FULL_WEIGHT_PA
   );
   const bR = blendWoba(
     fuzzyLookup(lookupIdx['bat-proj-rhp'], name, teamHint),
     fuzzyLookup(lookupIdx['bat-act-rhp'], name, teamHint),
-    minPA, wProj, wAct, pf
+    minPA, wProj, wAct, pf, BATTER_ACT_FULL_WEIGHT_PA
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
   // Default selection has three priority layers:
@@ -2060,4 +2145,4 @@ function applyCatcherFramingDelta(rvPerGame, settings) {
   return rvPerGame * mute;
 }
 
-module.exports = { normName,weightOr,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };
+module.exports = { normName,weightOr,blendWoba,BATTER_ACT_FULL_WEIGHT_PA,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };
