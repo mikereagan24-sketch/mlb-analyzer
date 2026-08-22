@@ -20,3 +20,12 @@ forecasts.csv
 frv-*.cjs
 frv-*.py
 refresh-db.sh
+
+# Scratch analysis dir and one-off diagnostics. These were untracked for
+# months and a `git add -A` swept ~90 of them (including sqlite WAL/SHM
+# backups) into a PR on 2026-08-22. Ignored so that cannot recur.
+tmp/
+diag*.js
+*.db-shm
+*.db-wal
+sweep-*.json

@@ -50,12 +50,29 @@ const db = new Database(path.join(__dirname, '..', 'data', 'mlb.db'), { readonly
 // come out identical and the run reports a false negative — the most
 // dangerous failure mode this script has. Extend this table when adding
 // a flag of that shape.
-const CALLER_POPULATED_INPUTS = {
-  DEFENSE_FRV_ENABLED: ['awayFieldingRunsPerGame', 'homeFieldingRunsPerGame'],
-  CATCHER_FRAMING_ENABLED: ['awayCatcherFramingRvPerGame', 'homeCatcherFramingRvPerGame'],
+// Keyed by PARAMETER FAMILY, not exact parameter name.
+//
+// This was keyed by exact name and that let a false negative straight
+// through: CATCHER_FRAMING_MUTE is a different key from
+// CATCHER_FRAMING_ENABLED, so the lookup missed, the guard never fired,
+// and the A/B reported "the flag is inert" when the truth was that the
+// harness never populated the input. A whole family of parameters reads
+// the same caller-populated field, so the guard has to match the family.
+const CALLER_POPULATED_INPUTS = [
+  { match: /^DEFENSE_FRV_/,    fields: ['awayFieldingRunsPerGame', 'homeFieldingRunsPerGame'] },
+  { match: /^CATCHER_FRAMING_/, fields: ['awayCatcherFramingRvPerGame', 'homeCatcherFramingRvPerGame'] },
+];
+const callerInputsFor = (param) => {
+  const hit = CALLER_POPULATED_INPUTS.filter(e => e.match.test(param))[0];
+  return hit ? hit.fields : null;
 };
 let frvForTeam = () => null;
-try { ({ computeTeamFieldingRunsPerGame: frvForTeam } = require('../services/frv-backtest')); } catch (e) {}
+let framingForTeam = () => null;
+try {
+  const fb = require('../services/frv-backtest');
+  frvForTeam = fb.computeTeamFieldingRunsPerGame || frvForTeam;
+  framingForTeam = fb.computeFramingRvPerGame || framingForTeam;
+} catch (e) {}
 const baseSettings = jobs.getSettings();
 
 let _s = 20260823;
@@ -89,6 +106,12 @@ for (const g of games) {
   try {
     w.awayFieldingRunsPerGame = frvForTeam(g.away_team, g.away_lineup_json, baseSettings);
     w.homeFieldingRunsPerGame = frvForTeam(g.home_team, g.home_lineup_json, baseSettings);
+    // Catcher framing is caller-populated too. model.js:1288 crosses the
+    // sides deliberately (the HOME catcher frames against the AWAY offense),
+    // but that crossing happens inside runModel -- here we just attach each
+    // team's own catcher, exactly as jobs.js:815 does.
+    w.awayCatcherFramingRvPerGame = framingForTeam(g.away_team, g.away_lineup_json, baseSettings);
+    w.homeCatcherFramingRvPerGame = framingForTeam(g.home_team, g.home_lineup_json, baseSettings);
   } catch (e) { /* leave null; the guard below reports it */ }
   const ph = impliedP(g.market_home_ml), pa = impliedP(g.market_away_ml);
   if (ph == null || pa == null || (ph + pa) <= 0) continue;
@@ -130,7 +153,7 @@ console.log('  ASSERTED identical game set — composition cannot move any numbe
 // Guard against the false-negative class: if this flag depends on a
 // caller-populated field and that field is null everywhere, the arms are
 // identical for a harness reason, not a model reason.
-const needs = CALLER_POPULATED_INPUTS[PARAM];
+const needs = callerInputsFor(PARAM);
 if (needs) {
   const missing = needs.filter(f => !rows.some(r => r.g[f] != null));
   if (missing.length) {
