@@ -155,6 +155,19 @@ construction. These two are higher-powered and decide the reading
 **The model is significantly worse than the market. The model is NOT
 significantly better than predicting a constant 51.65%.**
 
+> **REFINED 2026-08-23 by `docs/component-signal-diagnostic-2026-08-23.md`.**
+> Both statements stand, but "not better than a constant" turns out to
+> be a statement about **power, not brokenness**. Decomposing the model:
+> sp, bullpen and lineup wOBA each point the **right way in all 5
+> out-of-sample folds**; the assembled model is the best non-market
+> predictor tested and ranks games better (AUC 0.5504) than an
+> optimally-fitted linear combination of its own components (0.5137);
+> and recalibrating its output makes log loss *worse*, so the
+> runs→probability step is not the fault. The model is **weak but
+> sound** — roughly a third as informative as the market — and
+> establishing its edge over a constant needs ~2.5 seasons at the
+> observed effect size.
+
 > **This corrects `docs/wpit-wbat-calibration-sweep-2026-08-22.md`**,
 > which stated "the model is genuinely informative — 0.00286 better than
 > the base rate" and "captures ~30% of the market's information
