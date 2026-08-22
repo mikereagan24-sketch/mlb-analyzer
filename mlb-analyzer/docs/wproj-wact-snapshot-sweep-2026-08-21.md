@@ -143,11 +143,30 @@ Whole-range spread is ~1.9pp of ROI with no monotone shape and the
 production value sitting at the *worst* point — which is itself a tell
 that the ordering is noise, not a curve.
 
-**Methodological caveat:** the signal count varies with W_PROJ
-(775 → 733 → 748). Higher projection weight gives more regressed inputs,
-smaller edges, and fewer signals clearing the 1pp emit floor. So grid
-values are **not** compared on an identical bet set — this is
-strategy-vs-strategy, not the same wagers repriced.
+**Methodological caveat — stronger than first written.** The signal
+count varies with W_PROJ (775 → 733 → 748), so grid values are not
+compared on an identical bet set. Follow-up analysis established
+something sharper: **the bet set is the ONLY thing that can move.**
+
+`calcPnl` reads the side bet, the market line and the final score — never
+the model's numbers — and `wageredFor` reads only the market line. A
+signal emitted on the same side at two W_PROJ values therefore has a
+byte-identical pnl and stake at both. Confirmed directly: of the 742
+baseline signals, the **459 present at all 10 grid values have ROI
+identical to the last decimal at every grid point** (−4.78 overall,
+−2.25 ML, −6.52 TOT; span **0.00pp**), and side flips are 0 at seven of
+nine grid points.
+
+So the ML span of 4.33pp and the TOT span of 2.62pp in the table above
+are **100% composition** — driven entirely by near-floor signals
+(median edge 1.3-2.6pp vs 3.1-3.8pp for stayers) churning in and out,
+whose own ROI CIs all span zero by ±30pp or more.
+
+This does not change the conclusion — it was already a null — but it
+changes what the null *means*: not "W_PROJ was measured and found
+inert", but "**this harness cannot measure a pricing parameter at
+all**". See `docs/sweep-selection-effect-2026-08-21.md` and the
+`CLAUDE.md` rule.
 
 ### 4.2 Rolling folds — 5 contiguous date blocks, dROI vs baseline
 
@@ -304,5 +323,7 @@ work.
 ## Related
 
 - `docs/weight-sensitivity-sweep-2026-07.md` — the pass that blocked this.
+- `docs/sweep-selection-effect-2026-08-21.md` — why this harness measures
+  selection rather than pricing. Found from §4.1.
 - `docs/blendwoba-zero-weight-open-question-2026-08-21.md`
 - `docs/wind-deadband-cliff-open-question-2026-08-19.md` — where to go next.

@@ -271,6 +271,111 @@ read-only lookups slows every task without protecting anything. The
 existing standing rules ("verify what's in the merge diff", "grep for
 duplicate implementations") assume active investigation as the default.
 
+## Sweep ROI measures selection, not pricing (2026-08-21)
+
+**Any sweep scored by re-emitting signals under new settings and grading
+them measures WHICH BETS GET PLACED, not how well they are priced.** A
+sweep of this design can never validate a pricing change. It can only
+validate an emit-threshold change.
+
+### Why this is structural, not a sampling problem
+
+`services/model.js:calcPnl(signal, awayScore, homeScore, marketTotal)`
+reads the side bet, the market line and the final score. It never sees
+the model's numbers. `services/parameter-sweep.js:wageredFor` reads only
+`signal.marketLine`. So a signal emitted **on the same side** at two
+different parameter values has a **byte-identical pnl and stake at
+both**. A swept parameter can therefore move ROI through exactly two
+channels:
+
+1. which signals clear `SIGNAL_EMIT_FLOOR_PP` — composition
+2. which side gets bet — side flips
+
+Both are selection. No amount of extra data fixes this; it is what the
+harness computes.
+
+Demonstrated on the 2026-08-21 W_PROJ/W_ACT sweep: of 742 baseline
+signals, the **459 present at all 10 grid values had ROI identical to
+the last decimal at every grid point** (−4.78 overall, −2.25 ML, −6.52
+TOT; span **0.00pp**). The full-population ML span of 4.33pp and TOT
+span of 2.62pp were therefore 100% composition. Side flips were 0 at
+seven of nine grid points. See
+`docs/sweep-selection-effect-2026-08-21.md`.
+
+### Required output for any such sweep
+
+`services/parameter-sweep.js` now emits these unconditionally
+(`selection_effect` at run level, `vs_baseline_train` /
+`vs_baseline_test` per combo). A hand-rolled harness in `scripts/` or
+`tmp/` MUST report the same three things, or it is not reportable:
+
+1. **Core-signal ROI** — bets present at *every* grid value — alongside
+   the full-population number. **If `core_roi_span` is 0, the headline
+   is composition and must be described as such.**
+2. **enter / leave counts and ROI with CIs.** These marginal near-floor
+   bets do all the work, and their CIs are invariably enormous — on the
+   W_PROJ sweep every one spanned zero, typically by ±30pp at n≈30-80.
+3. **`n_changed_bet`** (side flips). `d_stay` is exactly 0 unless a side
+   flipped; a non-zero `d_stay` with zero flips means the flip detector
+   is broken, not that pricing moved.
+
+Detect a flip by comparing the **realised bet** (category + outcome +
+pnl + stake), never `category` alone: in a tight game both sides can
+carry negative American odds, so a genuine away→home switch keeps
+`category='favs'` and looks like the same bet.
+
+### To actually validate a pricing change
+
+Use a calibration metric over **all games**, not ROI over emitted
+signals: claimed edge vs realised frequency, Brier score, or log loss.
+`scripts/edge-calibration-curve.js` is the existing example of the right
+shape. A metric computed on model outputs rather than on the emitted
+subset is immune to this whole problem — as is any target that is not
+ROI at all (the 2026-07-07 bullpen blend sweep ranked on 30-team mean
+wOBA spread, which is why it is unaffected).
+
+### Prior work this reframes
+
+Affected — swept a **pricing** parameter and read ROI on emitted
+signals, so the reported deltas are composition:
+
+- `docs/weight-sensitivity-sweep-2026-07.md` — "combo 7"
+  (`W_PIT=0.35` + `SP_WEIGHT=0.75`), Val ROI −3.13% → +12.15%. That
+  **+15.28pp is a selection effect**, and the candidate should not be
+  piloted on the strength of it.
+- `scripts/optimize-params.js` (April 2026, commit 3397c3b) — the
+  top-20-by-ROI grid search that **selected production
+  `W_PIT=0.40 / W_BAT=0.60`**. The current production value rests on
+  this measurement.
+- `docs/pyth-exp-holdout-v2-prod-faithful-2026-07-13.md` — pyth_exp.
+- `services/temp-backtest.js` — the 5-config temp-formula sweep.
+- `services/runmult-totals-backtest.js` — RUN_MULT (partially: it also
+  carries a non-ROI target, which is unaffected).
+- `services/frv-backtest.js`,
+  `scripts/framing-frv-hindsight-backtest.js`,
+  `scripts/backtest-park-neutral.js`,
+  `scripts/backtest-sp-relief-split.js`,
+  `scripts/backtest-run-environment.js`,
+  `scripts/sweep-woba-blend.js`.
+- `docs/wproj-wact-snapshot-sweep-2026-08-21.md` — where this was found.
+  Its conclusion was already "no distinguishable effect", so the
+  reframing only strengthens it.
+
+**Not affected** — these sweep a selection knob, so selection is exactly
+what they should be measuring and the design matches the question:
+
+- `docs/ship-hard-cap-0.08-2026-07-13.md` (hard cap)
+- `tmp/sweep-unders-emit-floor-rolling-cv.js` (emit floor)
+- `scripts/backtest-edge-cap.js` (edge cap)
+- `docs/bullpen-fix-steps-1-2-plus-blend-2026-07-07.md` (ranked on wOBA
+  spread, not ROI)
+
+Reframed does **not** mean wrong-and-discard. It means the ROI delta
+measures which near-floor bets landed in the sample, so it cannot
+support a claim that the model prices better. Any conclusion that
+depended on such a delta needs re-deriving from a calibration metric
+before it is acted on.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
