@@ -144,6 +144,43 @@ function applySweepOverrides(baseSettings, overrides) {
   }
   if ('RUN_MULT'  in overrides) s.RUN_MULT  = overrides.RUN_MULT;
   if ('TOT_SLOPE' in overrides) s.TOT_SLOPE = overrides.TOT_SLOPE;
+
+  // FAIL LOUD on an unrecognised key. (2026-08-22)
+  //
+  // Every branch above is an explicit `if (KEY in overrides)`. A key that
+  // matches none of them was silently DISCARDED, and the caller got
+  // production settings back while believing it had swept something.
+  //
+  // That is not hypothetical. `calibration-sweep.js SP_WEIGHT 0.80` passes
+  // { SP_WEIGHT: w }, which matches no branch -- the correct key is
+  // BAT_HAND_SP_PAIRED, which sets SP_WEIGHT *and* its RELIEF_WEIGHT
+  // complement. All nine grid points therefore scored the identical
+  // production model and returned byte-identical log loss, Brier, ECE and
+  // edge slope. Read naively that says "SP_WEIGHT is perfectly inert";
+  // what it actually said is "the sweep never moved SP_WEIGHT".
+  //
+  // This is the third instance of one failure mode in this codebase: a
+  // hand-maintained key list that FAILS OPEN on anything it does not
+  // recognise. The other two were getSettings()'s whitelist (an unmapped
+  // setting is invisible to the model) and calibration-ab.js's
+  // CALLER_POPULATED_INPUTS guard (keyed by exact param name, so
+  // CATCHER_FRAMING_MUTE skipped the check entirely). Failing open is the
+  // shared defect; throwing is the fix.
+  const KNOWN = ['W_PROJ_W_ACT', 'W_PIT_W_BAT', 'BAT_HAND_SP', 'BAT_HAND_RELIEF',
+                 'BAT_HAND_SP_PAIRED', 'RUN_MULT', 'TOT_SLOPE'];
+  const unknown = Object.keys(overrides).filter(k => KNOWN.indexOf(k) === -1);
+  if (unknown.length) {
+    throw new Error(
+      'applySweepOverrides: unrecognised override key(s) ' + unknown.join(', ')
+      + '. Known keys: ' + KNOWN.join(', ')
+      + '. An unhandled key would be silently discarded and every grid point '
+      + 'would score the identical production model -- which reads as "the '
+      + 'parameter is inert" rather than "the sweep did nothing". '
+      + (unknown.indexOf('SP_WEIGHT') !== -1
+          ? 'For SP_WEIGHT use BAT_HAND_SP_PAIRED, which also sets the '
+            + 'RELIEF_WEIGHT complement and preserves the sum invariant.'
+          : 'Add an explicit branch above if this key should be sweepable.'));
+  }
   return s;
 }
 
