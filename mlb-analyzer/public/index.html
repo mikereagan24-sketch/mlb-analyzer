@@ -408,12 +408,14 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
   <option value="all" selected>All Signals</option>
   <option value="logged">Logged Bets Only</option>
 </select>
+<label style="font-size:11px;color:var(--text2);margin-left:8px" title="Games whose persisted inputs are known to be wrong: market prices captured after real first pitch, or weather pulled from the wrong venue. Excluded by default, matching parameter-sweep.loadGames. Tick to include them and see the difference."><input type="checkbox" id="bt-include-contaminated" onchange="loadBacktest()" style="margin-right:4px">include contaminated</label>
 <button class="btn btn-primary btn-sm" onclick="loadBacktest()">Run backtest</button>
 <button class="btn btn-ghost btn-sm" onclick="exportCSV()">Export CSV</button>
 <button class="btn btn-sm" onclick="openManualModal()" style="margin-left:8px">+ Log Manual Bet</button>
 </div>
 </div>
 <div id="bt-results">
+<div id="bt-contamination" style="margin-bottom:1rem"></div>
 <div id="bt-logged-clv" style="margin-bottom:1rem"></div>
 <div class="grid-4" id="bt-summary" style="margin-bottom:1rem"></div>
 <!-- Runline Companion Analysis (Step 3 of 3 in runline workstream).
@@ -4336,6 +4338,35 @@ function signalMeetsBacktestThreshold(s, thr) {
   return false;
 }
 
+// Contamination banner. The filter defaults to EXCLUDE, matching
+// parameter-sweep.loadGames -- but a filter the operator cannot see is a
+// filter that gets forgotten, which is the same failure as a remembered
+// filter one level up. So the count is always shown, both when rows are
+// excluded and when they are deliberately included.
+function renderContaminationBanner(d) {
+  const el = document.getElementById('bt-contamination');
+  if (!el) return;
+  const c = d && d.contamination;
+  if (!c || c.error) { el.innerHTML = ''; return; }
+  if (c.included) {
+    el.innerHTML = '<div class="notice warn">Showing <strong>' + c.available
+      + '</strong> contaminated row' + (c.available === 1 ? '' : 's')
+      + ' (' + c.market + ' market-priced after first pitch, ' + c.weather + ' bad weather). '
+      + 'These are excluded by default and from every offline harness &mdash; these numbers are '
+      + '<strong>not</strong> comparable to the calibration docs.</div>';
+    return;
+  }
+  if (!c.excluded) {
+    el.innerHTML = '<div class="notice ok">No contaminated rows in this range.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="notice info"><strong>' + c.excluded + '</strong> row'
+    + (c.excluded === 1 ? '' : 's') + ' excluded as contaminated ('
+    + c.market + ' market-priced after real first pitch, ' + c.weather + ' bad weather). '
+    + 'Matches the filter parameter-sweep.loadGames applies. '
+    + 'Tick <em>include contaminated</em> above to see them.</div>';
+}
+
 // Logged-bets CLV panel. Rendered only in mode=logged — CLV is
 // meaningless over the full signal population, since a signal with no
 // bet_line has no CLV by construction.
@@ -4383,10 +4414,22 @@ function renderLoggedClv(d, mode) {
     + '<th style="text-align:right">W-L</th><th style="text-align:right">win%</th>'
     + '<th style="text-align:right">implied bet / close</th><th style="text-align:right">vs close</th>'
     + '</tr></thead><tbody>'
-    + row('ALL logged', c.overall)
-    + '<tr><td colspan="7" style="padding-top:6px;color:var(--text3);font-size:11px">by closing-line provenance</td></tr>'
-    + row('genuine capture', c.by_provenance && c.by_provenance.genuine_capture, 'real close')
-    + row('backfilled', c.by_provenance && c.by_provenance.backfilled_from_market, 'closing_line = market_line — beat-the-card, not beat-the-close')
+    // OBSERVED FIRST, and the mixed figure explicitly labelled as mixed.
+    // Leading with 'ALL logged' presented a number blending real closes with
+    // ASSUMED ones (closing_line = market_line), where CLV degenerates into
+    // bet-price-vs-emit-price and centres near zero. On the current book that
+    // reads 0.78pp over 273 rows against 2.00pp over the 86 with a real
+    // close -- the same statistic, diluted by more than half.
+    + '<tr><td colspan="7" style="padding-top:2px;color:var(--text2);font-size:11px">'
+    + '<strong>OBSERVED closes only</strong> &mdash; the figure to read</td></tr>'
+    + row('observed close', c.by_provenance && c.by_provenance.genuine_capture,
+          'captured, re-derived, or line moved')
+    + '<tr><td colspan="7" style="padding-top:8px;color:var(--text3);font-size:11px">'
+    + 'assumed closes &mdash; shown for completeness, not to be read as CLV</td></tr>'
+    + row('ASSUMED close', c.by_provenance && c.by_provenance.backfilled_from_market,
+          'closing_line = market_line; beat-the-card, not beat-the-close')
+    + row('MIXED (all logged)', c.overall,
+          'observed + assumed together &mdash; diluted, do not quote')
     + '<tr><td colspan="7" style="padding-top:6px;color:var(--text3);font-size:11px">by timing (18h threshold)</td></tr>'
     + row('day before', c.by_timing && c.by_timing.day_before)
     + row('same day', c.by_timing && c.by_timing.same_day)
@@ -4418,8 +4461,12 @@ async function loadBacktest(){
     // POPULATION, not the math.
     const modeEl = document.getElementById('bt-mode');
     const btMode = modeEl ? modeEl.value : 'all';
+    const incEl = document.getElementById('bt-include-contaminated');
+    const includeContam = !!(incEl && incEl.checked);
     const d=await api('/backtest?from='+from+'&to='+to+'&cohort='+encodeURIComponent(apiCohort)
-      + '&mode=' + encodeURIComponent(btMode));
+      + '&mode=' + encodeURIComponent(btMode)
+      + (includeContam ? '&include_contaminated=1' : ''));
+    renderContaminationBanner(d);
     renderLoggedClv(d, btMode);
     let signals = d.signals || [];
     if (cohort === 'v5+v6') {
