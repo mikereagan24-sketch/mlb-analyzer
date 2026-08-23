@@ -82,6 +82,58 @@ partial support.
 0.953 versus rookie at 0.993 is a distinction between two numbers that are
 both indistinguishable from 1.0. There is nothing for it to separate.
 
+## METHODOLOGICAL RECORD — the project's first pre-registered prediction, and it was refuted at power
+
+Worth separating from the finding itself, because it is the more durable
+result.
+
+**Every prior finding in this project was either unfalsifiable or
+underpowered.** The pattern is visible across the last two days:
+
+| | |
+|---|---|
+| **ROI sweeps** | measured selection, not pricing — structurally incapable of answering the question asked of them (`sweep-selection-effect-2026-08-21`) |
+| **Calibration A/Bs** | FRV, park_neutral, hand_conditional — all landed inside their own CIs; the tiered standard exists *because* nothing could clear significance |
+| **The totals edge** | +10.66pp with a CI spanning zero; its one significant subset collapsed on re-measurement |
+| **CLV vs vig** | net −0.45pp, interval spanning zero |
+| **Mechanism hunts** | the totals selection effect survived four controls and decomposed into nothing measurable |
+
+Not one of those could have come back "no". They came back *unresolved*,
+and unresolved is what a study looks like when it cannot fail.
+
+**This one could fail, and did.**
+
+- The prediction was written **before** the number existed
+  (`47dc062`), with a numeric bar (**≥1.2×**), an explicit refutation
+  condition (**≤1.0**), and a stated **INCONCLUSIVE** outcome so that
+  ambiguity had somewhere to go other than into the confirming column.
+- The denominators were computed first and the script **refused to touch
+  signals** until the prediction was committed.
+- The test had **power**: CI width ~0.2 against a bar at 1.2×, so the
+  predicted effect would have been detected.
+- It came back **0.993** and the pre-written falsifier fired.
+
+**That is the first time this project produced a result that could have
+gone either way and went against the person who proposed it.**
+
+### Why that matters more than the rookie question
+
+A finding that cannot be refuted is not evidence, however carefully it is
+measured — and most of this project's history is careful measurement of
+things that could not be refuted. The fix is not more precision. It is
+committing to a falsifiable claim, in advance, with the bar and the
+failure condition written down.
+
+**The cost was about two hours.** The prerequisite backfill, the cohort
+build, and the two-stage script were the expensive parts, and they exist
+now. The pre-registration itself was ten minutes of writing before running
+a query that already worked.
+
+**The practice to keep: pre-register before measuring, state the
+refutation condition, and give ambiguity its own named outcome.** Applied
+to a hypothesis that felt strong, it took a day to settle instead of a
+season.
+
 ## Recommendation
 
 **Stop the remaining measurements, or run them knowing what they can no
