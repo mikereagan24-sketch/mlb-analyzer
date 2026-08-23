@@ -1429,6 +1429,23 @@ router.get('/backtest', (req, res) => {
     const filterByCohort = cohortArg !== 'all';
     const cohortPred = filterByCohort ? ' AND cohort=?' : '';
     const cohortPredBS = filterByCohort ? ' AND bs.cohort=?' : '';
+
+    // CONTAMINATION FILTER (2026-08-23). Matches parameter-sweep.loadGames,
+    // which has excluded these since 2026-08-06 (weather) and 2026-08-22
+    // (market). Until now /backtest excluded NEITHER, so the page and every
+    // offline harness were measuring populations that differ by ~17%.
+    //
+    // DEFAULT IS EXCLUDE, and the count is returned so the UI can show it.
+    // Silent filtering is how the next person forgets the filter exists --
+    // the same failure mode as a remembered filter, one level up. Pass
+    // include_contaminated=1 to look at the full set deliberately.
+    const includeContaminated = String(req.query.include_contaminated || '') === '1';
+    const CONTAM = "(g_c.weather_contamination_reason IS NOT NULL OR g_c.market_contamination_reason IS NOT NULL)";
+    const contamPredFor = (alias) => includeContaminated ? '' :
+      " AND NOT EXISTS (SELECT 1 FROM game_log g_c WHERE g_c.game_date=" + alias
+      + ".game_date AND g_c.game_id=" + alias + ".game_id AND " + CONTAM + ")";
+    const contamPred   = contamPredFor('bet_signals');
+    const contamPredBS = contamPredFor('bs');
     const cohortParams = filterByCohort ? [cohortArg] : [];
 //   One-time: null out CLV for Total signals (CLV not meaningful — bet_line is a price, not a total)
     // REMOVED 2026-08-23. This nulled every totals CLV on every /backtest
@@ -1476,10 +1493,26 @@ router.get('/backtest', (req, res) => {
       " SUM(CASE WHEN outcome='push' THEN 1 ELSE 0 END) as pushes," +
       " SUM(CASE WHEN outcome='pending' THEN 1 ELSE 0 END) as pending," +
       " ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END), 2) as total_pnl," +
+      // ROI DENOMINATOR UNIFIED 2026-08-23. This previously divided by
+      // count * 100 -- a flat $100-per-bet stake -- while the overall
+      // summary below divided by the real per-bet stake. Two aggregates on
+      // one page could disagree, and neither said which it was using.
+      //
+      // THE WAGERED-CASE VERSION IS CANONICAL: it is the amount actually
+      // risked (to-win-$100 staking), matches utils/wagered.js, and is what
+      // every offline harness computes. The flat-$100 form silently assumed
+      // every bet risked the same amount, which is false for any price other
+      // than +100.
       " ROUND(SUM(CASE WHEN outcome!='pending' THEN pnl ELSE 0 END)" +
-      "  / NULLIF(SUM(CASE WHEN outcome NOT IN ('pending','push') THEN 1 ELSE 0 END) * 100.0, 0) * 100, 2) as roi" +
+      "  / NULLIF(SUM(CASE WHEN outcome NOT IN ('pending','push') THEN CASE" +
+      "   WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0" +
+      "     THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)" +
+      "   WHEN signal_type='ML' THEN ABS(COALESCE(bet_line,market_line))" +
+      "   WHEN bet_price > 0 THEN ROUND(10000.0/bet_price,2)" +
+      "   WHEN bet_price IS NOT NULL THEN ABS(bet_price)" +
+      "   ELSE 110.0 END ELSE 0 END), 0) * 100, 2) as roi" +
       " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome != 'pending'" +
-      cohortPred + loggedPred +
+      cohortPred + loggedPred + contamPred +
       " GROUP BY category ORDER BY category"
     ).all(fromDate, toDate, ...cohortParams);
 
@@ -1520,7 +1553,7 @@ router.get('/backtest', (req, res) => {
       "   WHEN bet_price IS NOT NULL THEN ABS(bet_price)" +
       "   ELSE 110.0 END), 0) * 100, 2) as roi" +
       " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome NOT IN ('pending','push')" +
-      cohortPred + loggedPred
+      cohortPred + loggedPred + contamPred
     ).get(fromDate, toDate, ...cohortParams);
 
     const signals = db.prepare(
@@ -1540,7 +1573,7 @@ router.get('/backtest', (req, res) => {
       // was invisible until grade time. See
       // docs/locked-bet-visibility-fix-2026-07-06.md.
       "   AND (bs.is_active = 1 OR bs.outcome != 'pending' OR bs.bet_line IS NOT NULL)" +
-      cohortPredBS + loggedPredBS +
+      cohortPredBS + loggedPredBS + contamPredBS +
       " ORDER BY bs.game_date, bs.id"
     ).all(fromDate, toDate, ...cohortParams);
 
@@ -1560,13 +1593,48 @@ router.get('/backtest', (req, res) => {
     if (loggedOnly) {
       try {
         const { buildLoggedBetClv } = require('../services/clv-stats');
-        clv = buildLoggedBetClv(signals, { detectSource: signals.length <= 600 });
+        // Provenance from the audit tags, not the closing==market heuristic.
+        // 131 re-derived closes and 22 observed-no-audit rows are genuine
+        // observations the heuristic would have mislabelled.
+        const observedIds = new Set(db.prepare(
+          "SELECT DISTINCT signal_id FROM bet_signal_audit "
+          + "WHERE action IN ('set_closing_line','rederived_closing_line','observed_no_audit') "
+          + "AND signal_id IS NOT NULL").all().map(r => r.signal_id));
+        clv = buildLoggedBetClv(signals, {
+          detectSource: signals.length <= 600,
+          observedIds,
+        });
       } catch (e) {
         console.warn('[backtest] logged-bet CLV block failed (non-fatal): ' + e.message);
         clv = { error: e.message };
       }
     }
-    res.json({ overall, byCategory, signals, cohort: cohortArg, mode, clv });
+    // How many rows the contamination filter removed, so the UI can SHOW it.
+    // A filter the operator cannot see is a filter that gets forgotten.
+    let contamination = null;
+    try {
+      const cRow = db.prepare(
+        "SELECT COUNT(*) n, "
+        + "SUM(CASE WHEN g.market_contamination_reason IS NOT NULL THEN 1 ELSE 0 END) market, "
+        + "SUM(CASE WHEN g.weather_contamination_reason IS NOT NULL THEN 1 ELSE 0 END) weather "
+        + "FROM bet_signals bs JOIN game_log g "
+        + "  ON g.game_date=bs.game_date AND g.game_id=bs.game_id "
+        + "WHERE bs.game_date BETWEEN ? AND ? AND bs.game_date >= '2026-04-09' "
+        + "  AND bs.outcome != 'pending' "
+        + "  AND (g.market_contamination_reason IS NOT NULL OR g.weather_contamination_reason IS NOT NULL)"
+        + cohortPredBS + loggedPredBS
+      ).get(fromDate, toDate, ...cohortParams);
+      contamination = {
+        excluded: includeContaminated ? 0 : (cRow.n || 0),
+        available: cRow.n || 0,
+        market: cRow.market || 0,
+        weather: cRow.weather || 0,
+        included: includeContaminated,
+      };
+    } catch (e) {
+      contamination = { error: e.message };
+    }
+    res.json({ overall, byCategory, signals, cohort: cohortArg, mode, clv, contamination });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

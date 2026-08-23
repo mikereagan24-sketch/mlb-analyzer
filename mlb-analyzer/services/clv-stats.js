@@ -381,8 +381,17 @@ function buildLoggedBetClv(rows, opts) {
     // CLV is ML-only by design (see routes/api.js: Total CLV is NULLed).
     if (r.signal_type !== 'ML') continue;
     if (r.clv == null || r.bet_line == null || r.closing_line == null) continue;
-    const provenance = (Number(r.closing_line) === Number(r.market_line))
-      ? 'backfilled_from_market' : 'genuine_capture';
+    // PROVENANCE: prefer the audit tags (2026-08-23) over the old heuristic.
+    // The heuristic -- closing_line === market_line means backfilled -- gets
+    // two classes wrong: a re-derived close that happens to equal market_line
+    // reads as backfilled, and a genuinely captured flat line does too. The
+    // tags are authoritative: set_closing_line / rederived_closing_line /
+    // observed_no_audit are OBSERVED, backfilled_closing_line is ASSUMED.
+    // Falls back to the heuristic when no id map is supplied.
+    const provenance = o.observedIds
+      ? (o.observedIds.has(r.id) ? 'genuine_capture' : 'backfilled_from_market')
+      : ((Number(r.closing_line) === Number(r.market_line))
+          ? 'backfilled_from_market' : 'genuine_capture');
     const timing = timingBucket(r);
     const betImp = americanToImplied(Number(r.bet_line));
     const closeImp = americanToImplied(Number(r.closing_line));
