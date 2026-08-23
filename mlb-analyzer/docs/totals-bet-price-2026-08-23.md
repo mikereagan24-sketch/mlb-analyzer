@@ -78,6 +78,17 @@ its observed range is **−104 to 13.5**, i.e. the column is itself mixed.
 
 Real totals CLV needs a `closing_price` column. **Filed, not built here.**
 
+> **CORRECTION 2026-08-23.** The "−104 to 13.5, the column is mixed"
+> claim above is **wrong**. That range was caused entirely by one corrupt
+> row (id=13484), now repaired. `closing_line` on totals is uniformly
+> total-shaped, range 6.5–13.5.
+>
+> The real defect is worse: **761 of 761 totals rows have `closing_line`
+> exactly equal to `market_line`** — the closing capture for totals does
+> not exist, and both ML capture paths filter `signal_type='ML'`.
+> `closing_price` alone would therefore stay NULL. See
+> `docs/totals-closing-capture-scope-2026-08-23.md`.
+
 ## 3. What changed
 
 ### Schema
@@ -152,6 +163,13 @@ writing this.
   price in `market_line`) are left as-is and enumerated above. They are
   yours to decide on — one is missing data, the other needs the real total
   recovered from a snapshot.
+- **The two corrupted rows: FIXED 2026-08-23**, both recovered from
+  `game_log` (neither needed deleting) — see
+  `docs/totals-closing-capture-scope-2026-08-23.md` §4.
+- **KNOWN OFFSET, recorded rather than corrected:** totals ROI on bets
+  logged before 2026-08-23 is **understated by ~2pp** (22.10% recorded vs
+  24.09% at the struck prices, n=36). Rows logged from 2026-08-23 carry
+  `bet_price` and grade correctly, so the offset does not accumulate.
 - **No re-grading of historical P&L.** `pnl` on the 35 migrated rows still
   reflects the market-price basis. Re-running the grader would change
   recorded outcomes on bets you have already reconciled; that is a
