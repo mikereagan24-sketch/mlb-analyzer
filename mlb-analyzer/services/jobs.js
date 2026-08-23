@@ -3452,6 +3452,17 @@ function startCronJobs() {
       const { logGateHealth } = require('./feature-gate-registry');
       logGateHealth(db);
     } catch (e) { console.warn('[gate-health] skipped (non-fatal): ' + (e && e.message)); }
+
+    // getSettings() <-> settings-schema sync. Same slot and same reasoning
+    // as the gate-health check above: a setting that is stored, UI-wired
+    // and never read by getSettings is a control that does nothing, and it
+    // has gone unnoticed twice (catcher framing, then the three
+    // hand-conditional keys). Non-fatal by construction.
+    try {
+      const { logSettingsSchemaSync } = require('../utils/settings-sync-check');
+      const sc = require('./settings-schema');
+      logSettingsSchemaSync(getSettings(), sc.SETTINGS_SCHEMA || sc.schema || sc);
+    } catch (e) { console.warn('[settings-sync] skipped (non-fatal): ' + (e && e.message)); }
     try { await runRosterJob(); }
     catch(e) { console.error('[cron-roster] failed:', e && e.message); }
     // Season-cumulative roster (statsapi fullSeason) — backtest-only
