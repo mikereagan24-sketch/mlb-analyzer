@@ -1,5 +1,22 @@
 # Rookie / low-sample starting pitchers — open question (2026-08-22)
 
+> ---
+> **RESULT 2026-08-23 — the hypothesis is REFUTED on its most diagnostic
+> leg.** Over-representation among emitted signals: rookie ratio
+> **0.993, CI [0.888, 1.093]** against a pre-registered confirm bar of
+> 1.2×. Falsifier #3 below fired exactly as written.
+>
+> **Not an underpowered null** — the CI width is ~0.2 and the bar sat far
+> outside it, so a true 1.2× effect would have been detected. The only
+> ratio excluding 1.0 is `established` at 1.057, pointing the other way.
+>
+> §PR prediction 5 fails. Prediction 7's directional framing of the cliff
+> fix falls with it; the cliff fix keeps only its independent smoothness
+> rationale. Predictions below are left exactly as written.
+> See `docs/rookie-overrep-result-2026-08-23.md`.
+> ---
+
+
 > **Status: APPROVED AS SCOPED 2026-08-22. Not started.** The numbers
 > below are population counts and code references. No hypothesis test has
 > been run.
