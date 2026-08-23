@@ -1,3 +1,4 @@
+const { isSaneML } = require('../utils/market-sanity');
 // v2 2026-04-09T20:19:46.283Z
 const fetch = require('node-fetch');
 const { db } = require('../db/schema');
@@ -531,8 +532,13 @@ function parseOddsAPIResponse(games, bookmakerKey, totalBookmakerKey) {
     results.push({
       game_id: (awayAbbr + '-' + homeAbbr).toLowerCase(),
       awayTeam: awayAbbr, homeTeam: homeAbbr,
-      market_away_ml: awayOut?.price || null,
-      market_home_ml: homeOut?.price || null,
+      // Magnitude guard, shared with unabated.js and kalshi.js. This module
+      // had NO bound until 2026-08-22; anything the feed returned became a
+      // market price. isSaneML rejects |ML| > 1000 (~2.5x the largest real
+      // MLB line observed) and rejects 0, which `|| null` alone does not
+      // distinguish from a genuinely absent price.
+      market_away_ml: isSaneML(awayOut?.price) ? awayOut.price : null,
+      market_home_ml: isSaneML(homeOut?.price) ? homeOut.price : null,
       market_total: overOut?.point || null,
       over_price: overOut?.price || -110,
       under_price: underOut?.price || -110,

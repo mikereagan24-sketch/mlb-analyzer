@@ -2917,10 +2917,44 @@ async function runPitcherUsageBackfill() {
   };
 }
 
+// Pull real first pitch / scheduled start / status from statsapi for one
+// slate and persist them. Idempotent: re-running overwrites with fresher
+// values, which is required because firstPitch does not exist until the
+// game actually begins and status changes throughout the day.
+async function refreshFirstPitch(dateStr) {
+  const { fetchFirstPitch } = require('./first-pitch');
+  const rows = db.prepare(
+    'SELECT game_date, game_id, game_pk FROM game_log WHERE game_date = ? AND game_pk IS NOT NULL'
+  ).all(dateStr);
+  if (!rows.length) return 0;
+  const upd = db.prepare(
+    'UPDATE game_log SET scheduled_start_utc = COALESCE(?, scheduled_start_utc), '
+    + 'first_pitch_utc = COALESCE(?, first_pitch_utc), game_status = COALESCE(?, game_status) '
+    + 'WHERE game_date = ? AND game_id = ?'
+  );
+  let n = 0, fp = 0;
+  for (const r of rows) {
+    try {
+      const f = await fetchFirstPitch(r.game_pk, { timeoutMs: 8000 });
+      upd.run(f.scheduled_start_utc, f.first_pitch_utc, f.game_status, r.game_date, r.game_id);
+      n++; if (f.first_pitch_utc) fp++;
+    } catch (e) { /* per-game failure is not fatal for the slate */ }
+  }
+  console.log('[first-pitch] ' + dateStr + ': updated ' + n + '/' + rows.length + ', ' + fp + ' with real first pitch');
+  return n;
+}
+
 async function runScoreJob(dateStr) {
   dateStr = dateStr || yesterdayStr();
   console.log('[score-job] Starting for ' + dateStr);
   let gamesUpdated = 0;
+  // Keep the real first-pitch timestamps current. Runs before the score
+  // parse and never blocks it: an odds guard that silently loses its
+  // timestamp source would fall back to the display-string parse, which
+  // is the behaviour this whole change exists to replace, so a failure
+  // here must be loud in the log but harmless to the chain.
+  try { await refreshFirstPitch(dateStr); }
+  catch (e) { console.warn('[first-pitch] refresh failed (non-fatal): ' + (e && e.message)); }
   try {
     // Snapshot raw statsapi JSON before parsing; /api/replay/scores re-runs
     // parseScoresJson against the captured payload.
@@ -3622,6 +3656,29 @@ function startCronJobs() {
 }
 
 function gameHasStarted(gameRow, gameDate) {
+  // PRECEDENCE ADDED 2026-08-22. Prefer the real first-pitch timestamp;
+  // fall back to the legacy display-string parse only when it is absent.
+  //
+  // The fallback below parses game_log.game_time ("2:10 PM ET"), which is
+  // a DISPLAY STRING carrying the SCHEDULED time. It does not move when a
+  // game is delayed, so a rain-delayed game reads as "started" while the
+  // market is legitimately still pre-game, and a game that starts early
+  // reads as "not started" while the market is already live. The latter
+  // is the direction that costs money: 279 signals over 28 dates were
+  // priced against live in-game markets, 100% of them after real first
+  // pitch (docs/corrupt-line-source-trace-2026-08-22.md).
+  //
+  // first_pitch_utc / game_status / scheduled_start_utc come from statsapi
+  // via services/first-pitch.js. hasStarted() returns null when it cannot
+  // tell, and null is NOT treated as "not started" -- an unknown start is
+  // exactly when a price is most suspect, so we fall through to the
+  // legacy parse rather than returning false outright.
+  try {
+    const { hasStarted } = require('./first-pitch');
+    const authoritative = hasStarted(gameRow, new Date().toISOString(), 0);
+    if (authoritative !== null) return authoritative;
+  } catch (e) { /* fall through to the legacy parse */ }
+
   // Returns true if game start time has passed (game is live or finished).
   // Only games on TODAY's date (Pacific) can have started. game_time is
   // stored in ET (scraper.fmtET, RotoWire's .lineup__time text); subtract
@@ -6622,4 +6679,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

@@ -1,3 +1,4 @@
+const { isSaneML } = require('../utils/market-sanity');
 // Standalone Kalshi MLB moneyline client.
 //
 // Purpose: pull KXMLBGAME markets directly from Kalshi's public API to
@@ -49,7 +50,22 @@ const MIN_VOLUME = 0;
 // positive to exclude games that start within N minutes; e.g. 5 means
 // "drop games starting in the next 5 minutes too." Negative would let
 // just-started games through.
-const GAME_START_BUFFER_MIN = 0;
+// RAISED 0 -> 15 on 2026-08-22. Zero meant a game was excluded only from
+// the INSTANT its scheduled start passed, with no margin for (a) a first
+// pitch that lands later than scheduled, (b) clock skew between Kalshi's
+// notion of start and ours, or (c) a market that goes live-ish during
+// warmups. Measured consequence of the zero default: 279 signals over 28
+// dates were priced against live in-game markets, 100% of them after real
+// first pitch and none before (docs/corrupt-line-source-trace-2026-08-22.md).
+//
+// 15 minutes is a MITIGATION, not the fix. It narrows the window; it
+// cannot close it, because a rain-delayed game can sit "pre-game" for
+// three hours after its scheduled start and this buffer would wrongly
+// exclude it, while a game that starts early is still exposed. The real
+// fix is the first_pitch_utc timestamp (services/first-pitch.js) and the
+// hard refusal in jobs.js -- this constant exists to reduce exposure in
+// paths that have not yet been routed through it.
+const GAME_START_BUFFER_MIN = 15;
 
 // Kalshi abbr → game_log abbr. game_log uses (confirmed via DISTINCT scan):
 //   ARI ATH ATL BAL BOS CHC CIN CLE COL CWS DET HOU KC LAA LAD MIA MIL
@@ -427,6 +443,12 @@ async function getKalshiMlbLines(date, opts) {
     if (!Number.isFinite(ask)) continue;
     const win_prob_ask = ask; // dollars per $1 contract == implied probability
     const ask_ml = probToAmerican(win_prob_ask);
+    // Magnitude guard, shared with unabated.js and scraper.js. Until
+    // 2026-08-22 this module had NO bound: a live in-game market quoting
+    // one side at ~$0.001 converts to +94400 here and flowed straight
+    // through to the signal path. isSaneML rejects anything beyond
+    // +/-1000, which is ~2.5x the largest real MLB line ever observed.
+    const ask_ml_sane = isSaneML(ask_ml);
 
     const sideTeam = sideOfMarket(m.ticker);
     const volumeRaw = parseFloat(m.volume_24h_fp);
@@ -460,7 +482,8 @@ async function getKalshiMlbLines(date, opts) {
     }
     const evt = byEvent.get(eventTicker);
     const side = {
-      ask_ml,
+      ask_ml: ask_ml_sane ? ask_ml : null,
+      ask_ml_rejected: ask_ml_sane ? undefined : ask_ml,
       bid_dollars: Number.isFinite(bid) ? bid : null,
       ask_dollars: ask,
       win_prob_ask,

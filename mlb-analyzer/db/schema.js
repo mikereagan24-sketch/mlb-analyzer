@@ -1620,6 +1620,39 @@ try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_line INTEGER"); } catc
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN clv REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN under_price INTEGER"); } catch(e) {}
 
+// Real first pitch, as a proper UTC timestamp. (2026-08-22)
+//
+// game_log.game_time is a DISPLAY STRING ("2:10 PM ET"). It cannot be
+// compared to anything, it carries no date, and it is the SCHEDULED time
+// -- it does not move when a game is delayed. Every attempt to ask "was
+// this price captured before or after the game started" using that column
+// is a string comparison that silently succeeds and means nothing; that
+// exact mistake produced a bogus 100%-after result on 2026-08-22 before it
+// was caught.
+//
+// These three columns are the machine-readable replacement. game_time is
+// deliberately left alone: it is what the UI renders, and rewriting it
+// would be a display change riding along with a data fix.
+//
+//   scheduled_start_utc -- statsapi gameData.datetime.dateTime. What the
+//                          schedule says. Fixed once published.
+//   first_pitch_utc     -- statsapi gameData.gameInfo.firstPitch. When the
+//                          game ACTUALLY started. Absent until the game
+//                          begins, and REFLECTS DELAYS: a 16:35 scheduled
+//                          game that starts at 18:52 reports 18:52 here.
+//   game_status         -- statsapi status.detailedState (Scheduled,
+//                          Pre-Game, In Progress, Final, Postponed, ...).
+//                          The authority on whether a game is live right
+//                          now, for the case where first_pitch_utc has not
+//                          been written yet.
+//
+// Consumers must prefer first_pitch_utc and fall back to
+// scheduled_start_utc + a buffer, never to game_time.
+try { db.exec("ALTER TABLE game_log ADD COLUMN scheduled_start_utc TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN first_pitch_utc TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN game_status TEXT"); } catch(e) {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_game_log_first_pitch ON game_log(first_pitch_utc)"); } catch(e) {}
+
 // empirical_spread_outcomes — feat/empirical-spread-plus-run upgrade.
 // Existing deploys created the table under the prior commit's schema
 // without `side` / `pair_id` and with a PK that didn't include side.

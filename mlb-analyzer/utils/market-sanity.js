@@ -124,9 +124,31 @@ function _fmtAmerican(n) {
   return n > 0 ? '+' + n : String(n);
 }
 
+// Single-price sanity for a moneyline. (2026-08-22)
+//
+// Hoisted here from services/unabated.js, where it lived as isSaneML with
+// its own ML_MAX_ABS_PRICE = 1000. That constant and MAX_ABS_ML above were
+// derived INDEPENDENTLY -- one from Unabated's 99900 "no active contract"
+// sentinel, one from the game_log distribution (real lines peak at 403;
+// nothing exists between 403 and 99900) -- and landed on the same number.
+// Two modules agreeing on 1000 by coincidence is exactly how the sixth
+// copy of a function gets written, so there is now one definition.
+//
+// unabated.js, kalshi.js and scraper.js all use this. Before 2026-08-22
+// only unabated.js had any magnitude bound at all, which is why live
+// in-game Kalshi prices reached the signal path unchecked.
+function isSaneML(price) {
+  if (price == null) return false;
+  const n = Number(price);
+  if (!Number.isFinite(n)) return false;
+  if (n === 0) return false;              // 0 is not a price
+  return Math.abs(n) <= MAX_ABS_ML;
+}
+
 module.exports = {
   checkMarketMLPairSanity,
   IMPLIED_SUM_MIN,
   IMPLIED_SUM_MAX,
   MAX_ABS_ML,
+  isSaneML,
 };
