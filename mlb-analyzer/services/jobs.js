@@ -12,7 +12,7 @@ const empiricalSpreadEdge = require('./empirical-spread-edge');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
-const { calcCLV } = require('./clv');
+const { calcCLV, clvForSignal } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
 const { checkMarketMLPairSanity } = require('../utils/market-sanity');
 const {
@@ -2329,11 +2329,12 @@ async function runLineupJob(dateStr) {
               // feat/kalshi-fee-adjusted-lines.
               const gameForClose = q.getGameById.get(dateStr, gameId);
               if (gameForClose) {
-                const mlSigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, gameId);
+                // ML filter removed 2026-08-23 -- totals were never captured.
+                const mlSigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, gameId);
                 for (const sig of mlSigs) {
-                  const closingLine = sig.signal_side === 'away' ? gameForClose.market_away_ml : gameForClose.market_home_ml;
-                  const clv = calcCLV(sig.bet_line, closingLine);
-                  db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+                  const _cw = writeClosing(db, sig, gameForClose);
+                  const closingLine = _cw.closingLine;
+                  const clv = _cw.clv;
                   try {
                     q.insertBetSignalAudit({
                       signal_id: sig.id,
@@ -2942,6 +2943,41 @@ async function refreshFirstPitch(dateStr) {
   }
   console.log('[first-pitch] ' + dateStr + ': updated ' + n + '/' + rows.length + ', ' + fp + ' with real first pitch');
   return n;
+}
+
+
+// Closing values for one signal, whichever type it is. (2026-08-23)
+//
+// Replaces two copies of an ML-only block. Both closing-capture paths
+// filtered signal_type='ML', so totals were NEVER captured -- which is
+// why all 761 pre-existing totals closing_line values are exact copies of
+// market_line and zero of them differ. That is the signature of a capture
+// that never ran, not of a market that never moved: totals move in 39.9%
+// of games and their prices in 97.4%.
+//
+// gameRow is the locked game_log row -- market_*_ml for ML, market_total
+// plus over/under_price for totals.
+function closingValuesFor(sig, gameRow) {
+  if (String(sig.signal_type).toLowerCase() === 'total') {
+    const isOver = String(sig.signal_side).toLowerCase() === 'over';
+    return {
+      closingLine: gameRow.market_total != null ? gameRow.market_total : null,
+      closingPrice: isOver ? gameRow.over_price : gameRow.under_price,
+    };
+  }
+  return {
+    closingLine: sig.signal_side === 'away' ? gameRow.market_away_ml : gameRow.market_home_ml,
+    closingPrice: null,
+  };
+}
+
+// One write path for both types, so the two call sites cannot drift.
+function writeClosing(db, sig, gameRow) {
+  const { closingLine, closingPrice } = closingValuesFor(sig, gameRow);
+  const { clv, lineMove } = clvForSignal(sig.signal_type, sig, closingLine, closingPrice);
+  db.prepare('UPDATE bet_signals SET closing_line=?, closing_price=?, clv=? WHERE id=?')
+    .run(closingLine, closingPrice, clv, sig.id);
+  return { closingLine, closingPrice, clv, lineMove };
 }
 
 async function runScoreJob(dateStr) {
@@ -3871,11 +3907,13 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
     if (existing && gameHasStarted(existing, dateStr)) {
       db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
       console.log('[odds] Skipping started game: '+o.game_id);
-      const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND signal_type='ML' AND closing_line IS NULL").all(dateStr, o.game_id);
+      // ML filter removed 2026-08-23 -- totals were never captured. `o` carries
+      // market_total / over_price / under_price alongside the ML fields.
+      const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, o.game_id);
       for (const sig of mlSigsO) {
-        const closingLine = sig.signal_side === 'away' ? o.market_away_ml : o.market_home_ml;
-        const clv = calcCLV(sig.bet_line, closingLine);
-        db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closingLine, clv, sig.id);
+        const _cw = writeClosing(db, sig, o);
+        const closingLine = _cw.closingLine;
+        const clv = _cw.clv;
         try {
           q.insertBetSignalAudit({
             signal_id: sig.id,

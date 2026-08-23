@@ -43,4 +43,40 @@ function calcCLV(bet_line, closing_line) {
   return Math.round((pClose - pBet) * 1000) / 10;
 }
 
-module.exports = { americanToImplied, calcCLV };
+// CLV for either signal type, from one implementation. (2026-08-23)
+//
+// ML: the line IS the price, so bet_line vs closing_line is already the
+// price comparison and this is exactly calcCLV.
+//
+// TOTAL: a bet has two quantities and they move at very different rates.
+// Across 739 games with multiple captures the TOTAL moved in 39.9% and
+// the OVER PRICE moved in 97.4%. So the PRICE is the primary term --
+// a totals CLV computed from the line alone would miss the movement in
+// almost every game -- and the line move is reported separately rather
+// than folded in, because 7.5 -> 8.5 and -110 -> -103 are different
+// events and averaging them into one number hides both.
+//
+// Returns { clv, lineMove } where lineMove is the closing total minus the
+// bet total, signed from the BETTOR's perspective: positive means the
+// line moved in your favour (up for an over, down for an under).
+function clvForSignal(signalType, sig, closingLine, closingPrice) {
+  const isTotal = String(signalType || '').toLowerCase() === 'total';
+  if (!isTotal) {
+    return { clv: calcCLV(sig.bet_line, closingLine), lineMove: null };
+  }
+  // Price is the primary term. bet_price is the juice actually struck;
+  // before 2026-08-23 it was never captured, so historical totals rows
+  // legitimately return null here rather than a fabricated zero.
+  const clv = calcCLV(sig.bet_price, closingPrice);
+  let lineMove = null;
+  if (sig.bet_line != null && closingLine != null) {
+    const d = Number(closingLine) - Number(sig.bet_line);
+    if (Number.isFinite(d)) {
+      lineMove = String(sig.signal_side).toLowerCase() === 'under' ? -d : d;
+      lineMove = Math.round(lineMove * 100) / 100;
+    }
+  }
+  return { clv, lineMove };
+}
+
+module.exports = { americanToImplied, calcCLV, clvForSignal };
