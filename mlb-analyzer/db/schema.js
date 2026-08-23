@@ -1598,6 +1598,28 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN temp_run_adj REAL DEFAULT 0"); } 
 // persisted values still faithfully record what the model actually saw at
 // signal-emit time.
 try { db.exec("ALTER TABLE game_log ADD COLUMN weather_contamination_reason TEXT"); } catch(e) {}
+// Market contamination tag (2026-08-22). Deliberately the SAME SHAPE as
+// weather_contamination_reason above: one nullable text reason, NULL =
+// trusted, consumers filter IS NULL. Not a multi-tag column and not a
+// join table -- when two contaminations coincide, one reason wins and the
+// IS NULL filter still excludes the row correctly, which is the only
+// property the filter needs.
+//
+// Set when the persisted market_*_ml is known to have moved AFTER real
+// first pitch, i.e. the stored "market price" embeds information about a
+// game already in progress. Measured, not assumed: 141 ML signals had a
+// stored line differing from the last pre-first-pitch capture, with a
+// bimodal |change| distribution -- median 4 points (ordinary drift) but a
+// 12% tail at 100+ points, topping out at 543 (mil-pit 2026-07-11, -132
+// -> +411, a favorite that became a heavy dog while losing).
+//
+// As with weather: HISTORICAL VALUES ARE NOT OVERWRITTEN. The stored line
+// still faithfully records what the model saw at emit time, and logged
+// bets keep the price they were logged at. Tagging preserves the
+// evidence; invalidating would destroy it.
+//
+// The LIVE PATH IS UNAFFECTED -- this is an analysis filter only.
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_contamination_reason TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}

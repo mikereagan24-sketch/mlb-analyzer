@@ -418,6 +418,14 @@ function loadGames(db, fromDate, toDate) {
     "SELECT * FROM game_log WHERE game_date >= ? AND game_date <= ? "
     + "AND model_total IS NOT NULL "  // skip games the model never finished
     + "AND weather_contamination_reason IS NULL "
+    // Same exclusion, same reasoning, different input: when the stored
+    // market_*_ml moved after real first pitch it embeds the in-progress
+    // score, so it is not a pre-game price. Leaving these in would let a
+    // post-hoc market number act as the baseline the model is scored
+    // against -- the market would look artificially sharp and the model
+    // artificially bad, on exactly the games where the market "knew" the
+    // result. See docs/first-pitch-timestamp-and-exposure-2026-08-22.md.
+    + "AND market_contamination_reason IS NULL "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 }
