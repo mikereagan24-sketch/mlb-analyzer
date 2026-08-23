@@ -32,13 +32,14 @@ mention 17 of these parameters have anywhere.
 
 | parameter | live | original evidence | status |
 |---|---|---|---|
-| `W_PIT` / `W_BAT` | 0.40 / 0.60 | `optimize-params.js` top-20 **by ROI** — invalid | **Re-validated** 2026-08-22. Indistinguishable from the 0.30 optimum, inside a flat 0.20–0.50 plateau; **≥0.80 ruled out** (CI excludes zero) |
-| `SP_WEIGHT` | 0.80 | July sweep "combo 7" — **ROI + confounded** | **Re-validated** 2026-08-22. Inert on calibration (whole 0.1–0.9 grid spans 0.00126 log loss); matches the 0.800 volume-weighted BF benchmark |
+| `W_PIT` / `W_BAT` | 0.40 / 0.60 | `optimize-params.js` top-20 **by ROI** — invalid | **Re-validated 2026-08-22, and RE-RUN on the corrected harness** (framing + FRV populated). Conclusion holds: indistinguishable from the 0.30 optimum (gap 0.00026, CI [−0.00180, +0.00105]), inside a flat 0.20–0.50 plateau, **≥0.80 still ruled out** (CI excludes zero). Production has the **best ECE on the grid** (0.0074). No value clears all three gates |
+| `SP_WEIGHT` | 0.80 | July sweep "combo 7" — **ROI + confounded** | **Re-validated 2026-08-22, and RE-RUN on the corrected harness.** Conclusion holds: shallow curve, minimum at 0.60 by 0.00030, **no CI excludes zero**, no fold set same-sign. Grid span 0.00117 (was 0.00126) — the small shift confirms the original sweep used the correct paired key. Production has the **best ECE on the grid** (0.0074) and matches the 0.800 volume-weighted BF benchmark |
 | `RELIEF_WEIGHT` | 0.20 | complement of `SP_WEIGHT` | Inherits the above; sum invariant holds |
 | `W_PROJ` / `W_ACT` | 0.45 / 0.55 | Phase-3-blocked, never measured | **Measured** 2026-08-21. No distinguishable effect across 0.1–0.9; production sits inside the null |
 | `PARK_NEUTRAL_INPUTS_ENABLED` | true | PR #142 A/B — **ROI *and* pre-fix** | **Re-validated** 2026-08-22. Better on all 5 metrics; Δ −0.00055, CI [−0.00117, +0.00012] — not significant |
 | `SP_WEIGHT_R` / `SP_WEIGHT_L` | 0.865 / 0.649 | **orphaned** — never read until 2026-08-22 | **Wired + set to benchmark.** 0.649/0.865 from `pitcher_game_log` BF data |
-| `USE_HAND_CONDITIONAL_SP_WEIGHT` | false | none — was **unflippable** | **Evaluated** 2026-08-22. Directionally worse on all 5; Tier 4 |
+| `USE_HAND_CONDITIONAL_SP_WEIGHT` | false | none — was **unflippable** | **Evaluated** 2026-08-22, re-run on the corrected harness. Worse on 4 of 5, **better on ECE** — the earlier "worse on all five" was inaccurate. Tier 4 |
+| `SIGNAL_EDGE_HARD_CAP_PP` | **0.25** | was 0.08 on an ROI backtest | **Re-derived 2026-08-22 from the production audit log**, not the backtest. Of 1283 signals the cap has suppressed, **279 carried an implausible market line** (up to +94400) and **all 279 had edge ≥ 0.25**, while **zero** below 25pp did. 25pp is empirically where the corrupt population begins. Restored to its documented purpose as a data-integrity ceiling |
 | `DEFENSE_FRV_ENABLED` | false | precondition (now cleared) | **Evaluated.** Better on all 5, not significant; window to 2026-09-30 |
 
 ## B. Known-invalid evidence, not re-validated — 11 parameters
@@ -48,7 +49,7 @@ support them.**
 
 | parameter | live | evidence | invalidity |
 |---|---|---|---|
-| `SIGNAL_EDGE_HARD_CAP_PP` | **0.08** | `ship-hard-cap-0.08` ROI backtest | ~~ROI-selection~~ **MISCLASSIFIED — corrected 2026-08-22.** The cap *suppresses* (`model.js:1546 continue`), so selection **is** its mechanism and ROI measures it directly. The gap was always the 8pp level, not the instrument. **Now measured: 8pp is the worst of 9 levels tested** — it suppresses the only positive edge band (8-10pp, +15.1% ROI) and costs 1.41pp vs no cap. Code's own data-driven default is **0.25** |
+| ~~`SIGNAL_EDGE_HARD_CAP_PP`~~ **moved to section A** | ~~0.08~~ **0.25** | `ship-hard-cap-0.08` ROI backtest | ~~ROI-selection~~ **MISCLASSIFIED — corrected 2026-08-22.** The cap *suppresses* (`model.js:1546 continue`), so selection **is** its mechanism and ROI measures it directly. The gap was always the 8pp level, not the instrument. **Now measured: 8pp is the worst of 9 levels tested** — it suppresses the only positive edge band (8-10pp, +15.1% ROI) and costs 1.41pp vs no cap. Code's own data-driven default is **0.25** |
 | `SIGNAL_EDGE_SOFT_CAP_PP` | 0.06 | same | **Inert on P&L** — only sets the advisory `edge_suspect` flag; never changes emission or staking |
 | `SIGNAL_EDGE_CAP_ENABLED` | true | same | Selection mechanism, correctly measured by ROI (see above) |
 | `UI_HIGHLIGHT_TOT_OVERS_ENABLED`\* | false | "backtest showed no edge in overs" | ROI-selection |
