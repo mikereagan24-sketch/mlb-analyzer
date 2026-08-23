@@ -1665,6 +1665,31 @@ try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_price INTEGER"); } catch(e
 // a market that never moved. Those are NOT backfilled: there is no source
 // to recover a closing value that was never observed.
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_price INTEGER"); } catch(e) {}
+
+// Pitcher career reference, from statsapi. (2026-08-23)
+//
+// WHY A NEW TABLE. pitcher_game_log is SINGLE-SEASON (2026-03-03 onward),
+// so it carries no debut date and no career innings. The rookie/low-sample
+// hypothesis needs both: "rookie" is a career-experience notion, and
+// "below the actuals gate" is a season-sample notion, and 232 of 438
+// starters sit below the gate -- a population that is rookies PLUS spot
+// starters, openers, callups, post-injury returns and trade acquisitions.
+// Separating those requires career data the DB does not otherwise have.
+//
+// career_ip / career_bf / career_gs are AS-OF-FETCH totals, i.e. they
+// INCLUDE 2026. Any as-of-game-date use must subtract the 2026
+// contribution on or after that date from pitcher_game_log -- using them
+// raw is look-ahead, the exact error the ticket warns about for season BF.
+// See scripts/build-rookie-cohorts.js, which does the subtraction.
+try { db.exec(`CREATE TABLE IF NOT EXISTS pitcher_debut (
+  pitcher_mlb_id INTEGER PRIMARY KEY,
+  pitcher_name   TEXT,
+  mlb_debut_date TEXT,
+  career_ip      REAL,
+  career_bf      INTEGER,
+  career_gs      INTEGER,
+  fetched_at     TEXT NOT NULL DEFAULT (datetime('now'))
+)`); } catch(e) {}
 //
 // HISTORICAL NOTE (2026-08-23): 762 totals rows previously carried a
 // closing_line that was FABRICATED, not observed -- GET /backtest ran
