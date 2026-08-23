@@ -1,5 +1,26 @@
 # Projected-state calibration, and why the CLV panel is empty (2026-08-23)
 
+> ---
+> **SUPERSEDED 2026-08-23 — the CLV-vs-vig conclusion below does not hold.**
+>
+> The +0.78pp CLV was measured over 273 rows, **187 of which had an
+> ASSUMED closing line** (`closing_line = market_line`, written by the old
+> `GET /backtest`). On those, CLV degenerates into bet-price-vs-emit-price
+> and centres near zero — a different quantity wearing the CLV label.
+>
+> On the 86 rows with an **observed** close:
+> **CLV +2.00pp [+0.67, +3.24], vig 2.45pp per side (measured, not 2.25),
+> net −0.45pp [−1.73, +0.70] — not distinguishable from zero.**
+>
+> So the claim below that the vig gap *"explains 126W-142L and −$420.47
+> without needing anything else"* is **not supported**. A roughly
+> breakeven position does not explain a materially losing record.
+>
+> Figures below are left as recorded. See
+> `docs/clv-vs-overround-observed-2026-08-23.md`.
+> ---
+
+
 > **Measurement + diagnosis. Nothing shipped.**
 
 Three questions: why the CLV panel is blank, how CLV is actually

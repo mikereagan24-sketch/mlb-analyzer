@@ -535,6 +535,54 @@ same family — results that reproduce a previous run to five decimals mean
 nothing changed. Both are cases where the *shape* of a number, not its
 value, is what reveals the bug.
 
+## Never open a second write connection (2026-08-23)
+
+**A script that reads and writes must take `db` from `db/schema`. It must
+never call `new Database(...)` in write mode.**
+
+```js
+const { q, db } = require('../db/schema');   // correct
+const db = new Database(path, { readonly: false });   // WRONG if you also write
+```
+
+`db/schema` opens a connection at require time, and every `q.*` prepared
+statement writes through it. Open a second read-write handle and you have
+two writers on one SQLite file. Read-only (`{ readonly: true }`) is fine
+and is the right choice for pure analysis scripts.
+
+### It has two symptoms, and the quiet one is worse
+
+**Loud: the process hangs.** Your transaction takes the write lock, then a
+`q.insertBetSignalAudit(...)` inside it blocks on that same lock forever.
+Nothing commits, nothing errors, the script just sits there. This happened
+on the first `--apply` of `rederive-ml-closing-lines.js`.
+
+**Quiet: it reports zero and looks like a bug in your code.** A test that
+opens its own connection, writes uncommitted setup data, then calls a
+function that reads through `db/schema`'s connection will find *nothing* —
+SQLite isolation means the other connection cannot see an uncommitted
+write. `backfillMlClosingLines` was tested this way and reported
+`0 rows backfilled`. The obvious reading is "the function is broken." The
+function was fine.
+
+**Both happened on 2026-08-23, hours apart.** The quiet one nearly went
+into a write-up as a defect.
+
+### Rules
+
+1. **Analysis-only script** → `new Database(path, { readonly: true })`.
+   A second *read* connection is harmless.
+2. **Anything that writes, or that calls a `q.*` helper** → destructure
+   `db` from `db/schema` and use only that.
+3. **Setting up state for a test** → do it on the same connection the code
+   under test uses, or commit it. Uncommitted setup on a different
+   connection is invisible to the code you are testing.
+4. **A hang on `--apply`, or a suspicious zero from a function that writes,
+   should make you check the connection before you check the logic.**
+
+Same family as the timestamp rule above: the failure is silent by
+construction, and the wrong conclusion it produces is a plausible one.
+
 ## Review checklist — re-run these, do not trust a past clean result (2026-08-23)
 
 These are cheap, they are re-runnable, and every one of them exists
