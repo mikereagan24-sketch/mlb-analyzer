@@ -169,5 +169,80 @@ function build() {
     console.log('  it is the answer to the over-representation question and the');
     console.log('  prediction must be committed before it is seen. Re-run with');
     console.log('  --signals once the prediction is on record.');
+    return;
+  }
+
+  // ---- STAGE 2: signal share. Prediction committed 47dc062 (2026-08-23).
+  // Unit is the GAME, per the pre-registered method -- a game counts once
+  // regardless of how many signals it produced. Contaminated games are
+  // excluded, matching every other consumer.
+  const sigGames = new Set(db.prepare(
+    "SELECT DISTINCT bs.game_date || '|' || bs.game_id k FROM bet_signals bs "
+    + "JOIN game_log g ON g.game_date=bs.game_date AND g.game_id=bs.game_id "
+    + "WHERE g.market_contamination_reason IS NULL "
+    + "  AND g.weather_contamination_reason IS NULL").all().map(r => r.k));
+
+  const eligible = [...games.keys()].filter(k => {
+    const d = k.split('|')[0];
+    return true;
+  });
+  const withSig = eligible.filter(k => sigGames.has(k));
+
+  console.log('');
+  console.log('=== STAGE 2: SIGNAL SHARE ===');
+  console.log('  cohort-eligible games : ' + eligible.length);
+  console.log('  ... that emitted >=1 signal : ' + withSig.length
+    + '  (' + (100 * withSig.length / eligible.length).toFixed(1) + '%)');
+  console.log('');
+
+  function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+  // Date-clustered bootstrap on the RATIO (signal share / schedule share).
+  function ratioCI(key, seed) {
+    const byDate = new Map();
+    for (const k of eligible) {
+      const d = k.split('|')[0];
+      if (!byDate.has(d)) byDate.set(d, []);
+      byDate.get(d).push({ inCohort: !!games.get(k)[key], hasSig: sigGames.has(k) });
+    }
+    const dates = [...byDate.keys()], nD = dates.length, rnd = mulberry(seed);
+    const out = [];
+    for (let b = 0; b < 6000; b++) {
+      let cohortSig = 0, sig = 0, cohort = 0, all = 0;
+      for (let i = 0; i < nD; i++) {
+        for (const g of byDate.get(dates[Math.floor(rnd() * nD)])) {
+          all++;
+          if (g.inCohort) cohort++;
+          if (g.hasSig) { sig++; if (g.inCohort) cohortSig++; }
+        }
+      }
+      if (sig > 0 && all > 0 && cohort > 0) {
+        const sigShare = cohortSig / sig, schedShare = cohort / all;
+        if (schedShare > 0) out.push(sigShare / schedShare);
+      }
+    }
+    if (out.length < 50) return [null, null];
+    out.sort((a, b) => a - b);
+    return [out[Math.floor(0.025 * out.length)], out[Math.floor(0.975 * out.length)]];
+  }
+
+  console.log('  cohort         sched%   signal%   ratio    95% CI            verdict');
+  const seeds = { low_bf: 11, rookie: 22, vet_callup: 33, established: 44 };
+  for (const key of ['rookie', 'low_bf', 'vet_callup', 'established']) {
+    const sched = eligible.filter(k => games.get(k)[key]).length / eligible.length;
+    const cohortSig = withSig.filter(k => games.get(k)[key]).length;
+    const sigShare = cohortSig / withSig.length;
+    const ratio = sched > 0 ? sigShare / sched : null;
+    const ci = ratioCI(key, seeds[key]);
+    const excl = ci[0] != null && (ci[0] > 1 || ci[1] < 1);
+    console.log('  ' + key.padEnd(14)
+      + (100 * sched).toFixed(1).padStart(6) + '%'
+      + (100 * sigShare).toFixed(1).padStart(9) + '%'
+      + (ratio == null ? '   n/a' : ratio.toFixed(3).padStart(9))
+      + '   [' + (ci[0] == null ? 'n/a' : ci[0].toFixed(3)) + ', '
+      + (ci[1] == null ? 'n/a' : ci[1].toFixed(3)) + ']'
+      + (excl ? '   excludes 1.0' : '   spans 1.0'));
   }
 })();
