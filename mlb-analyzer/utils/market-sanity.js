@@ -45,6 +45,35 @@
 
 // Sum-of-implied-probs plausibility band. Real two-outcome books quote
 // 1.02-1.08 vig — anything wildly outside is a data bug, not a market.
+// Absolute magnitude ceiling on a single American moneyline. (2026-08-22)
+//
+// WHY THIS EXISTS, AND WHY THE OTHER TWO CHECKS MISS IT.
+// The feed emits placeholder/no-liquidity values as real numbers: +94400,
+// +89373, +88237, +80672, +79452 and similar were observed on 28 separate
+// dates between 2026-07-07 and 2026-08-06. Paired against a matching deep
+// favorite (e.g. -99900) such a pair passes BOTH existing checks:
+//   - signs are opposite, so the both-positive test does not fire;
+//   - implied p sum is 0.00106 + 0.99900 = 1.000, comfortably inside the
+//     [0.95, 1.20] vig band.
+// So 279 corrupt-line signals reached getSignals and were stopped only by
+// the edge cap, which was never meant to be the sole backstop.
+//
+// THE THRESHOLD IS EMPIRICAL, NOT A GUESS. Over 1643 game_log rows with
+// both moneylines present, the per-game max |ML| distribution is:
+//   p50=137  p90=186  p99=279  p99.5=299  p99.9=403  max=99900
+// Real MLB lines top out near 400 and the distribution is BIMODAL -- there
+// is nothing between 403 and 99900. 1000 sits in that empty gap at ~2.5x
+// the observed real maximum, so it rejects the corrupt population with no
+// plausible false positive. Measured: |ML| > 1000 rejects 2 of 1643 rows,
+// and both are corrupt.
+//
+// DELIBERATELY NOT the implied-p > 0.80 test that checkOddsSanity uses for
+// FLAGGING. p > 0.80 is ML -400, which is inside the real range (p99.9 is
+// 403) -- promoting that threshold to a block would suppress legitimate
+// heavy favorites. A flag threshold and a block threshold are different
+// numbers and must not be conflated.
+const MAX_ABS_ML = 1000;
+
 const IMPLIED_SUM_MIN = 0.95;
 const IMPLIED_SUM_MAX = 1.20;
 
@@ -72,6 +101,13 @@ function checkMarketMLPairSanity(awayMl, homeMl) {
     return 'impossible line pair: both sides positive (' +
       _fmtAmerican(a) + ' / ' + _fmtAmerican(h) + ') — no favorite in a two-outcome market';
   }
+  // Magnitude ceiling. Checked BEFORE the implied-sum band because a
+  // corrupt line paired with a matching deep favorite produces a sum of
+  // almost exactly 1.0 and would otherwise pass.
+  if (Math.abs(a) > MAX_ABS_ML || Math.abs(h) > MAX_ABS_ML) {
+    return 'implausible line magnitude: ' + _fmtAmerican(a) + ' / ' + _fmtAmerican(h) +
+      '  exceeds +/-' + MAX_ABS_ML + ' (real MLB lines peak near 400); treating as corrupt feed data';
+  }
   const pa = _impliedP(a);
   const ph = _impliedP(h);
   if (pa == null || ph == null) return null;
@@ -92,4 +128,5 @@ module.exports = {
   checkMarketMLPairSanity,
   IMPLIED_SUM_MIN,
   IMPLIED_SUM_MAX,
+  MAX_ABS_ML,
 };

@@ -383,6 +383,90 @@ support a claim that the model prices better. Any conclusion that
 depended on such a delta needs re-deriving from a calibration metric
 before it is acted on.
 
+## Guard-removal rule: ask what failure mode it prevents (2026-08-22)
+
+**Before removing, weakening, or relaxing any guard, state in writing
+what failure mode it exists to prevent, and confirm whether that failure
+mode is present in the data you are about to evaluate it on.**
+
+If you cannot name the failure mode, you are not yet in a position to
+remove the guard.
+
+### The specific trap: backtest blindness
+
+**An ROI or calibration analysis run over cleaned historical data cannot
+evaluate a guard whose job is to catch dirty data.** The analysis corpus
+is built from `game_log` via `preScreenGame`, which drops malformed rows.
+A guard against malformed input is therefore measured on a population
+from which its target has already been removed. It will look inert,
+because within that corpus it *is* inert.
+
+This is not a sampling weakness to caveat. It is a **structural
+mismatch between instrument and question**, in the same family as
+`## Sweep ROI measures selection, not pricing` above: the measurement
+cannot see the thing being asked about, so a null result carries no
+information either way.
+
+### How it actually happened
+
+`SIGNAL_EDGE_HARD_CAP_PP` was analysed across fourteen levels on the
+backtest corpus. The 0.25 level suppressed **0 of 1026** signals, and was
+written up as "inert -- a does-nothing pass." The recommendation was to
+treat the cap as a behavioural filter with no support and remove it.
+
+The production audit log said otherwise. Of 1283 signals the cap had
+actually suppressed, **279 carried a market line of |ML| > 1000 -- up to
++94400** -- across 28 separate dates. Every one of those had edge >= 0.25,
+and **no signal below 25pp carried a corrupt line at all**. The guard was
+catching roughly ten corrupt lines a day, and nothing upstream blocked
+them.
+
+The reason the backtest could not see it: `game_log` held **2 corrupt
+rows out of 1643**, and `preScreenGame` dropped them. The live path saw
+what the backtest had already thrown away.
+
+### Required practice
+
+1. **Name the failure mode first.** Write it down before measuring.
+2. **Check whether the analysis corpus contains that failure mode.**
+   Count it. If the count is zero or near-zero, the corpus cannot answer
+   the question -- say so and stop.
+3. **Go to production evidence for guards.** `bet_signal_audit`,
+   suppression logs, and `odds_flag_reason` record what a guard actually
+   caught. That is the correct instrument for "is this guard needed",
+   and the backtest is not.
+4. **Separate the two questions.** "Is this guard needed?" and "is this
+   threshold right?" have different answers and often different
+   instruments. The cap analysis was correct that **0.08 has no
+   behavioural support**, and wrong to conclude the guard could go. Both
+   findings stand together.
+5. **Flag thresholds and block thresholds are different numbers.** Do not
+   promote one to the other. `checkOddsSanity` flags at implied p > 0.80,
+   which is ML -400 -- inside the real range (observed p99.9 is 403).
+   Blocking there would suppress legitimate heavy favourites; the block
+   bound is |ML| > 1000, sited in the empty gap between 403 and 99900.
+
+### Related failure: a guard that fails open is not a guard
+
+Three separate hand-maintained key lists silently ignored anything they
+did not recognise, each producing a confident and wrong null:
+
+| site | unrecognised key caused |
+|---|---|
+| `getSettings()` whitelist | setting stored, UI-wired, **never read by the model** (twice: catcher framing, then the three hand-conditional keys) |
+| `calibration-ab.js` `CALLER_POPULATED_INPUTS` | keyed by exact param name, so `CATCHER_FRAMING_MUTE` skipped the guard and the A/B reported "flag is inert" |
+| `parameter-sweep.applySweepOverrides` | `{SP_WEIGHT: w}` matched no branch, silently discarded, so all nine grid points scored the identical production model |
+
+**Any lookup keyed by a hand-maintained list must throw on an
+unrecognised key rather than skip it.** All three now do, and the
+`getSettings`/schema sync is asserted every morning by
+`utils/settings-sync-check.js`.
+
+**The tell in all three cases was identical digits.** Results that
+reproduce a previous run to five decimal places are almost never a real
+null -- they mean the thing you thought you changed did not change.
+Check that before writing up any null result.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
