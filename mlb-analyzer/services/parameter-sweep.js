@@ -406,7 +406,17 @@ function loadWobaSnapshot(db, snapshotDate) {
 // Pre-load games + outcomes (game scores + market totals) once. The
 // per-combination inner loop reuses this — only the model settings
 // change between combos, not the game data.
-function loadGames(db, fromDate, toDate) {
+// opts (2026-08-23, for the contamination re-run only):
+//   includeMarketContaminated -- keep post-first-pitch-priced rows. ONLY for
+//     measuring what the exclusion changed. Never for production analysis.
+//   sampleN / seed -- deterministically downsample the returned set. Exists
+//     so a POWER CONTROL can be built: a random n-matched subsample of the
+//     CONTAMINATED corpus isolates "the delta moved because n dropped" from
+//     "the delta moved because the contamination was removed". Without that
+//     control, excluding 15.3% of games and observing a wider CI proves
+//     nothing about contamination.
+function loadGames(db, fromDate, toDate, opts) {
+  opts = opts || {};
   // Contamination filter (2026-08-06): the parameter sweep reruns
   // runModel per combo on historical rows; a row whose persisted
   // weather is known-wrong feeds biased inputs into EVERY combo
@@ -418,8 +428,27 @@ function loadGames(db, fromDate, toDate) {
     "SELECT * FROM game_log WHERE game_date >= ? AND game_date <= ? "
     + "AND model_total IS NOT NULL "  // skip games the model never finished
     + "AND weather_contamination_reason IS NULL "
+    // Same exclusion, same reasoning, different input: when the stored
+    // market_*_ml moved after real first pitch it embeds the in-progress
+    // score, so it is not a pre-game price. Leaving these in would let a
+    // post-hoc market number act as the baseline the model is scored
+    // against -- the market would look artificially sharp and the model
+    // artificially bad, on exactly the games where the market "knew" the
+    // result. See docs/first-pitch-timestamp-and-exposure-2026-08-22.md.
+    + (opts.includeMarketContaminated ? "" : "AND market_contamination_reason IS NULL ")
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
+}
+
+// Deterministic n-matched downsample. Separated from loadGames so the
+// sampling is visible at the call site rather than hidden in a query.
+function sampleGames(rows, n, seed) {
+  if (!n || n >= rows.length) return rows;
+  let a = (seed || 1) >>> 0;
+  const rnd = () => { a = (a * 1103515245 + 12345) & 0x7fffffff; return a / 0x7fffffff; };
+  const idx = rows.map((_, i) => i);
+  for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
+  return idx.slice(0, n).sort((x, y) => x - y).map(i => rows[i]);
 }
 
 // Probe one game-shape to make sure runModel can consume it without
@@ -1053,6 +1082,7 @@ module.exports = {
   // the in-server sweep uses, rather than reimplementing the snapshot
   // binding and pre-screen and drifting from it.
   loadGames,
+  sampleGames,
   loadWobaSnapshot,
   preScreenGame,
   targetMetric,

@@ -467,6 +467,74 @@ reproduce a previous run to five decimal places are almost never a real
 null -- they mean the thing you thought you changed did not change.
 Check that before writing up any null result.
 
+## Timestamp comparison discipline (2026-08-22)
+
+**Three separate timestamp bugs in a single investigation, each producing
+a confident wrong answer that survived until something else contradicted
+it.** This section exists because the failure is silent by construction:
+comparing timestamps almost never throws, it just returns the wrong
+boolean.
+
+### The three
+
+| bug | what it did |
+|---|---|
+| **Comparing against a display string.** `game_log.game_time` is `"2:10 PM ET"` — no date, no offset. `slice(11,16)` on a 10-character string returns `""`, and `anything >= ""` is `true`. | Reported "761 of 761 events after first pitch" and a 15–20% exposure table. Both meaningless. |
+| **Assuming one zone for the whole schema.** `bet_signal_audit.created_at` is **PT**; `game_log.odds_locked_at` is **UTC** (SQL `datetime('now')`). Identical-looking, seven hours apart. | Reported "0 signals locked before first pitch" — impossible — which would have inflated an exposure figure from 284 to 2453. |
+| **Trusting a column name.** `empirical_market_captures.capture_track = 'gametime'` does not mean captured at game time; those rows are frequently captured the day before. | Nearly used it as a pre-first-pitch reference without checking. |
+
+### The method that settled all three
+
+**Validate a timestamp interpretation against an event whose ordering is
+known a priori — then pick the reading that respects it.**
+
+Find an event type whose position relative to your reference is fixed by
+definition, independent of any data. Then test each candidate
+interpretation and keep the one that produces the impossible-free answer.
+
+Worked example. `set_closing_line` can *only* occur after a game ends:
+
+```
+created_at read as UTC : 369 after first pitch, 367 before   <- a coin flip. Wrong.
+created_at read as PT  : 727 after first pitch,   9 before   <- correct.
+```
+
+A 50/50 split is the signature of comparing noise. A near-total split in
+the direction logic demands is the signature of a correct reading.
+
+Second worked example, same method, different fact. The `morning` capture
+track stamps `07:30:39`. A cron named "morning" runs at 07:30 **local**;
+read as UTC that is 00:30 PT, and nothing called morning runs at half past
+midnight. That settled `generated_at` as PT without needing any join.
+
+### Required practice
+
+1. **Never compare a display string.** If a column renders in a UI, it is
+   for rendering. Comparisons need a real timestamp column, and if one
+   does not exist, that is the prerequisite — go build it before
+   continuing the analysis, not after.
+2. **State the zone of every timestamp in a comment at the comparison
+   site.** This schema genuinely mixes PT and UTC in adjacent columns.
+   `datetime('now')` in SQL is always UTC; anything routed through
+   `nowPtIso` is PT. Both render as `YYYY-MM-DD HH:MM:SS`.
+3. **Anchor on an a-priori-ordered event before trusting any
+   before/after result.** Closing lines follow games. Locks precede
+   starts. Morning crons run in the morning. Pick one, test the
+   interpretations, discard the one that produces impossibilities.
+4. **Treat impossible results as diagnostics, not edge cases.** "0 rows
+   locked before first pitch" and "100% after" are not surprising
+   findings — they are the shape of a broken comparison. The first
+   instinct on seeing a clean 0% or 100% must be to check the comparison,
+   not to write it up.
+5. **A 50/50 split is the other tell.** Random-looking output from a
+   comparison that should be strongly ordered means the two sides are not
+   in the same units.
+
+**Related:** the identical-digits tell under §"Guard-removal rule" is the
+same family — results that reproduce a previous run to five decimals mean
+nothing changed. Both are cases where the *shape* of a number, not its
+value, is what reveals the bug.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.

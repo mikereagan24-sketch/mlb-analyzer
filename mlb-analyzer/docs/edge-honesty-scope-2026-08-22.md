@@ -1,5 +1,23 @@
 # Edge honesty: scope of the calibration finding (2026-08-22)
 
+> ---
+> **ANNOTATION 2026-08-23 — re-run on the decontaminated corpus.**
+> Every figure on this page was computed on a corpus that retained 128
+> games priced after real first pitch
+> (`docs/post-start-pricing-tagged-2026-08-22.md`). Those are now excluded
+> and everything here was re-run.
+>
+> **No verdict changed and no tier moved.** Absolute numbers shift because
+> the corpus drops 790 -> 662 (16.2%); the shifts were checked against a
+> 20-seed n-matched control drawn from the *contaminated* corpus, and
+> **every one lands inside the control's p5..p95** — i.e. they are power
+> effects, not contamination effects.
+>
+> Superseding numbers: `docs/decontaminated-rerun-2026-08-23.md`.
+> Figures below are left as originally recorded rather than overwritten.
+> ---
+
+
 **Status:** measurement pass, nothing shipped. Harness:
 `scripts/edge-honesty-scope.js`.
 
