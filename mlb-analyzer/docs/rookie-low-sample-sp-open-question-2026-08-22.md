@@ -1,8 +1,17 @@
 # Rookie / low-sample starting pitchers — open question (2026-08-22)
 
-> **Status: filed, not started.** Scoped only — the numbers below are
-> population counts and code references gathered to make the ticket
-> actionable. No hypothesis test has been run.
+> **Status: APPROVED AS SCOPED 2026-08-22. Not started.** The numbers
+> below are population counts and code references. No hypothesis test has
+> been run.
+>
+> **Execution order is fixed:** the `mlbDebutDate` backfill (§P) is a hard
+> prerequisite — nothing else begins until it lands. Then both cohort
+> definitions, as-of-date, with the veteran-callup control. The
+> pre-registered prediction in §PR is timestamped and must not be edited
+> after measurement begins.
+>
+> **Item (5) is part of this ticket, not a separate one.** Same
+> population, and the decision is the deliverable.
 
 ## Hypothesis
 
@@ -25,6 +34,79 @@ This is a coherent chain and each link is separately testable. It is
 also the first hypothesis on this repo that predicts *where* the model's
 edge should be least honest, rather than predicting a level shift — that
 makes it falsifiable in a way most of the parameter work is not.
+
+## §P. Prerequisite — `mlbDebutDate` backfill (blocks everything)
+
+**Nothing in the test plan starts until this lands.** Definition (1b)
+does not exist without it, and (1a)-only would answer a question the
+hypothesis does not ask.
+
+Scope:
+
+- Source: statsapi `people/{id}` → `mlbDebutDate`.
+- Key: `pitcher_mlb_id`, already present on `pitcher_game_log`.
+- Volume: 438 distinct starters — a single pass, not a rolling job.
+- Storage: new table `pitcher_debut` (`pitcher_mlb_id` PK, `mlb_debut_date`,
+  `fetched_at`), not a column on `pitcher_game_log`, which is per-appearance.
+- Also capture career IP if statsapi returns it cheaply in the same call;
+  if it needs a second endpoint, debut date alone is enough to define
+  rookie status and career-IP can be a later refinement.
+
+Acceptance: coverage reported as `n_with_debut / 438`, and the misses
+**enumerated rather than summarised** — a systematic miss (e.g. every
+2026-debut pitcher) would bias the cohort in exactly the direction the
+hypothesis predicts, which is the one failure mode that could manufacture
+a false positive.
+
+**This is a data step. It must not be bundled with any measurement.**
+
+## §PR. Pre-registered prediction — written 2026-08-22, before any measurement
+
+Recorded now, timestamped, so it cannot be adjusted to fit the result.
+This is the point of the exercise: if the cliff fix ships afterwards, it
+ships against a prediction made in advance rather than a rationale fitted
+in hindsight.
+
+**Predictions, in the order they will be tested:**
+
+1. **Direction (item 2).** For the no-actuals rookie cohort, realized
+   wOBA-against will be **HIGHER (worse) than projected** — the model
+   over-rates them. Gap = realized − projected, predicted **positive**.
+2. **Rough magnitude (item 2).** Order **+0.010 to +0.025 wOBA** for the
+   rookie cohort. Stated as a range because it is a prior, not an
+   estimate: it is the scale of the difference between a league-average
+   prior and the talent level of pitchers who need a rookie to start.
+   **A gap under +0.005 should be read as the hypothesis failing**, not
+   as weak support.
+3. **Control (item 2).** Established starters: gap near zero,
+   **within ±0.005**. If the control shows a comparable positive gap,
+   the finding is a global projection bias and **not** about rookies —
+   that would refute the specific hypothesis even while showing a real
+   problem.
+4. **Veteran-callup subgroup.** Predicted to sit **between** the two,
+   nearer the control. This subgroup is what separates "no actuals" from
+   "genuinely unestablished"; if it matches the rookie cohort, the
+   mechanism is sample-size, not inexperience, and the cliff fix — not a
+   rookie prior — is the whole answer.
+5. **Over-representation (item 3).** Rookie-SP games predicted
+   **over-represented among emitted signals** relative to schedule share,
+   by a factor of **1.2×–2.0×**. Direction is the claim; the factor is a
+   rough prior.
+6. **Calibration (item 4).** Rookie-SP subset predicted **worse** on log
+   loss and **less honest** on edge slope than the rest. Expected to be
+   the weakest of the tests — see the thin-sample caveat.
+7. **The cliff fix (item 5).** Letting sub-gate actuals contribute
+   partially is predicted to **improve** pooled log loss by
+   **−0.0003 to −0.0015**, i.e. comparable to FRV's −0.00092. It is
+   bounded well below that by the affected share of games: it only moves
+   games with a sub-gate starter.
+
+**Falsifiers, stated in advance.** Any of these refutes the hypothesis as
+framed, and none is to be reinterpreted as partial support:
+
+- rookie-cohort gap ≤ +0.005, or negative;
+- control gap statistically indistinguishable from the rookie gap;
+- no over-representation among emitted signals (ratio ≈ 1.0).
 
 ## Test plan (as specified)
 
@@ -135,7 +217,31 @@ in this repo with a pre-registered directional prediction, which is
 worth considerably more than another A/B that lands inside its own CI.
 
 **Sequence accordingly: measure (2) before shipping the cliff fix**, so
-the prediction is on record first.
+the prediction is on record first. §PR is that record.
+
+### The ~300 BF decision belongs to this ticket
+
+Folded in rather than split out: it is the same population, and splitting
+it is how the constant ended up deferred in the first place. The
+measurement at `model.js:320-325` is done and the number is argued. What
+is missing is a decision, and a decision with no owner is what this repo
+has just spent a week cataloguing.
+
+**Deliverable for item (5) is therefore the change itself, not another
+measurement**, conditional on §PR prediction 1 holding:
+
+- pitcher-side smoothstep mirroring the batter fix
+  (`docs/woba-minpa-shrinkage-cliff-2026-08-21.md`), floor at
+  **~300 BF** per the measured curve;
+- byte-identical above the floor, asserted on replay, same discipline as
+  the batter fix;
+- shipped as **Tier 3** — mechanism pre-registered in §PR, point estimate
+  not worse, bounded harm, blast radius reported.
+
+If §PR prediction 1 fails, the cliff fix still has an independent
+smoothness rationale but **loses its predicted direction**, and should
+then be judged on its own as a Tier 3 mechanism change with no
+directional claim attached.
 
 ## Method constraints carried from prior work
 
