@@ -37,6 +37,10 @@
 const path = require('path');
 const Database = require('better-sqlite3');
 const ps = require('../services/parameter-sweep');
+// Caller-populated model inputs (FRV, catcher framing). Without this the
+// scored model is missing both defensive inputs and the absolute figures
+// describe a model that never runs in production. See services/harness-inputs.js.
+const hi = require('../services/harness-inputs');
 const { runModel, getBatterWoba, getPitcherWoba } = require('../services/model');
 const jobs = require('../services/jobs');
 
@@ -72,7 +76,7 @@ for (const g of games) {
   const idx = cache.get(g.game_date);
   if (!idx || g.home_score == null || g.away_score == null) continue;
   if (g.market_home_ml == null || g.market_away_ml == null) continue;
-  const w = ps.preScreenGame(g, idx, st);
+  const w = hi.populateCallerInputs(ps.preScreenGame(g, idx, st), g, st);
   if (!w) continue;
   const mr = runModel(w, idx, st, 'opener_aware', true);
   if (!mr || mr._suppressed || mr.adjHW == null || !isFinite(mr.adjHW)) continue;

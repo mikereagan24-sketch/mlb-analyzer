@@ -66,13 +66,7 @@ const callerInputsFor = (param) => {
   const hit = CALLER_POPULATED_INPUTS.filter(e => e.match.test(param))[0];
   return hit ? hit.fields : null;
 };
-let frvForTeam = () => null;
-let framingForTeam = () => null;
-try {
-  const fb = require('../services/frv-backtest');
-  frvForTeam = fb.computeTeamFieldingRunsPerGame || frvForTeam;
-  framingForTeam = fb.computeFramingRvPerGame || framingForTeam;
-} catch (e) {}
+const hi = require('../services/harness-inputs');
 const baseSettings = jobs.getSettings();
 
 let _s = 20260823;
@@ -104,14 +98,7 @@ for (const g of games) {
   // DEFENSE_FRV_ENABLED A/B silently produces IDENTICAL arms and reports a
   // false "flag is inert". Populate it the same way prod does.
   try {
-    w.awayFieldingRunsPerGame = frvForTeam(g.away_team, g.away_lineup_json, baseSettings);
-    w.homeFieldingRunsPerGame = frvForTeam(g.home_team, g.home_lineup_json, baseSettings);
-    // Catcher framing is caller-populated too. model.js:1288 crosses the
-    // sides deliberately (the HOME catcher frames against the AWAY offense),
-    // but that crossing happens inside runModel -- here we just attach each
-    // team's own catcher, exactly as jobs.js:815 does.
-    w.awayCatcherFramingRvPerGame = framingForTeam(g.away_team, g.away_lineup_json, baseSettings);
-    w.homeCatcherFramingRvPerGame = framingForTeam(g.home_team, g.home_lineup_json, baseSettings);
+    hi.populateCallerInputs(w, g, baseSettings);
   } catch (e) { /* leave null; the guard below reports it */ }
   const ph = impliedP(g.market_home_ml), pa = impliedP(g.market_away_ml);
   if (ph == null || pa == null || (ph + pa) <= 0) continue;

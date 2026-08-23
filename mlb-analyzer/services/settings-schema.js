@@ -185,8 +185,8 @@ const SETTINGS_SCHEMA = {
   // --- Catcher framing (run-environment adjustment) ------------------------
   catcher_framing_enabled: { type: 'boolean', default: false,
     help: 'Apply projected catcher framing runs to the opposing offense run estimate. Default OFF — requires the catcher_framing table to be populated by the Savant ingest. No-op when off or when no framing row exists for the catcher.' },
-  catcher_framing_mute: { type: 'number', min: 0.0, max: 1.0, default: 0.65,
-    help: 'Fraction of measured framing run value applied. <1 because pitcher wOBA-against already partially reflects framing from the usual batterymate; this captures the differential without double-counting. 0.65 = applies most of the value, since tonight\'s catcher often differs from the pitcher\'s sampled batterymates.' },
+  catcher_framing_mute: { type: 'number', min: 0.0, max: 1.0, default: 1.0,
+    help: 'Fraction of measured framing run value applied. <1 because pitcher wOBA-against already partially reflects framing from the usual batterymate; this captures the differential without double-counting. 0.65 = applies most of the value, since tonight\'s catcher often differs from the pitcher\'s sampled batterymates. DEFAULT CHANGED 0.65 -> 1.0 on 2026-08-22: measured for the first time, 1.0 beat 0.65 on all five calibration metrics (delta -0.00007 log loss, not significant, blast radius 789/790). Prod was already running 1.0, so the default was aligned to the measured and deployed value rather than moving prod to an unmeasured one. See docs/three-targets-hfa-cap-framing-2026-08-22.md.' },
   catcher_framing_abs_factor: { type: 'number', min: 0.0, max: 1.0, default: 0.80,
     help: 'Scaling applied to the 2023-2025 historical framing baseline to express pre-ABS values in 2026-equivalent units (ABS cut framing ~20%). Only affects the historical fallback; current-season 2026 data is used as-is. Net effect on a fallback catcher: ×abs_factor ×mute.' },
   catcher_framing_min_pitches_2026: { type: 'number', min: 0, max: 5000, default: 750,
