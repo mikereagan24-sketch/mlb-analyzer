@@ -133,8 +133,23 @@ relative to a true closing line.
   fee-adjusted, so CLV computed against it is systematically inflated.
   That pushes the true net *below* −0.45pp by an unquantified amount.
 
-That last one matters: it is the one caveat that moves the answer in a
-consistent direction rather than widening the interval.
+~~That last one matters: it is the one caveat that moves the answer in a
+consistent direction rather than widening the interval.~~
+
+> **CORRECTION 2026-08-23 — the fee caveat is wrong, measured.**
+> The `jobs.js` warning describes a **one-sided** adjustment. In fact
+> `bet_line`, `closing_line` and the capture table all derive from
+> `game_log.market_*_ml`, which is already fee-adjusted — so both sides of
+> the CLV carry the fee and it cancels.
+>
+> Measured residual: **−0.011pp, 95% CI [−0.023, −0.001]** — negligible,
+> and **negative**, i.e. the opposite direction to what I claimed. Net
+> moves −0.451pp → −0.440pp. **It stays ambiguous; it does not become
+> clearly negative.** (If only the close were adjusted the skew would be
+> +1.649pp — that is the number the caveat describes, and it does not
+> apply.)
+>
+> See `docs/fee-skew-and-the-record-2026-08-23.md`.
 
 ## Related
 
