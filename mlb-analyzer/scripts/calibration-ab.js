@@ -80,7 +80,12 @@ console.log('  target: log loss / Brier / ECE / AUC over ALL games — no emit f
 console.log('');
 
 // ---- corpus --------------------------------------------------------
-const games = ps.loadGames(db, FROM, TO);
+// INCLUDE_CONTAMINATED=1 re-runs against the pre-2026-08-23 corpus, which
+// retained games priced after real first pitch. Only for measuring what the
+// exclusion changed -- never for a production verdict.
+const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
+const games = ps.loadGames(db, FROM, TO, { includeMarketContaminated: INCLUDE_DIRTY });
+if (INCLUDE_DIRTY) console.log('  *** corpus INCLUDES market-contaminated games (comparison run) ***');
 const cache = new Map();
 for (const g of games) if (!cache.has(g.game_date)) cache.set(g.game_date, ps.loadWobaSnapshot(db, g.game_date));
 const rows = [];
