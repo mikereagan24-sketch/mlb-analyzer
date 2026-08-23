@@ -157,6 +157,79 @@ edge band, period, total level, or side. It is either operator judgment
 not captured in these fields, or noise on n=37 — and with the aggregate CI
 spanning zero, the second remains entirely plausible.
 
+## THE RECORD — what is established, and what remains the leading explanation
+
+Stated once, plainly, so it is not reconstructed from the sections above.
+
+**1. The selection effect is real in direction.** Across every cut, the
+logged bets outperform comparable unlogged signals in the same direction.
+That is not in dispute.
+
+**2. It survives every control available.**
+
+| control | logged | comparable not-logged |
+|---|---|---|
+| aggregate | +10.66pp | +1.01pp (same window) |
+| **period** — all 38 bets fall in one pre-v7 month | +10.66pp | +1.01pp |
+| **edge band** — matched at ≥4pp, where the operator actually bet | +9.60pp | +1.01pp |
+| **total level** | operator favoured 7.5–8 | that band is **−2.73pp** in the population |
+| **side** | 55% unders | population is **73%** unders — the operator was *less* under-heavy, yet the outperformance came from unders |
+
+**3. It decomposes into no identifiable mechanism.** Edge band, period,
+total level and side were each tested. None explains it, and two point the
+*wrong way*: the total band the operator favoured is negative in the
+population, and the side mix is less under-weighted than the population
+that produced the signals.
+
+**4. At n=37, with the aggregate CI spanning zero, noise remains the
+leading explanation.**
+
+```
+GAP  +10.66pp   95% CI [-1.91, +23.58]   1.30 SD
+ROI  +21.12%    95% CI [-3.19, +46.41]
+```
+
+This is not a hedge appended to a positive finding. **It is the ranking.**
+A 1.30 SD result on 37 observations, whose only significant subset
+(+18.10pp on 20 unders) collapses to +1.10pp and non-significance when
+re-measured on 550 unconditioned signals, is what noise looks like when
+you slice it. The direction surviving four controls raises the
+possibility of something real; it does not outweigh the interval.
+
+**Consequently: nothing here is actionable, and the under number in
+particular must not be acted on.**
+
+## REVISIT TRIGGER — a count, not a date
+
+**Re-run the decisive test at n ≥ 100 logged totals bets.**
+
+Registered in `services/feature-gate-registry.js` as
+`totals_selection_edge`, gated on the `totals_logged_bets_100`
+precondition, so the **6AM gate-health check reports it itself** rather
+than relying on anyone remembering. Verified: currently `38 / 100`,
+status `blocked`, `needs_attention: false`. When the count is reached the
+status becomes `awaiting_decision` and it appears in the morning
+needs-attention list.
+
+**Why a count and not a date.** Waiting a further month adds no
+information — only logged bets do. A calendar window would come due while
+the sample was still uninformative and force a decision on noise, which is
+the failure mode the whole gate-standard work exists to avoid.
+
+**Why 100 specifically.** At n=37 the gap CI spans ~25pp. Interval width
+scales as 1/√n, so n=100 narrows it to roughly 15pp — still wide, but for
+the first time narrow enough to separate the observed +10.66pp from zero
+*if the effect is real at that magnitude*. It is the point at which the
+test starts being able to answer, not the point at which the answer
+arrives.
+
+**What to re-run at the trigger**, both parts, not just the first:
+
+1. `scripts/totals-edge-regrade.js` — the logged-book gap with a CI.
+2. **The unconditioned comparison** — the same measurement on all emitted
+   totals signals. This is the step that killed the +18.10pp under result
+   and it is the one most likely to be skipped.
+
 ## What I would and would not conclude
 
 **Would:**
