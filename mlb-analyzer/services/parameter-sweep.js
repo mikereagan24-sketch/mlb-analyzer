@@ -187,14 +187,13 @@ function applySweepOverrides(baseSettings, overrides) {
 // Compute the wagered amount per signal (mirrors the SQL in /backtest
 // overall + the wageredForSignal helper in public/index.html so ROI is
 // computed identically across sweep / backtest API / UI display).
-function wageredFor(signal) {
-  if (signal.type === 'ML') {
-    const ln = Number(signal.marketLine);
-    if (!ln) return 0;
-    return ln > 0 ? (10000 / ln) : Math.abs(ln);
-  }
-  return 110;
-}
+// MOVED 2026-08-23 to utils/wagered.js. The old body returned a FLAT 110
+// for totals regardless of price, making every totals ROI denominator an
+// approximation -- and an asymmetric one, understating the stake on
+// favourites and overstating it on dogs. The shared version uses the
+// actual price, preferring bet_price (struck) then the market's
+// over/under price, with -110 genuinely last.
+const { wageredFor } = require('../utils/wagered');
 
 // Bucket a single emitted signal into one of {favs, dogs, overs, unders}.
 function categoryFor(signal) {

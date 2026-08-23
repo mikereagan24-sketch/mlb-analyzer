@@ -1493,11 +1493,31 @@ router.get('/backtest', (req, res) => {
       "   WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0" +
       "     THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)" +
       "   WHEN signal_type='ML' THEN ABS(COALESCE(bet_line,market_line))" +
+      // Totals 2026-08-23: use the struck price, not a flat 110. NOTE the
+      // divergence from utils/wagered.js, which also falls back to the
+      // market over/under price -- those columns live on game_log, not
+      // bet_signals, and this query has no join. That fallback matters for
+      // unlogged SIGNALS; every row here is a LOGGED BET and logged totals
+      // carry bet_price (35 of 38 historical rows migrated 2026-08-23), so
+      // the fallback is unreachable in practice for this population.
+      // SQL PARITY with utils/wagered.js -- change both together.
+      "   WHEN bet_price > 0 THEN ROUND(10000.0/bet_price,2)" +
+      "   WHEN bet_price IS NOT NULL THEN ABS(bet_price)" +
       "   ELSE 110.0 END), 2) as wagered," +
       " ROUND(SUM(pnl) / NULLIF(SUM(CASE" +
       "   WHEN signal_type='ML' AND COALESCE(bet_line,market_line) > 0" +
       "     THEN ROUND(10000.0/COALESCE(bet_line,market_line),2)" +
       "   WHEN signal_type='ML' THEN ABS(COALESCE(bet_line,market_line))" +
+      // Totals 2026-08-23: use the struck price, not a flat 110. NOTE the
+      // divergence from utils/wagered.js, which also falls back to the
+      // market over/under price -- those columns live on game_log, not
+      // bet_signals, and this query has no join. That fallback matters for
+      // unlogged SIGNALS; every row here is a LOGGED BET and logged totals
+      // carry bet_price (35 of 38 historical rows migrated 2026-08-23), so
+      // the fallback is unreachable in practice for this population.
+      // SQL PARITY with utils/wagered.js -- change both together.
+      "   WHEN bet_price > 0 THEN ROUND(10000.0/bet_price,2)" +
+      "   WHEN bet_price IS NOT NULL THEN ABS(bet_price)" +
       "   ELSE 110.0 END), 0) * 100, 2) as roi" +
       " FROM bet_signals WHERE game_date BETWEEN ? AND ? AND game_date >= '2026-04-09' AND outcome NOT IN ('pending','push')" +
       cohortPred + loggedPred

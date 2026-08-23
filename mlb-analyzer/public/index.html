@@ -4121,15 +4121,28 @@ function renderSignalTracking(signals) {
 //   ML negative bet_line  -> abs(line)
 //   Total                 -> 110 (flat -110 juice assumption)
 // bet_line falls back to market_line when not explicitly logged.
+// Mirrors utils/wagered.js. Totals previously returned a flat 110
+// regardless of price; they now use the struck bet_price, then the
+// market's over/under price, then -110 as a genuine last resort.
 function wageredForSignal(s){
+  var stake = function (ml) {
+    if (ml == null || ml === '') return null;
+    var n = Number(ml);
+    if (!isFinite(n) || n === 0) return null;
+    return n > 0 ? Math.round((10000.0 / n) * 100) / 100 : Math.abs(n);
+  };
   if (s.signal_type === 'ML') {
-    var ln = s.bet_line != null ? s.bet_line : s.market_line;
-    if (ln == null) return 0;
-    ln = Number(ln);
-    if (ln > 0) return Math.round((10000.0 / ln) * 100) / 100;
-    return Math.abs(ln);
+    var v = stake(s.bet_line != null ? s.bet_line : s.market_line);
+    return v == null ? 0 : v;
   }
-  return 110.0; // Total
+  // Total: bet_line holds the TOTAL, never a price -- do not use it here.
+  var isOver = String(s.signal_side || '').toLowerCase() === 'over';
+  var cands = [s.bet_price, isOver ? s.over_price : s.under_price];
+  for (var i = 0; i < cands.length; i++) {
+    var w = stake(cands[i]);
+    if (w != null) return w;
+  }
+  return 110.0;
 }
 
 // Bucket helpers. 0.5pp buckets indexed by floor(edge*100/0.5).

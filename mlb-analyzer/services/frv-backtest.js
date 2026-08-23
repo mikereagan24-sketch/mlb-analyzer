@@ -182,14 +182,9 @@ function isHighlightedSignal(sig, t) {
   return false;
 }
 
-function wageredFor(sig) {
-  if (sig.type === 'ML') {
-    const ln = Number(sig.marketLine);
-    if (!ln) return 0;
-    return ln > 0 ? (10000 / ln) : Math.abs(ln);
-  }
-  return 110;
-}
+// MOVED 2026-08-23 to utils/wagered.js -- see the note there on the
+// flat-110 totals defect this replaces.
+const { wageredFor } = require('../utils/wagered');
 
 function emptyBucket() {
   return { signals: 0, wins: 0, losses: 0, pushes: 0, pnl: 0, wagered: 0 };
