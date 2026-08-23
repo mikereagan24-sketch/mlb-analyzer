@@ -60,6 +60,19 @@ const PRECONDITIONS = {
     scalar(db, 'SELECT COUNT(*) v FROM game_log WHERE home_sp_weight_used IS NOT NULL') > 0,
   at_emit_columns_populated: (db) =>
     scalar(db, 'SELECT COUNT(*) v FROM bet_signals WHERE model_home_ml_at_emit IS NOT NULL') > 0,
+
+  // COUNT-BASED, not calendar-based. The totals-edge question cannot be
+  // answered by waiting -- it is answered by accumulating logged bets, and
+  // 37 is nowhere near enough. A date-based window would come due while the
+  // sample was still uninformative and force a decision on noise.
+  //
+  // 100 is not arbitrary: at n=37 the gap CI was [-1.91, +23.58], a width
+  // of ~25pp. Interval width scales as 1/sqrt(n), so n=100 narrows it to
+  // roughly 15pp -- still wide, but enough to separate the observed
+  // +10.66pp from zero if the effect is real at that magnitude. It is the
+  // point at which the test starts being able to answer.
+  totals_logged_bets_100: (db) =>
+    scalar(db, "SELECT COUNT(*) v FROM bet_signals WHERE signal_type='Total' AND bet_line IS NOT NULL") >= 100,
 };
 
 function tableCount(db, t) {
@@ -138,6 +151,29 @@ const GATES = [
     decision: { date: '2026-07-04', outcome: 'enabled', ref: 'docs/sp-forecast-abbrev-name-2026-07-04.md' } },
 
   // ---- settings-gated, currently OFF ----
+  // ---- open question, no settings key: an OBSERVATION to re-test, not a flag ----
+  { id: 'totals_selection_edge', key: null, on_expected: null,
+    criterion: 'Re-run the decisive test at n >= 100 logged totals bets. NOT a calendar date.',
+    criterion_type: 'calibration', precondition: 'totals_logged_bets_100',
+    window_end: null, decision: null,
+    note: 'FINDING 2026-08-23 (docs/totals-edge-four-steps-2026-08-23.md). Logged totals showed '
+        + '23W-14L, +21.12% ROI after re-grading at struck prices, with a win-rate gap of +10.66pp '
+        + 'over the price-implied rate. THE GAP CI SPANS ZERO: [-1.91, +23.58], 1.30 SD on n=37. '
+        + 'Split by side, the under subset is +18.10pp with a CI excluding zero -- but the SAME '
+        + 'measurement on 550 unconditioned under signals gives +1.10pp, spanning zero. Same sign, '
+        + '~16x the magnitude: selection, not a model property. '
+        + 'The selection effect IS real in direction and survives every control available -- period '
+        + '(all 38 bets fall in one pre-v7 month; same-window logged +10.66pp vs not-logged +1.01pp), '
+        + 'edge band (matched at >=4pp: +9.60pp vs +1.01pp), total level (the band the operator '
+        + 'favoured is NEGATIVE in the population) and side (the operator was LESS under-heavy than '
+        + 'the population, 55% vs 73%, yet the outperformance came from unders). '
+        + 'IT DECOMPOSES INTO NO IDENTIFIABLE MECHANISM. '
+        + 'AT n=37 WITH THE AGGREGATE CI SPANNING ZERO, NOISE REMAINS THE LEADING EXPLANATION. '
+        + 'Do not act on the +18.10pp under number. '
+        + 'REVISIT TRIGGER: n >= 100 logged totals bets, then re-run scripts/totals-edge-regrade.js '
+        + 'AND the unconditioned comparison. The trigger is a COUNT because waiting a further month '
+        + 'adds no information -- only logged bets do.' },
+
   { id: 'defense_frv_enabled', key: 'defense_frv_enabled', on_expected: false,
     criterion: 'Default OFF — "requires the fielding_frv table to be populated".',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
