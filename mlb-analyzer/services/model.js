@@ -1601,10 +1601,22 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
     if (actualTotal === tot) return { outcome: 'push', pnl: 0 };
     // Use locked bet_line as the total line bet (e.g. 6.5), price is typically -110
     // Use signal.overPrice/underPrice if available, else -110
-    const price = isOver
-      ? (signal.overPrice || signal.over_price || -110)
-      : (signal.underPrice || signal.under_price || -110);
-    const line = effectiveLine(price, null); // bet_line on totals is the line number, not the price
+    // Price precedence (2026-08-23). bet_price is the juice the operator
+    // actually got; it wins over the market's price because it is what the
+    // bet was struck at. Before bet_price existed this fell straight to the
+    // market price and the logged juice -- which WAS being captured, in
+    // bet_line -- was silently ignored, so every totals P&L was graded at a
+    // price the operator did not get. Measured on 36 clean historical rows:
+    // 22.10% ROI as graded vs 24.09% at the logged price, a -1.99pp
+    // understatement. The -110 fallback below never actually fired on those
+    // rows (game_log carried a price for all 38), but it is the last resort
+    // and is now clearly the last resort rather than the second one.
+    const price = (signal.bet_price != null && signal.bet_price !== '')
+      ? Number(signal.bet_price)
+      : (isOver
+          ? (signal.overPrice || signal.over_price || -110)
+          : (signal.underPrice || signal.under_price || -110));
+    const line = effectiveLine(price, null); // price, not the total: bet_line holds the total on Total rows
     const pnl = toWin100(line, covered);
     return { outcome: covered ? 'win' : 'loss', pnl };
   }

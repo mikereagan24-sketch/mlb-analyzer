@@ -5851,15 +5851,25 @@ router.post('/signals/manual', requireAdminToken, (req, res) => {
 router.post('/signals/:id/bet-line', requireAdminToken, (req, res) => {
   try {
     const { id } = req.params;
-    const { bet_line } = req.body;
+    const { bet_line, bet_price } = req.body;
     if (bet_line == null) return res.status(400).json({error:'bet_line required'});
     // Recalculate CLV if closing_line already exists
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
     // CLV in implied-prob percentage points; ML only — Total signals stay clv=NULL.
     const clv = (sig.signal_type === 'ML') ? calcCLV(bet_line, sig.closing_line) : null;
-    db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
-      .run(bet_line, clv, id);
+    // bet_price is the totals juice. Only meaningful on Total rows -- on ML
+    // the line IS the price and bet_line already holds it, so accepting one
+    // here would create a second, conflicting source of truth.
+    const price = (sig.signal_type === 'Total' && bet_price != null && bet_price !== '')
+      ? Number(bet_price) : null;
+    if (price != null) {
+      db.prepare("UPDATE bet_signals SET bet_line=?, bet_price=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
+        .run(bet_line, price, clv, id);
+    } else {
+      db.prepare("UPDATE bet_signals SET bet_line=?, bet_locked_at=datetime('now'), clv=? WHERE id=?")
+        .run(bet_line, clv, id);
+    }
     try {
       const ua = (req.headers && req.headers['user-agent']) || '';
       q.insertBetSignalAudit({
@@ -5873,10 +5883,10 @@ router.post('/signals/:id/bet-line', requireAdminToken, (req, res) => {
         closing_line: sig.closing_line,
         clv: clv,
         source: 'ui_lock_button',
-        detail: 'bet_line=' + bet_line + ' | UA=' + ua,
+        detail: 'bet_line=' + bet_line + (price != null ? ' bet_price=' + price : '') + ' | UA=' + ua,
       });
     } catch(e) { /* audit failure must not block lock */ }
-    res.json({success:true, id, bet_line, clv});
+    res.json({success:true, id, bet_line, bet_price: price, clv});
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
