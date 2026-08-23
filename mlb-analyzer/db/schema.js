@@ -1665,6 +1665,18 @@ try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_price INTEGER"); } catch(e
 // a market that never moved. Those are NOT backfilled: there is no source
 // to recover a closing value that was never observed.
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_price INTEGER"); } catch(e) {}
+//
+// HISTORICAL NOTE (2026-08-23): 762 totals rows previously carried a
+// closing_line that was FABRICATED, not observed -- GET /backtest ran
+// `UPDATE bet_signals SET closing_line = market_line` on every request,
+// so the "closing" line was a copy of the emit line. Those 762 were
+// NULLED deliberately on 2026-08-23, not lost: each is preserved in
+// bet_signal_audit with action='null_fabricated_closing' and the old
+// value. A totals row with closing_line set but closing_price NULL should
+// not exist after that date; if one appears, something is writing a
+// closing line without capturing the price. See
+// docs/get-mutations-audit-2026-08-23.md.
+
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}
