@@ -1451,22 +1451,21 @@ router.get('/backtest', (req, res) => {
     // "the line never moved" and made totals CLV structurally zero.
     // Totals are excluded so the real capture in services/jobs.js is the
     // only writer for them. ML behaviour is unchanged.
-    db.prepare(`UPDATE bet_signals SET
-      closing_line = market_line,
-      clv = CASE
-        WHEN signal_type='ML' AND bet_line IS NOT NULL AND market_line IS NOT NULL THEN
-          ROUND(
-            ((CASE WHEN market_line < 0 THEN ABS(market_line)*1.0/(ABS(market_line)+100)
-                                        ELSE 100.0/(market_line+100) END)
-             -
-             (CASE WHEN bet_line < 0    THEN ABS(bet_line)*1.0/(ABS(bet_line)+100)
-                                        ELSE 100.0/(bet_line+100)    END)
-            ) * 1000) / 10.0
-        ELSE NULL END
-      WHERE closing_line IS NULL
-        AND signal_type='ML'
-        AND outcome != 'pending'
-        AND market_line IS NOT NULL`).run();
+    // MOVED OUT 2026-08-23. This ran UPDATE bet_signals on EVERY request to a
+    // GET endpoint. It assigned closing_line = market_line for resolved signals
+    // lacking a close -- an ASSUMPTION that the line did not move, not an
+    // observation. For totals it manufactured 762 closing lines indistinguishable
+    // from real captures; those were nulled 2026-08-23.
+    //
+    // It now lives in services/jobs.js backfillMlClosingLines(), runs in the
+    // morning cron, and audit-marks every row it writes with
+    // action=backfilled_closing_line so an assumed close stays distinguishable
+    // from a captured one.
+    //
+    // DO NOT reintroduce a write here. A read endpoint that mutates is invisible
+    // until someone notices data that changed with no edit, and widening this
+    // very query is how the totals fabrication happened.
+    // scripts/audit-get-mutations.js exists to catch a regression.
     // Re-prepare summary queries inline because the pre-prepared versions in
     // schema.js don't parameterize cohort. Cheap: two statement compiles per
     // request. Keep the same math as getSummaryByCategory / getOverallSummary.

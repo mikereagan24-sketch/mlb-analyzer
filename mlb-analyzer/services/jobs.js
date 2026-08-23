@@ -2980,6 +2980,81 @@ function writeClosing(db, sig, gameRow) {
   return { closingLine, closingPrice, clv, lineMove };
 }
 
+
+// ML closing-line backfill, moved out of GET /backtest. (2026-08-23)
+//
+// WHY IT MOVED. This ran inside a GET on every request. Scoping it to ML
+// stopped it fabricating totals data, but a read endpoint that mutates is
+// a standing hazard: the next person to widen the WHERE clause
+// reintroduces the bug, and nothing about a GET suggests it writes.
+//
+// WHAT IT DOES, STATED HONESTLY. It assigns closing_line = market_line --
+// i.e. it asserts "the line did not move" for any resolved ML signal the
+// real capture missed. That is a GUESS, not an observation, and for a
+// meaningful share of rows it is almost certainly wrong: 601 of 993 ML
+// rows currently carry a closing_line with no capture audit and a value
+// equal to market_line, and 192 of the 273 live ML CLV values rest on
+// one. Those are not explained by missing audit history -- in June, 209
+// such rows were written while only 2 were genuinely captured.
+//
+// WHY IT IS KEPT AT ALL. Removing it would leave ML CLV coverage far
+// thinner than today, and unlike the totals case the guess is sometimes
+// right (66 genuinely-captured ML rows also show closing == market, so a
+// flat line is real and common). The fix applied here is not deletion but
+// PROVENANCE: every row this touches gets a bet_signal_audit row with
+// action='backfilled_closing_line', so a backfilled value is
+// distinguishable from a captured one forever after. Indistinguishability
+// was the actual defect in the totals case, not the backfill itself.
+//
+// Consumers that need real closes should require a set_closing_line audit
+// row, or closing_line != market_line. Both are now decidable.
+function backfillMlClosingLines() {
+  const rows = db.prepare(
+    "SELECT id, game_date, game_id, signal_type, signal_side, bet_line, market_line "
+    + "FROM bet_signals WHERE closing_line IS NULL AND signal_type='ML' "
+    + "AND outcome != 'pending' AND market_line IS NOT NULL"
+  ).all();
+  if (!rows.length) { console.log('[closing-backfill] nothing to backfill'); return 0; }
+
+  const upd = db.prepare(
+    "UPDATE bet_signals SET closing_line = market_line, "
+    + "clv = CASE WHEN bet_line IS NOT NULL AND market_line IS NOT NULL THEN "
+    + "  ROUND(((CASE WHEN market_line < 0 THEN ABS(market_line)*1.0/(ABS(market_line)+100) "
+    + "                                    ELSE 100.0/(market_line+100) END) "
+    + "        - (CASE WHEN bet_line < 0 THEN ABS(bet_line)*1.0/(ABS(bet_line)+100) "
+    + "                                  ELSE 100.0/(bet_line+100) END)) * 1000) / 10.0 "
+    + "  ELSE NULL END "
+    + "WHERE id = ? AND closing_line IS NULL AND signal_type='ML'"
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      const res = upd.run(r.id);
+      if (!res.changes) continue;
+      n++;
+      try {
+        q.insertBetSignalAudit({
+          signal_id: r.id,
+          game_date: r.game_date,
+          game_id: r.game_id,
+          signal_type: r.signal_type,
+          signal_side: r.signal_side,
+          action: 'backfilled_closing_line',
+          bet_line: r.bet_line,
+          closing_line: r.market_line,
+          clv: null,
+          source: 'cron_backfill_ml_closing',
+          detail: 'closing_line set = market_line (' + r.market_line + '). This is an '
+            + 'ASSUMPTION that the line did not move, not an observed close. Moved out of '
+            + 'GET /backtest 2026-08-23.',
+        });
+      } catch (e) { /* audit failure must not abort the backfill */ }
+    }
+  })();
+  console.log('[closing-backfill] backfilled ' + n + ' ML closing lines (audit-marked as assumed, not observed)');
+  return n;
+}
+
 async function runScoreJob(dateStr) {
   dateStr = dateStr || yesterdayStr();
   console.log('[score-job] Starting for ' + dateStr);
@@ -3528,6 +3603,11 @@ function startCronJobs() {
     // and never read by getSettings is a control that does nothing, and it
     // has gone unnoticed twice (catcher framing, then the three
     // hand-conditional keys). Non-fatal by construction.
+    // ML closing-line backfill. Moved here from GET /backtest on 2026-08-23 --
+    // a read endpoint must not mutate. Non-fatal: a backfill failure must
+    // never abort the morning chain.
+    try { backfillMlClosingLines(); }
+    catch (e) { console.warn('[closing-backfill] skipped (non-fatal): ' + (e && e.message)); }
     try {
       const { logSettingsSchemaSync } = require('../utils/settings-sync-check');
       const sc = require('./settings-schema');
@@ -6717,4 +6797,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

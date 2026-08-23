@@ -535,6 +535,59 @@ same family — results that reproduce a previous run to five decimals mean
 nothing changed. Both are cases where the *shape* of a number, not its
 value, is what reveals the bug.
 
+## Review checklist — re-run these, do not trust a past clean result (2026-08-23)
+
+These are cheap, they are re-runnable, and every one of them exists
+because something was found by running it that nobody had noticed by
+reading. **A clean result from a previous run is not evidence about the
+current tree.**
+
+| check | command | catches |
+|---|---|---|
+| **Read endpoints that write** | `node scripts/audit-get-mutations.js` | a `GET` that mutates — invisible until someone notices data that changed with no edit |
+| **Settings the model cannot see** | runs in the 6AM cron; `utils/settings-sync-check.js` | a schema key never mapped into `getSettings()`, i.e. a tunable with no effect |
+| **Gate windows that elapsed silently** | runs in the 6AM cron; `services/feature-gate-registry.js` | a feature dark past its own evaluation window |
+
+### When to re-run the GET-mutation scan
+
+**Any PR that touches `routes/api.js`.** It takes under a second.
+
+Expected output today is exactly one live hit:
+
+```
+handlers with LIVE mutations: 1
+  GET /admin/odds-comparison
+```
+
+That one is **known and accepted** — it persists genuinely live-fetched
+venue prices into a dedicated snapshot table, guarded so it never writes
+a locked row, documented against the 07-10 incident. **Anything else
+appearing is a regression.**
+
+The distinction that matters, and the one that made the totals bug
+invisible for months:
+
+- A GET writing a **derived** value into an **analysis table** is
+  invisible fabrication. `GET /backtest` assigned
+  `closing_line = market_line` on every request, manufacturing 762 totals
+  closing lines indistinguishable from real captures.
+- A GET caching a **fetched** value into a **snapshot table** is a design
+  choice with a stated reason.
+
+### The scan's own blind spot, which is why it is a checklist item and not a gate
+
+`KNOWN_MUTATORS` in the second pass is a **hand-maintained list** — the
+same shape of thing that has failed open three times in this repo
+(`getSettings`' whitelist, `CALLER_POPULATED_INPUTS`,
+`applySweepOverrides`). A clean second pass means **"nothing found", not
+"nothing there"**: a helper not on the list, or a write two hops away,
+will not appear.
+
+The first pass is deliberately biased the other way — a mutating keyword
+inside a **comment** counts as a hit. For an audit that is the correct
+direction: a false positive costs a glance, a false negative costs six
+months.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
