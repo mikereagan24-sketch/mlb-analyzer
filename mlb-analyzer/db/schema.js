@@ -1646,6 +1646,25 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN market_contamination_reason TEXT"
 // price (observed range -104..13.5 -- the column is mixed). Real totals
 // CLV needs a closing_price column; filed, not built here.
 try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_price INTEGER"); } catch(e) {}
+
+// Closing juice, the other half of the closing capture. (2026-08-23)
+//
+// closing_line on a Total holds the closing TOTAL; this holds the closing
+// PRICE for the bet side. Mirrors bet_line / bet_price so one mental model
+// covers both ends of a totals bet.
+//
+// WHY BOTH. Across 739 games with multiple captures the total moved in
+// 295 (39.9%) and the over price moved in 720 (97.4%). A totals CLV built
+// on the line alone would miss the movement in almost every game.
+//
+// WHY THIS WAS EMPTY BEFORE. Both closing-capture paths filtered
+// signal_type='ML' (jobs.js, and the bulk endpoint in routes/api.js), so
+// totals were never captured at all. The 761 pre-existing totals
+// closing_line values are exact copies of market_line -- zero of 761
+// differ, which is the signature of a capture that never ran rather than
+// a market that never moved. Those are NOT backfilled: there is no source
+// to recover a closing value that was never observed.
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN closing_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}

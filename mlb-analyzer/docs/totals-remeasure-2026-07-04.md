@@ -1,5 +1,36 @@
 # Totals gap re-measurement — 2026-07-04
 
+> ---
+> **ANNOTATION 2026-08-23 — this finding rests on realised P&L alone, and
+> cannot gain CLV support retroactively.**
+>
+> Every totals CLV in the database is `NULL`, and would have been **zero**
+> even if computed. Two independent reasons, both now fixed forward:
+>
+> 1. **No closing price was ever captured.** Both closing-capture paths
+>    filtered `signal_type='ML'`, so totals were never in scope.
+> 2. **`GET /backtest` manufactured the closing line**, assigning
+>    `closing_line = market_line` for any resolved signal missing one —
+>    and separately ran `UPDATE bet_signals SET clv=NULL WHERE
+>    signal_type='Total'` on every request. So all 761 totals rows had a
+>    closing line identical to their emit line by construction, which is
+>    indistinguishable from "the line never moved".
+>
+> **Retroactive CLV is impossible**: the closing values were never
+> observed, so there is nothing to recover. Nulling the 761 manufactured
+> copies is an option; inventing closing prices for them is not.
+>
+> **Going forward it can gain CLV support.** From 2026-08-23 the capture
+> writes a real closing total and closing price, and totals CLV is
+> computed from the price. See
+> `docs/totals-closing-capture-2026-08-23.md`.
+>
+> This is not a refutation of the Under lean. It does mean the finding
+> currently stands on one leg where the ML findings stand on two, and the
+> second leg starts accumulating only from today.
+> ---
+
+
 Re-measures `docs/audit-2026-07-02.md` finding 1.3 (mid-range totals over-projected
 on Overs) with the model as it stands today. Read-only, no settings changes.
 

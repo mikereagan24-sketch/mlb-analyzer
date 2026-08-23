@@ -55,7 +55,7 @@ const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/s
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
 const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
-const { calcCLV } = require('../services/clv');
+const { calcCLV, clvForSignal } = require('../services/clv');
 const router = express.Router();
 
 // Shared admin-token middleware. Originally extracted from the
@@ -1373,6 +1373,14 @@ router.post('/jobs/fix-signals', requireAdminToken, (req, res) => {
     // CLV in implied-probability percentage points; mirrors services/clv.js
     // calcCLV(). Total signals stay clv=NULL — bet_line is a total, not a
     // price, and implied-prob doesn't apply.
+    // SCOPED TO ML 2026-08-23. This assigns closing_line = market_line, i.e.
+    // it MANUFACTURES a closing value equal to the emit value rather than
+    // capturing one. That is the origin of the 761-of-761 totals rows whose
+    // closing_line exactly equals market_line -- they were never captured,
+    // they were backfilled from themselves, which is indistinguishable from
+    // "the line never moved" and made totals CLV structurally zero.
+    // Totals are excluded so the real capture in services/jobs.js is the
+    // only writer for them. ML behaviour is unchanged.
     db.prepare(`UPDATE bet_signals SET
       closing_line = market_line,
       clv = CASE
@@ -1385,7 +1393,8 @@ router.post('/jobs/fix-signals', requireAdminToken, (req, res) => {
                                         ELSE 100.0/(bet_line+100)    END)
             ) * 1000) / 10.0
         ELSE NULL END
-      WHERE closing_line IS NULL AND outcome != 'pending' AND market_line IS NOT NULL`).run();
+      WHERE closing_line IS NULL AND outcome != 'pending' AND market_line IS NOT NULL
+        AND signal_type='ML'`).run();
     const fixed = db.prepare('SELECT COUNT(*) as n FROM bet_signals WHERE closing_line IS NOT NULL').get();
     res.json({success:true, withClosingLine: fixed.n});
   } catch(e) { res.status(500).json({error:e.message}); }
@@ -1422,13 +1431,26 @@ router.get('/backtest', (req, res) => {
     const cohortPredBS = filterByCohort ? ' AND bs.cohort=?' : '';
     const cohortParams = filterByCohort ? [cohortArg] : [];
 //   One-time: null out CLV for Total signals (CLV not meaningful — bet_line is a price, not a total)
-    db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' AND clv IS NOT NULL").run();
+    // REMOVED 2026-08-23. This nulled every totals CLV on every /backtest
+    // request, on the premise that "bet_line is a price, not a total" -- the
+    // inverse of what the column actually held. Totals now carry bet_price
+    // and closing_price and their CLV is real, so wiping it here would
+    // silently undo the capture on the next page load.
+    // db.prepare("UPDATE bet_signals SET clv=NULL WHERE signal_type='Total' ...").run();
     // Auto-backfill closing_line from market_line for resolved signals that have none
     // CLV in implied-probability percentage points; mirrors services/clv.js
     // calcCLV(). Note: this query already runs after the explicit
     // 'UPDATE bet_signals SET clv=NULL WHERE signal_type=Total' above, but
     // belt-and-suspenders we still gate on signal_type='ML' here so the
     // formula is never applied to totals even if call ordering changes.
+    // SCOPED TO ML 2026-08-23. This assigns closing_line = market_line, i.e.
+    // it MANUFACTURES a closing value equal to the emit value rather than
+    // capturing one. That is the origin of the 761-of-761 totals rows whose
+    // closing_line exactly equals market_line -- they were never captured,
+    // they were backfilled from themselves, which is indistinguishable from
+    // "the line never moved" and made totals CLV structurally zero.
+    // Totals are excluded so the real capture in services/jobs.js is the
+    // only writer for them. ML behaviour is unchanged.
     db.prepare(`UPDATE bet_signals SET
       closing_line = market_line,
       clv = CASE
@@ -1442,6 +1464,7 @@ router.get('/backtest', (req, res) => {
             ) * 1000) / 10.0
         ELSE NULL END
       WHERE closing_line IS NULL
+        AND signal_type='ML'
         AND outcome != 'pending'
         AND market_line IS NOT NULL`).run();
     // Re-prepare summary queries inline because the pre-prepared versions in
@@ -5857,7 +5880,17 @@ router.post('/signals/:id/bet-line', requireAdminToken, (req, res) => {
     const sig = db.prepare('SELECT * FROM bet_signals WHERE id=?').get(id);
     if (!sig) return res.status(404).json({error:'Signal not found'});
     // CLV in implied-prob percentage points; ML only — Total signals stay clv=NULL.
-    const clv = (sig.signal_type === 'ML') ? calcCLV(bet_line, sig.closing_line) : null;
+    // EXTENDED 2026-08-23 for totals. On ML the line IS the price, so this is
+    // unchanged. On a Total the CLV is bet_price vs closing_price: the price is
+    // the primary term because it moves in 97.4% of games against 39.9% for the
+    // line. The bet_price being written in THIS request is spliced in, so logging
+    // a bet against an already-captured close yields CLV immediately rather than
+    // on some later pass.
+    const _sigForClv = Object.assign({}, sig, { bet_line: bet_line });
+    if (sig.signal_type === 'Total' && bet_price != null && bet_price !== '') {
+      _sigForClv.bet_price = Number(bet_price);
+    }
+    const { clv } = clvForSignal(sig.signal_type, _sigForClv, sig.closing_line, sig.closing_price);
     // bet_price is the totals juice. Only meaningful on Total rows -- on ML
     // the line IS the price and bet_line already holds it, so accepting one
     // here would create a second, conflicting source of truth.
@@ -5930,10 +5963,16 @@ router.post('/signals/:id/closing-line', requireAdminToken, (req, res) => {
     if (!sig) return res.status(404).json({error:'Signal not found'});
     // Recalculate CLV if bet_line exists (ML only ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ not meaningful for totals)
     // CLV in implied-prob percentage points; ML only — Total signals stay clv=NULL.
-    const clv = (sig.signal_type === 'ML') ? calcCLV(sig.bet_line, closing_line) : null;
-    db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?")
-      .run(closing_line, clv, id);
-    res.json({success:true, id, closing_line, clv});
+    // Totals handled since 2026-08-23. closing_price is optional in the body;
+    // when absent on a Total the CLV stays null rather than being derived from
+    // the line alone, which would be quietly wrong rather than honestly absent.
+    const _cp = (req.body.closing_price != null && req.body.closing_price !== '')
+      ? Number(req.body.closing_price) : null;
+    const { clv, lineMove } = clvForSignal(sig.signal_type, sig, closing_line,
+      _cp != null ? _cp : sig.closing_price);
+    db.prepare("UPDATE bet_signals SET closing_line=?, closing_price=COALESCE(?, closing_price), clv=? WHERE id=?")
+      .run(closing_line, _cp, clv, id);
+    res.json({success:true, id, closing_line, closing_price: _cp, clv, line_move: lineMove});
   } catch(err) { res.status(500).json({error:err.message}); }
 });
 
@@ -5941,12 +5980,23 @@ router.post('/signals/:id/closing-line', requireAdminToken, (req, res) => {
 router.post('/signals/closing-lines', requireAdminToken, (req, res) => {
   try {
     const { game_date, game_id, closing_line } = req.body;
-    const sigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL AND signal_type='ML'").all(game_date, game_id);
+    // ML filter removed 2026-08-23. Totals take their closing quantities from
+    // the body; without them only ML rows update, so an existing caller that
+    // posts just closing_line behaves exactly as before.
+    const sigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(game_date, game_id);
     let updated = 0;
+    const { closing_total, closing_over_price, closing_under_price } = req.body;
     for (const sig of sigs) {
-      // CLV in implied-prob pp; SELECT above already filters to signal_type=ML.
-      const clv = calcCLV(sig.bet_line, closing_line);
-      db.prepare("UPDATE bet_signals SET closing_line=?, clv=? WHERE id=?").run(closing_line, clv, sig.id);
+      const isTot = String(sig.signal_type).toLowerCase() === 'total';
+      const line = isTot ? closing_total : closing_line;
+      if (line == null) continue;
+      const raw = isTot
+        ? (String(sig.signal_side).toLowerCase() === 'over' ? closing_over_price : closing_under_price)
+        : null;
+      const cp = (raw != null && raw !== '') ? Number(raw) : null;
+      const { clv } = clvForSignal(sig.signal_type, sig, line, cp);
+      db.prepare("UPDATE bet_signals SET closing_line=?, closing_price=?, clv=? WHERE id=?")
+        .run(line, cp, clv, sig.id);
       updated++;
     }
     res.json({success:true, updated});
