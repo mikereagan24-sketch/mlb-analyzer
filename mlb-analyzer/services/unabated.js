@@ -216,15 +216,11 @@ function isSaneTotalJuice(price) {
 // to reject the 99900 "no active contract" sentinel that Unabated sometimes
 // returns when a book's side is delisted — not to police legitimate market
 // prices. Null / non-numeric / zero also fail (0 is nonsense as a price).
-const ML_MAX_ABS_PRICE = 1000;
-
-function isSaneML(price) {
-  if (price == null) return false;
-  const n = Number(price);
-  if (!Number.isFinite(n)) return false;
-  if (n === 0) return false;
-  return Math.abs(n) <= ML_MAX_ABS_PRICE;
-}
+// MOVED 2026-08-22 to utils/market-sanity.js so kalshi.js and scraper.js
+// share one definition instead of each growing their own (or, as was the
+// case until now, having none). ML_MAX_ABS_PRICE is re-exported from the
+// shared MAX_ABS_ML -- same value, one source.
+const { isSaneML, MAX_ABS_ML: ML_MAX_ABS_PRICE } = require('../utils/market-sanity');
 
 // MLB runline is fixed at ±1.5 — this PR only ingests the standard line.
 // Alt spreads (±2.5, ±3.5, etc.) are non-standard handicaps and would
