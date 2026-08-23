@@ -1652,14 +1652,32 @@ function logBetControlFor(sig, g) {
     venueBits = ' <span style="color:var(--text3);font-size:10px">@' + escapeHtml(String(sig.price_venue)) + '</span>';
   }
   var fmt = function (v) { return v == null ? '?' : (Number(v) > 0 ? '+' : '') + v; };
+  // A total is a quantity, not a signed price: "8.5", never "+8.5". fmt's
+  // sign prefix is correct for American odds and wrong for the line itself.
+  var fmtTot = function (v) { return v == null ? '?' : String(v); };
+  // A totals bet has TWO numbers -- the total and the juice -- and until
+  // 2026-08-23 only the total was captured, so P&L graded at the market's
+  // price rather than the one actually struck. isTot drives the two-field
+  // variants below. On ML the line IS the price, so nothing changes there.
+  var isTot = String(sig.signal_type || '').toLowerCase() === 'total';
+  var dispPrice = null;
+  if (isTot) {
+    dispPrice = (sig.signal_side === 'over')
+      ? (sig.over_price != null ? sig.over_price : (g && g.over_price))
+      : (sig.under_price != null ? sig.under_price : (g && g.under_price));
+    if (dispPrice == null) dispPrice = -110;   // last resort, and visible in the field
+  }
   if (!logged) {
     if (sig.market_line == null) {
       return '<div class="ocl-row" style="font-size:11px;color:var(--text3);margin:2px 0 6px 14px">no line to log</div>';
     }
     return '<div class="ocl-row" id="ocl-' + id + '" style="margin:2px 0 6px 14px">'
       + '<button class="btn btn-sm" style="font-size:11px;padding:2px 8px" '
-      + 'onclick="oneClickLogBet(' + id + ',' + Number(sig.market_line) + ')">'
-      + 'Log ' + fmt(sig.market_line) + '</button>' + venueBits + '</div>';
+      + 'onclick="oneClickLogBet(' + (id + ',' + Number(sig.market_line)
+          + (isTot ? ',' + Number(dispPrice) : '')) + ')">'
+      + 'Log ' + (isTot ? fmtTot(sig.market_line) : fmt(sig.market_line))
+      + (isTot ? ' @ ' + fmt(dispPrice) : '')
+      + '</button>' + venueBits + '</div>';
   }
   // Logged: show what was logged, click to adjust. clv only exists once a
   // closing line has landed, so it is rendered conditionally.
@@ -1667,25 +1685,42 @@ function logBetControlFor(sig, g) {
     ? ' <span style="color:' + (sig.clv >= 0 ? 'var(--green)' : '#e05') + ';font-size:10px">CLV '
       + (sig.clv >= 0 ? '+' : '') + sig.clv + '</span>' : '';
   return '<div class="ocl-row" id="ocl-' + id + '" style="margin:2px 0 6px 14px;font-size:11px">'
-    + '<span style="color:var(--green)">✓ logged ' + fmt(sig.bet_line) + '</span>' + venueBits + clvBit
+    + '<span style="color:var(--green)">✓ logged '
+        + (isTot ? fmtTot(sig.bet_line) : fmt(sig.bet_line)) + '</span>'
+    + (isTot
+        ? (sig.bet_price != null
+            ? ' <span style="color:var(--green)">@ ' + fmt(sig.bet_price) + '</span>'
+            : ' <span style="color:var(--amber,#e90)" title="No price captured for this totals bet - P&amp;L falls back to the market price, or -110.">@ ?</span>')
+        : '')
+    + venueBits + clvBit
     + ' <a href="#" style="font-size:10px;color:var(--text3)" '
-    + 'onclick="event.preventDefault();adjustLoggedBet(' + id + ',' + Number(sig.bet_line) + ')">adjust</a></div>';
+    + 'onclick="event.preventDefault();adjustLoggedBet(' + (id + ',' + Number(sig.bet_line)
+        + (isTot ? ',' + Number(sig.bet_price != null ? sig.bet_price : dispPrice) + ',true' : ''))
+    + ')">adjust</a></div>';
 }
 
 // One click, no confirmation. Verifies the write landed before reporting
 // success — same read-back guard lockBetLine uses, which exists because
 // a lock once returned success without persisting.
-async function oneClickLogBet(sigId, line) {
+// price is the totals juice; undefined on ML, where the line IS the price.
+async function oneClickLogBet(sigId, line, price) {
+  var hasPrice = (price !== undefined && price !== null && price !== '');
   var el = document.getElementById('ocl-' + sigId);
   if (el) el.innerHTML = '<span style="font-size:11px;color:var(--text3)">logging…</span>';
   try {
     var r = await api('/signals/' + sigId + '/bet-line', {
-      method: 'POST', body: JSON.stringify({ bet_line: Number(line) })
+      method: 'POST',
+      body: JSON.stringify(hasPrice
+        ? { bet_line: Number(line), bet_price: Number(price) }
+        : { bet_line: Number(line) })
     });
     if (!r || !r.success) throw new Error((r && r.error) || 'log failed');
     var verified = null;
     try { verified = await api('/signals/' + sigId); } catch (_) {}
-    if (!verified || Number(verified.bet_line) !== Number(line)) {
+    // Verify the PRICE landed too -- a partial write that silently kept the
+    // old juice is exactly the failure this read-back guard exists to catch.
+    var priceOk = !hasPrice || (verified && Number(verified.bet_price) === Number(price));
+    if (!verified || Number(verified.bet_line) !== Number(line) || !priceOk) {
       if (el) el.innerHTML = '<span style="font-size:11px;color:#e05">LOG FAILED — not persisted. '
         + 'Check /api/audit/by-game/&lt;date&gt;/&lt;game_id&gt;.</span>';
       return;
@@ -1697,7 +1732,8 @@ async function oneClickLogBet(sigId, line) {
       el.innerHTML = '<span style="font-size:11px;color:var(--green)">✓ logged '
         + (Number(line) > 0 ? '+' : '') + line + '</span>' + clvBit
         + ' <a href="#" style="font-size:10px;color:var(--text3)" '
-        + 'onclick="event.preventDefault();adjustLoggedBet(' + sigId + ',' + Number(line) + ')">adjust</a>';
+        + 'onclick="event.preventDefault();adjustLoggedBet(' + (sigId + ',' + Number(line)
+            + (hasPrice ? ',' + Number(price) + ',true' : '')) + ')">adjust</a>';
     }
   } catch (e) {
     if (el) el.innerHTML = '<span style="font-size:11px;color:#e05">error: ' + escapeHtml(e.message || String(e)) + '</span>';
@@ -1707,17 +1743,44 @@ async function oneClickLogBet(sigId, line) {
 // Correction after the fact — the operator often gets a different line
 // than the card showed. Same endpoint; it overwrites bet_line/
 // bet_locked_at and recomputes clv, so re-posting is idempotent.
-function adjustLoggedBet(sigId, current) {
+// isTot adds a second field for the juice. Both are editable because the
+// operator routinely gets a different total AND a different price than the
+// card showed, and capturing only one is what made totals P&L grade against
+// the market's price rather than the struck one.
+function adjustLoggedBet(sigId, current, currentPrice, isTot) {
   var el = document.getElementById('ocl-' + sigId);
   if (!el) return;
-  el.innerHTML = '<input id="ocl-in-' + sigId + '" type="number" value="' + current
-    + '" style="width:70px;font-size:11px" onkeydown="if(event.key===\'Enter\')oneClickLogBet(' + sigId + ',this.value)">'
-    + ' <button class="btn btn-sm" style="font-size:11px;padding:2px 8px" '
-    + 'onclick="oneClickLogBet(' + sigId + ',document.getElementById(\'ocl-in-' + sigId + '\').value)">save</button>'
-    + ' <a href="#" style="font-size:10px;color:var(--text3)" '
-    + 'onclick="event.preventDefault();oneClickLogBet(' + sigId + ',' + current + ')">cancel</a>';
-  var inp = document.getElementById('ocl-in-' + sigId);
-  if (inp) { inp.focus(); inp.select(); }
+  // Handlers are bound after render rather than inlined as onkeydown="...".
+  // The inline form needs a quote escaped inside an attribute inside a JS
+  // string literal, which is three levels of quoting and was silently
+  // mis-escaped once already. Binding afterwards has no quoting at all.
+  el.innerHTML = '<input id="ocl-in-' + sigId + '" type="number"'
+      + ' step="' + (isTot ? '0.5' : '1') + '" value="' + current + '"'
+      + ' title="' + (isTot ? 'total' : 'price') + '" style="width:60px;font-size:11px">'
+    + (isTot
+        ? ' <span style="font-size:11px;color:var(--text3)">@</span>'
+          + ' <input id="ocl-px-' + sigId + '" type="number" step="1" value="' + currentPrice
+            + '" title="price / juice you got" style="width:60px;font-size:11px">'
+        : '')
+    + ' <button id="ocl-save-' + sigId + '" class="btn btn-sm" style="font-size:11px;padding:2px 8px">save</button>'
+    + ' <a href="#" id="ocl-cancel-' + sigId + '" style="font-size:10px;color:var(--text3)">cancel</a>';
+
+  var lineEl = document.getElementById('ocl-in-' + sigId);
+  var pxEl = isTot ? document.getElementById('ocl-px-' + sigId) : null;
+  var save = function () {
+    oneClickLogBet(sigId, lineEl.value, pxEl ? pxEl.value : undefined);
+  };
+  var onKey = function (e) { if (e.key === 'Enter') save(); };
+  if (lineEl) lineEl.addEventListener('keydown', onKey);
+  if (pxEl) pxEl.addEventListener('keydown', onKey);
+  var sv = document.getElementById('ocl-save-' + sigId);
+  if (sv) sv.addEventListener('click', save);
+  var cn = document.getElementById('ocl-cancel-' + sigId);
+  if (cn) cn.addEventListener('click', function (e) {
+    e.preventDefault();
+    oneClickLogBet(sigId, current, isTot ? currentPrice : undefined);
+  });
+  if (lineEl) { lineEl.focus(); lineEl.select(); }
 }
 
 function playVenueLineFor(sig, row, g){

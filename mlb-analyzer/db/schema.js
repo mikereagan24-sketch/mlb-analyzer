@@ -1620,6 +1620,32 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN weather_contamination_reason TEXT
 //
 // The LIVE PATH IS UNAFFECTED -- this is an analysis filter only.
 try { db.exec("ALTER TABLE game_log ADD COLUMN market_contamination_reason TEXT"); } catch(e) {}
+
+// Totals bet PRICE, separate from the totals bet LINE. (2026-08-23)
+//
+// THE AMBIGUITY THIS RESOLVES. bet_line does double duty by signal type:
+//   ML    -- the line IS the price (-150), so one column suffices.
+//   Total -- a bet has TWO numbers: the total (8.5) and the juice (-110).
+// One column cannot hold both, and the codebase disagreed with itself
+// about which one it held. services/model.js:1607 asserted "bet_line on
+// totals is the line number, not the price" and graded accordingly, while
+// 37 of 38 logged totals rows actually contained a PRICE (-127..+125).
+// One row contained a total (bet_line=9 on 2026-04-15 was-pit, whose
+// market_line is also 9), which is what the one-click UI writes today --
+// it defaults to sig.market_line, and for a Total that is the total.
+//
+// SETTLED SEMANTICS from here:
+//   Total: bet_line = the TOTAL you got, bet_price = the JUICE you got.
+//   ML:    bet_line = the price you got, bet_price stays NULL.
+// This matches the model.js comment and the UI's existing behaviour, and
+// the historical price values are migrated into bet_price rather than
+// discarded (scripts/backfill-totals-bet-price.js).
+//
+// NOTE ON CLV: totals CLV remains NULL even with a captured bet price,
+// because closing_line on totals holds the closing TOTAL, not a closing
+// price (observed range -104..13.5 -- the column is mixed). Real totals
+// CLV needs a closing_price column; filed, not built here.
+try { db.exec("ALTER TABLE bet_signals ADD COLUMN bet_price INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_status TEXT DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN roof_confidence TEXT DEFAULT 'estimated'"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN game_time TEXT"); } catch(e) {}try { db.exec("ALTER TABLE game_log ADD COLUMN odds_locked_at TEXT"); } catch(e) {}
