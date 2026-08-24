@@ -164,10 +164,55 @@ so this is a return to the documented value rather than a new choice.
 its own merits under the §3 standard — not something that arrives as a
 side effect of a wiring fix.
 
-**Consequence for the pending evaluation:** the recorded
-hand-conditional A/B used 0.7 in its ON arm and therefore no longer
-describes prod. It needs re-running against 0.649 before hand-conditional
-is judged.
+### Re-run against the benchmark — verdict unchanged
+
+| | OFF | ON @ 0.649 | ON @ 0.7 (prior) |
+|---|---|---|---|
+| log loss | **0.68975** | 0.68982 | 0.68984 |
+| Brier | **0.24829** | 0.24833 | 0.24834 |
+| ECE | **0.0114** | 0.0142 | 0.0155 |
+| AUC | **0.5494** | 0.5485 | 0.5484 |
+| edge slope | **-0.313** | -0.320 | -0.319 |
+
+Delta log loss **+0.00008**, CI [-0.00040, +0.00059]; sign test **2 / 5**
+windows favourable. **Directionally worse on all five metrics - Tier 4.
+Leave off.**
+
+The benchmark constant does not rescue it. 0.649 is marginally better
+than 0.7 on ECE (0.0142 vs 0.0155), consistent with it being the
+empirically derived value, but **both lose to the flag being off**.
+
+*Process note:* the first attempt returned numbers byte-identical to the
+0.7 run. `calibration-ab.js` reads settings from the **local** DB and
+only prod had been changed, so it silently re-tested 0.7. Caught by the
+identical digits; local was aligned to prod and the run repeated. A
+harness that reads local settings while the change lives in prod will do
+this every time.
+
+### Shadow-series discontinuity - quantified, and negligible
+
+**There is no persisted shadow series.** The hand-conditional deltas are
+`console.log` only (`services/model.js:1345`); nothing writes them to a
+table. `game_log.{home,away}_sp_weight_used` looks like a candidate but
+holds `SP_PIT_WEIGHT` from the IP forecast - a different quantity, per
+the CLAUDE.md SP_WEIGHT vs SP_PIT_WEIGHT rule. So there is nothing to
+pool across or restart.
+
+**The window in which 0.7 was ever read:**
+
+| | |
+|---|---|
+| PR #257 merged (key first mapped) | 2026-08-22 **21:53Z** |
+| prod set to 0.649 | ~2026-08-22 **22:12Z** |
+| **upper bound** | **<= 19 minutes** |
+
+Shortened further by Render build+deploy lag, containing **at most one
+hourly cron boundary (22:00Z)**. Before the merge the key was unmapped,
+so 0.7 could not have been read earlier.
+
+**No restart needed.** The general concern was right - a wiring fix that
+changes a constant mid-accumulation would corrupt a series - it just did
+not bite here, because exposure was minutes and nothing is persisted.
 
 ## 3. A gate standard that can actually be met
 
