@@ -6120,6 +6120,55 @@ async function runCatcherFramingJob(year) {
     });
     tx(rows);
     console.log('[framing] upserted ' + applied + '/' + rows.length + ' catchers');
+
+    // PRUNE catchers no longer on the leaderboard. (2026-08-24)
+    //
+    // The upsert alone left dropped-off catchers frozen forever: on
+    // 2026-08-24, seven of sixty-six rows dated 2026-06-03 or 2026-05-21,
+    // and because they still cleared the 750-pitch floor on those FROZEN
+    // counts, computeFramingRvPerGame preferred them to the three-year
+    // historical baseline. T. d'Arnaud started that day on a 2026-05-21
+    // rate. A stale current-season rate outranking a real historical one is
+    // the worst ordering available.
+    //
+    // SANITY FLOOR, because delete-missing is the dangerous half of this.
+    // A truncated or partially-parsed CSV would otherwise wipe the table,
+    // and every consumer would silently fall through to the 0.80 fallback
+    // with nothing reporting it. So the prune only runs when the fetch
+    // looks like a real leaderboard: at least MIN_PRUNE_ROWS rows, and at
+    // least half of what we already had. Refusing to prune is always safe;
+    // pruning on a bad fetch is not.
+    const MIN_PRUNE_ROWS = 40;
+    let pruned = 0, prunedNames = [];
+    try {
+      const before = q.countCatcherFraming ? q.countCatcherFraming.get().c : 0;
+      const fetchedIds = new Set(rows.map(r => r.mlb_id).filter(x => x != null));
+      if (fetchedIds.size < MIN_PRUNE_ROWS || fetchedIds.size * 2 < before) {
+        console.warn('[framing] PRUNE SKIPPED -- fetch returned ' + fetchedIds.size
+          + ' ids against ' + before + ' existing rows; that looks like a bad fetch,',
+          'not a roster change. Stale rows are left in place deliberately.');
+      } else {
+        const existing = q.getAllCatcherFramingNames.all();
+        const doomed = existing.filter(r => !fetchedIds.has(r.mlb_id));
+        const tx2 = db.transaction((ds) => {
+          for (const d of ds) { q.deleteCatcherFramingById.run(d.mlb_id); }
+        });
+        tx2(doomed);
+        pruned = doomed.length;
+        prunedNames = doomed.map(d => d.name || d.mlb_id);
+        if (pruned) {
+          // Enumerated, not counted. A prune that silently removes a
+          // starting catcher is exactly the event worth seeing by name.
+          console.log('[framing] pruned ' + pruned + ' catcher(s) no longer on the leaderboard:');
+          prunedNames.forEach(n => console.log('[framing]     ' + n
+            + '  -> now falls through to the 2023-25 historical baseline (x0.80), or to no adjustment'));
+        } else {
+          console.log('[framing] prune: nothing to remove');
+        }
+      }
+    } catch (e) {
+      console.warn('[framing] prune failed (non-fatal): ' + (e && e.message));
+    }
     // Daily snapshot. Mirrors the wOBA snapshot pattern at the bottom
     // of routes/api.js ingestWobaCSV — fires right after the upsert so
     // the row set we just landed is the row set archived under today's
@@ -6134,7 +6183,7 @@ async function runCatcherFramingJob(year) {
     } catch (e) {
       console.warn('[framing-snapshot] capture failed (non-fatal): ' + e.message);
     }
-    return { success: true, fetched: rows.length, applied };
+    return { success: true, fetched: rows.length, applied, pruned, prunedNames };
   } catch (e) {
     console.error('[framing] job failed: ' + e.message);
     return { success: false, error: e.message };
