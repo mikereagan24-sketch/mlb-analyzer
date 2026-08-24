@@ -1,5 +1,24 @@
 # SP_WEIGHT on calibration — inert, and combo 7's leg was doubly invalid (2026-08-22)
 
+> ---
+> **SUPERSEDED 2026-08-24 — re-run on the corrected corpus.**
+> These figures were measured against a database carrying **27**
+> weather-contamination tags. The corrected corpus has **797**, and
+> `loadGames` filtered weather UNCONDITIONALLY, so the arm labelled
+> "full/contaminated" had already had one contamination class removed.
+> The real exclusion is **57.3% of games, not 16.2%**.
+>
+> **No verdict changed tier on re-run** — but two quoted precisions do not
+> survive: the **window sign test is unstable at n=349** (same-n controls
+> give 2/5, 3/5 and 4/5 on the same feature), and the **sweep grid minimum
+> moves across resamples**. FRV reads 3/5 rather than 4/5, and that
+> difference is power, not decontamination.
+>
+> Original figures left intact. See
+> `docs/decontaminated-rerun-corrected-2026-08-24.md`.
+> ---
+
+
 > **Measurement pass. Nothing shipped.** Production `sp_weight=0.80 /
 > relief_weight=0.20` stays.
 

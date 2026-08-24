@@ -583,6 +583,55 @@ into a write-up as a defect.
 Same family as the timestamp rule above: the failure is silent by
 construction, and the wrong conclusion it produces is a plausible one.
 
+## The window sign test is not precise at n~350 (2026-08-24)
+
+**Stop quoting "N of 5 windows" to one-window precision on a corpus of a
+few hundred games.** Measured directly: five random n-matched subsamples
+of the SAME corpus, contamination retained, nothing excluded, produce
+
+```
+feature            full corpus   clean (n=349)   same-n resamples
+DEFENSE_FRV            4/5            3/5         2, 3, 3, 4, 4
+PARK_NEUTRAL           4/5            3/5         2, 2, 2, 2, 4
+HAND_CONDITIONAL       2/5            2/5         1, 1, 2, 3, 3
+```
+
+A feature reads **2/5 or 4/5 on the same data** depending which 349 games
+it sees. So "FRV is exactly one window short of Tier 2" — repeated across
+four documents — was a precise sentence about an imprecise quantity.
+
+**The rule.** The Tier 2 window criterion still stands as a bar to clear.
+What must stop is treating a near-miss as informative:
+
+- **4/5 vs 3/5 at this n is not a difference.** Do not report a feature as
+  "one window away", do not report a re-run as having moved it closer or
+  further, and do not let a window count be the reason a verdict changed.
+- **If the window count is doing the deciding, say underpowered instead.**
+  The honest states are "clears the bar" and "does not"; the ordering
+  between two failing counts carries no information here.
+- **Carry the control.** A window count without an n-matched resample
+  spread beside it is a point estimate with no error bar. Every harness
+  now takes `SAMPLE_N` + `SAMPLE_SEED` for exactly this.
+
+### The same instability, one level down: the sweep grid minimum
+
+```
+W_PIT_W_BAT   lowest log loss:  0.40 clean | 0.30 full | 0.20 and 0.30 in controls
+SP_WEIGHT     lowest log loss:  0.30 clean | 0.60 full | 0.80 and 0.90 in controls
+```
+
+**"The best value on the grid" moves by half the parameter range across
+resamples of the same data.** That is why the three-gate rule (bootstrap
+CI + folds + val-fit) exists, and why "production is not the grid minimum"
+is never on its own a reason to move a parameter.
+
+### What made this visible
+
+Only the n-matched control. Without it, three separate movements in the
+2026-08-24 re-run would each have been written up as a result: FRV 4/5 ->
+3/5, `model - base` changing sign, and the W_PIT grid minimum landing on
+production. All three are what dropping to n~350 does on its own.
+
 ## Know which database you are measuring (2026-08-24)
 
 **`data/mlb.db` is not production.** It is a separately-evolved local

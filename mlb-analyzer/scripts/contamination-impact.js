@@ -1,25 +1,45 @@
 #!/usr/bin/env node
 /**
- * What did excluding post-first-pitch-priced games actually change? (2026-08-23)
+ * What did excluding contaminated games actually change?
+ * (2026-08-23; CORRECTED AND EXTENDED 2026-08-24)
  *
- * THE PROBLEM WITH A SIMPLE BEFORE/AFTER. Excluding 15.3% of games costs
- * power everywhere. A wider CI after exclusion proves nothing on its own --
- * that is what dropping 131 games does regardless of which 131.
+ * THE PROBLEM WITH A SIMPLE BEFORE/AFTER. Excluding a large slice of games
+ * costs power everywhere. A wider CI after exclusion proves nothing on its
+ * own -- that is what dropping N games does regardless of which N.
  *
  * THREE ARMS, so the two effects separate:
- *   A  full corpus (859)          -- contaminated, the original
- *   B  clean corpus (728)         -- contamination excluded
- *   C  n-matched control (728)    -- RANDOM 728 drawn from A, contamination
- *                                    RETAINED, repeated over many seeds
+ *   A  FULL corpus     -- both contamination classes RETAINED
+ *   B  clean corpus    -- both classes excluded
+ *   C  n-matched ctrl  -- RANDOM |B| drawn from A, contamination RETAINED,
+ *                         repeated over many seeds
  *
- * C is the null distribution for "what does merely dropping to n=728 do".
- * If B lands INSIDE C's spread, the movement is a power effect. If B lands
- * OUTSIDE it, the movement is the contamination. A before/after alone
- * cannot tell those apart and would attribute both to contamination.
+ * C is the null distribution for "what does merely dropping to n=|B| do".
+ * If B lands INSIDE C's spread the movement is a power effect; OUTSIDE, it
+ * is the contamination. A before/after alone cannot tell those apart and
+ * would attribute both to contamination.
+ *
+ * WHY THIS WAS RE-RUN (2026-08-24). The 2026-08-23 version was measured
+ * against a database in which only 27 games carried a weather-contamination
+ * tag. The corrected corpus has 797. Worse, loadGames filtered weather
+ * UNCONDITIONALLY, so arm A -- the arm labelled "full, contaminated" -- had
+ * already had one contamination class silently removed, and ~770 known-bad-
+ * weather games sat in BOTH arms. Neither the exclusion cost nor the
+ * contamination effect could be bounded by that design.
+ *
+ *   exclusion measured on 2026-08-23 :  128 games,  16.2%
+ *   exclusion on the corrected corpus:  492 games,  56.4%   (same window)
+ *
+ * FOUR ARMS NOW, because there are two contamination classes and only one
+ * was ever measured. Each partial arm gets its own n-matched control:
+ *   B_all      both excluded            <- the production filter
+ *   B_market   post-first-pitch only    <- what 2026-08-23 believed it ran
+ *   B_weather  known-bad weather only   <- the newly visible 770
+ * The decomposition is the point: it says whether the weather class, which
+ * was invisible last time, moves anything on its own.
  *
  * ONE SCORING PASS. A game's model prediction does not depend on which arm
  * it sits in, so the full corpus is scored once and each arm is a re-slice.
- * That makes a 20-seed control affordable; scoring per arm would not be.
+ * That makes a 20-seed control per arm affordable; scoring per arm would not.
  */
 const path = require('path');
 const R = path.join(__dirname, '..');
@@ -86,8 +106,11 @@ const f3 = v => v == null ? ' n/a ' : (v >= 0 ? '+' : '') + v.toFixed(3);
   console.log('=== contamination impact: market-vs-model and edge honesty ===');
   console.log('  window ' + FROM + ' .. ' + TO);
 
-  // ---- score the FULL corpus once
-  const all = ps.loadGames(db, FROM, TO, { includeMarketContaminated: true });
+  // ---- score the FULL corpus once. BOTH classes retained -- see header;
+  // omitting includeWeatherContaminated is what made the 2026-08-23 run
+  // measure a "full" arm that had already been weather-filtered.
+  const all = ps.loadGames(db, FROM, TO,
+    { includeMarketContaminated: true, includeWeatherContaminated: true });
   const cache = new Map();
   const rows = [];
   const real = console.log; console.log = () => {};
@@ -105,16 +128,24 @@ const f3 = v => v == null ? ' n/a ' : (v >= 0 ? '+' : '') + v.toFixed(3);
     rows.push({
       d: g.game_date, y: g.home_score > g.away_score ? 1 : 0,
       p: clamp(mr.adjHW), mkt: clamp(ph / (ph + pa)),
-      dirty: !!g.market_contamination_reason,
+      dirtyMkt: !!g.market_contamination_reason,
+      dirtyWx:  !!g.weather_contamination_reason,
     });
   }
   console.log = real;
 
   const A = rows;
-  const B = rows.filter(r => !r.dirty);
-  console.log('  scored: A(full)=' + A.length + '   B(clean)=' + B.length
-    + '   excluded=' + (A.length - B.length)
-    + '  (' + (100 * (A.length - B.length) / A.length).toFixed(1) + '%)');
+  const B = rows.filter(r => !r.dirtyMkt && !r.dirtyWx);
+  const Bm = rows.filter(r => !r.dirtyMkt);              // market class only
+  const Bw = rows.filter(r => !r.dirtyWx);               // weather class only
+  const pct = x => (100 * (A.length - x.length) / A.length).toFixed(1) + '%';
+  console.log('  scored A (FULL, both classes retained) : ' + A.length);
+  console.log('    market-contaminated in A            : ' + A.filter(r => r.dirtyMkt).length);
+  console.log('    weather-contaminated in A           : ' + A.filter(r => r.dirtyWx).length);
+  console.log('    BOTH classes on the same game       : ' + A.filter(r => r.dirtyMkt && r.dirtyWx).length);
+  console.log('  B_all     both excluded  n=' + B.length + '   drops ' + pct(B));
+  console.log('  B_market  market only    n=' + Bm.length + '   drops ' + pct(Bm));
+  console.log('  B_weather weather only   n=' + Bw.length + '   drops ' + pct(Bw));
   console.log('');
 
   const metrics = [
@@ -126,58 +157,75 @@ const f3 = v => v == null ? ' n/a ' : (v >= 0 ? '+' : '') + v.toFixed(3);
     { k: 'edge slope (ML)', f: edgeSlope },
   ];
 
-  // ---- C: n-matched control over many seeds
-  const ctrl = {};
-  for (const m of metrics) ctrl[m.k] = [];
-  for (let s = 0; s < SEEDS; s++) {
-    const sub = ps.sampleGames(A, B.length, 1000 + s * 7919);
-    for (const m of metrics) { const v = m.f(sub); if (v != null && isFinite(v)) ctrl[m.k].push(v); }
+  // ---- Each B arm gets its OWN n-matched control, because the arms have
+  // different n and a control built for one does not bound another.
+  function controlFor(target) {
+    const c = {};
+    for (const m of metrics) c[m.k] = [];
+    for (let s = 0; s < SEEDS; s++) {
+      const sub = ps.sampleGames(A, target.length, 1000 + s * 7919);
+      for (const m of metrics) { const v = m.f(sub); if (v != null && isFinite(v)) c[m.k].push(v); }
+    }
+    return c;
   }
 
-  console.log('=== A (contaminated, n=' + A.length + ')  vs  B (clean, n=' + B.length + ') ===');
-  console.log('  metric               A          B          B-A        C control p5..p95        verdict');
-  for (const m of metrics) {
-    const a = m.f(A), b = m.f(B);
-    const c = ctrl[m.k].slice().sort((x, y) => x - y);
-    const lo = c[Math.floor(0.05 * c.length)], hiV = c[Math.floor(0.95 * c.length)];
-    const inside = (b >= lo && b <= hiV);
-    console.log('  ' + m.k.padEnd(20)
-      + f5(a) + '  ' + f5(b) + '  ' + f5(b - a) + '   ['
-      + f5(lo) + ', ' + f5(hiV) + ']   '
-      + (inside ? 'POWER (inside control)' : '*** CONTAMINATION ***'));
+  const ARMS = [
+    { key: 'B_all',     label: 'both classes excluded',       rows: B  },
+    { key: 'B_market',  label: 'post-first-pitch only',       rows: Bm },
+    { key: 'B_weather', label: 'known-bad weather only',      rows: Bw },
+  ];
+
+  for (const arm of ARMS) {
+    const ctrl = controlFor(arm.rows);
+    console.log('=== A (FULL, n=' + A.length + ')  vs  ' + arm.key
+      + ' (' + arm.label + ', n=' + arm.rows.length + ') ===');
+    console.log('  metric               A          B          B-A        C control p5..p95        verdict');
+    for (const m of metrics) {
+      const a = m.f(A), b = m.f(arm.rows);
+      const c = ctrl[m.k].slice().sort((x, y) => x - y);
+      const lo = c[Math.floor(0.05 * c.length)], hiV = c[Math.floor(0.95 * c.length)];
+      const inside = (b >= lo && b <= hiV);
+      console.log('  ' + m.k.padEnd(20)
+        + f5(a) + '  ' + f5(b) + '  ' + f5(b - a) + '   ['
+        + f5(lo) + ', ' + f5(hiV) + ']   '
+        + (inside ? 'POWER (inside control)' : '*** CONTAMINATION ***'));
+    }
+    console.log('');
   }
-  console.log('');
-  console.log('  C = 20 random n-matched subsamples of A with contamination RETAINED.');
-  console.log('  B inside C p5..p95 => the move is what dropping to n=' + B.length + ' does anyway.');
+  console.log('  C = ' + SEEDS + ' random n-matched subsamples of A, contamination RETAINED.');
+  console.log('  B inside C p5..p95 => the move is what dropping to that n does anyway.');
   console.log('  B outside => the move is attributable to removing the contaminated rows.');
   console.log('');
 
   // ---- SIGNIFICANCE RETENTION under the n-matched control.
   //
-  // The component diagnostic flipped "market beats the base rate" from
-  // significant to not. A point estimate moving is one question; a CI
-  // crossing zero is another, and dropping 128 games widens every CI
-  // regardless of which games. So: in the control subsamples -- same n,
-  // contamination RETAINED -- how often does the claim survive at all?
-  // If it dies most of the time at n=662 anyway, the flip is power.
-  console.log('=== significance retention at n=' + B.length + ' (control, contamination RETAINED) ===');
+  // A point estimate moving is one question; a CI crossing zero is another,
+  // and dropping games widens every CI regardless of which games. So: in the
+  // control subsamples -- same n, contamination RETAINED -- how often does
+  // the claim survive at all? If it dies most of the time at that n anyway,
+  // a flip on the clean corpus is power.
   const claims = [
     { k: 'market beats base rate', stat: r => llMkt(r) - baseLL(r), sig: ci => ci[1] != null && ci[1] < 0 },
     { k: 'model beats base rate',  stat: r => ll(r) - baseLL(r),    sig: ci => ci[1] != null && ci[1] < 0 },
     { k: 'model worse than market',stat: r => ll(r) - llMkt(r),     sig: ci => ci[0] != null && ci[0] > 0 },
   ];
+  console.log('=== significance retention (control = same n, contamination RETAINED) ===');
   for (const c of claims) {
     const ciA = clusteredCI(A, c.stat, 7777);
-    const ciB = clusteredCI(B, c.stat, 7777);
-    let held = 0;
-    for (let s = 0; s < SEEDS; s++) {
-      const sub = ps.sampleGames(A, B.length, 1000 + s * 7919);
-      if (c.sig(clusteredCI(sub, c.stat, 7777))) held++;
+    let line = '  ' + c.k.padEnd(24) + ' A(n=' + A.length + '): '
+      + (c.sig(ciA) ? 'SIGNIFICANT' : 'not sig    ');
+    for (const arm of ARMS) {
+      const ciB = clusteredCI(arm.rows, c.stat, 7777);
+      let held = 0;
+      for (let s = 0; s < SEEDS; s++) {
+        const sub = ps.sampleGames(A, arm.rows.length, 1000 + s * 7919);
+        if (c.sig(clusteredCI(sub, c.stat, 7777))) held++;
+      }
+      line += '   | ' + arm.key + '(n=' + arm.rows.length + '): '
+        + (c.sig(ciB) ? 'SIG    ' : 'not sig')
+        + ' ctrl ' + String(held).padStart(2) + '/' + SEEDS;
     }
-    console.log('  ' + c.k.padEnd(24)
-      + ' A(n=' + A.length + '): ' + (c.sig(ciA) ? 'SIGNIFICANT' : 'not sig    ')
-      + '   B(n=' + B.length + '): ' + (c.sig(ciB) ? 'SIGNIFICANT' : 'not sig    ')
-      + '   control holds ' + held + '/' + SEEDS + ' at same n');
+    console.log(line);
   }
   console.log('');
   console.log('  A claim that survives in only a minority of same-n CONTAMINATED');
@@ -186,14 +234,16 @@ const f3 = v => v == null ? ' n/a ' : (v >= 0 ? '+' : '') + v.toFixed(3);
   console.log('');
 
   console.log('=== CIs on the headline comparisons (date-clustered, B=' + BOOT + ') ===');
-  for (const [label, arm] of [['A contaminated', A], ['B clean', B]]) {
+  const armsForCI = [['A FULL (both retained)', A]].concat(
+    ARMS.map(a => [a.key + ' (' + a.label + ')', a.rows]));
+  for (const [label, arm] of armsForCI) {
     const g = ll(arm) - llMkt(arm);
     const gc = clusteredCI(arm, r => ll(r) - llMkt(r), 4242);
     const bb = ll(arm) - baseLL(arm);
     const bc = clusteredCI(arm, r => ll(r) - baseLL(r), 5353);
     const es = edgeSlope(arm);
     const ec = clusteredCI(arm, edgeSlope, 6464);
-    console.log('  ' + label);
+    console.log('  ' + label + '   n=' + arm.length);
     console.log('    model - market : ' + f5(g) + '  [' + f5(gc[0]) + ', ' + f5(gc[1]) + ']'
       + (gc[0] != null && gc[0] > 0 ? '   model WORSE, significant' : '   not significant'));
     console.log('    model - base   : ' + f5(bb) + '  [' + f5(bc[0]) + ', ' + f5(bc[1]) + ']'

@@ -1,6 +1,23 @@
 # HFA_BOOST, the edge-cap level, and CATCHER_FRAMING_MUTE (2026-08-22)
 
 > ---
+> **§3 SUPERSEDED 2026-08-24.** The `CATCHER_FRAMING_MUTE` comparison below
+> was measured against a `catcher_framing` table last written **2026-06-03
+> — 82 days stale** — because nothing ever scheduled the refresh job.
+> `MUTE` is a MULTIPLIER, not a switch, so framing was applied at full
+> strength off frozen run values.
+>
+> Re-measured on refreshed framing: **1.0 is better on 3 of 5 metrics, not
+> 5 of 5** — worse on log loss and Brier. Δ = +0.00002, CI [−0.00061,
+> +0.00067], still not significant either way. The recommendation to leave
+> production at 1.0 stands; **the evidence offered for it here does not.**
+>
+> The job is now scheduled in the 6AM chain. See
+> `docs/decontaminated-rerun-corrected-2026-08-24.md` §3c.
+> ---
+
+
+> ---
 > **ANNOTATION 2026-08-23 — re-run on the decontaminated corpus.**
 > Every figure on this page was computed on a corpus that retained 128
 > games priced after real first pitch

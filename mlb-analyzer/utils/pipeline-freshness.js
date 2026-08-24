@@ -115,9 +115,9 @@ const PIPELINES = [
   {
     key: 'catcher_framing',
     sql: "SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) v FROM catcher_framing",
-    zone: 'UTC-ts', expectedLagDays: 0, warnDays: 14, critDays: 45,
-    note: 'no cron refreshes this; it is fetched by hand. The long thresholds '
-        + 'describe the actual cadence, they do not endorse it',
+    zone: 'UTC-ts', expectedLagDays: 0, warnDays: 3, critDays: 7,
+    note: 'framing RV feeds the pricing path; scheduled daily in the 6AM chain '
+        + 'from 2026-08-24 after 82 days unrefreshed',
   },
 ];
 
