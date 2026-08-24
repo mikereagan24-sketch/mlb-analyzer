@@ -1,12 +1,15 @@
-# Lineup-source recon: both new sources are off-limits (2026-08-23)
+# Lineup-source recon: one prohibited, one unknown (2026-08-23)
 
 > **No scrapers built. Reporting first, as scoped.**
 >
 > **RotoGrinders is technically easy and contractually prohibited** — its
 > Terms of Service name scraping explicitly.
 >
-> **Lineups.com returns HTTP 403 behind Cloudflare bot protection** — it is
-> actively refusing automated access.
+> **Lineups.com returns HTTP 403 behind Cloudflare bot protection**, and
+> its stated policy is **unreadable** — `/terms`, `/privacy-policy` and even
+> its own advertised sitemap all return the same block. Status is
+> **unknown, not prohibited**; that is a different thing from RotoGrinders
+> and needs a human with a browser to settle.
 >
 > **The three-way comparison as specified cannot proceed.** The underlying
 > question can, on a narrower footing — §5.
@@ -49,7 +52,61 @@ is not the governing document here; the ToS is, and it is unambiguous.
 **Recommendation: do not scrape it.** Not a technical judgement — the
 technical answer is that it would take an afternoon.
 
-## Lineups.com — blocked before terms even matter
+## Lineups.com — blocked, and the stated policy is unreadable
+
+**Follow-up 2026-08-23: I could not determine their stated policy, and
+should not have implied the 403 settled the question.**
+
+Every path returns the identical Cloudflare 403 — including the pages that
+would answer it:
+
+```
+403  /terms              [CF block]      403  /api          [CF block]
+403  /terms-of-service   [CF block]      403  /data         [CF block]
+403  /terms-of-use       [CF block]      403  /developers   [CF block]
+403  /privacy-policy     [CF block]      403  /contact      [CF block]
+403  /sitemap_index.xml  [CF block]   <- their OWN advertised sitemap
+```
+
+**So: whether Lineups.com permits automated access, and whether they sell
+an API or data product, is UNKNOWN.** Not "prohibited" — unknown. That is
+a different status from RotoGrinders, where the prohibition is quoted and
+explicit.
+
+### The genuine tension in what they publish
+
+| | |
+|---|---|
+| `robots.txt` (returns **200**) | **no rule against `/mlb/lineups/`**, no rule against `/api`. Disallows specific paths (`/search`, `/betting/go`, `/mlb/iframe-depth-charts`, `wp-admin`…) and blocks two named bots outright (Dotbot, Gigabot) |
+| Cloudflare edge | blocks **everything** to a non-browser client, including the sitemap robots.txt advertises for crawlers |
+
+Their machine-readable crawl policy permits the path. Their edge
+configuration refuses the request. The most likely reading is a blanket
+bot rule that was never reconciled with robots.txt — but that is an
+inference, and it does not convert a refusal into permission.
+
+**What I did not do:** vary user-agent or headers to see which
+specifically triggers the block. Establishing *how* to get through is the
+first step of getting through, and their stated policy is exactly the
+thing I cannot read.
+
+### How to actually answer this
+
+**Open `lineups.com/terms` (or whatever they call it) in a browser** — it
+loads fine for a person, and it takes a minute. The two things worth
+looking for:
+
+1. an automated-access / scraping clause, in the shape of the
+   RotoGrinders one quoted above;
+2. any mention of an API, data licensing, or a developer/business
+   contact.
+
+If the terms are silent on automated access and they offer a feed, this
+source moves from blocked to available and the next-day two-way
+comparison comes back on the table. **Tell me what it says and I will act
+on it** — including building the ingest if it is permitted.
+
+## Lineups.com — the original technical finding
 
 ```
 GET https://www.lineups.com/mlb/lineups/  ->  403
@@ -67,8 +124,8 @@ I did not attempt any workaround, and would not.
 
 | piece | status |
 |---|---|
-| Same-day 3-way (RotoWire / RotoGrinders / Lineups) | **not possible** |
-| Next-day 2-way (RotoWire / Lineups) | **not possible** |
+| Same-day 3-way (RotoWire / RotoGrinders / Lineups) | **RotoGrinders leg prohibited**; Lineups leg unknown |
+| Next-day 2-way (RotoWire / Lineups) | **blocked in practice, status unknown** — recoverable if the terms permit |
 | **Pre-registered prediction** (RotoGrinders > RotoWire same-day) | **cannot be tested** |
 
 On the prediction: you asked for one, and the discipline was right — but
