@@ -83,6 +83,15 @@ this log — three rows at the same second — so the two later entries
 firing *singly* are the tell: those are not the scheduler. They are two
 occasions when the app was opened by hand.
 
+That triplication is itself local-only, and it is probably the mechanism
+behind the divergence in §"the copy has DIVERGED". Production's
+`cron_log` has **zero same-second duplicates**; this laptop was running
+**three server processes at once**, each with its own `node-cron`
+registration and its own write handle on the same SQLite file, all
+re-scoring the same games concurrently. That is the process-level version
+of the second-write-connection trap already in CLAUDE.md, and it ran for
+months.
+
 **So the answer to "silent errors or the chain not executing" is: the
 chain was not executing, locally, and that is a property of this laptop,
 not of the pipeline.**
@@ -299,12 +308,88 @@ Done, reversibly:
 2. PRAGMA quick_check                  -> ok; game_log 1876; logged bets 333
 3. backed up the current copy          -> data/mlb.db.local-pre-refresh-20260824
 4. promoted the snapshot               -> data/mlb.db
-5. re-ran all six remediation scripts
+5. re-ran the remediation
 ```
 
-Undo is a single `cp` from the dated backup. The analysis base now carries
-198 more games, 17 more scored dates, 21 more logged bets, production's
-797 weather-contamination tags, and the corrected weather.
+Undo is a single `cp` from the dated backup.
+
+### Final state
+
+```
+game_log rows                        1876   (was 1678)
+  scored                             1812   (was 1579)
+logged bets                           333   (was 312)
+  logged totals carrying bet_price     40   (was 3 in production)
+weather_contamination_reason tagged   797   (was 27)
+market_contamination_reason tagged    219   (was 134)
+first_pitch_utc                      1569   of 1876; the misses are 08-24/08-25 Scheduled
+pitcher_debut rows                    448   (was 438)
+freshness                            9 ok, 1 critical (catcher_framing, below)
+```
+
+### The re-apply list was wrong, and it failed quietly
+
+I ran six scripts. There are **eight**, and the two I omitted —
+`backfill-totals-bet-price.js` and `fix-corrupt-totals-rows.js` — are
+*upstream* of one I did run.
+
+The failure mode is the point. `regrade-stale-totals-pnl` prices each bet
+at what was struck, which lives in `bet_price`. Run before the migration
+that populates `bet_price`, it reported:
+
+```
+logged totals graded rows: 41   stale: 0
+rows re-graded: 0
+rows still disagreeing with calcPnl (must be 0): 23
+*** REFUSING id=9547: outcome would change win -> loss.  (x14)
+```
+
+**"stale: 0" reads as success.** Only the refusal guard and the
+non-zero verification line said otherwise — and the 14 refusals were
+correct: `bet_line` on those rows held a *price*, not a total, so the
+script's recomputation was comparing a score against −105. **The guard
+prevented fourteen bad writes.**
+
+Run in the right order, after the migration:
+
+```
+rows re-graded: 11   net delta +56.78
+rows still disagreeing with calcPnl (must be 0): 0
+```
+
+`scripts/refresh-analysis-db.sh` now carries all eight in dependency order
+with the two dependencies stated in the file, because this is exactly the
+kind of thing that is obvious once and forgotten by the next refresh.
+
+### Two verification numbers that did not reach zero, and what they are
+
+**`ML closing lines with NO provenance tag (target 0): 22`** — not a
+defect. All 22 are April–May rows where `closing_line != market_line`
+(genuine movement, so not the fabrication pattern) and 20 are logged bets.
+They predate `bet_signal_audit`. They are real closes with no audit row,
+which is a provenance gap on the oldest data, not fabricated data.
+
+**`totals with a closing_line: 5`** after nulling 939 — 4 genuine captures
+the null script correctly skipped, plus one recovered by
+`fix-corrupt-totals-rows`. All five are legitimate.
+
+### Numbers that moved on the complete corpus
+
+Worth recording because several were reported this week off the smaller,
+diverged copy:
+
+```
+                                        reported this week   on the full corpus
+post-first-pitch ML exposure (upper)                   178                  252
+  ... with a real price move                        (varies)                226
+  ... distinct games tagged                              134                  219
+fabricated totals closing lines nulled                 762                  939
+ML CLV, observed-only              2.00pp on n=86     1.97pp on n=89
+```
+
+The CLV figure is the reassuring one: **the finding this week's CLV thread
+rested on survives the corpus change essentially unmoved.** The exposure
+and fabrication counts are larger simply because the corpus is larger.
 
 ## Two things found while looking, neither of them asked for
 

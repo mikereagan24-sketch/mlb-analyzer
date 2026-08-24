@@ -88,11 +88,27 @@ ls -l "data/mlb.db.local-pre-refresh-${STAMP}"
 cp "${SNAP}" data/mlb.db
 
 echo "=== 5/5 re-applying local-only remediation ==="
-# Order matters: first-pitch timestamps are the input to the post-start
-# tagging, so they must land first. Everything after is independent.
+# ORDER IS LOAD-BEARING, and getting it wrong fails quietly rather than
+# loudly. Two dependencies:
+#
+#   first-pitch timestamps  ->  tag-post-start-pricing
+#       the tagging criterion IS the first-pitch comparison; with no
+#       timestamps it tags nothing and reports success.
+#
+#   bet-price migration     ->  regrade-stale-totals-pnl
+#       the re-grade prices each bet at what was struck, which lives in
+#       bet_price. Run before the migration it finds 0 stale rows and
+#       reports "23 rows still disagreeing" -- which is what happened on
+#       the first run of this sequence on 2026-08-24. Run after, it
+#       re-grades 11 rows for a net +56.78 and verification reaches 0.
+#
+# fix-corrupt-totals-rows handles the 2 rows the migration REFUSES
+# (price-shaped bet_line with no usable market_line), so it follows it.
 "$NODE" scripts/backfill-first-pitch.js
 "$NODE" scripts/tag-post-start-pricing.js --apply
 "$NODE" scripts/backfill-pitcher-debut.js --apply
+"$NODE" scripts/backfill-totals-bet-price.js --apply
+"$NODE" scripts/fix-corrupt-totals-rows.js --apply
 "$NODE" scripts/null-fabricated-totals-closing.js --apply
 "$NODE" scripts/rederive-ml-closing-lines.js --apply
 "$NODE" scripts/regrade-stale-totals-pnl.js --apply
