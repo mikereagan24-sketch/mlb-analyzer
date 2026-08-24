@@ -3598,6 +3598,19 @@ function startCronJobs() {
       logGateHealth(db);
     } catch (e) { console.warn('[gate-health] skipped (non-fatal): ' + (e && e.message)); }
 
+    // Ingest freshness. Runs alongside the gate-health and settings-sync
+    // checks and for the same reason: a pipeline that stops arriving is
+    // invisible until someone happens to look at a MAX(date). On
+    // 2026-08-23 that cost a day -- an analysis copy eighteen days stale
+    // was mistaken for a production outage, and neither question had an
+    // answer you could look up. This check answers both, because it is
+    // the same question asked of whichever database it is pointed at.
+    // Non-fatal by construction.
+    try {
+      const { logPipelineFreshness } = require('../utils/pipeline-freshness');
+      logPipelineFreshness(db);
+    } catch (e) { console.warn('[freshness] skipped (non-fatal): ' + (e && e.message)); }
+
     // getSettings() <-> settings-schema sync. Same slot and same reasoning
     // as the gate-health check above: a setting that is stored, UI-wired
     // and never read by getSettings is a control that does nothing, and it
