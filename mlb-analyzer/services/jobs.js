@@ -3638,6 +3638,22 @@ function startCronJobs() {
     // Non-fatal: a Savant hiccup must not abort the morning chain.
     try { await runFieldingFrvJob(); }
     catch(e) { console.error('[cron-frv] failed:', e && e.message); }
+    // Catcher framing (Savant leaderboard). SCHEDULED 2026-08-24 -- it never
+    // was. The table was populated by hand and the last write was
+    // 2026-06-03, so by the time the freshness check found it, every
+    // framing value in the model was 82 days old, and CATCHER_FRAMING_MUTE
+    // had been evaluated against an input that had not moved in eleven
+    // weeks. This is a pricing-path input, which is precisely why it should
+    // not depend on someone remembering.
+    //
+    // Placed immediately after the FRV job because they are the same shape:
+    // a daily Savant leaderboard pull of a slow-moving, strongly-regressed
+    // aggregate. Non-fatal, like everything else in this chain -- a Savant
+    // hiccup must not abort the morning. The freshness check at the top of
+    // this block is what now reports a run of failures, so a silent stall
+    // cannot repeat.
+    try { await runCatcherFramingJob(); }
+    catch(e) { console.error('[cron-framing] failed:', e && e.message); }
     // Team baserunning (FG team-aggregated BsR). Daily snapshot for
     // forward-honest backtests; the live table is also used as the
     // current-state hindsight reference. Non-fatal: an FG hiccup must

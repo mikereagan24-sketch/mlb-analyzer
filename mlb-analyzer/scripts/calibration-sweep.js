@@ -61,7 +61,22 @@ console.log('  target: log loss / Brier / ECE / edge slope over ALL games — no
 console.log('');
 
 // ---- corpus (same builders the sweep engine uses) -------------------
-const games = ps.loadGames(db, FROM, TO);
+// Three arms, same env contract as scripts/calibration-ab.js:
+//   (default)  arm B clean  |  INCLUDE_CONTAMINATED=1  arm A both classes
+//   SAMPLE_N + SAMPLE_SEED  arm C  n-matched power control
+// See the note in calibration-ab.js for why the control is not optional.
+const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
+const SAMPLE_N = process.env.SAMPLE_N ? Number(process.env.SAMPLE_N) : 0;
+const SAMPLE_SEED = process.env.SAMPLE_SEED ? Number(process.env.SAMPLE_SEED) : 1;
+let games = ps.loadGames(db, FROM, TO,
+  { includeMarketContaminated: INCLUDE_DIRTY, includeWeatherContaminated: INCLUDE_DIRTY });
+if (INCLUDE_DIRTY) console.log('  *** ARM A: corpus RETAINS both contamination classes ***');
+if (SAMPLE_N) {
+  const before = games.length;
+  games = ps.sampleGames(games, SAMPLE_N, SAMPLE_SEED);
+  console.log('  *** ARM C: n-matched control, ' + before + ' -> ' + games.length
+    + ' at seed ' + SAMPLE_SEED + ' ***');
+}
 const cache = new Map();
 for (const g of games) if (!cache.has(g.game_date)) cache.set(g.game_date, ps.loadWobaSnapshot(db, g.game_date));
 const scoreable = [];

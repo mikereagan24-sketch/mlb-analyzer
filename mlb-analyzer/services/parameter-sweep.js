@@ -408,6 +408,16 @@ function loadWobaSnapshot(db, snapshotDate) {
 // opts (2026-08-23, for the contamination re-run only):
 //   includeMarketContaminated -- keep post-first-pitch-priced rows. ONLY for
 //     measuring what the exclusion changed. Never for production analysis.
+//   includeWeatherContaminated (2026-08-24) -- keep known-wrong-weather rows.
+//     Added for the same reason and with the same restriction. It did not
+//     exist for the 2026-08-23 re-run, and its absence made that re-run
+//     misleading: the weather filter was UNCONDITIONAL, so arms A and B
+//     were both already weather-filtered and the "full corpus" was not
+//     full. Worse, only 27 games carried a weather tag at the time --
+//     the corrected corpus has 797 -- so ~770 known-bad-weather games sat
+//     silently in BOTH arms. An arm labelled "contaminated" that has had
+//     one contamination class quietly removed cannot bound what exclusion
+//     costs. Never for production analysis.
 //   sampleN / seed -- deterministically downsample the returned set. Exists
 //     so a POWER CONTROL can be built: a random n-matched subsample of the
 //     CONTAMINATED corpus isolates "the delta moved because n dropped" from
@@ -426,7 +436,7 @@ function loadGames(db, fromDate, toDate, opts) {
   return db.prepare(
     "SELECT * FROM game_log WHERE game_date >= ? AND game_date <= ? "
     + "AND model_total IS NOT NULL "  // skip games the model never finished
-    + "AND weather_contamination_reason IS NULL "
+    + (opts.includeWeatherContaminated ? "" : "AND weather_contamination_reason IS NULL ")
     // Same exclusion, same reasoning, different input: when the stored
     // market_*_ml moved after real first pitch it embeds the in-progress
     // score, so it is not a pre-game price. Leaving these in would let a

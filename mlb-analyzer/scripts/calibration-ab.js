@@ -80,12 +80,35 @@ console.log('  target: log loss / Brier / ECE / AUC over ALL games — no emit f
 console.log('');
 
 // ---- corpus --------------------------------------------------------
-// INCLUDE_CONTAMINATED=1 re-runs against the pre-2026-08-23 corpus, which
-// retained games priced after real first pitch. Only for measuring what the
-// exclusion changed -- never for a production verdict.
+// THREE ARMS, selected by env so the harness itself stays single-purpose:
+//
+//   (default)                    arm B -- clean. The production verdict.
+//   INCLUDE_CONTAMINATED=1       arm A -- BOTH contamination classes retained.
+//   SAMPLE_N=<n> SAMPLE_SEED=<s> arm C -- random n-matched subsample of
+//                                whatever corpus the flags selected.
+//
+// Arm C is the power control. Excluding contaminated games costs power
+// everywhere, so a Delta that moves or a CI that widens after exclusion
+// proves nothing until it is compared against what dropping to the same n
+// does with the contamination RETAINED.
+//
+// 2026-08-24: INCLUDE_CONTAMINATED now retains the WEATHER class too. It
+// used to retain only the market class, while loadGames filtered weather
+// unconditionally -- so the arm labelled "contaminated" had already had one
+// class removed. With 27 weather tags that was nearly harmless; the
+// corrected corpus has 797, and it is not.
 const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
-const games = ps.loadGames(db, FROM, TO, { includeMarketContaminated: INCLUDE_DIRTY });
-if (INCLUDE_DIRTY) console.log('  *** corpus INCLUDES market-contaminated games (comparison run) ***');
+const SAMPLE_N = process.env.SAMPLE_N ? Number(process.env.SAMPLE_N) : 0;
+const SAMPLE_SEED = process.env.SAMPLE_SEED ? Number(process.env.SAMPLE_SEED) : 1;
+let games = ps.loadGames(db, FROM, TO,
+  { includeMarketContaminated: INCLUDE_DIRTY, includeWeatherContaminated: INCLUDE_DIRTY });
+if (INCLUDE_DIRTY) console.log('  *** ARM A: corpus RETAINS both contamination classes (comparison run) ***');
+if (SAMPLE_N) {
+  const before = games.length;
+  games = ps.sampleGames(games, SAMPLE_N, SAMPLE_SEED);
+  console.log('  *** ARM C: n-matched control, ' + before + ' -> ' + games.length
+    + ' at seed ' + SAMPLE_SEED + ' ***');
+}
 const cache = new Map();
 for (const g of games) if (!cache.has(g.game_date)) cache.set(g.game_date, ps.loadWobaSnapshot(db, g.game_date));
 const rows = [];
