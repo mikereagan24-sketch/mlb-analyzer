@@ -6123,48 +6123,31 @@ async function runCatcherFramingJob(year) {
 
     // PRUNE catchers no longer on the leaderboard. (2026-08-24)
     //
-    // The upsert alone left dropped-off catchers frozen forever: on
-    // 2026-08-24, seven of sixty-six rows dated 2026-06-03 or 2026-05-21,
-    // and because they still cleared the 750-pitch floor on those FROZEN
-    // counts, computeFramingRvPerGame preferred them to the three-year
-    // historical baseline. T. d'Arnaud started that day on a 2026-05-21
-    // rate. A stale current-season rate outranking a real historical one is
-    // the worst ordering available.
-    //
-    // SANITY FLOOR, because delete-missing is the dangerous half of this.
-    // A truncated or partially-parsed CSV would otherwise wipe the table,
-    // and every consumer would silently fall through to the 0.80 fallback
-    // with nothing reporting it. So the prune only runs when the fetch
-    // looks like a real leaderboard: at least MIN_PRUNE_ROWS rows, and at
-    // least half of what we already had. Refusing to prune is always safe;
-    // pruning on a bad fetch is not.
-    const MIN_PRUNE_ROWS = 40;
+    // The guard and the delete live in utils/prune-missing.js. They were
+    // inline first, and inline meant the refusal path could only be
+    // exercised by triggering a real truncated fetch from Savant -- which
+    // is to say never, on the one branch whose failure mode is emptying a
+    // pricing-path table. scripts/test-prune-missing.js drives the SAME
+    // function against synthetic fetches, including a scratch-DB run that
+    // asserts a truncated response leaves the table intact.
     let pruned = 0, prunedNames = [];
     try {
-      const before = q.countCatcherFraming ? q.countCatcherFraming.get().c : 0;
-      const fetchedIds = new Set(rows.map(r => r.mlb_id).filter(x => x != null));
-      if (fetchedIds.size < MIN_PRUNE_ROWS || fetchedIds.size * 2 < before) {
-        console.warn('[framing] PRUNE SKIPPED -- fetch returned ' + fetchedIds.size
-          + ' ids against ' + before + ' existing rows; that looks like a bad fetch,',
-          'not a roster change. Stale rows are left in place deliberately.');
+      const { pruneMissing } = require('../utils/prune-missing');
+      const res = pruneMissing(db, 'catcher_framing', 'mlb_id', rows.map(r => r.mlb_id));
+      pruned = res.pruned;
+      prunedNames = res.prunedRows.map(d => d.name || d.id);
+      if (res.skipped) {
+        console.warn('[framing] PRUNE SKIPPED -- ' + res.reason
+          + '. Stale rows are left in place deliberately; refusing to prune is safe,'
+          + ' pruning on a bad fetch is not.');
+      } else if (pruned) {
+        // Enumerated, not counted. A prune that silently removes a
+        // starting catcher is exactly the event worth seeing by name.
+        console.log('[framing] pruned ' + pruned + ' catcher(s) no longer on the leaderboard:');
+        prunedNames.forEach(n => console.log('[framing]     ' + n
+          + '  -> now falls through to the 2023-25 historical baseline (x0.80), or to no adjustment'));
       } else {
-        const existing = q.getAllCatcherFramingNames.all();
-        const doomed = existing.filter(r => !fetchedIds.has(r.mlb_id));
-        const tx2 = db.transaction((ds) => {
-          for (const d of ds) { q.deleteCatcherFramingById.run(d.mlb_id); }
-        });
-        tx2(doomed);
-        pruned = doomed.length;
-        prunedNames = doomed.map(d => d.name || d.mlb_id);
-        if (pruned) {
-          // Enumerated, not counted. A prune that silently removes a
-          // starting catcher is exactly the event worth seeing by name.
-          console.log('[framing] pruned ' + pruned + ' catcher(s) no longer on the leaderboard:');
-          prunedNames.forEach(n => console.log('[framing]     ' + n
-            + '  -> now falls through to the 2023-25 historical baseline (x0.80), or to no adjustment'));
-        } else {
-          console.log('[framing] prune: nothing to remove');
-        }
+        console.log('[framing] prune: nothing to remove (' + res.reason + ')');
       }
     } catch (e) {
       console.warn('[framing] prune failed (non-fatal): ' + (e && e.message));
