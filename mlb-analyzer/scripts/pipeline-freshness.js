@@ -43,6 +43,14 @@ function render(label, r) {
       + String(row.lagDays == null ? '-' : row.lagDays).padStart(4)
       + String(row.excess == null ? '-' : (row.excess > 0 ? '+' + row.excess : row.excess)).padStart(8)
       + '  ' + mark + ' ' + row.level);
+    // A row can be CRITICAL with excess 0 -- freshly written, stale tail.
+    // Without this line the readout looks self-contradictory.
+    if (row.perRow && row.perRow.level && row.perRow.level !== 'ok') {
+      console.log('      ' + (row.perRow.error
+        ? 'per-row check failed: ' + row.perRow.error
+        : 'PER-ROW: oldest ' + row.perRow.oldest + ' (+' + row.perRow.excess + 'd), '
+          + row.perRow.rowsBehindNewest + ' row(s) behind the newest'));
+    }
   }
   console.log('  ' + r.crit + ' critical, ' + r.warn + ' stale, '
     + (r.rows.length - r.crit - r.warn) + ' ok');

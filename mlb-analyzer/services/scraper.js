@@ -895,7 +895,27 @@ async function fetchSeasonRosters() {
 // from the server date so it rolls over automatically each season.
 async function fetchCatcherFraming(year) {
   const yr = year || new Date().getFullYear();
-  const url = `https://baseballsavant.mlb.com/leaderboard/catcher-framing?year=${yr}&csv=true`;
+  // minPitches=100 (2026-08-24). WITHOUT it Savant applies its own
+  // "Qualified" default, and that default is STRICTER than our floor:
+  //
+  //   (none) / q  ->  59 rows      500  ->  70 rows
+  //   100         -> 100 rows      750  ->  61 rows
+  //   250         ->  89 rows
+  //
+  // So the note that used to sit on fetchCatcherFramingHistorical --
+  // "deliberately untouched, the read-time CATCHER_FRAMING_MIN_PITCHES_2026
+  // floor already governs" -- was wrong. The floor NEVER bound: every row
+  // Savant returned already had >= 913 pitches, and 59 < 61 means Savant's
+  // qualifier excluded catchers our own 750 floor would have accepted.
+  //
+  // The effective inclusion rule was Savant's, and it silently dropped
+  // ACTIVE STARTERS: T. d'Arnaud started for LAA on 2026-08-24 carrying a
+  // framing rate frozen at 2026-05-21, because he had fallen off the
+  // qualified list and the upsert never revisited him.
+  //
+  // Same knob and the same camelCase trap documented on
+  // fetchCatcherFramingHistorical below: snake_case variants are ignored.
+  const url = `https://baseballsavant.mlb.com/leaderboard/catcher-framing?year=${yr}&minPitches=100&csv=true`;
   const resp = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -957,11 +977,11 @@ function _parseFramingCsv(text) {
 // 59-row response to the default). Direct CSV row-count probe
 // (59 → 128) confirmed minPitches=100 is the right knob.
 //
-// fetchCatcherFraming (current season) URL deliberately untouched —
-// the model's read-time CATCHER_FRAMING_MIN_PITCHES_2026 floor
-// (default 750) already governs there, and the consumer falls
-// through to this historical baseline when current-season is below
-// the floor.
+// 2026-08-24: fetchCatcherFraming (current season) now passes the SAME
+// minPitches=100. It previously did not, on the reasoning that the
+// read-time CATCHER_FRAMING_MIN_PITCHES_2026 floor "already governs
+// there" -- which was false: Savant's default qualifier is stricter
+// than 750 and ran first. See the note on that function.
 async function fetchCatcherFramingHistorical(opts) {
   const o = opts || {};
   const startY = o.seasonStart || 2023;

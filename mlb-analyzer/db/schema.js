@@ -2559,6 +2559,28 @@ q.getFramingByCatcherName = db.prepare(
   "JOIN catcher_framing cf ON cf.mlb_id = tr.mlb_id " +
   "WHERE tr.team=? AND tr.player_name=?"
 );
+// Prune a catcher who has fallen off the Savant leaderboard. (2026-08-24)
+//
+// runCatcherFramingJob upserts whatever the CSV returns and used to remove
+// NOTHING, so a catcher who dropped off kept his last value forever. On
+// 2026-08-24, seven of sixty-six rows were frozen -- five at 2026-06-03 and
+// two at 2026-05-21 -- and they all still cleared the 750-pitch floor on
+// their FROZEN pitch counts, so the model preferred a three-month-old
+// partial-season rate to the three-year historical baseline. T. d'Arnaud
+// started for LAA that day priced on a 2026-05-21 rate.
+//
+// Deleting here does not destroy the record. catcher_framing_snapshot
+// archives every fetched row under its snapshot_date, so a pruned
+// catcher's last observed value stays queryable at the date he was last
+// on the leaderboard -- it simply stops being read as current.
+//
+// That is what makes DELETE the right verb rather than a tombstone column:
+// a tombstone would have to be understood by five separate copies of
+// computeFramingRvPerGame (frv-backtest, baserunning-backtest, two scripts,
+// and the inline one in jobs.js), and four of them would keep reading the
+// stale row. Removing it from the live table is enforced by construction.
+q.deleteCatcherFramingById = db.prepare("DELETE FROM catcher_framing WHERE mlb_id=?");
+q.countCatcherFraming = db.prepare("SELECT COUNT(*) c FROM catcher_framing");
 q.listCatcherFraming = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing ORDER BY rv_tot DESC");
 q.upsertCatcherFramingHist = db.prepare(
   "INSERT INTO catcher_framing_historical (mlb_id,name,rv_tot,pitches,season_start,season_end,updated_at) " +

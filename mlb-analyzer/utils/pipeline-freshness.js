@@ -26,6 +26,15 @@
  * expected lag is negative. Each entry declares its own baseline and the
  * thresholds apply to the EXCESS over that baseline.
  *
+ * PER-ROW STALENESS (2026-08-24). MAX(date) is an aggregate over the
+ * NEWEST row and says nothing about the oldest -- the same shape of error
+ * as reading MAX(game_date) and concluding a pipeline was alive. It bit
+ * immediately: catcher_framing is an upsert-per-catcher table that never
+ * deleted, so 59 rows written today made it report `ok` while seven rows
+ * sat 82 and 95 days behind, one of them pricing a catcher who started
+ * that day. Any entry may declare `perRow`, and the pipeline's level is
+ * the WORSE of the aggregate and per-row verdicts.
+ *
  * TIMESTAMP UNITS. Per the discipline in CLAUDE.md, every entry states
  * the zone of the column it reads. Mixing a UTC column into a PT
  * comparison produces a spurious one-day error, which is the same size as
@@ -56,6 +65,11 @@ function todayPt() {
  *   warnDays        excess at which it reports as STALE
  *   critDays        excess at which it reports as CRITICAL
  *   note            what breaks downstream when this one stops
+ *   perRow          OPTIONAL {sql, warnDays, critDays, note}. sql returns
+ *                   one row: v = OLDEST per-row PT date, n = how many rows
+ *                   are behind the newest. Only meaningful for tables
+ *                   upserted per entity (per catcher, per player, per
+ *                   team), where a partial refresh leaves a stale tail.
  */
 const PIPELINES = [
   {
@@ -105,12 +119,41 @@ const PIPELINES = [
     sql: "SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) v FROM team_rosters",
     zone: 'UTC-ts', expectedLagDays: 0, warnDays: 2, critDays: 4,
     note: 'IL moves and callups stop landing; bullpen-aware signals use old rosters',
+    perRow: {
+      sql: "SELECT MIN(substr(datetime(updated_at,'-7 hours'),1,10)) v, "
+         + "SUM(CASE WHEN substr(datetime(updated_at,'-7 hours'),1,10) < "
+         + "(SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) FROM team_rosters) "
+         + "THEN 1 ELSE 0 END) n FROM team_rosters",
+      warnDays: 4, critDays: 10,
+      note: 'a tail of players not refreshed with the rest of the roster',
+    },
   },
   {
     key: 'fielding_frv',
     sql: "SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) v FROM fielding_frv",
     zone: 'UTC-ts', expectedLagDays: 0, warnDays: 3, critDays: 7,
     note: 'a trailing 3yr aggregate; slow-moving, so a longer threshold is honest',
+    perRow: {
+      sql: "SELECT MIN(substr(datetime(updated_at,'-7 hours'),1,10)) v, "
+         + "SUM(CASE WHEN substr(datetime(updated_at,'-7 hours'),1,10) < "
+         + "(SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) FROM fielding_frv) "
+         + "THEN 1 ELSE 0 END) n FROM fielding_frv",
+      // Deliberately looser than catcher_framing's 3/7. FRV is a trailing
+      // THREE-SEASON aggregate, so a player whose row is a few weeks old is
+      // barely wrong; a current-season framing RATE a few weeks old is. The
+      // thresholds encode that difference rather than copying a number.
+      //
+      // KNOWN OPEN as of 2026-08-24: 44 of 552 rows sit at 2026-05-22,
+      // +94d, so this fires today. runFieldingFrvJob has the same
+      // never-deletes shape the framing job had, but the right policy is
+      // NOT obviously a prune -- a fielder who drops off the leaderboard
+      // still has a valid three-year FRV, unlike a stale partial-season
+      // framing rate. Awaiting a decision; this is a standing item, not a
+      // new incident.
+      warnDays: 21, critDays: 60,
+      note: 'players dropped from the Savant leaderboard keeping a frozen FRV '
+          + '(known open 2026-08-24: 44 rows at +94d, prune policy undecided)',
+    },
   },
   {
     key: 'catcher_framing',
@@ -118,6 +161,14 @@ const PIPELINES = [
     zone: 'UTC-ts', expectedLagDays: 0, warnDays: 3, critDays: 7,
     note: 'framing RV feeds the pricing path; scheduled daily in the 6AM chain '
         + 'from 2026-08-24 after 82 days unrefreshed',
+    perRow: {
+      sql: "SELECT MIN(substr(datetime(updated_at,'-7 hours'),1,10)) v, "
+         + "SUM(CASE WHEN substr(datetime(updated_at,'-7 hours'),1,10) < "
+         + "(SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) FROM catcher_framing) "
+         + "THEN 1 ELSE 0 END) n FROM catcher_framing",
+      warnDays: 3, critDays: 7,
+      note: 'a catcher off the leaderboard keeping a frozen rate that still outranks the historical baseline -- exactly the 2026-08-24 defect',
+    },
   },
 ];
 
@@ -155,8 +206,43 @@ function checkPipelineFreshness(db, asOf) {
     if (excess >= p.critDays) { level = 'CRITICAL'; crit++; }
     else if (excess >= p.warnDays) { level = 'STALE'; warn++; }
 
+    // PER-ROW pass. The aggregate above says the newest row is current;
+    // this asks whether the OLDEST one is. The pipeline's level is the
+    // WORSE of the two -- a table can be freshly written and still carry a
+    // stale tail, which is exactly the state that reported `ok` on
+    // 2026-08-24 while pricing a catcher off a 95-day-old rate.
+    let perRow = null;
+    if (p.perRow) {
+      try {
+        const pr = db.prepare(p.perRow.sql).get();
+        const oldest = pr && pr.v ? String(pr.v).slice(0, 10) : null;
+        const behind = pr && pr.n != null ? Number(pr.n) : 0;
+        if (oldest) {
+          const pLag = dayDiff(today, oldest);
+          const pExcess = pLag - p.expectedLagDays;
+          let pLevel = 'ok';
+          if (pExcess >= p.perRow.critDays) pLevel = 'CRITICAL';
+          else if (pExcess >= p.perRow.warnDays) pLevel = 'STALE';
+          perRow = { oldest, rowsBehindNewest: behind, lagDays: pLag,
+                     excess: pExcess, level: pLevel, note: p.perRow.note };
+          if (pLevel === 'CRITICAL' && level !== 'CRITICAL') {
+            if (level === 'STALE') warn--;
+            level = 'CRITICAL'; crit++;
+          } else if (pLevel === 'STALE' && level === 'ok') {
+            level = 'STALE'; warn++;
+          }
+        }
+      } catch (e) {
+        // A per-row query that cannot run must not take the whole check
+        // down, but it must not read as a pass either.
+        perRow = { error: e && e.message, level: 'CRITICAL' };
+        if (level !== 'CRITICAL') { if (level === 'STALE') warn--; level = 'CRITICAL'; crit++; }
+      }
+    }
+
     rows.push({ key: p.key, last, lagDays: lag, excess, level,
-                expectedLagDays: p.expectedLagDays, zone: p.zone, detail: p.note });
+                expectedLagDays: p.expectedLagDays, zone: p.zone, detail: p.note,
+                perRow });
   }
 
   return { asOf: today, rows, warn, crit, ok: warn === 0 && crit === 0 };
@@ -188,6 +274,17 @@ function logPipelineFreshness(db, asOf) {
       + 'last=' + (row.last || 'none')
       + (row.excess != null ? ('  +' + row.excess + 'd beyond normal lag') : '')
       + '  -- ' + row.detail);
+    // Say WHICH half fired. "newest row is current but N rows are not" is a
+    // different problem from "nothing has arrived", and the fixes differ.
+    if (row.perRow && row.perRow.level && row.perRow.level !== 'ok') {
+      if (row.perRow.error) {
+        console.warn('[freshness]         per-row check failed: ' + row.perRow.error);
+      } else {
+        console.warn('[freshness]         PER-ROW: oldest row ' + row.perRow.oldest
+          + '  (+' + row.perRow.excess + 'd), ' + row.perRow.rowsBehindNewest
+          + ' row(s) behind the newest  -- ' + row.perRow.note);
+      }
+    }
   }
   console.warn('[freshness]     if this is an analysis COPY of the database this is not an outage'
     + ' -- refresh it before measuring anything (scripts/refresh-analysis-db.sh)');
