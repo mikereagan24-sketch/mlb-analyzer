@@ -82,7 +82,9 @@ place, and the guard table in `calibration-ab.js` keys off the same idea.
 | point estimate favourable on ≥4 of 5 metrics | 4 better, 1 tied — passes |
 | bounded harm: CI upper < +0.001 | +0.00059 — passes |
 
-**Verdict unchanged: still exactly one window short.** Do not enable.
+**Verdict unchanged: fails the window test. Do not enable.**
+
+> *Softened 2026-08-24: this read "one window short". The window sign test is not precise to one window at n~350 -- same-n resamples of the same corpus give 2/5, 3/5 and 4/5 on this feature -- so the count is a pass/fail, not a distance. See CLAUDE.md "The window sign test is not precise at n~350".*
 
 What *did* improve is the edge slope: **−0.243 → −0.153**, now the
 largest honesty gain measured anywhere in the repo and larger in
@@ -255,7 +257,7 @@ moves.
 
 | doc | before | after | verdict |
 |---|---|---|---|
-| FRV | Δ −0.00087, 4/5 | Δ **−0.00092**, 4/5 | unchanged — 1 window short |
+| FRV | Δ −0.00087, 4/5 | Δ **−0.00092**, 4/5 | unchanged — fails the window test |
 | park_neutral | Δ −0.00055, 3/5 | Δ **−0.00051**, 3/5 | unchanged |
 | hand_conditional | Δ +0.00009, 2/5, "worse on all 5" | Δ **+0.00011**, 2/5, **worse on 4, better on ECE** | Tier 4 unchanged; the "all five" phrasing corrected |
 | edge-honesty ML slope | −0.313 | **−0.243** | conclusion strengthened |

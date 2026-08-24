@@ -239,7 +239,7 @@ Window sign test, K=5, one season:
 
 | feature | windows favourable | sign-test p | pooled Δ | tier |
 |---|---|---|---|---|
-| **FRV** | **4 / 5** | 0.188 | −0.00087 | not yet — 1 window short |
+| **FRV** | **4 / 5** | 0.188 | −0.00087 | no — fails the window test |
 | park_neutral | 3 / 5 | 0.500 | −0.00055 | not yet |
 | hand_conditional | 2 / 5 | 0.813 | +0.00009 | **Tier 4 — directionally worse** |
 
@@ -253,10 +253,16 @@ hand_conditional  W1 -0.00044  W2 +0.00027  W3 -0.00043  W4 +0.00026  W5 +0.0007
 
 **Nothing clears the bar yet — and that is the point.** The standard is
 meetable but currently unmet, which is what a working gate looks like.
-FRV is the live candidate: one window short, and it carries the largest
+FRV is the unresolved candidate: it fails the window test, and it carries the largest
 edge-slope improvement measured anywhere (−0.313 → −0.218). Under the
-proposed standard it needs roughly **3–4 more favourable windows**, i.e.
-re-evaluate after another ~500–600 games rather than on a calendar date.
+proposed standard it should be **re-evaluated after another ~500–600
+games** rather than on a calendar date.
+
+> *Softened 2026-08-24: this read "it needs roughly 3–4 more favourable
+> windows". That quantifies a distance to the bar using a statistic that
+> does not support it — same-n resamples give 2/5, 3/5 and 4/5 on this
+> feature at n~350. The accumulate-more-games recommendation stands; the
+> arithmetic of how many windows remain does not.*
 
 **Recommended registry change:** replace `window_end` calendar dates
 with **window counts**. A gate should close when the evidence is in, not

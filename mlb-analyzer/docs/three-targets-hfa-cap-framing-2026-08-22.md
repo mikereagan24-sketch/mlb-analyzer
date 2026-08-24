@@ -314,8 +314,10 @@ again:
 - `docs/component-signal-diagnostic-2026-08-23.md`
 
 **FRV is the one to re-run first**, because framing and fielding are the
-two caller-populated defensive inputs and its evaluation is the live
-gate candidate at 4/5 windows.
+two caller-populated defensive inputs and its evaluation is the gate
+candidate closest to a decision.
+
+> *Softened 2026-08-24: this read "one window short". The window sign test is not precise to one window at n~350 -- same-n resamples of the same corpus give 2/5, 3/5 and 4/5 on this feature -- so the count is a pass/fail, not a distance. See CLAUDE.md "The window sign test is not precise at n~350".*
 
 Not done here — flagged rather than silently re-run, so the numbers on
 those pages are not quietly replaced underneath their conclusions.

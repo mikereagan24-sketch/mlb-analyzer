@@ -12,6 +12,14 @@
 > is the right instrument for a suppression mechanism) and its 8pp level
 > is now measured as the worst of nine tested. Running count:
 > **14 current / 8 known-invalid / 49 never evaluated.**
+>
+> **UPDATE 2026-08-24 — `CATCHER_FRAMING_MUTE` MOVES BACK.** Its
+> evaluation ran against framing data frozen since 2026-06-03. On fresh
+> data the five-metric result does not reproduce (3 of 5, Δ +0.00002,
+> n/s). **1.0 has no supporting evidence in either direction** — it is
+> held by inertia, not by argument. Running count:
+> **13 current / 8 known-invalid / 50 never evaluated.**
+> See `docs/decontaminated-rerun-corrected-2026-08-24.md` §3c.
 
 Scope: everything `getSettings()` hands `runModel`. "Evidence" means an
 argument that the value is *right*, not a record that it *is* the value —
@@ -99,9 +107,13 @@ the only axis it can move. **Keep. Moved to section A.**
 the threshold value 60 itself was never justified.
 
 **Framing / defense mutes** — `CATCHER_FRAMING_MUTE` **1.0**
-(**EVALUATED 2026-08-22**: better than the schema default 0.65 on all
-five metrics; Δ -0.00007, not significant. Divergence is benign — keep
-1.0 and align the schema default) ·
+(**RETRACTED TO UNEVALUATED 2026-08-24.** The 2026-08-22 evaluation was
+measured against a `catcher_framing` table last written 2026-06-03 — 82
+days stale, because nothing scheduled the refresh job. Re-measured on
+fresh framing: 1.0 is better on **3 of 5** metrics, not 5 of 5 — worse
+on log loss and Brier. Δ = +0.00002, CI [-0.00061, +0.00067].
+**1.0 has no supporting evidence in either direction. It stays at 1.0 by
+inertia, not by argument, and must not be quoted as validated.**) ·
 `CATCHER_FRAMING_TAKES_PER_GAME` 58 · `CATCHER_FRAMING_ABS_FACTOR` 0.8 ·
 `CATCHER_FRAMING_MIN_PITCHES_2026` 750 · `DEFENSE_FRV_MUTE` 0.5 ·
 `DEFENSE_FRV_OPPS_PER_GAME` 25
@@ -161,7 +173,11 @@ Two things follow, and they point opposite ways:
 - **`HFA_BOOST`** — cheapest possible check, and the underlying effect is
   not established.
 - **`CATCHER_FRAMING_MUTE` = 1.0 vs default 0.65** — an unexplained live
-  divergence, one A/B away from an answer.
+  divergence. A/B'd twice now (2026-08-22 on stale framing, 2026-08-24 on
+  fresh) and **indistinguishable both times**. The open item is no longer
+  "run the A/B" — it is that at n=349 this A/B cannot separate the two
+  values at all, so the divergence stays unexplained until the corpus
+  supports a mean |Δp| of 0.0024.
 - Leave the rest recorded-as-unexamined. The ledger's value is that the
   list now exists and the gate health check reports on it.
 

@@ -278,6 +278,27 @@ two runs, so freshness and power moved together. What can be said without
 untangling them is that **the five-metric argument is gone and the honest
 status is "indistinguishable"**.
 
+### Say it plainly: 1.0 is held by inertia
+
+**`CATCHER_FRAMING_MUTE = 1.0` has no supporting evidence in either
+direction.** Not "weak support", not "directionally favourable" — none.
+The only argument that ever existed for it was the five-metric sweep of
+2026-08-22, and that sweep was of an input frozen since 2026-06-03. On
+fresh data it does not reproduce.
+
+It stays at 1.0 **because nothing argues for moving it**, which is
+inertia, not an argument. Recorded explicitly so that the 2026-08-22
+sentence "better on all five metrics" does not get quoted back as
+validation. The provenance ledger moves it from *current evidence* back
+to *never evaluated*.
+
+Worth noting what it would take to settle: the flag moves p(home) on
+100% of games with mean |Δp| = **0.0024**. At n=349 that is far below
+what this A/B can resolve. **The open item is not "run the A/B again"
+— it has been run twice. It is that the corpus cannot separate 0.65
+from 1.0 at all**, and re-running it on the same n will keep producing
+the same non-answer.
+
 **Recommendation unchanged in action, changed in justification:** leave
 production at 1.0 because nothing argues for moving it, not because it was
 shown better. The schema-default alignment recommended on 2026-08-22 still
@@ -344,3 +365,70 @@ would have been reported as a result.**
 - `docs/the-outage-that-was-not-2026-08-24.md` — why the corpus was wrong.
 - `scripts/contamination-impact.js` — the four-arm harness.
 - `services/parameter-sweep.js` — `includeWeatherContaminated`, the missing opt-out.
+
+## Deploy and production verification (2026-08-24)
+
+**Deployed.** `/health` on production returns the freshness registry with
+the `#287` note text (`"scheduled daily in the 6AM chain from
+2026-08-24"`), which is the marker that the framing cron shipped.
+
+Production freshness right now, unauthenticated:
+
+```
+cron_log                    2026-08-24   ok
+game_log slate              2026-08-25   ok
+game_log scored             2026-08-23   ok
+pitcher_game_log            2026-08-23   ok
+woba_data_snapshot          2026-08-24   ok
+empirical_market_captures   2026-08-24   ok
+bet_signals                 2026-08-24   ok
+team_rosters                2026-08-24   ok
+fielding_frv                2026-08-24   ok
+catcher_framing             2026-06-03   CRITICAL  (+82d)
+
+status: critical
+status_reason: pipeline_freshness: 1 pipeline(s) critical
+```
+
+**The check is working on production and is reporting the one real
+problem.** Nine green, one critical, and the critical one is genuine.
+
+### Production framing is still 82 days stale, and will be until 6AM PT
+
+The cron is deployed but the 6AM PT chain already ran today, so **the first
+scheduled framing refresh is 2026-08-25 06:00 PT**. The local analysis copy
+was refreshed by hand; production was not.
+
+I tried to close the gap today by POSTing `/api/jobs/catcher-framing` —
+the same job the cron now runs — and was blocked from making the call.
+It is not done.
+
+### How to verify, with no credential
+
+`/health` is public. After 2026-08-25 06:00 PT:
+
+```
+curl -s https://mlb-analyzer.onrender.com/health \
+  | grep -o '"key":"catcher_framing"[^}]*'
+```
+
+- **`"last":"2026-08-25"`** → the cron fired. `status` should drop from
+  `critical` to `ok` with `pipeline_freshness` gone from `status_reason`.
+- **`"last":"2026-06-03"`** → it did not fire, and the wiring needs
+  looking at rather than the data.
+
+Because the local copy was refreshed by hand on 08-24 and production was
+not, the two dates are distinguishable: a production `last` of **08-25**
+can only have come from the scheduled run.
+
+### The admin token was rotated mid-session
+
+The value used earlier today for `/api/admin/download-db` and
+`/api/admin/query` now returns **401** on every admin endpoint. That is why
+the manual trigger was not attempted a second way and why re-downloading
+production is no longer possible from here.
+
+Also corrected: I described that token as **"committed in plaintext"**.
+It was not. `refresh-db.sh` is at `.gitignore:22` with no git history —
+an untracked local file. The credential-in-a-file concern stands; the
+"in version control" part was wrong.
