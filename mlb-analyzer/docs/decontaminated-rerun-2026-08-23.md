@@ -94,7 +94,7 @@ demonstrably better than a constant, not demonstrably worse than the
 market on this window, and its claimed edge remains demonstrably
 dishonest (CI excludes 1.0 on both corpora).
 
-## 2. FRV — the live gate candidate
+## 2. FRV — an unresolved gate candidate
 
 | | contaminated | clean |
 |---|---|---|
@@ -103,8 +103,9 @@ dishonest (CI excludes 1.0 on both corpora).
 | windows | **4 / 5** | **4 / 5** |
 | edge slope OFF→ON | −0.243 → −0.153 | −0.120 → −0.030 |
 
-**Verdict unchanged: still exactly one window short of Tier 2. Do not
-enable.**
+**Verdict unchanged: does not clear Tier 2. Do not enable.**
+
+> *Softened 2026-08-24: this read "one window short". The window sign test is not precise to one window at n~350 -- same-n resamples of the same corpus give 2/5, 3/5 and 4/5 on this feature -- so the count is a pass/fail, not a distance. See CLAUDE.md "The window sign test is not precise at n~350".*
 
 The delta is essentially identical (−0.00092 → −0.00088) while the CI
 widened by 0.0002 on the upper side — textbook power, not a change in the
@@ -197,7 +198,7 @@ not a new fact about the market.
 | model − market | no | narrowed as predicted, inside control |
 | model − base | no | inside control |
 | edge slope | no | halved, but well inside control |
-| **FRV** | **no** | 4/5 both; CI widened only |
+| **FRV** | **no** | fails the window test on both; CI widened only |
 | park_neutral | no | 3/5 both |
 | hand_conditional | no | 2/5 both, Tier 4 |
 | W_PIT sweep | no | prod still unbeaten; 1 fewer value ruled out (power) |

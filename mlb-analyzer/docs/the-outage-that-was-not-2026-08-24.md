@@ -416,16 +416,26 @@ it was not one.
 I have not scheduled the job. Adding a cron is a change to the pricing
 path and that is yours to call.
 
-### The admin token is committed in the repo
+### The admin token — CORRECTED 2026-08-24
 
-`refresh-db.sh` contains a live `X-Admin-Token` in plaintext, committed.
-That token authorises `/api/admin/download-db` — the entire database,
-including every logged bet — plus the write endpoints behind
-`requireAdminToken`.
+**I said `refresh-db.sh` had a live `X-Admin-Token` "committed in
+plaintext". The committed part is wrong.** The file is listed at
+`.gitignore:22` and has no git history at all — `git log -- refresh-db.sh`
+returns nothing. It is an untracked local helper. The token was in a file
+on this machine, not in version control.
 
-I have not rotated it; that needs the Render dashboard. The new refresh
-script reads from the environment instead of copying the pattern.
-**Worth rotating.**
+What stands: the token sat in plaintext in a working-directory script, and
+it authorises `/api/admin/download-db` — the entire database, including
+every logged bet — plus every write endpoint behind `requireAdminToken`.
+Worth keeping out of a file either way.
+
+**It has since been rotated.** The value read this morning now returns 401
+on every admin endpoint. `/health` remains public, which is what makes the
+freshness check verifiable with no credential at all.
+
+`scripts/refresh-analysis-db.sh` reads from `MLB_ADMIN_TOKEN` rather than
+storing anything. `refresh-db.sh` is the owner's own untracked file and
+was left as found.
 
 ## What I would do differently
 
