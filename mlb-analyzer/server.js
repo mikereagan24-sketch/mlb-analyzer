@@ -246,6 +246,42 @@ app.get('/health', (req, res) => {
   } catch (e) {
     out.woba_freshness_error = e && e.message || String(e);
   }
+
+  // Ingest freshness across every pipeline, not just the wOBA upload.
+  // woba_freshness above covers ONE input; scores, pitcher logs, market
+  // captures, rosters and the slate itself had no equivalent, and on
+  // 2026-08-23 an eighteen-day-stale analysis copy was mistaken for a
+  // production outage because there was nothing to look up. Same registry
+  // the 6AM cron logs, surfaced here so the answer is one GET away.
+  //
+  // Severity: CRITICAL escalates status to 'critical', STALE to
+  // 'degraded' -- matching the woba_freshness precedence above.
+  try {
+    const { checkPipelineFreshness } = require('./utils/pipeline-freshness');
+    const { db } = require('./db/schema');
+    const fr = checkPipelineFreshness(db);
+    out.pipeline_freshness = {
+      as_of: fr.asOf,
+      checked: fr.rows.length,
+      critical: fr.rows.filter(r => r.level === 'CRITICAL').map(r => ({
+        pipeline: r.key, last: r.last, days_beyond_normal_lag: r.excess })),
+      stale: fr.rows.filter(r => r.level === 'STALE').map(r => ({
+        pipeline: r.key, last: r.last, days_beyond_normal_lag: r.excess })),
+      per_pipeline: fr.rows,
+    };
+    if (fr.crit > 0) {
+      out.status = 'critical';
+      out.status_reason = (out.status_reason ? out.status_reason + '; ' : '')
+        + 'pipeline_freshness: ' + fr.crit + ' pipeline(s) critical'
+        + (fr.warn ? ', ' + fr.warn + ' stale' : '');
+    } else if (fr.warn > 0) {
+      if (out.status !== 'critical') out.status = 'degraded';
+      out.status_reason = (out.status_reason ? out.status_reason + '; ' : '')
+        + 'pipeline_freshness: ' + fr.warn + ' pipeline(s) stale';
+    }
+  } catch (e) {
+    out.pipeline_freshness_error = e && e.message || String(e);
+  }
   // Park-map coverage check. Any scheduled game whose home key doesn't
   // resolve in services/weather.js PARKS silently no_park-skips in
   // runWeatherJob — buries the failure in cron_log skip_reasons where

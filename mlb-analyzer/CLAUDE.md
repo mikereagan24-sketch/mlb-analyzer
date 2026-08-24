@@ -583,6 +583,71 @@ into a write-up as a defect.
 Same family as the timestamp rule above: the failure is silent by
 construction, and the wrong conclusion it produces is a plausible one.
 
+## Know which database you are measuring (2026-08-24)
+
+**`data/mlb.db` is not production.** It is a separately-evolved local
+copy, and on 2026-08-24 the two disagreed on `temp_f` for **1586 of 1678
+shared games** and on `model_total` for **1595** — median disagreement
+**0.33 runs**, which is larger than most effects measured against it.
+Production carried a weather-hour correction backfilled around 2026-07-30
+that the local copy never received; the local copy carried a week of
+remediation that production never received.
+
+### The rule
+
+**Run `node scripts/pipeline-freshness.js` before measuring anything.**
+It takes under a second and prints the last-arrival date of every ingest
+pipeline. Exit code 1 on anything CRITICAL, so it can gate a script.
+
+To settle "is production broken or is my copy old", compare them:
+
+```
+node scripts/pipeline-freshness.js --compare data/mlb.db.prod-YYYYMMDD
+```
+
+The verdict line is the point. **Direction is what distinguishes the two
+cases, not staleness.** If the reference is newer everywhere they differ,
+it is a stale copy. If each is newer somewhere, they have **DIVERGED** and
+neither is a superset — reconcile before overwriting either, or work
+disappears silently in whichever direction you copy.
+
+### What this cost
+
+An entire day of 2026-08-23 was measured against a corpus that ended
+2026-08-06 and nothing said so. The staleness was then **reported to the
+owner as a production outage** — "scores, pitcher logs, wOBA snapshots and
+market captures all stopped", "signals still emitting on 17-day-old batter
+data". Production was healthy throughout: complete, fully-scored, current
+to the hour. The exposure was zero.
+
+Both halves of that failure were one query away. The evidence used to
+raise the alarm — `MAX(game_date)` per table — was correct for the file
+being read and said nothing at all about the system it was blamed on.
+
+### Never conclude an outage from a local DB alone
+
+A `MAX(date)` on a copy measures **the copy's vintage**, not the health of
+the thing that produced it. Before reporting that a pipeline stopped:
+
+1. run the freshness check against **production**, via
+   `/health` (`pipeline_freshness`) or a dated download;
+2. check whether the *process* is even running locally — no server, no
+   `node-cron`, so no cron chain, and that is a property of the laptop;
+3. distinguish **rows written by a scheduler** from **rows written by
+   someone opening the app**. Two brief manual runs on 2026-08-11 and
+   2026-08-22 left `game_log` rows dated 08-12 and 08-23 in the local
+   copy, which is what made a dead local server look like a *partially*
+   working pipeline. It was not partially working; it was off.
+
+### Refreshing the copy
+
+Use `scripts/refresh-analysis-db.sh` — it downloads to a dated file,
+integrity-checks before promoting, backs up the current copy, and
+**re-applies the local-only remediation**, which is the step that is easy
+to forget. Everything the remediation scripts write is local-only:
+production has the schema but not the data, so a naive refresh silently
+reverts all of it.
+
 ## Review checklist — re-run these, do not trust a past clean result (2026-08-23)
 
 These are cheap, they are re-runnable, and every one of them exists
@@ -595,6 +660,19 @@ current tree.**
 | **Read endpoints that write** | `node scripts/audit-get-mutations.js` | a `GET` that mutates — invisible until someone notices data that changed with no edit |
 | **Settings the model cannot see** | runs in the 6AM cron; `utils/settings-sync-check.js` | a schema key never mapped into `getSettings()`, i.e. a tunable with no effect |
 | **Gate windows that elapsed silently** | runs in the 6AM cron; `services/feature-gate-registry.js` | a feature dark past its own evaluation window |
+| **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
+
+### When to re-run the freshness check
+
+**Before any measurement, and it is the first thing to run when a number
+looks wrong.** Anything CRITICAL means the corpus is not what you think it
+is, and every result computed on it is about a different dataset than the
+one you meant to study.
+
+`catcher_framing` reports CRITICAL on production as of 2026-08-24 —
+last refreshed **2026-06-03, 82 days**. No cron refreshes it; it is
+fetched by hand. That is a real finding the check surfaced on its first
+run, and it is unresolved.
 
 ### When to re-run the GET-mutation scan
 

@@ -1,4 +1,4 @@
-# Horizon, source, coverage — and a pipeline that stopped 18 days ago (2026-08-24)
+# Horizon, source, coverage — and an outage that was not one (2026-08-24)
 
 > **The coverage gap does not exist. Coverage on completed games since
 > capture began is 100.00%.** My recommendation to pursue it was wrong.
@@ -7,9 +7,14 @@
 > at all** — which corrects yesterday's conclusion that forward capture is
 > no longer a priority. It is, for the horizon that has never been captured.
 >
-> **And, found while checking: scores, pitcher logs, wOBA snapshots and
-> market captures all stopped around 2026-08-06.** Signals are still
-> emitting. That is the urgent item on this page.
+> **RETRACTED, same day — §4 below was wrong.** I reported that scores,
+> pitcher logs, wOBA snapshots and market captures "all stopped around
+> 2026-08-06" and that signals were still emitting against them. **There
+> was no outage.** Production is complete, fully scored and current to the
+> hour; the stale thing was the local analysis copy I was reading.
+> Exposure was zero. Kept below with the retraction inline rather than
+> deleted, because the reasoning error is the reusable part.
+> See `docs/the-outage-that-was-not-2026-08-24.md`.
 
 ## (1) Horizon — no split, and it is all next-day
 
@@ -97,7 +102,35 @@ now has almost no population to test it on, which is the right outcome.
 and wrong in a way I could have caught yesterday by splitting the 18.1% by
 month before recommending anything.
 
-## (4) The thing that actually needs attention
+## (4) The thing that actually needs attention — RETRACTED 2026-08-24
+
+> **This section is wrong and is kept only as a record of how.**
+>
+> Every table below is a `MAX(date)` taken from `data/mlb.db`, a LOCAL
+> analysis copy. It measures **the copy's vintage**, and I presented it as
+> the health of the system that produced it. Production was healthy the
+> whole time: `/health` returned `status: ok` with wOBA uploaded 0.9 hours
+> earlier, and `game_log` is complete and fully scored for every date I
+> listed as missing.
+>
+> The two "still current" rows are the giveaway I misread. `bet_signals`
+> and `game_log` looked current by `MAX(game_date)` because the app was
+> opened by hand on 08-11 and 08-22, writing next-day rows. By
+> `created_at`, nothing was written locally after 2026-08-07. The local
+> server was not partially working — it was off.
+>
+> **Blast radius was zero**: the eight signals emitted locally on stale
+> wOBA had NULL `bet_line`, NULL `bet_price` and NULL `bet_locked_at`, and
+> production's last logged bet is 2026-08-24.
+>
+> The freshness check recommended at the end of this section was built and
+> is now in the 6AM cron, on `/health`, and in
+> `scripts/pipeline-freshness.js`. It reports the same numbers — and its
+> `--compare` mode says **"STALE COPY, not an outage"**, which is the
+> distinction this page failed to draw.
+>
+> Full correction: `docs/the-outage-that-was-not-2026-08-24.md`.
+
 
 Found while establishing that the August misses were an unplayed slate.
 
