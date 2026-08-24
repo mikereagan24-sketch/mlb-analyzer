@@ -1,5 +1,23 @@
 # Lineup accuracy and model impact — measured today, not in six weeks (2026-08-23)
 
+> ---
+> **CORRECTION 2026-08-24 — these numbers are the NEXT-DAY horizon only.**
+> `proj_lineup_captured_at` has no horizon spread: median lead **32.2h**,
+> p5 25.3h, p95 35.7h, captures at 14:00 UTC from
+> `daily-lineups.php?date=tomorrow`. **Essentially zero same-day captures**
+> (2 of 1357).
+>
+> So exact-slot 52.5%, roster 85.5% and the 0.130-run median impact are the
+> **worst-case horizon**, not an average. Same-day has never been captured,
+> which means forward capture IS still warranted for that horizon —
+> correcting this page's conclusion that it was no longer a priority.
+>
+> Also corrected: the 18.1% coverage gap is a startup artifact. Coverage on
+> completed games since capture began (2026-04-27) is **100.00%**.
+> See `docs/lineup-horizon-coverage-and-a-stale-pipeline-2026-08-24.md`.
+> ---
+
+
 > **The historical comparison was already possible. Forward capture was
 > not needed and is no longer the priority.**
 >
