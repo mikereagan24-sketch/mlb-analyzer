@@ -6176,6 +6176,51 @@ async function runParkFactorsJob(opts) {
   }
 }
 
+// Self-heal the park_factors table. (2026-08-25)
+//
+// WHY THIS WAS NEEDED IMMEDIATELY. The table shipped empty: schema creates
+// it at boot, but the ingest was scheduled monthly, so production came up
+// with ZERO rows and the freshness check correctly reported
+// 'no rows at all'. With an empty table resolveParkFactor returns null,
+// every newly-scraped game gets park_factor NULL, and the model's
+// `game.park_factor || 1.0` prices it as a NEUTRAL PARK -- COL at 1.00
+// instead of 1.25. A monthly cron with no bootstrap means the first month
+// runs on neutral parks.
+//
+// So: on every boot, top up if the table is empty or older than
+// maxAgeDays. Also covers a missed monthly run, which is the same hole
+// one cycle later. Cheap -- one HTTP request against a table that changes
+// monthly -- and skipped entirely when the data is current.
+async function runParkFactorsJobIfStale(maxAgeDays = 30) {
+  try {
+    const n = q.countParkFactors ? q.countParkFactors.get() : 0;
+    if (n > 0) {
+      const row = db.prepare('SELECT MAX(pulled_at) AS last FROM park_factors').get();
+      const last = row && row.last;
+      if (last) {
+        // SQLite datetime('now') is UTC 'YYYY-MM-DD HH:MM:SS'.
+        const t = Date.parse(String(last).replace(' ', 'T') + 'Z');
+        if (!isNaN(t)) {
+          const ageDays = (Date.now() - t) / 86400000;
+          if (ageDays < maxAgeDays) {
+            console.log('[park-factors] skip: pulled ' + ageDays.toFixed(1)
+              + 'd ago (< ' + maxAgeDays + 'd), ' + n + ' teams');
+            return { success: true, skipped: true, ageDays: +ageDays.toFixed(2), teams: n };
+          }
+          console.log('[park-factors] top-up: last pull ' + ageDays.toFixed(1) + 'd ago');
+        }
+      }
+    } else {
+      console.log('[park-factors] table is EMPTY -- bootstrapping now rather than'
+        + ' waiting for the monthly cron; an empty table prices every park as neutral');
+    }
+    return await runParkFactorsJob();
+  } catch (e) {
+    console.error('[park-factors] top-up failed: ' + (e && e.message));
+    return { success: false, error: e && e.message };
+  }
+}
+
 async function runCatcherFramingJob(year) {
   console.log('[framing] fetching Savant catcher-framing leaderboard...');
   try {
@@ -6965,4 +7010,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runParkFactorsJob, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

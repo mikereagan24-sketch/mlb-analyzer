@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { startCronJobs, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
+const { startCronJobs, runParkFactorsJobIfStale, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
 
 // One-shot row migrations. db/schema.js's require() opened the DB and
 // ran its schema migrations (CREATE TABLE IF NOT EXISTS, idempotent
@@ -367,7 +367,16 @@ try {
   const byTeam = {};
   for (const r of q.listParkFactors.all()) byTeam[r.team] = r;
   const chk = pf.assertAllTeamsResolve(byTeam);
-  if (!chk.ok) {
+  const isEmpty = Object.keys(byTeam).length === 0;
+  if (isEmpty) {
+    // EMPTY and PARTIAL are different problems. Empty is expected exactly
+    // once -- first boot on a new database -- and self-heals via the
+    // top-up above. Partial means something wrote a subset, which the
+    // ingest refuses to do, so it points at a writer outside the job.
+    console.warn('[boot][park-factors] table is EMPTY -- the startup top-up will'
+      + ' bootstrap it. Until it completes, newly-scraped games get a NULL'
+      + ' park_factor and price as a neutral park.');
+  } else if (!chk.ok) {
     console.error('[boot][park-factors] *** ' + chk.missing.length + ' of ' + chk.checked
       + ' TEAMS HAVE NO PARK FACTOR: ' + chk.missing.join(', ') + ' ***');
     console.error('[boot][park-factors]     Games at those parks will be written with a NULL'
@@ -394,6 +403,16 @@ app.listen(PORT, () => {
   // sit at last-cron-state until the following morning. Failure here must
   // not block the listen() callback returning, so the call is fire-and-forget.
   runRosterJob().catch(e => console.warn('[startup-roster] failed:', e && e.message));
+
+  // One-shot park-factor top-up. Runs if the table is EMPTY or older than
+  // 30 days. The table shipped empty on 2026-08-25 because the ingest was
+  // scheduled monthly with no bootstrap, so production came up with zero
+  // rows -- and an empty park_factors makes resolveParkFactor return null,
+  // which makes the model price every park as NEUTRAL (COL 1.00 instead of
+  // 1.25) until the first cron fires. A monthly job needs a boot path or
+  // its first month runs on nothing. Fire-and-forget, like the roster pull.
+  runParkFactorsJobIfStale()
+    .catch(e => console.warn('[startup-park-factors] failed:', e && e.message));
 
   // One-shot pitcher_game_log backfill (PR A). Self-gating via the
   // 'pitcher_usage_backfill_done' app_settings flag — runs at most once

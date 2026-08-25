@@ -48,7 +48,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
+const { runParkFactorsJob, runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats, weightOr } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -2013,6 +2013,30 @@ router.get('/admin/roster/per-team-status', requireAdminToken, async (req, res) 
 });
 
 // Catcher framing ingest: pull Savant leaderboard → catcher_framing table.
+// Park factors: pull Savant index_runs into the park_factors table.
+// (2026-08-25)
+//
+// EXISTS SO THE SCHEDULED PATH CAN BE PROVEN WITHOUT WAITING FOR IT. The
+// cron is monthly (0 5 1 * *), so a broken ingest would go unnoticed for
+// up to four weeks. This runs the SAME function the cron calls, on the
+// server, so 'does it work on Render' is answerable on deploy day rather
+// than on the 1st.
+router.post('/jobs/park-factors', requireAdminToken, async (req, res) => {
+  console.log('[api] park-factors job fired');
+  try {
+    const result = await runParkFactorsJob(req.body && req.body.params);
+    res.status(result && result.success ? 200 : 500).json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Read the table back, including provenance. No token: it is public
+// reference data, and being able to SEE the pull date and source url
+// without credentials is the point of storing them.
+router.get('/park-factors', (req, res) => {
+  try { res.json(q.listParkFactors.all()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/jobs/catcher-framing', requireAdminToken, async (req, res) => {
   console.log('[api] catcher-framing job fired');
   try {
