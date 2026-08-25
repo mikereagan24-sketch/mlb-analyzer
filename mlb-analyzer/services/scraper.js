@@ -103,18 +103,23 @@ function loadParkFactors(force) {
   return require('./park-factors').loadParkFactors(force);
 }
 
+// Returns {pf, source} rather than a bare number (2026-08-25), so the
+// write site can stamp game_log.park_factor_source without duplicating this
+// branch. Duplicating it is how computeFramingRvPerGame reached nine copies.
+// Only one caller reads the value; the shape change is contained.
 function resolveParkFactor(team, gameDate, parkFactorsMap) {
   const hit = pickVenueOverride(team, gameDate);
-  if (hit) return hit.pf;
+  if (hit) return { pf: hit.pf, source: 'venue_override' };
   const v = parkFactorsMap && parkFactorsMap[team];
-  if (v != null && isFinite(v) && v > 0) return v;
+  if (v != null && isFinite(v) && v > 0) {
+    return { pf: v, source: require('./park-factors').SOURCE_NAME };
+  }
   // NO SILENT 1.0. A missing team used to fall through to the neutral park,
-  // which is a plausible-looking number that nothing downstream could
-  // distinguish from real data. Return null so the column is NULL and the
-  // gap is countable, and say so loudly at the write site.
+  // a plausible-looking number nothing downstream could distinguish from
+  // real data. NULL makes the gap countable.
   console.warn('[park-factor] NO FACTOR for team "' + team + '" on ' + gameDate
     + ' -- writing NULL rather than 1.0. Check park_factors (runParkFactorsJob).');
-  return null;
+  return { pf: null, source: null };
 }
 
 function htmlToText(html) {
@@ -424,7 +429,8 @@ function parseLineupsHtml(html, dateStr) {
       // first; falls back to PARK_FACTORS[homeTeam] || 1.0. dateStr
       // is the parseLineupsHtml date arg in scope here. See
       // VENUE_OVERRIDES at module top for the full mechanism.
-      park_factor: resolveParkFactor(homeTeam, dateStr, PARK_FACTORS),
+      park_factor: resolveParkFactor(homeTeam, dateStr, PARK_FACTORS).pf,
+      park_factor_source: resolveParkFactor(homeTeam, dateStr, PARK_FACTORS).source,
       away_lineup: parsePlayers('is-visit'),
       home_lineup: parsePlayers('is-home'),
     });

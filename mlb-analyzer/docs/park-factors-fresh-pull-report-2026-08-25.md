@@ -501,3 +501,53 @@ both the scraper (write path) and the model (read path). Two cached copies
 of the value that decides whether a game prices on a real park would drift,
 and the drift would be invisible.
 
+
+---
+
+# The regime boundary, recorded as a column (2026-08-25)
+
+`park_factor` is persisted at scrape time and post-lock immutable, so the
+switch to Savant `index_runs` does **not** reach existing rows. Any
+corpus-wide analysis crosses a **park-factor regime boundary** — the same
+class as the v6/v7 cohort split, and a larger discontinuity than either
+contamination class: 24 of 30 teams changed, by up to 0.17.
+
+## `game_log.park_factor_source`
+
+```
+legacy_unsourced           1436   <- the boundary matters here
+unchanged_either_regime     429   <- team's factor did not move; unaffected
+venue_override               10   <- an override supplied it; neither table
+savant_index_runs             1
+                           ----
+                           1876   rows with a factor but no source: 0
+```
+
+`loadGames` carries it through, so every harness that already sees the
+contamination reasons now sees this too — 381 games on the standard
+calibration window split 318 legacy / 62 unchanged / 1 override.
+
+## Classified by comparison, not by date
+
+The tag comes from checking the stored value against **both** tables. A
+date would be a proxy for *when the row was scraped*, which is recorded
+nowhere — and rows for future games scraped before the cutover carry
+legacy values despite a later `game_date`, so the date proxy would
+mislabel exactly the rows most likely to matter.
+
+`scripts/tag-park-factor-regime.js` is re-runnable and holds the frozen
+legacy table. That is now **the only remaining record of what those 1436
+rows were scored under**, since it is no longer in the source tree.
+
+## The honest denominator
+
+**1436 of 1876**, not 1876. `unchanged_either_regime` rows are identical
+under both tables because their team's factor did not move, so the
+boundary does not apply to them. Reporting the split as "the whole corpus"
+would overstate it by 429 games.
+
+And the legacy side is **unsourced**, not merely old — those values matched
+no source that could be pulled. That is a reason to prefer the
+post-cutover side where a choice exists; it is not a reason to discard the
+earlier games.
+

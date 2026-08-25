@@ -2606,6 +2606,21 @@ db.exec(
   '  pulled_at TEXT NOT NULL' +       // UTC, datetime('now')
   ')'
 );
+// game_log.park_factor_source (2026-08-25). A REGIME MARKER, not a
+// contamination tag -- same shape as the v6/v7 cohort column.
+//
+// park_factor is persisted at scrape time and post-lock immutable, so the
+// 2026-08-25 switch to Savant index_runs does NOT reach existing rows.
+// Any corpus-wide analysis therefore CROSSES A PARK-FACTOR REGIME BOUNDARY,
+// and without a marker the only way to know which side a row is on is to
+// remember the date -- which is precisely the kind of remembered filter
+// this repo keeps getting wrong.
+//
+// Values are classified by COMPARING the stored value against both tables,
+// not by date. The comparison is directly observable; a date is a proxy
+// for when the row was scraped, which is not recorded.
+try { db.exec('ALTER TABLE game_log ADD COLUMN park_factor_source TEXT'); }
+catch (e) { /* already present */ }
 q.upsertParkFactor = db.prepare(
   'INSERT INTO park_factors (team,factor,source,source_url,source_params,year_range,' +
   ' venue_id,venue_name,n_pa,manual_reason,pulled_at) ' +
