@@ -404,3 +404,100 @@ evidence of harmlessness. Future park-factor changes get evaluated on the
 totals target — MAE, RMSE and level — and the note is in CLAUDE.md so the
 next person does not have to rediscover it.
 
+
+---
+
+# Verified in production, and the last silent-neutral removed (2026-08-25)
+
+## The table is populated, with provenance, pulled by Render itself
+
+`GET /api/park-factors` (untokened):
+
+```
+rows 30   sourced 29   manual 1
+pulled_at      2026-08-25 17:53:17   (single value across all 30)
+source_url     baseballsavant.mlb.com/leaderboard/statcast-park-factors?...
+source_params  type=year, year=2026, batSide=(both), stat=index_R,
+               condition=All, rolling=3
+year_range     2024-2026
+ATH manual_reason present, 500 chars
+```
+
+**That timestamp is Render's own.** The boot top-up ran there without a
+manual trigger, which answers the "prove the ingest works on the server"
+question directly — the scheduled path's *function* is exercised, five
+days before the cron would have fired.
+
+## Freshness reads sensibly
+
+```
+park_factors   last 2026-08-25   lag 0   excess 0   ok
+               perRow: oldest 2026-08-25, 0 rows behind newest
+```
+
+Not `null`, not CRITICAL. The check that could never see a source literal
+now reports a real lag on a real timestamp — and the one thing still
+CRITICAL in production is `fielding_frv`, the per-row item left open by
+decision.
+
+## Exposure window: zero
+
+Every game on 2026-08-24, 08-25 and 08-26 checked individually — **40
+games, 0 with a NULL `park_factor`.**
+
+Consistent with the timing: #301 deployed around 17:2x–17:4x UTC and the
+top-up ran at 17:53:17, which in Pacific terms is 10:2x–10:53 AM. No
+scrape cron fires in that gap — lineups run 8AM then noon, odds 8AM then
+11AM — so nothing was written while the table was empty.
+
+**Counted rather than assumed**, per the corrupt-line rule. The reasoning
+above would have been a good guess; it is not evidence.
+
+One thing the check surfaced that is worth stating: existing rows keep
+their **old** factors (ARI 1.10 not 1.08, SF 0.92 not 0.94). `park_factor`
+is persisted at scrape time and post-lock immutable, so **the new values
+apply going forward, not retroactively.** That is the intended behaviour,
+not a gap.
+
+## The consumer no longer discards the resolver's honesty
+
+`resolveParkFactor` returns `null` when it does not know. One line later,
+`model.js` did `game.park_factor || 1.0` — the same silent-neutral pattern,
+turning an honest NULL back into a plausible number.
+
+The chain is now:
+
+```
+venue override  ->  persisted value  ->  the park_factors TABLE  ->  SAY SO
+```
+
+The table read matters for rows scraped before it existed, and for any row
+written during a gap.
+
+When nothing resolves, **two** things happen, because a flag nobody reads
+is the same silence in a different shape:
+
+- **`_parkFactorMissing`** — a flag every harness and backtest can filter
+  on, so an analysis excludes the game instead of averaging a neutral park
+  into its corpus.
+- **`_suppressed: 'no_park_factor'`** — the live path refuses to emit.
+  `getSignals` already returns `[]` on `_suppressed`, so this is a hard
+  refusal, not a note.
+
+Verified on all three paths:
+
+```
+persisted value present            pf-missing=false  suppressed=-
+persisted NULL -> table fallback   pf-missing=false  suppressed=-
+persisted NULL + unknown team      pf-missing=true   suppressed=no_park_factor
+                                   signals emitted: 0
+```
+
+And across the full corpus, **357 games scored, 0 missing, 0 suppressed** —
+the guard does not fire on real data.
+
+`loadParkFactors` now lives once, in `services/park-factors.js`, read by
+both the scraper (write path) and the model (read path). Two cached copies
+of the value that decides whether a game prices on a real park would drift,
+and the drift would be invisible.
+

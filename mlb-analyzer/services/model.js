@@ -1264,10 +1264,39 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const teamDateOverride = !venueIdOverride
     ? pickVenueOverride(game.home_team, game.game_date)
     : null;
+  let pfMissing = false;
   let pf;
   if (venueIdOverride)        pf = venueIdOverride.parkFactor;
   else if (teamDateOverride)  pf = teamDateOverride.pf;
-  else                        pf = (game.park_factor || 1.0);
+  // NO SILENT NEUTRAL. `game.park_factor || 1.0` was the same pattern the
+  // resolver dropped on 2026-08-25: 1.0 is the NEUTRAL PARK, a plausible
+  // number that nothing downstream can tell apart from real data. The
+  // resolver now writes NULL when it does not know, and this line used to
+  // discard that honesty one step later.
+  //
+  // Chain: persisted value -> the park_factors TABLE (authoritative, and
+  // complete by the ingest's own refusal to write a partial set) -> give up
+  // and SAY SO. The table read matters for rows scraped before it existed
+  // and for any row written during a gap.
+  else {
+    const persisted = game.park_factor;
+    if (persisted != null && isFinite(persisted) && persisted > 0) {
+      pf = persisted;
+    } else {
+      let fromTable = null;
+      try {
+        const tbl = require('./park-factors').loadParkFactors();
+        const k = String(game.home_team || '').toUpperCase();
+        if (tbl && isFinite(tbl[k]) && tbl[k] > 0) fromTable = tbl[k];
+      } catch (e) { /* fall through to missing */ }
+      if (fromTable != null) {
+        pf = fromTable;
+      } else {
+        pf = 1.0;
+        pfMissing = true;
+      }
+    }
+  }
   const aRunsRaw = Math.max(0,(aTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
   const hRunsRaw = Math.max(0,(hTeamWoba-WOBA_BASELINE)*RUN_MULT*pf);
   // Catcher framing adjustment. A good framing catcher steals strikes,
@@ -1355,8 +1384,25 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
       + ' away_sp_hand=' + (game.away_sp_hand||'U') + ' home_sp_hand=' + (game.home_sp_hand||'U')
       + ' fallback_side=' + (awayHandUnresolved && homeHandUnresolved ? 'BOTH' : awayHandUnresolved ? 'AWAY_batters' : 'HOME_batters'));
   }
+  // Surface the missing park factor rather than pricing neutral in
+  // silence. Two consumers, deliberately:
+  //   _parkFactorMissing  -- a FLAG every harness and backtest can filter
+  //                          on, so an analysis can exclude these instead
+  //                          of averaging a neutral park into its corpus.
+  //   _suppressed         -- set below, so the LIVE path refuses to emit.
+  // A flag nobody reads is the same silence in a different shape, which is
+  // why the emit path gets a hard refusal and not just a note.
+  if (pfMissing) {
+    console.warn('[model] ' + (game.game_id || '?') + ': NO PARK FACTOR for home team "'
+      + game.home_team + '" -- not in game_log.park_factor, not in the park_factors'
+      + ' table, no venue override. Refusing to emit signals rather than pricing a'
+      + ' neutral park.');
+  }
 
   return { aTeamWoba,hTeamWoba,aRuns,hRuns,rawHW,adjHW,adjAW,aML,hML,estTot,windFactor,windRunAdj,
+    _parkFactorMissing: pfMissing || undefined,
+    _suppressed: pfMissing ? 'no_park_factor' : undefined,
+    _suppressed_detail: pfMissing ? ('home_team=' + game.home_team + ' has no park factor in any source') : undefined,
     // PR 4: per-side SP weights used in this model run. Persisted to
     // game_log.{away,home}_sp_weight_used by processGameSignals so
     // future backtests can replay model with exact weight inputs.

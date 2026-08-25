@@ -182,8 +182,28 @@ function assertAllTeamsResolve(byTeam) {
   return { ok: missing.length === 0, missing, suspicious, checked: REQUIRED_TEAMS.length };
 }
 
+// Cached table read, shared by the SCRAPER (write path) and the MODEL
+// (read path). One home, because two cached copies would drift and this
+// is the value that decides whether a game prices on a real park.
+// Per-process; a restart or an explicit force picks up the monthly refresh.
+let _cache = null;
+function loadParkFactors(force) {
+  if (_cache && !force) return _cache;
+  const out = {};
+  try {
+    const { q } = require('../db/schema');
+    for (const r of q.listParkFactors.all()) {
+      if (r && r.team && isFinite(r.factor) && r.factor > 0) out[r.team] = r.factor;
+    }
+  } catch (e) {
+    console.error('[park-factor] could not read park_factors: ' + (e && e.message));
+  }
+  _cache = out;
+  return out;
+}
+
 module.exports = {
-  fetchSavantParkFactors, assertAllTeamsResolve,
+  fetchSavantParkFactors, assertAllTeamsResolve, loadParkFactors,
   SOURCE_NAME, SOURCE_BASE, SOURCE_PARAMS, sourceUrl, paramString,
   CLUB_TO_ABBR, REQUIRED_TEAMS, MANUAL,
 };
