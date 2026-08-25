@@ -2583,6 +2583,43 @@ q.getFramingByCatcherName = db.prepare(
 // computeFramingRvPerGame (frv-backtest, baserunning-backtest, two scripts,
 // and the inline one in jobs.js), and four of them would keep reading the
 // stale row. Removing it from the live table is enforced by construction.
+// ---------------------------------------------------------------------
+// park_factors (2026-08-25). Moved out of the object literal in
+// services/scraper.js, which sat unrefreshed for 127 days carrying a
+// comment that named a source it did not come from. A literal cannot be
+// seen by the freshness registry; a table with pulled_at can.
+//
+// EVERY provenance field is required in practice, because the failure this
+// replaces was not a wrong number -- it was a number nobody could trace.
+db.exec(
+  'CREATE TABLE IF NOT EXISTS park_factors (' +
+  '  team TEXT PRIMARY KEY,' +
+  '  factor REAL NOT NULL,' +
+  '  source TEXT NOT NULL,' +          // 'baseball_savant_index_runs' | 'manual'
+  '  source_url TEXT,' +
+  '  source_params TEXT,' +           // verbatim query params of the pull
+  '  year_range TEXT,' +              // e.g. '2024-2026'
+  '  venue_id INTEGER,' +
+  '  venue_name TEXT,' +
+  '  n_pa INTEGER,' +                 // sample behind the factor
+  '  manual_reason TEXT,' +           // required when source='manual'
+  '  pulled_at TEXT NOT NULL' +       // UTC, datetime('now')
+  ')'
+);
+q.upsertParkFactor = db.prepare(
+  'INSERT INTO park_factors (team,factor,source,source_url,source_params,year_range,' +
+  ' venue_id,venue_name,n_pa,manual_reason,pulled_at) ' +
+  "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now')) " +
+  'ON CONFLICT(team) DO UPDATE SET factor=excluded.factor, source=excluded.source,' +
+  ' source_url=excluded.source_url, source_params=excluded.source_params,' +
+  ' year_range=excluded.year_range, venue_id=excluded.venue_id,' +
+  ' venue_name=excluded.venue_name, n_pa=excluded.n_pa,' +
+  ' manual_reason=excluded.manual_reason, pulled_at=excluded.pulled_at'
+);
+q.listParkFactors = db.prepare('SELECT * FROM park_factors ORDER BY factor DESC');
+q.getParkFactor = db.prepare('SELECT * FROM park_factors WHERE team=?');
+q.countParkFactors = db.prepare('SELECT COUNT(*) c FROM park_factors').pluck();
+
 q.deleteCatcherFramingById = db.prepare("DELETE FROM catcher_framing WHERE mlb_id=?");
 q.countCatcherFraming = db.prepare("SELECT COUNT(*) c FROM catcher_framing");
 q.listCatcherFraming = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing ORDER BY rv_tot DESC");

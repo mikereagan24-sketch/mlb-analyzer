@@ -170,6 +170,26 @@ const PIPELINES = [
       note: 'a catcher off the leaderboard keeping a frozen rate that still outranks the historical baseline -- exactly the 2026-08-24 defect',
     },
   },
+  {
+    key: 'park_factors',
+    sql: "SELECT MAX(substr(datetime(pulled_at,'-7 hours'),1,10)) v FROM park_factors",
+    // MONTHLY on purpose, so the thresholds are wide on purpose. Savant's
+    // index_runs is a regressed three-season aggregate that barely moves;
+    // what moved by a third of a run in six days in April 2026 was two
+    // humans reading it, not the data. warn at 35d catches a missed monthly
+    // run; crit at 70d catches two.
+    zone: 'UTC-ts', expectedLagDays: 0, warnDays: 35, critDays: 70,
+    note: 'park factor multiplies BOTH teams run estimates on every game; it sat '
+        + '127 days unrefreshed as a source literal before this table existed',
+    perRow: {
+      sql: "SELECT MIN(substr(datetime(pulled_at,'-7 hours'),1,10)) v, "
+         + "SUM(CASE WHEN substr(datetime(pulled_at,'-7 hours'),1,10) < "
+         + "(SELECT MAX(substr(datetime(pulled_at,'-7 hours'),1,10)) FROM park_factors) "
+         + "THEN 1 ELSE 0 END) n FROM park_factors",
+      warnDays: 35, critDays: 70,
+      note: 'a team left behind by a partial pull -- the ingest refuses to write a partial set, so a split here means something wrote outside the job',
+    },
+  },
 ];
 
 /**

@@ -351,6 +351,41 @@ app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+// PARK-FACTOR COMPLETENESS, at boot. (2026-08-25)
+//
+// The failure mode this guards is specific: a team missing from
+// park_factors used to fall through to 1.0 in resolveParkFactor, and 1.0
+// is the NEUTRAL PARK -- a plausible number that nothing downstream can
+// distinguish from real data. resolveParkFactor now returns null and warns,
+// but a NULL discovered at scrape time is already too late for tonight's
+// slate, so the set is checked once at startup while someone is watching.
+//
+// Non-fatal by construction: it must never stop the server from serving.
+try {
+  const { q } = require('./db/schema');
+  const pf = require('./services/park-factors');
+  const byTeam = {};
+  for (const r of q.listParkFactors.all()) byTeam[r.team] = r;
+  const chk = pf.assertAllTeamsResolve(byTeam);
+  if (!chk.ok) {
+    console.error('[boot][park-factors] *** ' + chk.missing.length + ' of ' + chk.checked
+      + ' TEAMS HAVE NO PARK FACTOR: ' + chk.missing.join(', ') + ' ***');
+    console.error('[boot][park-factors]     Games at those parks will be written with a NULL'
+      + ' park_factor and priced as a neutral park. Run runParkFactorsJob.');
+  } else {
+    const oldest = q.listParkFactors.all()
+      .map(r => r.pulled_at).sort()[0] || 'unknown';
+    console.log('[boot][park-factors] OK  ' + chk.checked + ' teams resolve; oldest pull '
+      + String(oldest).slice(0, 10));
+  }
+  if (chk.suspicious && chk.suspicious.length) {
+    console.warn('[boot][park-factors] exactly-1.000 from a non-manual source: '
+      + chk.suspicious.join(', '));
+  }
+} catch (e) {
+  console.warn('[boot][park-factors] check skipped (non-fatal): ' + (e && e.message));
+}
+
 app.listen(PORT, () => {
   console.log(`MLB Analyzer running on port ${PORT}`);
   startCronJobs();

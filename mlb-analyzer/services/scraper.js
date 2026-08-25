@@ -96,10 +96,37 @@ function pickVenueOverride(team, gameDate) {
 // team is unknown). The model.js read path doesn't call this — it
 // uses pickVenueOverride directly so it can fall through to the
 // persisted game.park_factor column as the final fallback.
+// Cached table read. Cached because parseLineupsHtml calls resolveParkFactor
+// once per game and the table changes monthly; the cache is per-process and
+// a restart picks up a refresh.
+let _pfCache = null;
+function loadParkFactors(force) {
+  if (_pfCache && !force) return _pfCache;
+  const out = {};
+  try {
+    const { q } = require('../db/schema');
+    for (const r of q.listParkFactors.all()) {
+      if (r && r.team && isFinite(r.factor) && r.factor > 0) out[r.team] = r.factor;
+    }
+  } catch (e) {
+    console.error('[park-factor] could not read park_factors: ' + (e && e.message));
+  }
+  _pfCache = out;
+  return out;
+}
+
 function resolveParkFactor(team, gameDate, parkFactorsMap) {
   const hit = pickVenueOverride(team, gameDate);
   if (hit) return hit.pf;
-  return (parkFactorsMap && parkFactorsMap[team]) || 1.0;
+  const v = parkFactorsMap && parkFactorsMap[team];
+  if (v != null && isFinite(v) && v > 0) return v;
+  // NO SILENT 1.0. A missing team used to fall through to the neutral park,
+  // which is a plausible-looking number that nothing downstream could
+  // distinguish from real data. Return null so the column is NULL and the
+  // gap is countable, and say so loudly at the write site.
+  console.warn('[park-factor] NO FACTOR for team "' + team + '" on ' + gameDate
+    + ' -- writing NULL rather than 1.0. Check park_factors (runParkFactorsJob).');
+  return null;
 }
 
 function htmlToText(html) {
@@ -292,13 +319,12 @@ function parseLineupsHtml(html, dateStr) {
   //               full seasons of data yet.
   // Every other team uses the straight FanGraphs R factor. Keys are the
   // uppercase abbreviations FanGraphs / scraper produce.
-  const PARK_FACTORS = {
-    COL:1.25, ARI:1.10, CIN:1.10, CHC:1.08, NYY:1.07, BOS:1.06,
-    PHI:1.05, ATL:1.04, CWS:1.03, TEX:1.03, WAS:1.02, TOR:1.02,
-    KC:1.02,  MIA:1.01, LAD:1.00, HOU:1.00, STL:0.99, DET:0.98,
-    TB:0.95,  MIN:0.97, PIT:0.97, LAA:0.97, MIL:0.96, BAL:0.96,
-    CLE:0.95, SEA:0.95, NYM:0.94, SD:0.94,  SF:0.92,  ATH:1.19
-  };
+  // PARK FACTORS now come from the park_factors TABLE, not a literal.
+  // The literal that used to sit here went 127 days unrefreshed carrying a
+  // comment naming a source it did not come from; see services/park-factors.js
+  // and docs/park-factors-fresh-pull-report-2026-08-25.md. A literal cannot
+  // be seen by the freshness registry -- a table with pulled_at can.
+  const PARK_FACTORS = loadParkFactors();
 
   const games = [];
   // Track how many sections we've already seen for each team-pair on this
@@ -1361,4 +1387,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor };
+module.exports = { fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor, loadParkFactors };
