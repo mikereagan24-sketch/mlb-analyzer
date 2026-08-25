@@ -650,27 +650,12 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
         return c ? c.name : '';                        // '' = lineup present but no C
       };
       const framingEnabled = !!(settings && settings.CATCHER_FRAMING_ENABLED);
-      const absFactor = (settings && settings.CATCHER_FRAMING_ABS_FACTOR != null)
-        ? Number(settings.CATCHER_FRAMING_ABS_FACTOR) : 0.80;
-      const min2026 = (settings && settings.CATCHER_FRAMING_MIN_PITCHES_2026 != null)
-        ? Number(settings.CATCHER_FRAMING_MIN_PITCHES_2026) : 750;
-      // Leaguewide shadow-zone called takes per full team-game (~58). This
-      // is the framing-relevant pitch count a STARTING catcher receives in
-      // a complete game — an environmental constant (property of the
-      // pitching/umpiring mix), NOT a per-catcher estimate.
-      const takesPerGame = (settings && settings.CATCHER_FRAMING_TAKES_PER_GAME != null)
-        ? Number(settings.CATCHER_FRAMING_TAKES_PER_GAME) : 58;
-      // Per-game framing runs = per-pitch rate × takes/game. Both rv_tot and
-      // pitches are real Statcast counts (pitches = framing-relevant shadow
-      // takes), so the rate needs no estimate. Per-pitch normalization is
-      // immune to the defensive-replacement / partial-game problem: a
-      // catcher's rate is computed from his actual takes regardless of how
-      // they were distributed across full vs partial games. We then project
-      // tonight's STARTING catcher to a full game's worth of takes.
-      const rate = (rvTot, pitches) => {
-        if (!pitches || pitches <= 0) return null;
-        return (rvTot / pitches) * takesPerGame;
-      };
+      // absFactor / min2026 / takesPerGame / rate() used to be computed
+      // here. They now live in utils/framing-rate.js alongside the
+      // precedence that consumes them -- leaving dead copies behind is how
+      // the 'the floor already governs' comment on fetchCatcherFraming
+      // stayed wrong for four months: a constant that looks load-bearing
+      // and is not.
       // Returns { rv, state }. state ∈ enum documented in
       // db/schema.js's catcher_framing_state column. rv is the raw
       // per-game value before MUTE/ENABLED gating — model.js's
@@ -690,29 +675,26 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
             + ': catcher "' + catcherName + '" did not resolve to a roster mlb_id — no framing applied (check roster / name format)');
           return { rv: null, state: 'no_roster_match' };
         }
-        // Primary: current-season (2026) framing, used as-is (already
-        // post-ABS). Only trusted when it clears the min-pitches floor —
-        // a 200-pitch 2026 sample is noisier than a 3-year baseline.
-        const row = q.getCatcherFramingById.get(mlbId);
-        if (row && row.pitches >= min2026) {
-          return { rv: rate(row.rv_tot, row.pitches), state: 'applied' };
+        // Precedence delegated to utils/framing-rate.js -- ONE
+        // implementation, shared with frv-backtest, baserunning-backtest
+        // and the two framing scripts. It was copied verbatim into all
+        // five, and all five age-blindly preferred a stale current-season
+        // row to a valid three-year baseline (2026-08-24: d'Arnaud priced
+        // off a 946-pitch row last written 2026-05-21).
+        const { framingRateForCatcher } = require('../utils/framing-rate');
+        const fr = framingRateForCatcher(q, mlbId, settings);
+        if (fr.source === 'current') {
+          return { rv: fr.rv, state: 'applied' };
         }
-        // Fallback: 2023-2025 historical baseline, scaled by absFactor to
-        // express pre-ABS values in 2026-equivalent units. Applies when the
-        // 2026 row is missing entirely OR below the min-pitches floor.
-        if (q.getCatcherFramingHistById) {
-          const h = q.getCatcherFramingHistById.get(mlbId);
-          if (h && h.pitches > 0) {
-            const r = rate(h.rv_tot, h.pitches);
-            if (r != null) {
-              if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
-                + ': catcher "' + catcherName + '" (id ' + mlbId + ') low/no 2026 sample — using 2023-25 baseline ×' + absFactor);
-              return { rv: r * absFactor, state: 'applied' };
-            }
-          }
+        if (fr.source === 'historical') {
+          if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
+            + ': catcher "' + catcherName + '" (id ' + mlbId + ') ' + fr.detail
+            + ' -- using 2023-25 baseline');
+          return { rv: fr.rv, state: 'applied' };
         }
         if (framingEnabled) console.warn('[framing] ' + gameRow.game_id + ' ' + team
-          + ': catcher "' + catcherName + '" (id ' + mlbId + ') has no 2026 or historical framing row — no framing applied');
+          + ': catcher "' + catcherName + '" (id ' + mlbId + ') ' + fr.detail
+          + ' -- no framing applied');
         return { rv: null, state: 'no_framing_data' };
       };
       const awayC = findCatcher(gameRow.away_lineup_json);
@@ -6120,6 +6102,43 @@ async function runCatcherFramingJob(year) {
     });
     tx(rows);
     console.log('[framing] upserted ' + applied + '/' + rows.length + ' catchers');
+
+    // RECORD THE OBSERVED CUT, every pull. (2026-08-24)
+    //
+    // Savant's "Qualified" default is a called-pitch threshold that RISES
+    // through the season -- 913 on 2026-05-21, 1,217 on 06-03, 2,271 on
+    // 08-24 -- i.e. a rate rule (share of team innings) expressed in raw
+    // counts. It is not published in the CSV. Anyone reasoning about it
+    // from a single observation will be wrong within weeks, which is
+    // exactly how a 2,081-pitch starter looked like a contradiction.
+    //
+    // minPitches=100 bypasses it, so the cut should no longer matter. This
+    // records the evidence that the bypass is still working: with it, the
+    // smallest row sits near the 100 floor (335 on 2026-08-24). If Savant
+    // ever stops honouring the parameter we fall back to their qualified
+    // set, and the ONLY visible symptom is the minimum jumping into the
+    // thousands while the row count drops. Silent otherwise.
+    const pitchCounts = rows.map(r => Number(r.pitches)).filter(p => isFinite(p) && p > 0);
+    const observedMin = pitchCounts.length ? Math.min.apply(null, pitchCounts) : null;
+    const observedMax = pitchCounts.length ? Math.max.apply(null, pitchCounts) : null;
+    console.log('[framing] pull observability: rows=' + rows.length
+      + '  min_pitches=' + observedMin + '  max_pitches=' + observedMax
+      + '  (minPitches=100 requested)');
+    // The canary. With the bypass working the minimum has never exceeded a
+    // few hundred; the LOWEST qualified cut ever observed was 913. A
+    // minimum at or above that means we are looking at a qualified set.
+    // Known blind spot, stated rather than hidden: very early in a season
+    // the qualified cut itself is below 913, so this would not fire in
+    // April. It is a regression detector for mid-season, not a proof.
+    const BYPASS_CANARY_PITCHES = 900;
+    if (observedMin != null && observedMin >= BYPASS_CANARY_PITCHES) {
+      console.warn('[framing] *** minPitches BYPASS MAY HAVE STOPPED WORKING ***'
+        + '  smallest row is ' + observedMin + ' pitches (>= ' + BYPASS_CANARY_PITCHES + ')'
+        + ' and only ' + rows.length + ' rows came back. That is the shape of the'
+        + ' QUALIFIED set, not the minPitches=100 set. Active starters below the'
+        + ' qualifier are being dropped again -- check the URL in'
+        + ' services/scraper.js fetchCatcherFraming.');
+    }
 
     // PRUNE catchers no longer on the leaderboard. (2026-08-24)
     //
