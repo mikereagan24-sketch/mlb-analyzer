@@ -1,4 +1,26 @@
 # Narrowing the exposure, and tagging it (2026-08-22)
+> ---
+> **TWO FIGURES ON THIS PAGE ARE WITHDRAWN (2026-08-25).**
+>
+> **1. The 15.6% / 284-signal exposure is not comparable to anything
+> measured since.** It was computed on the pre-refresh corpus (1,678
+> games) with a criterion that has since changed. On the corrected corpus
+> the same script tags **219 games** and finds **226 signals with a real
+> price move out of 252 exposed**. Do not carry 15.6% forward.
+>
+> **2. Any claim resting on April-June `created_at` is withdrawn.**
+> `bet_signals.created_at` in those months is NOT an emit time: **433 of
+> ~454 June signals carry `created_at` at hour 01 PT**, a single nightly
+> batch window matching the `auto_delete` / `set_closing_line` crons of
+> that era. Rows were REWRITTEN at 1AM, not emitted then. Read as emit
+> times they produce "87%, 94%, 99.8% of signals priced after first
+> pitch", which is an artifact, not a finding. July onward is
+> interpretable because `updated_at` exists and the hour distribution
+> spreads across the cron schedule.
+>
+> Full re-measurement:
+> `docs/corrupt-feed-and-post-start-recheck-2026-08-25.md`.
+> ---
 
 > **141 of 158 exposed ML signals had a price that actually moved after
 > first pitch. 17 were no-ops.**
