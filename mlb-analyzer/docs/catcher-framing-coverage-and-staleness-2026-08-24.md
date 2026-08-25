@@ -342,3 +342,91 @@ changing the check is a decision, not a cleanup.
 - `services/scraper.js:965` — `fetchCatcherFramingHistorical`, which does pass it, and why.
 - `services/frv-backtest.js:51` — `computeFramingRvPerGame`, the precedence chain.
 - `docs/decontaminated-rerun-corrected-2026-08-24.md` §3c — why MUTE = 1.0 is held by inertia.
+
+## 8. The precedence bug, and why the delete-guard did not cover it (added 2026-08-24)
+
+The prune guard removes rows absent from a fetch. **It only runs when a
+fetch succeeds.** The 82 days this table sat frozen were 82 days with *no
+fetch at all* — so no prune, so nothing removed the stale rows. The guard
+protects against a catcher leaving the leaderboard; it does nothing about
+the ingest stopping.
+
+The read path had the matching hole. The precedence was:
+
+```
+current-season row with pitches >= floor  ->  use it
+else historical 2023-25 row               ->  use it x 0.80
+else                                      ->  null
+```
+
+**The floor checks volume and nothing else.** A row that stops updating
+keeps its pitch count, so it clears the floor forever and keeps
+**outranking a valid three-year baseline**. d'Arnaud: 946 pitches, written
+2026-05-21, still winning on 2026-08-24 because `946 >= 750` and nothing
+asked how old the 946 was.
+
+### Fixed at read time, which is the only place that is safe
+
+`utils/framing-rate.js` now owns the precedence and age-gates the
+current-season row at **30 days**. On the live defect:
+
+```
+stale 946p row, 95d old   ->  historical baseline  +0.0232   (was -0.1298)
+```
+
+A **0.153 runs/game** correction, in the opposite direction.
+
+The threshold is a **constant, not a setting**, deliberately — it is a
+correctness guard, not a tuning knob, and there is no operating regime
+where raising it helps. A row with **no** `updated_at` is treated as
+stale, not fresh: failing open there would reproduce the defect for every
+row predating the column.
+
+### It was nine copies, not five
+
+An earlier note in this repo said `computeFramingRvPerGame` existed "five
+times verbatim". That was an undercount, and the first sweep here
+reproduced it — grepping `min2026` found seven and missed two that had
+renamed the constant. A second sweep on three different keys found the
+rest:
+
+```
+services/frv-backtest.js              services/temp-backtest.js
+services/baserunning-backtest.js      services/under-selection-diagnostic.js
+services/runmult-totals-backtest.js   scripts/framing-frv-per-team-runs.js
+scripts/framing-frv-hindsight-backtest.js
+scripts/backtest-run-environment.js   (renamed locals — missed on pass one)
+services/jobs.js                      (inline, in findCatcher)
+```
+
+All nine now delegate. **When a duplicate can rename its locals, one grep
+is a sample, not a census.**
+
+## 9. Recording the qualifier on every pull
+
+`minPitches=100` bypasses Savant's qualifier, so the drifting cut should
+no longer matter — but only while the bypass keeps working, and its
+failure is silent. The job now logs every pull:
+
+```
+[framing] pull observability: rows=100  min_pitches=335  max_pitches=7442  (minPitches=100 requested)
+```
+
+and carries a canary. Simulated against a Savant that ignores the
+parameter:
+
+```
+[framing] pull observability: rows=59  min_pitches=2271  max_pitches=2851
+[framing] *** minPitches BYPASS MAY HAVE STOPPED WORKING ***  smallest row is
+          2271 pitches (>= 900) and only 59 rows came back. That is the shape
+          of the QUALIFIED set, not the minPitches=100 set.
+[framing] PRUNE SKIPPED -- fetch returned 59 ids against 159 existing rows (< 50%)
+```
+
+Two independent protections firing on the same bad fetch: the canary
+names the cause, and the prune guard refuses to act on it.
+
+**Known blind spot, stated rather than hidden:** very early in a season
+the qualified cut is itself below the 900-pitch canary (it was 913 on
+2026-05-21), so this would not fire in April. It is a mid-season
+regression detector, not a proof.

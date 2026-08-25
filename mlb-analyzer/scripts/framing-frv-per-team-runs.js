@@ -95,34 +95,19 @@ function resolveCatcherMlbId(team, lineupName) {
   return candidates.length === 1 ? candidates[0].mlb_id : null;
 }
 
+// Thin wrapper. The precedence itself lives in utils/framing-rate.js --
+// this existed as FIVE verbatim copies, all carrying the same bug: the
+// pitch floor checked volume and never age, so a current-season row that
+// stopped updating outranked a valid three-year baseline forever.
 function computeFramingRvPerGame(team, lineupJson, settings) {
-  if (!q.getCatcherFramingById) return null;
   const arr = tryParse(lineupJson) || [];
   if (!arr.length) return null;
   const c = arr.find(p => (p.pos || '').toUpperCase() === 'C');
   if (!c || !c.name) return null;
   const mlbId = resolveCatcherMlbId(team, c.name);
   if (!mlbId) return null;
-  const min2026 = settings.CATCHER_FRAMING_MIN_PITCHES_2026 != null
-    ? Number(settings.CATCHER_FRAMING_MIN_PITCHES_2026) : 750;
-  const takesPerGame = settings.CATCHER_FRAMING_TAKES_PER_GAME != null
-    ? Number(settings.CATCHER_FRAMING_TAKES_PER_GAME) : 58;
-  const absFactor = settings.CATCHER_FRAMING_ABS_FACTOR != null
-    ? Number(settings.CATCHER_FRAMING_ABS_FACTOR) : 0.80;
-  const rate = (rvTot, pitches) => {
-    if (!pitches || pitches <= 0) return null;
-    return (rvTot / pitches) * takesPerGame;
-  };
-  const row = q.getCatcherFramingById.get(mlbId);
-  if (row && row.pitches >= min2026) return rate(row.rv_tot, row.pitches);
-  if (q.getCatcherFramingHistById) {
-    const h = q.getCatcherFramingHistById.get(mlbId);
-    if (h && h.pitches > 0) {
-      const r = rate(h.rv_tot, h.pitches);
-      if (r != null) return r * absFactor;
-    }
-  }
-  return null;
+  const { framingRateForCatcher } = require('../utils/framing-rate');
+  return framingRateForCatcher(q, mlbId, settings).rv;
 }
 
 function computeTeamFieldingRunsPerGame(team, lineupJson, settings) {

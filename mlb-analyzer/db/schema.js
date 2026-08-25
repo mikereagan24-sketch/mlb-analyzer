@@ -2547,7 +2547,11 @@ q.upsertCatcherFraming = db.prepare(
   "ON CONFLICT(mlb_id) DO UPDATE SET " +
   "  name=excluded.name, rv_tot=excluded.rv_tot, pitches=excluded.pitches, updated_at=excluded.updated_at"
 );
-q.getCatcherFramingById = db.prepare("SELECT mlb_id,name,rv_tot,pitches FROM catcher_framing WHERE mlb_id=?");
+// updated_at is SELECTed because the READ path age-gates this row:
+// a stale current-season rate must stop outranking the historical
+// baseline. See utils/framing-rate.js. Dropping it from this SELECT
+// silently reinstates the 2026-08-24 defect.
+q.getCatcherFramingById = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing WHERE mlb_id=?");
 // Full scan of catcher_framing — used as a fallback in
 // resolveCatcherMlbId when the team_rosters lookup misses. Small
 // table (~60 rows / season) so the linear scan in JS is cheap; the
