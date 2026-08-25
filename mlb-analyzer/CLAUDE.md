@@ -632,6 +632,52 @@ Only the n-matched control. Without it, three separate movements in the
 3/5, `model - base` changing sign, and the W_PIT grid minimum landing on
 production. All three are what dropping to n~350 does on its own.
 
+## The park-factor regime boundary at 2026-08-25
+
+**Any corpus-wide analysis crosses it.** `game_log.park_factor` is
+persisted at scrape time and post-lock immutable, so the switch to Savant
+`index_runs` did **not** reach existing rows. Games scored before the
+cutover carry the old, unsourced factors; games after carry the new ones.
+
+This is the same class of thing as the **v6/v7 cohort split**, not a
+contamination tag — nothing is wrong with either side, they are two
+regimes — and the discontinuity is larger than either contamination class:
+**24 of 30 teams changed, by up to 0.17.**
+
+### It is a column, not a convention
+
+```sql
+SELECT park_factor_source, COUNT(*) FROM game_log GROUP BY 1;
+
+  legacy_unsourced           1436   <- the boundary matters here
+  unchanged_either_regime     429   <- team's factor did not move; unaffected
+  venue_override               10   <- an override supplied it; neither table
+  savant_index_runs             1
+```
+
+A date would have been a proxy for *when the row was scraped*, which is
+recorded nowhere — and rows for future games scraped before the cutover
+carry legacy values despite a later `game_date`, so the date proxy
+mislabels exactly the rows most likely to matter. **The tag is assigned by
+comparing the stored value against both tables**, which is directly
+observable. `scripts/tag-park-factor-regime.js` is re-runnable and holds
+the frozen legacy table — the only remaining record of what those 1436
+rows were scored under, since it is no longer in the source tree.
+
+### What to do with it
+
+- **Report it.** A calibration spanning the boundary should say so, the
+  way the contamination exclusions are stated.
+- **Prefer splitting to pooling** when the result is sensitive to the
+  level of totals — the two regimes differ by a game-weighted 0.43 runs.
+- **`unchanged_either_regime` is genuinely unaffected**, so the honest
+  denominator for "how much of the corpus is split" is 1436 of 1876, not
+  1876.
+- The legacy side is **unsourced**, not merely old: those values matched
+  no source that could be pulled (FanGraphs `3yr` 4/30, Savant R 6/30).
+  That is a reason to prefer the post-cutover side where a choice exists,
+  not a reason to discard the earlier games.
+
 ## Park factors are evaluated on TOTALS, never on the ML target (2026-08-25)
 
 **The ML calibration A/B is structurally blind to park factor.** Measured:
@@ -814,6 +860,7 @@ current tree.**
 | **Read endpoints that write** | `node scripts/audit-get-mutations.js` | a `GET` that mutates — invisible until someone notices data that changed with no edit |
 | **Settings the model cannot see** | runs in the 6AM cron; `utils/settings-sync-check.js` | a schema key never mapped into `getSettings()`, i.e. a tunable with no effect |
 | **Gate windows that elapsed silently** | runs in the 6AM cron; `services/feature-gate-registry.js` | a feature dark past its own evaluation window |
+| **Park-factor regime split** | `SELECT park_factor_source, COUNT(*) FROM game_log GROUP BY 1` | a corpus-wide analysis silently pooling two park-factor regimes across the 2026-08-25 boundary |
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
 | **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — seven times so far |
