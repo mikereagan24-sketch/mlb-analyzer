@@ -1,4 +1,25 @@
 # Two writers ping-ponging the signal price — open question (2026-08-25)
+> ---
+> **UPDATED SAME DAY — QUESTION 2 IS ANSWERED, AND IT IS THE BID/ASK CASE.**
+>
+> The gap is **not** rounding. It is **directional and systematic**, and it
+> reaches every price these writers touch — not only the ones that
+> oscillate.
+>
+> ```
+> writer               n      mean d(implied)   moved price DOWN (better)
+> refresh            3648        +0.1769pp       1163  (31.9%)
+> refresh_odds_tail  1845        -0.4430pp       1695  (91.9%)
+>
+> head-to-head on the same signal, implied(odds_tail) - implied(upsert):
+>   n=1993   mean -0.4503pp   odds_tail cheaper on 1942 (97.4%)
+>   sign-split z vs 50/50: -42.39
+> ```
+>
+> **The two writers push in opposite directions with 97.4% consistency.**
+> That is a spread side, not a rounding difference. Reprioritised
+> accordingly: the cent gap is the symptom, the side is the problem.
+> ---
 
 > **Filed, not started.**
 >
@@ -123,3 +144,100 @@ attempt is documented in code as having worked when it did not.
 - `services/jobs.js` — `processGameSignals`, the lazy-fetch fallback comment.
 - `refreshSignalBaselines` — the other writer.
 - `docs/corrupt-feed-and-post-start-recheck-2026-08-25.md` — where this surfaced.
+
+---
+
+# Question 2, answered: it is the spread side (2026-08-25, later)
+
+## The test
+
+Rounding and fee-adjustment are **symmetric** — they should push a price
+up as often as down. A writer reading the wrong side of the spread is
+**signed** — it pushes the same way every time. So: over every
+`market_line` change, what is the mean change in implied probability, and
+what fraction move the price down?
+
+```
+writer               n       mean d(implied)   median        moved DOWN (better)
+refresh            3648         +0.1769pp      +0.2763pp     1163  (31.9%)
+refresh_odds_tail  1845         -0.4430pp      -0.3814pp     1695  (91.9%)
+```
+
+A symmetric role sits near `0.0000pp` with a ~50% split. **Neither does.**
+They push in **opposite** directions, consistently.
+
+Head-to-head, restricted to the same signal in an immediate reversal so
+the two prices describe the same market at the same moment:
+
+```
+implied(odds_tail) - implied(upsert)
+  n = 1993
+  mean   -0.4503pp      median  -0.3814pp
+  odds_tail cheaper : 1942  (97.4%)
+  odds_tail dearer  :   50  ( 2.5%)
+  sign-split z vs 50/50: -42.39
+```
+
+**97.4% one-way.** That is not a rounding artifact at any sample size.
+
+## Why this is bigger than the oscillation
+
+The reversal count (2,728) was the visible part. The bias is on **all
+5,493 changes**, so roughly **2,765 biased writes never oscillate at all**
+and are invisible to any reversal-based analysis — including the analysis
+that opened this ticket.
+
+Whichever writer is on the wrong side is applying that offset to every
+price it touches, and `market_line` is:
+
+- the denominator of `edge_pct`, so the edge on those signals is
+  systematically shifted;
+- the price P&L grades against
+  (`docs/one-click-bet-logging-design-2026-08-23.md`), so it moves
+  realised ROI and not just the display.
+
+A ~0.45pp offset is small against a 6–8pp emit band. It is **not** small
+against the differences this project has been trying to measure all
+month: the lineup-projection effect was 0.130 runs, catcher framing 0.048.
+An 0.45pp systematic price offset is the same order as the things being
+gated on.
+
+## What is still open
+
+**Which one is wrong.** The measurement establishes that they differ
+systematically and by how much. It does not say which side is correct —
+that needs the source definitions, not the audit trail:
+
+- if `refreshSignalBaselines` reads a venue **bid** while
+  `processGameSignals` reads the **ask**, the ask is the price actually
+  available and the tail writer is optimistic by ~0.45pp;
+- if one applies the Kalshi fee adjustment and the other does not, the
+  fee-adjusted one is right and the gap is a missing transform;
+- `price_venue` and `venue_stale` are on the signal row and should
+  identify which source each pass landed on.
+
+**The 2.5% that go the other way** are worth a look too — 50 of 1,993.
+Either a second mechanism, or the sign of a genuine market move large
+enough to overwhelm the offset.
+
+## The fix must ship with a measurement, not a comment
+
+`services/jobs.js` already asserts this was fixed by a lazy-fetch
+fallback. The reversal rate is **51% in July and 48% in August**. That is
+the third comment found in this repo claiming a resolution the data
+contradicts (`fetchCatcherFraming`'s "the floor already governs",
+`PARK_FACTORS`' "straight FanGraphs R factor").
+
+So: `scripts/measure-price-oscillation.js`, run before and after, output
+pasted into the PR.
+
+**Success criterion — both, and the second matters more:**
+
+1. reversal rate materially down from 49.7%;
+2. **both writers near `0.0000pp` with a ~50% down-split.**
+
+(2) is the one that catches the real defect. A fix that stops the
+ping-pong by making one writer authoritative would take the reversal rate
+to zero **while leaving the bias fully in place** — and would look like a
+complete success by criterion (1) alone.
+
