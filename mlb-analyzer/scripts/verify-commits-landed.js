@@ -73,18 +73,28 @@ const branches = candidates.map(b => b.trim()).filter(b => b && b !== 'main');
 
 const stranded = [];
 for (const b of branches) {
-  const range = mainRef + '..' + b;
-  const fmt = since ? ('--since=' + since + ' ') : '';
-  // QUOTE THE FORMAT. Unquoted, the `|` separators are shell PIPES, git
-  // log receives `--format=%h`, the rest becomes a pipeline into commands
-  // that do not exist, sh() swallows the error and returns '' — and this
-  // tool reports OK for every branch, forever. A checker that cannot fail
-  // is worse than no checker, which is the whole reason it exists.
-  const out = sh('git log ' + fmt + '--format="%h|%cI|%s" ' + range);
+  // `git cherry` rather than `git log`. The difference matters: a commit
+  // that was CHERRY-PICKED onto a new branch and merged leaves its
+  // ORIGINAL sha on the original branch forever, and git log will report
+  // it as unmerged for the rest of time. git cherry compares patch
+  // content and marks those with '-'; only '+' means the change itself is
+  // genuinely absent from main.
+  //
+  // Two entries on the first real run were exactly this: 0d57066 and
+  // b6b2263, both re-landed via #289 and #290. Reporting them as stranded
+  // would have trained the reader to ignore the output, which is how a
+  // check dies.
+  const out = sh('git cherry ' + mainRef + ' ' + b);
   if (!out) continue;
-  for (const line of out.split('\n')) {
-    const [sha, when, ...rest] = line.split('|');
-    stranded.push({ branch: b, sha, when, subject: rest.join('|') });
+  for (const line of out.split(String.fromCharCode(10))) {
+    const t = line.trim();
+    if (!t.startsWith('+')) continue;          // '-' = content already upstream
+    const sha = t.slice(1).trim().split(' ')[0];
+    if (!sha) continue;
+    const meta = sh('git log -1 --format=%cI ' + sha) || '';
+    const subj = sh('git log -1 --format=%s ' + sha) || '';
+    if (since && meta && meta < since) continue;
+    stranded.push({ branch: b, sha: sha.slice(0, 7), when: meta, subject: subj });
   }
 }
 

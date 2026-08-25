@@ -788,6 +788,55 @@ last refreshed **2026-06-03, 82 days**. No cron refreshes it; it is
 fetched by hand. That is a real finding the check surfaced on its first
 run, and it is unresolved.
 
+### When to re-run the landed-commit verifier
+
+**After every merge, before saying anything shipped.** It takes 6.5s.
+
+```
+node scripts/verify-commits-landed.js
+```
+
+Exit 1 if anything is stranded. Expected output today is 15 commits on 15
+branches, all of them the April-to-August tail dispositioned in
+`docs/stranded-branch-dispositions-2026-08-24.md`. **Anything with a
+recent date is a regression** — that is the whole signal.
+
+It uses `git cherry`, not `git log`, so a commit that was cherry-picked
+onto a new branch and merged is correctly **not** reported: its original
+sha lives on the original branch forever, and `git log` would flag it
+until the end of time. Seven such entries dropped out when this changed
+(22 → 15). An alarm that cries wolf on re-landed work trains you to skip
+reading it, which is how a check dies.
+
+### Run `--selftest` periodically, not once
+
+```
+node scripts/verify-commits-landed.js --selftest
+```
+
+Same reasoning as `KNOWN_MUTATORS` being hand-maintained: **a checker that
+has never failed is one you are trusting on inspection.** This one is not
+hypothetical about that — it shipped three separate silent-pass bugs
+before it worked:
+
+1. `--format=%h|%cI|%s` **unquoted**, so the shell ate the pipes, git got
+   a truncated format, the error was swallowed, and it **reported OK for
+   every branch**. It passed on first run.
+2. Two edits to the fix became literal CR/LF bytes — once a parse error,
+   once a file that ran and lied. The file carries **no backslash escapes
+   at all**, by design; see the comment on the line that kept breaking.
+3. `--selftest` itself ran `git checkout -b` through the error-swallowing
+   helper, so on a dirty tree the checkout failed, execution continued,
+   and the empty selftest commit landed **on the working branch**.
+
+The selftest creates a throwaway unmerged commit **from `main`** (not from
+HEAD — branching from HEAD inherits the current branch's unmerged work and
+fails spuriously) and asserts exactly one is detected. It refuses to run
+on a dirty tree.
+
+**Re-run it whenever the script is touched, and whenever a clean sweep is
+about to be used as evidence that nothing was lost.**
+
 ### When to re-run the GET-mutation scan
 
 **Any PR that touches `routes/api.js`.** It takes under a second.
