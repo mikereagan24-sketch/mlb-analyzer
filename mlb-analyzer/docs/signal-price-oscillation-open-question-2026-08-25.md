@@ -241,3 +241,100 @@ ping-pong by making one writer authoritative would take the reversal rate
 to zero **while leaving the bias fully in place** — and would look like a
 complete success by criterion (1) alone.
 
+
+---
+
+# Which writer is wrong: `processGameSignals` — and neither candidate explanation was right (2026-08-25, later still)
+
+> **It is not bid-vs-ask, and it is not a missing fee adjustment.** Both
+> writers write a correct price *for the tier they resolved*. The bias
+> lives entirely in **tier transitions**: `processGameSignals` keeps
+> losing the venue and falling back to the single-source price, which is
+> systematically worse.
+
+## The discriminator
+
+Split every `market_line` change by whether `price_venue` moved with it:
+
+```
+bucket                              n      mean d(implied)   moved DOWN
+refresh [venue CHANGED]           3014        +0.2644pp       27.4%
+refresh [venue same]               634        -0.2391pp       53.2%   <- ~symmetric
+refresh_odds_tail [venue CHANGED] 1845        -0.4430pp       91.9%
+```
+
+**When the venue does not change, `refresh` is roughly symmetric** — 53.2%
+down, which is what rounding looks like. The one-way bias appears only
+where the tier flips.
+
+That rules out both candidates. A bid-vs-ask read would bias *every* write
+by that writer. So would a missing fee transform. Neither is confined to
+transitions.
+
+## What is actually happening
+
+```
+refresh:            poly   -> null   1423   mean +0.6822pp
+refresh:            kalshi -> null    670   mean +0.4437pp
+refresh_odds_tail:  null   -> poly   1201   mean -0.5937pp
+refresh_odds_tail:  null   -> kalshi  547   mean -0.1707pp
+
+and when refresh DOES resolve a venue, it improves the price too:
+refresh:            null -> poly      335   mean -0.9288pp
+refresh:            null -> kalshi    118   mean -0.9875pp
+```
+
+`processGameSignals` **loses the venue on 2,093 passes** and writes
+`gl.market_*_ml` — the single-source Kalshi-direct fallback — over a
+venue-comparison price that was already there.
+`refreshSignalBaselines` re-acquires the venue on the next cycle and
+restores it. Round and round.
+
+**So the tail writer is not "optimistic about a price that isn't
+available."** The venue price is a real `net_american` from a best-of-N
+comparison across Polymarket and Kalshi. It is the better price *because
+it is the best of several*, and the fallback is worse *because it is one
+source*. The tail writer is right; the upsert writer is discarding a good
+price for a worse one.
+
+## Which should win: the venue price
+
+Not on a coin-flip between two writers — on the merits. A best-of-venues
+price is the price actually obtainable; the Kalshi-direct fallback is a
+single quote used when the comparison could not be resolved. **The fix is
+not to pick a winner, it is to stop `processGameSignals` losing the
+venue** — which is exactly what the lazy-fetch fallback in that function
+already claims to do.
+
+## The 50 outliers are not diagnostic
+
+They carry **no distinct venue or market signature** — the same
+transitions as the majority, in the same proportions:
+
+```
+dearer (50)                  cheaper (1942)
+  null -> poly     10          poly -> null    680
+  kalshi -> null    9          null -> poly    677
+  poly -> null      9          kalshi -> null  275
+  null -> kalshi    6          null -> kalshi  274
+
+mean magnitude   +0.5551pp        -0.4764pp
+```
+
+They are the tail of the same distribution: cases where the venue winner
+happened to be worse than the fallback on that pass, which a best-of-N
+selection against a live single quote will do a small fraction of the
+time. **No second mechanism.** Recorded because it was asked for and
+because a null result on a diagnostic is worth as much as a positive one.
+
+## What this changes about the fix
+
+The success criterion in the previous section still holds, but the target
+is now specific: **`refresh [venue CHANGED]` should approach zero.** If
+`processGameSignals` stops losing the venue, the transitions stop, the
+reversals stop, and the bias stops — one cause, three symptoms.
+
+And per `CLAUDE.md` — *"a comment claiming a fix carries the number it was
+verified against"* — the fix ships with `measure-price-oscillation.js`
+output before and after, not a sentence.
+

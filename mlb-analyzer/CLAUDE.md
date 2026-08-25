@@ -583,6 +583,49 @@ into a write-up as a defect.
 Same family as the timestamp rule above: the failure is silent by
 construction, and the wrong conclusion it produces is a plausible one.
 
+## A comment claiming a fix carries the number it was verified against (2026-08-25)
+
+**Three times now** a code comment has asserted a resolution the data
+contradicts, and in each case the comment was the only evidence anyone
+had:
+
+```
+services/scraper.js   "the read-time MIN_PITCHES floor already governs there"
+                      -> the floor never bound; Savant's qualifier ran first
+services/scraper.js   "every other team uses the straight FanGraphs R factor"
+                      -> matched 4 of 30; the values came from no pullable source
+services/jobs.js      the lazy-fetch fallback that fixed the price ping-pong
+                      -> reversal rate 51% July, 48% August. Unchanged.
+```
+
+### The rule
+
+**A comment that says something was fixed must state the measurement that
+established it — the number, and how to re-run it.** Not "this was fixed",
+not "this now works". A figure and a command.
+
+```js
+// FIXED 2026-08-25: venue tier now resolves on the upsert path.
+// Reversal rate 49.7% -> 4.1%; both writers within 0.05pp of neutral.
+// Re-run: node scripts/measure-price-oscillation.js
+```
+
+This is falsifiable in the way the comments were not: **either the number
+is there or it is not**, and if it is there, anyone can re-run it and get
+a different answer. A prose claim has neither property.
+
+### Corollaries
+
+- **A fix without a measurement is not finished.** If there is no number
+  to quote, the thing to write is what was tried and what remains open —
+  which is an honest comment, unlike an unverified claim of success.
+- **Prefer a script to a figure alone.** All three failures above would
+  have been caught the first time anyone re-ran the check. A number with
+  no command behind it decays into the same prose.
+- **When you find a comment asserting a fix with no number, verify before
+  trusting it.** All three were load-bearing: each had been read and
+  believed at least once before the contradiction surfaced.
+
 ## The window sign test is not precise at n~350 (2026-08-24)
 
 **Stop quoting "N of 5 windows" to one-window precision on a corpus of a
@@ -863,6 +906,7 @@ current tree.**
 | **Park-factor regime split** | `SELECT park_factor_source, COUNT(*) FROM game_log GROUP BY 1` | a corpus-wide analysis silently pooling two park-factor regimes across the 2026-08-25 boundary |
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
+| **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
 | **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — seven times so far |
 
 ### When to re-run the freshness check
