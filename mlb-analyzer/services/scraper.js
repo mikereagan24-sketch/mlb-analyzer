@@ -896,22 +896,38 @@ async function fetchSeasonRosters() {
 async function fetchCatcherFraming(year) {
   const yr = year || new Date().getFullYear();
   // minPitches=100 (2026-08-24). WITHOUT it Savant applies its own
-  // "Qualified" default, and that default is STRICTER than our floor:
+  // "Qualified" default, which for 2026 returns 59 rows against 100.
   //
-  //   (none) / q  ->  59 rows      500  ->  70 rows
-  //   100         -> 100 rows      750  ->  61 rows
-  //   250         ->  89 rows
+  // WHAT THAT QUALIFIER ACTUALLY IS, measured rather than assumed:
+  // diffing the two responses gives PERFECT SEPARATION on `pitches` --
+  // qualified 2271..7442, excluded 335..2081. So it IS a called-pitch
+  // threshold, and today it sits somewhere in (2081, 2271].
   //
-  // So the note that used to sit on fetchCatcherFramingHistorical --
-  // "deliberately untouched, the read-time CATCHER_FRAMING_MIN_PITCHES_2026
-  // floor already governs" -- was wrong. The floor NEVER bound: every row
-  // Savant returned already had >= 913 pitches, and 59 < 61 means Savant's
-  // qualifier excluded catchers our own 750 floor would have accepted.
+  // AND IT MOVES WITH THE SEASON. The minimum of each qualified pull we
+  // have on record:
   //
-  // The effective inclusion rule was Savant's, and it silently dropped
-  // ACTIVE STARTERS: T. d'Arnaud started for LAA on 2026-08-24 carrying a
-  // framing rate frozen at 2026-05-21, because he had fallen off the
-  // qualified list and the upsert never revisited him.
+  //     2026-05-21    913 pitches
+  //     2026-06-03  1,217
+  //     2026-08-24  2,271
+  //
+  // which is what a rate-based rule (a share of team innings) looks like
+  // expressed in pitches. Record the number when you pull, because it is
+  // not stable and Savant does not publish it in the CSV.
+  //
+  // The bar is FAR above our own CATCHER_FRAMING_MIN_PITCHES_2026 floor
+  // of 750, so the floor never bound: the effective inclusion rule was
+  // Savant's, we did not control it, and it silently dropped ACTIVE
+  // STARTERS. D. Cavanaugh (SF) caught 2,081 pitches and was excluded;
+  // T. d'Arnaud started for LAA on 2026-08-24 carrying a rate frozen at
+  // 2026-05-21, because he had fallen off the list and the upsert never
+  // revisited him.
+  //
+  // A TRAP WORTH NAMING. Before this change the table's smallest row was
+  // 913 pitches, which looks like evidence the bar was low. It was not:
+  // that row was a MAY-VINTAGE carryover the never-deleting upsert had
+  // left behind. A table that mixes pull vintages tells you nothing about
+  // the current qualifier, and reading it that way is how a 2,081-pitch
+  // catcher can look like a contradiction rather than a data point.
   //
   // Same knob and the same camelCase trap documented on
   // fetchCatcherFramingHistorical below: snake_case variants are ignored.
