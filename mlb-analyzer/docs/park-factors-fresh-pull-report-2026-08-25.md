@@ -293,3 +293,114 @@ Savant row** (venue-keyed, and the club changed venues), so it stays on the
 manual 1.19 either way; and **TB is absent from the 2023-25 window**, which
 is the Steinbrenner-season gap again.
 
+
+---
+
+# Adopted: Savant `index_runs`, in a table (2026-08-25)
+
+Applied on the merits, not as a restoration — the live values matched no
+source that could be pulled.
+
+## Provenance, recorded in three places
+
+```
+source : baseball_savant_index_runs
+url    : https://baseballsavant.mlb.com/leaderboard/statcast-park-factors
+params : type=year, year=2026, batSide=(both), stat=index_R,
+         condition=All, rolling=3
+range  : 2024-2026
+pulled : stored per row as park_factors.pulled_at (UTC)
+```
+
+The parameters are **constants in `services/park-factors.js`**, not
+call-site arguments, because changing any of them changes the numbers —
+and a comment that named a source without its parameters is what put us
+here. They are also written into **every row** (`source_url`,
+`source_params`, `year_range`, `venue_id`, `venue_name`, `n_pa`), so the
+provenance survives even if the code moves.
+
+`stat=index_R` selects the **runs** column. Savant's headline "Park
+Factor" and FanGraphs' `3yr` are wOBA-style composite offensive indices,
+and they differ substantially: COL 112 vs 125, TEX 93 vs 86, SEA 92 vs 85.
+
+## The two gaps, decided rather than carried
+
+### TB — adjustment dropped. Savant's venue-keying already isolates Tropicana.
+
+This was the open question, and the data answers it directly:
+
+```
+Rays, 2024-2026 window:  venue 12 "Tropicana Field"   n_pa 33,312
+median park across the same window:                   n_pa 52,362
+```
+
+**33,312 against a 52,362 median is two seasons, not three.** Savant keys
+park factors by *venue*, so the 2025 Steinbrenner season is a different
+venue and is simply absent. The contamination the 0.95 override existed to
+correct **is not present in this source**, which makes the override a
+hand-tuned number with no remaining rationale. Dropped; Savant R gives
+**0.94**.
+
+Recorded caveats: the sample is ~36% smaller than a typical park's, so the
+estimate is noisier; and the 2026 portion is a park that reopened with a
+new roof and new turf after Hurricane Milton, so even the Tropicana years
+are not quite one park.
+
+### ATH — adjustment kept, with the reason in the row
+
+Savant has **no Athletics row on any window** (checked 2023–2026 ×
+rolling 1/2/3). Venue-keyed again: the club left Oakland Coliseum for
+Sutter Health Park, which has no qualifying multi-season sample. **This is
+not a preference over Savant — there is nothing to prefer.**
+
+1.19 carries forward, corroborated by FanGraphs' own split: `3yr` 112 still
+averages in Coliseum years, `1yr` 121 is Sutter Health alone, and 1.19 sits
+between. The reason is stored in `park_factors.manual_reason`, and the row
+says to revisit when Savant lists the venue.
+
+*(KC's 1.02 override was also dropped — Savant R gives 1.02 directly. The
+Mexico City 1.20 override is untouched; it lives in `model.js`
+`VENUE_ID_OVERRIDES`, bypasses this table, and fired on 2 games.)*
+
+## The failure mode this table is prone to, and the three guards
+
+A team missing from the table used to fall through to **1.0** in
+`resolveParkFactor`. 1.0 is the *neutral park* — a plausible number that
+nothing downstream can distinguish from real data.
+
+1. **`resolveParkFactor` no longer returns 1.0.** It returns `null` and
+   warns by name, so the column is NULL and the gap is countable.
+2. **The ingest refuses a partial write.** Verified against a simulated
+   truncated response: `REFUSING TO WRITE -- 28 of 30 teams did not
+   resolve`, and the existing 30-row table was left intact. Overwriting a
+   good table with 25 of 30 is worse than not writing.
+3. **A boot assertion** checks all 30 resolve and prints the oldest pull
+   date, because a NULL discovered at scrape time is already too late for
+   that night's slate.
+
+## Freshness and cadence
+
+`park_factors` is in the registry at **warn 35 days, critical 70** —
+one missed monthly run, then two. The cron is `0 5 1 * *` PT, on the
+server. Savant and FanGraphs are both behind a Cloudflare interactive
+challenge from some networks (this repo's dev laptop returns
+`cf-mitigated: challenge`) while Render is not, which is a second reason
+the ingest does not live in a script someone runs locally.
+
+## Evaluate park factors on TOTALS ONLY — the ML A/B is structurally blind
+
+**Measured: mean |Δp(home)| = 0.00028** for a swap that moved 24 of 30
+teams and 80% of games.
+
+A park factor multiplies **both** teams' run estimates by the same number.
+It moves the total; it leaves the win-probability ratio almost untouched.
+0.00028 is an order of magnitude below the catcher-framing flag's 0.0024,
+which was already unresolvable at n=349.
+
+**So the ML calibration A/B will report "not significant" for a
+park-factor change no matter how wrong the factors are.** It is not a
+weak test here, it is the wrong instrument, and a null from it is not
+evidence of harmlessness. Future park-factor changes get evaluated on the
+totals target — MAE, RMSE and level — and the note is in CLAUDE.md so the
+next person does not have to rediscover it.
+

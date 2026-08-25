@@ -3755,6 +3755,22 @@ function startCronJobs() {
   //
   // Fire-and-forget spawn — a script hiccup must not interfere with
   // the pricing crons.
+  // --- Park factors: 5AM PT on the 1st of the month ---
+  // MONTHLY, deliberately. Savant's index_runs is a regressed three-season
+  // aggregate; it barely moves. The previous table went 127 days without a
+  // refresh and nobody could tell, which is the problem this schedule and
+  // the park_factors freshness entry (warn 35d) solve together -- the cron
+  // does the work, the check notices when the cron does not.
+  //
+  // ON THE SERVER, not a laptop: Savant and FanGraphs are both behind a
+  // Cloudflare interactive challenge from some networks (cf-mitigated:
+  // challenge on this repo's dev machine) while Render is not.
+  cron.schedule('0 5 1 * *', async () => {
+    console.log('[cron] monthly park-factor refresh');
+    try { await runParkFactorsJob(); }
+    catch (e) { console.error('[cron-park-factors] failed:', e && e.message); }
+  }, { timezone: 'America/Los_Angeles' });
+
   cron.schedule('0 9 * * 1', () => {
     console.log('[cron] Mon 9AM PT shadow-audit sweep');
     try {
@@ -6088,6 +6104,78 @@ function resolveCatcherMlbId(team, lineupName) {
 
 // Fetch the Savant catcher-framing leaderboard and upsert into
 // catcher_framing (keyed by mlb_id). Non-fatal per-row; reports counts.
+// Park factors: pull Baseball Savant index_runs into the park_factors
+// table. (2026-08-25)
+//
+// MONTHLY, and on the server rather than a laptop. The underlying numbers
+// are a regressed three-season aggregate that barely moves; what moved by
+// a third of a run in six days back in April was two humans reading them.
+// So the cadence is slow and the transcription is nobody's job.
+//
+// FanGraphs and Savant are both behind a Cloudflare interactive challenge
+// from some networks (this repo's dev laptop included, cf-mitigated:
+// challenge) while Render is not. That is a second reason the ingest lives
+// here and not in a script someone runs locally.
+async function runParkFactorsJob(opts) {
+  const o = opts || {};
+  const pf = require('./park-factors');
+  console.log('[park-factors] pulling ' + pf.sourceUrl(o.params));
+  try {
+    const { rows, url, params } = await pf.fetchSavantParkFactors(o.params);
+    const byTeam = {};
+    for (const r of rows) {
+      byTeam[r.team] = { factor: r.factor, source: pf.SOURCE_NAME, url, params,
+                         year_range: r.year_range, venue_id: r.venue_id,
+                         venue_name: r.venue_name, n_pa: r.n_pa, manual_reason: null };
+    }
+    // Manual entries LAST so they win, and each carries its reason into
+    // the row. A manual factor whose reason is null is a regression.
+    for (const t of Object.keys(pf.MANUAL)) {
+      const m = pf.MANUAL[t];
+      byTeam[t] = { factor: m.factor, source: 'manual', url: null, params: null,
+                    year_range: null, venue_id: null, venue_name: null, n_pa: null,
+                    manual_reason: m.reason };
+    }
+
+    // THE ASSERTION, before any write. A partial pull that overwrites a
+    // good table with 25 of 30 teams is worse than not writing at all:
+    // the five that vanish fall through to 1.0, which is indistinguishable
+    // from a neutral park.
+    const check = pf.assertAllTeamsResolve(byTeam);
+    if (!check.ok) {
+      const msg = 'park-factors REFUSING TO WRITE -- ' + check.missing.length + ' of '
+        + check.checked + ' teams did not resolve: ' + check.missing.join(', ')
+        + '. A missing team silently becomes 1.0, which reads as a neutral park.';
+      console.error('[park-factors] ' + msg);
+      return { success: false, error: msg, missing: check.missing };
+    }
+    if (check.suspicious.length) {
+      console.warn('[park-factors] exactly-1.000 from a non-manual source: '
+        + check.suspicious.join(', ') + ' -- legitimate for a neutral park, but it is'
+        + ' also what the old `|| 1.0` fallback produced. Worth an eye.');
+    }
+
+    const tx = db.transaction((entries) => {
+      for (const t of Object.keys(entries)) {
+        const e = entries[t];
+        q.upsertParkFactor.run(t, e.factor, e.source, e.url, e.params, e.year_range,
+          e.venue_id, e.venue_name, e.n_pa, e.manual_reason);
+      }
+    });
+    tx(byTeam);
+
+    const n = q.countParkFactors.get();
+    const manual = Object.keys(pf.MANUAL).length;
+    console.log('[park-factors] wrote ' + n + ' teams (' + (n - manual) + ' from '
+      + pf.SOURCE_NAME + ', ' + manual + ' manual)  range=' + (rows[0] && rows[0].year_range));
+    console.log('[park-factors] params: ' + params);
+    return { success: true, teams: n, sourced: n - manual, manual, url, params };
+  } catch (e) {
+    console.error('[park-factors] job failed: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 async function runCatcherFramingJob(year) {
   console.log('[framing] fetching Savant catcher-framing leaderboard...');
   try {
@@ -6877,4 +6965,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runParkFactorsJob, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

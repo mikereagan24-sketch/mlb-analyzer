@@ -632,6 +632,48 @@ Only the n-matched control. Without it, three separate movements in the
 3/5, `model - base` changing sign, and the W_PIT grid minimum landing on
 production. All three are what dropping to n~350 does on its own.
 
+## Park factors are evaluated on TOTALS, never on the ML target (2026-08-25)
+
+**The ML calibration A/B is structurally blind to park factor.** Measured:
+a swap that moved **24 of 30 teams and 80% of games** produced a mean
+|Δp(home)| of **0.00028**.
+
+The reason is arithmetic, not sample size. A park factor multiplies
+**both** teams' run estimates by the same number, so it moves the **total**
+and leaves the win-probability **ratio** almost untouched. For scale, the
+catcher-framing flag moves p(home) by 0.0024 and was already unresolvable
+at n=349; this is an order of magnitude smaller again.
+
+**So `calibration-ab.js` will report "not significant" for a park-factor
+change however wrong the factors are.** A null from it is not evidence of
+harmlessness — it is the instrument reporting that it cannot see.
+
+### What to run instead
+
+The totals target: **MAE, RMSE, and the level (mean model − actual)**,
+scored under both factor tables on an identical game set. Report the level
+separately from dispersion — they move independently, and the distinction
+decided the 2026-08-25 source choice:
+
+```
+arm                MAE      RMSE     level     d MAE    d RMSE   d level
+production        3.4477   4.4699   -0.5752
+FanGraphs 3yr     3.4206   4.4281   -0.6402  -0.0270   -0.0419   -0.0650
+Savant R 24-26    3.4089   4.4183   -0.5827  -0.0387   -0.0516   -0.0075
+```
+
+FanGraphs sharpened dispersion while pushing an already-negative bias
+0.065 further; Savant R sharpened dispersion and moved the level 0.0075.
+On MAE alone they look similar. **The level is what separated them.**
+
+### The general form
+
+Before running an A/B, ask **what the change can physically move**. A term
+that scales both sides equally cannot move a ratio-based target. A term
+that shifts one side can. Choosing the target after the fact — or reading
+a null from a blind instrument as a pass — is how a change of this size
+gets waved through.
+
 ## Know which database you are measuring (2026-08-24)
 
 **`data/mlb.db` is not production.** It is a separately-evolved local
