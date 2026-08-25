@@ -178,6 +178,24 @@ const QUERIES = [
   // ==================== backfill jobs ====================
 
   {
+    name: 'signal-audit-actions',
+    description: 'bet_signal_audit action counts in a date window. Exists so a REFUSAL '
+      + 'path can be confirmed in production without pulling the DB -- a green deploy '
+      + 'proves nothing about a guard that only fires on a live in-progress rescore.',
+    sql:
+      'SELECT action, COUNT(*) AS n, MIN(created_at) AS first_at, MAX(created_at) AS last_at '
+      + 'FROM bet_signal_audit '
+      + 'WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at <= ?) '
+      + '  AND (? IS NULL OR action = ?) '
+      + 'GROUP BY action ORDER BY n DESC',
+    params: [
+      { name: 'from',   type: 'string', required: false, default: null },
+      { name: 'to',     type: 'string', required: false, default: null },
+      { name: 'action', type: 'string', required: false, default: null },
+    ],
+    bindOrder: ['from', 'from', 'to', 'to', 'action', 'action'],
+  },
+  {
     name: 'backfill-recent',
     description: 'Most recent backfill_jobs rows across all tasks (or filtered by task).',
     sql:
