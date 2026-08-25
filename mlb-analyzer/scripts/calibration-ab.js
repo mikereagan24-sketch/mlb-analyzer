@@ -140,8 +140,31 @@ console.log('');
 
 // ---- score both arms ------------------------------------------------
 const realLog = console.log;
-function scoreArm(value) {
+// PARK-FACTOR ARM (2026-08-25). PARK_FACTORS is not a setting -- it is a
+// source literal in services/scraper.js whose value is PERSISTED onto each
+// game row at ingest, and runModel reads game.park_factor. So an A/B on it
+// cannot go through PARAM; it has to override the ROW FIELD.
+//
+// PF_ON_JSON supplies the candidate table keyed by home team; the OFF arm
+// is whatever is already persisted. Added here rather than in a new script
+// on the nine-copies principle: one harness, one set of metrics, one
+// window sign test.
+const PF_ON = process.env.PF_ON_JSON ? JSON.parse(process.env.PF_ON_JSON) : null;
+if (PF_ON) {
+  console.log('  *** PARK-FACTOR ARM: ON overrides game.park_factor for '
+    + Object.keys(PF_ON).length + ' teams; OFF uses the persisted value ***');
+}
+function scoreArm(value, pfTable) {
   const st = Object.assign({}, baseSettings, { [PARAM]: value });
+  // Save/restore rather than mutate permanently: the two arms must see the
+  // same row objects in every other respect.
+  const saved = pfTable ? rows.map(r => r.g.park_factor) : null;
+  if (pfTable) {
+    for (const r of rows) {
+      const k = String(r.g.home_team || '').toUpperCase();
+      if (pfTable[k] != null) r.g.park_factor = pfTable[k];
+    }
+  }
   const out = new Array(rows.length).fill(null);
   const t0 = Date.now();
   console.log = () => {};
@@ -150,13 +173,13 @@ function scoreArm(value) {
       const mr = runModel(rows[i].g, rows[i].idx, st, 'opener_aware', true);
       out[i] = (mr && !mr._suppressed && mr.adjHW != null && isFinite(mr.adjHW)) ? clamp(mr.adjHW) : null;
     }
-  } finally { console.log = realLog; }
+  } finally { console.log = realLog; if (saved) rows.forEach((r, n) => { r.g.park_factor = saved[n]; }); }
   process.stdout.write('  scored ' + PARAM + '=' + JSON.stringify(value)
     + '  (' + ((Date.now() - t0) / 1000).toFixed(1) + 's)' + String.fromCharCode(10));
   return out;
 }
-const pOff = scoreArm(OFF);
-const pOn = scoreArm(ON);
+const pOff = scoreArm(OFF, null);
+const pOn = scoreArm(ON, PF_ON);
 
 // Identical game set across arms — the assertion an ROI A/B cannot make.
 const keep = [];
