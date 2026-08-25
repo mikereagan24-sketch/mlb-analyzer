@@ -180,3 +180,96 @@ started-game branch, and that one is deliberate.
 - `docs/post-start-pricing-tagged-2026-08-22.md` — the tagging.
 - `services/jobs.js:4014` — the guard that exists.
 - `services/jobs.js:566` — `processGameSignals`, which has none.
+
+---
+
+# The trace, and the refusal (2026-08-25, later)
+
+## (1) Which callers legitimately write after first pitch: none of them
+
+All eight call sites of `processGameSignals` are **model-rescoring** paths:
+
+```
+jobs.js:2699   lineup ingest    -> rescore
+jobs.js:3400   weather update   -> rescore
+jobs.js:3670   7AM rerun loop
+jobs.js:4139   odds job         -> rescore
+jobs.js:5238   date rescore
+jobs.js:5960   opener detection -> rescore
+api.js:1302    POST /games/:date/rerun
+```
+
+**The closing-capture path is not among them.** It lives in `runOddsJob`'s
+started-game branch and calls `writeClosing` directly, never entering
+`processGameSignals`. So the distinction turned out to be neither
+per-caller nor per-field — **no caller of this function needs a
+post-first-pitch write at all**, and the legitimate one is on a separate
+path already.
+
+### Per-field would have been the answer if they shared a path
+
+Your instinct was right about which fields, and the audit trail shows
+exactly the set:
+
+```
+2026-07-08 22:21:08  refresh            {"market_line":{"from":100,"to":-104},"model_line":...
+2026-07-09 03:00:13  refresh            {"market_line":{"from":-102,"to":-104},"edge_pct":...
+2026-07-09 18:00:22  set_closing_line   odds locked at game start gate
+2026-07-09 20:00:12  deactivated        Model ml at rerun: -139, mkt=-104 - edge no longer meets threshold
+```
+
+`market_line`, `model_line`, `edge_pct` on the refresh path; `closing_line`
+and grading elsewhere. Since they do not share a path, **the refusal is
+the whole upsert** — freezing `market_line` alone would leave `edge_pct`
+and `category` derived from a price the row no longer carries, which is
+internally inconsistent and worse than either consistent state.
+
+**An unrelated pathology visible in that same trace:** `refresh` and
+`refresh_odds_tail` oscillate between −102 and −104 dozens of times in a
+single evening, each overwriting the other. Two sources disagreeing by one
+cent, ping-ponging. Not touched here, but it is why the audit table has
+8,848 pricing writes for ~2,000 signals.
+
+## (2) `bet_locked_at` covers almost none of it
+
+```
+signals Jul-Aug on games with a real first pitch : 1222
+  ever locked                                    :   32  (2.6%)
+
+pricing writes (refresh / refresh_odds_tail)     : 8848
+  after first pitch                              : 3532  (39.9%)
+  of those, on a LOCKED signal                   :   67
+```
+
+The lock protects **the operator's logged bets**, not the emitted-signal
+corpus that calibration reads — and 2.6% of signals are ever locked. It
+was never going to cover this.
+
+**A correction to my own first pass at this:** I initially read
+`updated_at` and reported "18 locked signals updated after first pitch —
+the lock did not hold." That was wrong. `updated_at` is bumped by *any*
+write, including `deactivated`, `set_closing_line` and grading, all of
+which are legitimate post-start. Measured on the audit trail instead — the
+only instrument that distinguishes a *pricing* write — the lock does hold
+on the pricing path.
+
+## The refusal
+
+`processGameSignals` now checks `gameHasStarted` before the signal loop
+and returns, logging `refused_post_start_pricing` to the audit trail.
+
+```
+PRE-GAME      refusals 0 -> 0   proceeded
+IN-PROGRESS   refusals 0 -> 1   refused
+```
+
+Verified against a real DB row put into an in-progress shape (scores
+NULL, first pitch in the past) and restored afterwards — scores, first
+pitch, status and audit rows all back to their prior values.
+
+**Finished games never reach the guard**, and should not: they exit
+earlier through the grading branch, which is where outcome and P&L are
+written. A rescore of a completed slate produced 15 games, 0 errors, 0
+refusals. The guard only fires in the live window between first pitch and
+final, which is exactly the window the 3,532 writes were landing in.
+

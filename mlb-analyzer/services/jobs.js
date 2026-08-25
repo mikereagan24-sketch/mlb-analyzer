@@ -1203,6 +1203,53 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     ? Math.round(stdModel.hML) : null;
   const _stdModelAwayMlAtEmit = (stdModel && !stdModel._suppressed && stdModel.aML != null && Number.isFinite(stdModel.aML))
     ? Math.round(stdModel.aML) : null;
+  // REFUSE TO PRICE A STARTED GAME. (2026-08-25)
+  //
+  // runOddsJob has had this check since 2026-08-22 (jobs.js, the
+  // `Skipping started game` branch) and it stops game_log taking a live
+  // price. It never covered THIS path. processGameSignals re-runs the
+  // model and upserts market_line / edge_pct onto EXISTING signals, and
+  // it had no start check at all -- measured on the audit trail,
+  // 3,532 of 8,848 pricing writes in July-August (39.9%) landed after
+  // real first pitch.
+  //
+  // WHY THE WHOLE UPSERT AND NOT JUST market_line. Freezing the market
+  // field alone would leave edge_pct and category derived from a price
+  // the row no longer carries -- internally inconsistent, and worse than
+  // either consistent state. All eight callers of processGameSignals are
+  // model-rescoring paths (lineups, weather, the 7AM rerun, the odds job,
+  // date rescore, opener detection, POST /rerun); NONE of them is the
+  // closing-capture path, which lives in runOddsJob's started-game branch
+  // and calls writeClosing directly. So refusing here costs no legitimate
+  // consumer anything.
+  //
+  // NOT COVERED BY bet_locked_at. Only 2.6% of signals are ever locked --
+  // the lock protects the operator's logged bets, not the emitted corpus
+  // that calibration reads -- and 67 post-first-pitch pricing writes
+  // landed on locked rows anyway.
+  //
+  // A REFUSAL, not a flag: the price it would write is a live in-game
+  // price, which is the thing this whole exercise is about.
+  let _startedNow = false;
+  try { _startedNow = !!gameHasStarted(gameRow, gameRow.game_date); }
+  catch (e) { _startedNow = false; }
+  if (_startedNow && signals.length) {
+    console.log('[signals] ' + gameRow.game_id + ': game has started -- refusing to'
+      + ' write ' + signals.length + ' signal price(s). Closing capture and grading are'
+      + ' unaffected (different path).');
+    try {
+      q.insertBetSignalAudit({
+        signal_id: null, game_date: gameRow.game_date, game_id: gameRow.game_id,
+        signal_type: null, signal_side: null,
+        action: 'refused_post_start_pricing',
+        bet_line: null, closing_line: null, clv: null,
+        source: 'process_game_signals',
+        detail: JSON.stringify({ signals: signals.length }),
+      });
+    } catch (e) { /* audit is non-fatal */ }
+    return;
+  }
+
   for (const sig of signals) {
     // Venue-aware market baseline for the STORED market_line + PnL grading.
     // When the venue override landed on the game object, use game.market_*
