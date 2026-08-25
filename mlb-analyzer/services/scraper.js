@@ -96,23 +96,11 @@ function pickVenueOverride(team, gameDate) {
 // team is unknown). The model.js read path doesn't call this — it
 // uses pickVenueOverride directly so it can fall through to the
 // persisted game.park_factor column as the final fallback.
-// Cached table read. Cached because parseLineupsHtml calls resolveParkFactor
-// once per game and the table changes monthly; the cache is per-process and
-// a restart picks up a refresh.
-let _pfCache = null;
+// Delegated to services/park-factors.js so there is ONE cached copy. Two
+// caches of the value that decides whether a game prices on a real park
+// would drift, and the drift would be invisible.
 function loadParkFactors(force) {
-  if (_pfCache && !force) return _pfCache;
-  const out = {};
-  try {
-    const { q } = require('../db/schema');
-    for (const r of q.listParkFactors.all()) {
-      if (r && r.team && isFinite(r.factor) && r.factor > 0) out[r.team] = r.factor;
-    }
-  } catch (e) {
-    console.error('[park-factor] could not read park_factors: ' + (e && e.message));
-  }
-  _pfCache = out;
-  return out;
+  return require('./park-factors').loadParkFactors(force);
 }
 
 function resolveParkFactor(team, gameDate, parkFactorsMap) {
