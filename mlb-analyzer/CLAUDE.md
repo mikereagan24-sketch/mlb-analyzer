@@ -697,6 +697,69 @@ to forget. Everything the remediation scripts write is local-only:
 production has the schema but not the data, so a naive refresh silently
 reverts all of it.
 
+## One PR, one push (2026-08-24)
+
+**Seven times now**, work has been committed, pushed, and reported as
+delivered while sitting on a branch `main` never absorbed. Four of those
+were in a single afternoon.
+
+### It is not a race with the reviewer
+
+The timing settles it. Every stranded commit was pushed **after** its PR
+had already merged:
+
+```
+commit 0d57066 pushed 22:19Z    PR #288 merged 21:27Z    +52 min
+commit d5c0078 pushed 23:25Z    PR #291 merged 23:03Z    +22 min
+commit 47a9329 pushed 00:19Z    PR #291 merged 23:03Z    +76 min
+commit 5a91e04 pushed 00:37Z    PR #291 merged 23:03Z    +94 min
+```
+
+Nobody merged early. The cause is **treating an open PR's branch as a
+scratch workspace** and appending to it without re-checking whether the PR
+is still open. A merged PR does not notice later pushes; `git push`
+succeeds; the branch still exists. **Every surface reports success.**
+
+### The rule
+
+**One PR, one push.** Once a PR is opened, that branch is finished. More
+work means a new branch from `main`, even if it is one line and even if it
+belongs to the same conversation.
+
+If a follow-up genuinely must go on an open PR's branch, **check the PR is
+still open first** (`gh pr view <n> --json state`), and re-check after
+pushing.
+
+### Before and after
+
+**Before opening a PR:** list the commits it should contain, and put that
+list in the PR body. A PR whose expected contents are written down cannot
+quietly merge with a subset.
+
+**After it merges:** verify. Not "the branch exists" — that was true every
+time. Verify the SHAs are ancestors of `main`:
+
+```
+node scripts/verify-commits-landed.js            # every unmerged branch
+node scripts/verify-commits-landed.js <branch>   # one branch
+node scripts/verify-commits-landed.js --selftest # prove detection works
+```
+
+Exit 1 if anything is stranded, so it can gate a "done" claim.
+
+### The checker had this same failure mode, twice
+
+Worth recording because it is the point of the rule. The first version
+built `git log --format=%h|%cI|%s` **unquoted**, so the shell read the
+`|` as pipes, git got a truncated format, the error was swallowed, and the
+tool **reported OK for every branch forever**. Two later edits to the fix
+were converted into literal CR/LF bytes by the tooling in between.
+
+Hence `--selftest`, which creates a throwaway unmerged commit and asserts
+the checker sees it. **"It printed OK" is exactly what a broken checker
+prints.** The file also carries no backslash escapes by design.
+
+
 ## Review checklist — re-run these, do not trust a past clean result (2026-08-23)
 
 These are cheap, they are re-runnable, and every one of them exists
@@ -711,6 +774,7 @@ current tree.**
 | **Gate windows that elapsed silently** | runs in the 6AM cron; `services/feature-gate-registry.js` | a feature dark past its own evaluation window |
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
+| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — seven times so far |
 
 ### When to re-run the freshness check
 
