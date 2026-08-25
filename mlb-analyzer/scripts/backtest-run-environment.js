@@ -42,20 +42,18 @@ function resolveId(team, name){
 
 // Settings (match live)
 var S = jobs.getSettings();
-var FR_TAKES = S.CATCHER_FRAMING_TAKES_PER_GAME!=null?S.CATCHER_FRAMING_TAKES_PER_GAME:58;
-var FR_ABS   = S.CATCHER_FRAMING_ABS_FACTOR!=null?S.CATCHER_FRAMING_ABS_FACTOR:0.80;
-var FR_MIN   = S.CATCHER_FRAMING_MIN_PITCHES_2026!=null?S.CATCHER_FRAMING_MIN_PITCHES_2026:750;
+// FR_MIN / FR_TAKES / FR_ABS removed -- utils/framing-rate.js owns them now.
 var DEF_OPP  = S.DEFENSE_FRV_OPPS_PER_GAME!=null?S.DEFENSE_FRV_OPPS_PER_GAME:25;
 var FIELD = { '1B':1,'2B':1,'3B':1,'SS':1,'LF':1,'CF':1,'RF':1 };
 
+// NINTH copy of the framing precedence, found on the second sweep --
+// the first grep keyed on `min2026` and this one had renamed it FR_MIN.
+// Delegated like the rest so the age gate applies here too.
 function framingPerGame(team, arr){
   var c=null; for(var i=0;i<arr.length;i++){ if((arr[i].pos||'').toUpperCase()==='C'){c=arr[i];break;} }
   if(!c) return null;
   var id=resolveId(team,c.name); if(!id) return null;
-  var row=q.getCatcherFramingById.get(id);
-  if(row && row.pitches>=FR_MIN) return (row.rv_tot/row.pitches)*FR_TAKES;
-  if(q.getCatcherFramingHistById){ var h=q.getCatcherFramingHistById.get(id); if(h&&h.pitches>0) return (h.rv_tot/h.pitches)*FR_TAKES*FR_ABS; }
-  return null;
+  return require('../utils/framing-rate').framingRateForCatcher(q, id, S).rv;
 }
 function defensePerGame(team, arr){
   var sum=0, res=0;
