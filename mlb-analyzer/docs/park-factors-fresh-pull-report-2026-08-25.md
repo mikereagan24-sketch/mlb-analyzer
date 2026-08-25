@@ -167,3 +167,129 @@ cautions on that:
 - `scripts/park-factor-refresh-report.js` — §3 and §4, re-runnable.
 - `scripts/calibration-ab.js` — `PF_ON_JSON` arm added for §5.
 - `4a2cff2` — the 2026-04-19 refresh whose provenance does not reproduce.
+
+---
+
+# Addendum: is it Baseball Savant R? (2026-08-25, later)
+
+> **Your read of Savant is exactly right, and the source hypothesis still
+> does not hold.** Every number you quoted reproduces: COL composite
+> **112** vs R **125**, TEX **93** vs **86**, SEA **92** vs **85**. The two
+> columns really do differ substantially, and COL 1.25 really does match
+> Savant R exactly.
+>
+> **But 6 of 29 match, not most.** Production is not Savant R on any window
+> I can pull. COL is a coincidence -- or rather, COL is extreme enough that
+> several sources land near 1.25.
+>
+> **The merits argument stands on its own, though**, and it is the better
+> reason: we multiply a RUN estimate, so the runs column is the right
+> column. On the totals target Savant R beats both production and
+> FanGraphs, and unlike FanGraphs it does not worsen the level.
+
+## The comparison, all 30 teams
+
+```
+  team  prod   FG3yr  SvR24-26  SvComp  SvR23-25    mFG  mSv26  mSv25
+  ARI    1.10   1.02    1.08     104     1.06         .     .      .
+  ATH    1.19   1.12     --       --      --          .     .      .
+  ATL    1.04   1.00    1.00     100     1.02         .     .      .
+  BAL    0.96   0.99    1.04     102     1.00         .     .      .
+  BOS    1.06   1.01    1.06     103     1.10         .     Y      .
+  CHC    1.08   0.94    0.94      97     0.94         .     .      .
+  CIN    1.10   1.02    1.02     101     1.06         .     .      .
+  CLE    0.95   1.03    0.98      99     0.94         .     .      .
+  COL    1.25   1.11    1.25     112     1.25         .     Y      Y
+  CWS    1.03   0.98    0.96      98     0.98         .     .      .
+  DET    0.98   1.01    1.02     101     1.02         .     .      .
+  HOU    1.00   1.00    1.02     101     1.00         Y     .      Y
+  KC     1.02   1.02    1.02     101     1.02         Y     Y      Y
+  LAA    0.97   0.98    0.98      99     1.02         .     .      .
+  LAD    1.00   0.99    1.00     100     1.02         .     Y      .
+  MIA    1.01   1.00    1.00     100     1.02         .     .      .
+  MIL    0.96   0.98    0.94      97     0.94         .     .      .
+  MIN    0.97   1.01    1.06     103     1.06         .     .      .
+  NYM    0.94   0.99    0.98      99     0.96         .     .      .
+  NYY    1.07   1.00    1.02     101     1.00         .     .      .
+  PHI    1.05   1.05    1.04     102     1.02         Y     .      .
+  PIT    0.97   1.04    1.02     101     0.98         .     .      .
+  SD     0.94   0.97    0.94      97     0.94         .     Y      Y
+  SEA    0.95   0.91    0.85      92     0.83         .     .      .
+  SF     0.92   0.98    0.94      97     0.94         .     .      .
+  STL    0.99   0.96    0.94      97     1.00         .     .      .
+  TB     0.95   1.01    0.94      97      --          .     .      .
+  TEX    1.03   0.93    0.86      93     0.94         .     .      .
+  TOR    1.02   1.01    1.02     101     1.00         Y     .      .
+  WAS    1.02   1.02    1.06     103     1.02         Y     .      Y
+
+  FanGraphs 3yr      matches 4/30    mean |diff| 0.0467
+  Savant R 2024-26   matches 6/29    mean |diff| 0.0410
+  Savant R 2023-25   matches 5/28    mean |diff| 0.0357
+```
+
+I swept twelve windows -- `year` 2023..2026 x `rolling` 1,2,3 -- and the
+best was **6 of 30**. Nothing reproduces the live table.
+
+### Where the COL coincidence comes from, and where it breaks
+
+COL matches Savant R on both windows. So do KC and SD. But the
+disagreements are large and not one-directional:
+
+```
+  CHC  prod 1.08   Savant R 0.94    -0.14
+  TEX  prod 1.03   Savant R 0.86    -0.17
+  SEA  prod 0.95   Savant R 0.85    -0.10
+  MIN  prod 0.97   Savant R 1.06    +0.09
+  BAL  prod 0.96   Savant R 1.04    +0.08
+```
+
+Production sits **above** both candidate sources at TEX, CHC, CIN, ARI and
+NYY, and **below** both at CLE, PIT, MIN and BAL. That is the pattern of a
+table from an **older park era** carried forward -- Globe Life and Wrigley
+have both trended pitcher-friendly since -- not of a mis-labelled column.
+I could not confirm that, and I am not asserting it.
+
+## Savant R on the totals target
+
+Same harness, same corpus, n=352:
+
+```
+  arm                    MAE      RMSE     mean(model - actual)
+  OFF  production       3.4477   4.4699        -0.5752
+  ON   FanGraphs 3yr    3.4206   4.4281        -0.6402
+  ON   Savant R 24-26   3.4089   4.4183        -0.5827
+
+  vs production          d MAE     d RMSE    d level     windows
+  FanGraphs 3yr         -0.0270   -0.0419    -0.0650      5 / 5
+  Savant R 24-26        -0.0387   -0.0516    -0.0075      4 / 5
+```
+
+**Savant R is better than FanGraphs on both MAE and RMSE, and it barely
+touches the level.** FanGraphs improves dispersion but pushes the model's
+already-negative bias from -0.575 to -0.640; Savant R moves it 0.0075.
+That difference is the strongest argument in the data, and it points the
+same way the merits argument does.
+
+On the window counts (5/5 and 4/5): **no n-matched control was run for
+this metric**, and a window count at n~350 is not a precise quantity. They
+are reported because they were computed, not as tiers, and the ordering
+between 4 and 5 carries no weight here.
+
+## Where this leaves it
+
+The provenance question is **not** "the comment names the wrong source".
+It is that **the live values match no source I can pull** -- not FanGraphs
+`3yr`, not Savant R on any of twelve windows. Whatever they are, they are
+unsourced, which makes the choice of what to replace them with a decision
+on the merits rather than a restoration.
+
+On the merits, **Savant R is the better column** for the reason you gave:
+the term multiplies a run estimate, and Savant's composite is a wOBA-based
+offensive index rather than runs. The totals measurement agrees with the
+argument, which is the useful kind of agreement.
+
+Still not applied. Two things would need settling first: **ATH has no
+Savant row** (venue-keyed, and the club changed venues), so it stays on the
+manual 1.19 either way; and **TB is absent from the 2023-25 window**, which
+is the Steinbrenner-season gap again.
+
