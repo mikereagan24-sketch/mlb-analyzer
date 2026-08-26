@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { startCronJobs, runParkFactorsJobIfStale, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
+const { startCronJobs, runParkFactorsJobIfStale, runFirstPitchBackfillIfMissing, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
 
 // One-shot row migrations. db/schema.js's require() opened the DB and
 // ran its schema migrations (CREATE TABLE IF NOT EXISTS, idempotent
@@ -413,6 +413,22 @@ app.listen(PORT, () => {
   // its first month runs on nothing. Fire-and-forget, like the roster pull.
   runParkFactorsJobIfStale()
     .catch(e => console.warn('[startup-park-factors] failed:', e && e.message));
+
+  // One-shot first-pitch / scheduled-start top-up. Same shape and the same
+  // reason as the park-factor line above: refreshFirstPitch has only ever
+  // run for YESTERDAY inside the 4AM score job, so production carries the
+  // start anchor on 30 of ~1876 rows while the analysis copy has 1569.
+  //
+  // Without scheduled_start_utc every lineup capture stores
+  // lead_minutes=NULL, and that is NOT repairable later: first_pitch_utc
+  // does not exist for a game that has not started, so there is no value
+  // to backfill for the moment the capture describes.
+  //
+  // Bounded to one batch and NOT awaited -- the full walk is ~1850
+  // statsapi calls at 120ms, about four minutes, which must not sit in
+  // front of a Render boot. The 3AM cron finishes the remainder.
+  try { runFirstPitchBackfillIfMissing(); }
+  catch (e) { console.warn('[startup-first-pitch-backfill] failed:', e && e.message); }
 
   // One-shot pitcher_game_log backfill (PR A). Self-gating via the
   // 'pitcher_usage_backfill_done' app_settings flag — runs at most once
