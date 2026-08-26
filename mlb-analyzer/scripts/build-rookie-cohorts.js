@@ -119,6 +119,29 @@ function build() {
   return { MIN_BF, rows: out, modelDates };
 }
 
+// A start is classified once; a GAME counts if either starter qualifies.
+// Shared so every consumer of these cohorts aggregates identically --
+// scripts/rookie-roi-and-calibration.js reads the same map rather than
+// re-deriving it, which is how the three-stack duplicate-logic bugs start.
+function gamesFromRows(rows) {
+  const games = new Map();
+  for (const r of rows) {
+    const k = r.game_date + '|' + r.game_id;
+    const g = games.get(k) || { low_bf: false, rookie: false, vet_callup: false, established: false };
+    const isLow = r.low_bf;
+    if (isLow) g.low_bf = true;
+    if (r.rookie === true) g.rookie = true;
+    if (isLow && r.career_ip_before != null && r.career_ip_before >= ROOKIE_IP) g.vet_callup = true;
+    if (!isLow && r.career_ip_before != null && r.career_ip_before >= ROOKIE_IP) g.established = true;
+    games.set(k, g);
+  }
+  return games;
+}
+
+module.exports = { build, gamesFromRows, ROOKIE_IP };
+
+if (require.main !== module) return;
+
 (function main() {
   const { MIN_BF, rows } = build();
   console.log('=== rookie / low-sample SP cohorts, as-of-date ===');
