@@ -115,6 +115,33 @@ const PIPELINES = [
     note: 'no signals emitted; either the slate is empty or the rerun step died',
   },
   {
+    // Registered on day one, before there is any data to be stale.
+    //
+    // Forward capture is the one thing here where a day not running is
+    // UNRECOVERABLE -- there is no backfill for "what did RotoWire say at
+    // 10AM on a date that has passed". A silent stop costs a day of the
+    // only corpus that can answer the horizon question, and the whole
+    // reason this table exists is that the same-day pulls ran all season
+    // while nothing noticed they were being discarded.
+    //
+    // The per-row dimension is the important half: the AGGREGATE goes
+    // green as long as *some* horizon is landing, and next-day capture
+    // would keep it green on its own while same-day silently stopped.
+    // perRow tracks the oldest per-horizon max, so one horizon dying is
+    // visible even while the other is healthy.
+    key: 'lineup_captures',
+    sql: 'SELECT MAX(substr(capture_time,1,10)) v FROM lineup_captures',
+    zone: 'UTC-ts', expectedLagDays: 0, warnDays: 2, critDays: 4,
+    note: 'forward lineup capture stopped; a missed day is unrecoverable, there is no backfill',
+    perRow: {
+      sql: 'SELECT MIN(h) v, SUM(CASE WHEN h < (SELECT MAX(substr(capture_time,1,10)) '
+         + 'FROM lineup_captures) THEN 1 ELSE 0 END) n FROM '
+         + '(SELECT horizon, MAX(substr(capture_time,1,10)) h FROM lineup_captures GROUP BY horizon)',
+      warnDays: 2, critDays: 4,
+      note: 'one horizon stopped while the other kept running -- the aggregate cannot see this',
+    },
+  },
+  {
     key: 'team_rosters',
     sql: "SELECT MAX(substr(datetime(updated_at,'-7 hours'),1,10)) v FROM team_rosters",
     zone: 'UTC-ts', expectedLagDays: 0, warnDays: 2, critDays: 4,

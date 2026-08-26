@@ -174,3 +174,34 @@ None of those is urgent at a 0.13-run median impact.
 - `docs/lineup-source-recon-2026-08-23.md` — why the source comparison is blocked.
 - `scripts/lineup-accuracy-historical.js` — this measurement.
 - `docs/totals-edge-four-steps-2026-08-23.md` — the Under lean this bias points toward but does not explain.
+
+---
+
+## ANNOTATION (2026-08-26) — the model-impact number moved; do not edit the above
+
+Re-run on the corrected corpus, restricted to the **same date range**
+(`≤ 2026-08-22`) so this is not a comparison against newer games:
+
+```
+                        as written here     re-run 2026-08-26
+  exact-slot                    52.5%             51.1%
+  roster                        85.5%             85.3%
+  median model impact           0.130             0.300 runs    <- 2.3x
+  mean model impact               n/a             0.393 runs
+  n (both scorings)              1539              1819
+```
+
+Accuracy is materially unchanged. **Model impact more than doubled.** It is
+not new games — the restriction above holds the window fixed. It is the
+refreshed local corpus re-scoring `proj_model_total` / `model_total`; see
+`CLAUDE.md`, "Know which database you are measuring".
+
+**The conclusion at the end of this document does not survive that.** It
+reads *"none of those is urgent at a 0.13-run median impact."* At 0.300
+median, p75 0.560 and p90 0.870, lineup error is a considerably larger
+input error than this document concluded, and the follow-on work it
+deprioritised should be re-read in that light.
+
+Superseded by `docs/same-day-lineup-capture-2026-08-26.md` §6, which also
+records that this corpus has **no same-day horizon at all** (2 of 1,588
+rows) — so every figure here is a next-day figure.

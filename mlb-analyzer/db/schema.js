@@ -2635,6 +2635,56 @@ q.listParkFactors = db.prepare('SELECT * FROM park_factors ORDER BY factor DESC'
 q.getParkFactor = db.prepare('SELECT * FROM park_factors WHERE team=?');
 q.countParkFactors = db.prepare('SELECT COUNT(*) c FROM park_factors').pluck();
 
+// ---------------------------------------------------------------------
+// lineup_captures (2026-08-26). Every lineup pull, at every horizon, kept.
+//
+// WHY A TABLE AND NOT MORE game_log COLUMNS. game_log's proj_* snapshot is
+// written through COALESCE (services/jobs.js) so the FIRST non-empty
+// projected write wins and everything after it is a no-op. The 8PM PT
+// tomorrow-slate prefetch runs runLineupJob(tomorrow) and takes that slot,
+// so the NINE same-day pulls the next day (8AM, noon-6PM hourly, 11PM PT)
+// are fetched, parsed -- and discarded. Measured: 1586 of 1588 rows with
+// proj_lineup_captured_at are next-day, exactly 2 are same-day.
+//
+// So same-day lineup data has been arriving all season and being dropped
+// on the floor. This table is where it lands. It is append-only; the
+// COALESCE behaviour on game_log is deliberate (post-lock snapshot) and is
+// left exactly as it is.
+//
+// HORIZON IS STORED, NOT INFERRED. It is computed at fetch time from the
+// requested date against the America/New_York calendar date, which is the
+// only place that information exists uncorrupted. Deriving it later from
+// capture_time vs game_date would be a guess: an 11PM PT same-day pull and
+// a 1AM ET next-day pull land within hours of each other on opposite sides
+// of the boundary, and DST moves the boundary twice a year.
+//
+// lead_minutes is stored ALONGSIDE horizon, not instead of it, because the
+// two answer different questions -- horizon is which page was fetched,
+// lead_minutes is how close to first pitch it was. A 6PM PT same-day pull
+// for a 7PM ET game has a NEGATIVE lead; that is the post-start case and
+// it is flagged, not silently averaged in.
+//
+// source is a column, not a convention, so a second provider slots in
+// without a migration. Populated with one today: 'rotowire'.
+// DDL lives in db/lineup-captures-ddl.js so schema.js and the test build
+// the table from one string rather than two that can drift apart.
+const { LINEUP_CAPTURES_DDL } = require('./lineup-captures-ddl');
+for (const ddl of LINEUP_CAPTURES_DDL) db.exec(ddl);
+
+q.insertLineupCapture = db.prepare(
+  'INSERT OR IGNORE INTO lineup_captures (game_date,game_id,source,horizon,capture_time,side,' +
+  ' lineup_json,lineup_status,sp_name,sp_hand,hand_source,n_slots,page_has_started,' +
+  ' lead_minutes,first_pitch_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+);
+q.countLineupCaptures = db.prepare('SELECT COUNT(*) c FROM lineup_captures').pluck();
+q.lineupCaptureFreshness = db.prepare(
+  'SELECT horizon, MAX(capture_time) last_at, COUNT(*) n, ' +
+  ' COUNT(DISTINCT game_date || game_id) games FROM lineup_captures GROUP BY horizon'
+);
+q.lineupCapturesForGame = db.prepare(
+  'SELECT * FROM lineup_captures WHERE game_date=? AND game_id=? ORDER BY capture_time'
+);
+
 q.deleteCatcherFramingById = db.prepare("DELETE FROM catcher_framing WHERE mlb_id=?");
 q.countCatcherFraming = db.prepare("SELECT COUNT(*) c FROM catcher_framing");
 q.listCatcherFraming = db.prepare("SELECT mlb_id,name,rv_tot,pitches,updated_at FROM catcher_framing ORDER BY rv_tot DESC");
