@@ -24,10 +24,17 @@
  * column (the park-factor regime); this is the same shape.
  *
  * lead_minutes is stored alongside, not instead. horizon is which page was
- * fetched; lead_minutes is how close to first pitch it was. They are
- * different questions and the analysis needs both -- a 6PM PT same-day pull
- * for a 4PM ET game has a negative lead, and that capture is a record, not
- * a forecast.
+ * fetched; lead_minutes is how close to start it was. They are different
+ * questions and the analysis needs both -- a 6PM PT same-day pull for a
+ * 4PM ET game has a negative lead, and that capture is a record, not a
+ * forecast.
+ *
+ * THE ANCHOR FOR THAT LEAD IS scheduled_start_utc, NOT first_pitch_utc.
+ * first pitch does not exist until the game begins; statsapi returns null
+ * for a scheduled game. Since every capture is pre-game by construction, a
+ * lead measured only against first pitch would be NULL on exactly the rows
+ * the analysis is built from -- and unbackfillable, because the value did
+ * not exist at the moment the row describes. See pickAnchor.
  */
 const SOURCE_ROTOWIRE = 'rotowire';
 
@@ -47,8 +54,9 @@ function stmtsFor(db) {
       insert: db.prepare(
         'INSERT OR IGNORE INTO lineup_captures (game_date,game_id,source,horizon,capture_time,side,'
         + ' lineup_json,lineup_status,sp_name,sp_hand,hand_source,n_slots,page_has_started,'
-        + ' lead_minutes,first_pitch_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'),
-      firstPitch: db.prepare('SELECT first_pitch_utc FROM game_log WHERE game_date=? AND game_id=?'),
+        + ' lead_minutes,lead_anchor,scheduled_start_utc,first_pitch_utc)'
+        + ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'),
+      anchors: db.prepare('SELECT scheduled_start_utc, first_pitch_utc FROM game_log WHERE game_date=? AND game_id=?'),
     };
     _stmts.set(db, s);
   }
@@ -69,11 +77,29 @@ function horizonFor(dateStr, nowMs) {
   return null;                    // past or 2+ days out -- not a capture horizon
 }
 
-function leadMinutes(firstPitchUtc, captureIso) {
-  if (!firstPitchUtc) return null;
-  const fp = Date.parse(firstPitchUtc), cap = Date.parse(captureIso);
-  if (!isFinite(fp) || !isFinite(cap)) return null;
-  return Math.round((fp - cap) / 60000);
+function leadMinutes(anchorUtc, captureIso) {
+  if (!anchorUtc) return null;
+  const a = Date.parse(anchorUtc), cap = Date.parse(captureIso);
+  if (!isFinite(a) || !isFinite(cap)) return null;
+  return Math.round((a - cap) / 60000);
+}
+
+// Pick the lead anchor from what EXISTS AT CAPTURE TIME.
+//
+// first_pitch_utc is null for any game that has not begun -- statsapi
+// returns it that way, verified 2026-08-26 on a scheduled game. Every
+// capture is pre-game by construction, so preferring first pitch and
+// stopping there would put NULL on precisely the rows the analysis needs,
+// and no later backfill could repair it: the value did not exist at the
+// moment the row describes.
+//
+// first_pitch still wins WHEN PRESENT, because a capture taken during a
+// rain delay should measure against when play actually started, and that
+// is also what makes a post-start capture show a negative lead.
+function pickAnchor(scheduledUtc, firstPitchUtc) {
+  if (firstPitchUtc) return { at: firstPitchUtc, anchor: 'first_pitch' };
+  if (scheduledUtc) return { at: scheduledUtc, anchor: 'scheduled' };
+  return { at: null, anchor: null };
 }
 
 /**
@@ -92,20 +118,17 @@ function captureSlate(games, dateStr, capturedAt, opts) {
   opts = opts || {};
   const source = opts.source || SOURCE_ROTOWIRE;
   const horizon = opts.horizon || horizonFor(dateStr, opts.nowMs);
-  const out = { horizon, written: 0, skipped: 0, started: 0, reason: null };
+  const out = { horizon, written: 0, skipped: 0, started: 0, noAnchor: 0, reason: null };
 
   if (!horizon) { out.reason = 'not_a_capture_horizon'; return out; }
   if (!Array.isArray(games) || !games.length) { out.reason = 'no_games'; return out; }
 
   const capture_time = capturedAt || new Date().toISOString();
 
-  // first_pitch is copied in at capture time so the row stays reproducible
-  // even if game_log is later corrected. NOTE: first_pitch_utc is populated
-  // on the analysis copy and largely absent in production (30 rows as of
-  // 2026-08-25, the backfill never ran there), so lead_minutes will be NULL
-  // for most production captures until it does. That is why page_has_started
-  // exists as an independent in-progress signal -- it comes from the page
-  // itself and needs no local backfill.
+  // Both anchors are copied in at capture time so the row stays
+  // reproducible even if game_log is later corrected -- and so the
+  // scheduled time recorded here is the one that was actually knowable,
+  // not a value revised after a postponement.
   const db = opts.db || appDb();
   const st = stmtsFor(db);
 
@@ -116,9 +139,14 @@ function captureSlate(games, dateStr, capturedAt, opts) {
   const rows = [];
   for (const g of games) {
     if (!g || !g.game_id) { out.skipped++; continue; }
-    let fp = null;
-    try { const row = st.firstPitch.get(dateStr, g.game_id); fp = row ? row.first_pitch_utc : null; } catch (e) { fp = null; }
-    const lead = leadMinutes(fp, capture_time);
+    let sched = null, fp = null;
+    try {
+      const row = st.anchors.get(dateStr, g.game_id);
+      if (row) { sched = row.scheduled_start_utc || null; fp = row.first_pitch_utc || null; }
+    } catch (e) { sched = null; fp = null; }
+    const a = pickAnchor(sched, fp);
+    const lead = leadMinutes(a.at, capture_time);
+    if (a.anchor == null) out.noAnchor++;
     const started = g.page_has_started ? 1 : 0;
     if (started) out.started++;
 
@@ -147,6 +175,8 @@ function captureSlate(games, dateStr, capturedAt, opts) {
         arr.length,
         started,
         lead,
+        a.anchor,
+        sched,
         fp,
       ]);
     }
@@ -157,4 +187,4 @@ function captureSlate(games, dateStr, capturedAt, opts) {
   return out;
 }
 
-module.exports = { captureSlate, horizonFor, leadMinutes, SOURCE_ROTOWIRE };
+module.exports = { captureSlate, horizonFor, leadMinutes, pickAnchor, SOURCE_ROTOWIRE };

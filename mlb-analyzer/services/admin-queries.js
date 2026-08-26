@@ -214,6 +214,55 @@ const QUERIES = [
     bindOrder: ['from', 'from', 'to', 'to', 'action', 'action'],
   },
   {
+    name: 'lineup-capture-health',
+    description: 'Per-horizon, per-PT-hour lineup_captures inventory with anchor coverage. '
+      + 'Exists to confirm a NEW SCHEDULED JOB actually ran in production -- the 10AM PT '
+      + 'lineup pull added 2026-08-26 has never fired, and the park-factor table shipped '
+      + 'empty for exactly this reason (monthly cron, no bootstrap, nobody looked). '
+      + 'Hour is PT so it lines up with the cron schedule; anchor coverage is here because '
+      + 'a capture with lead_minutes NULL is a row that cannot be bucketed by lead.',
+    sql:
+      "SELECT substr(datetime(capture_time,'-7 hours'),1,10) AS pt_date, "
+      + "  CAST(substr(datetime(capture_time,'-7 hours'),12,2) AS INTEGER) AS pt_hour, "
+      + '  horizon, COUNT(*) AS rows, '
+      + "  COUNT(DISTINCT game_date || '|' || game_id) AS games, "
+      + '  SUM(CASE WHEN lead_minutes IS NOT NULL THEN 1 ELSE 0 END) AS with_lead, '
+      + "  SUM(CASE WHEN lead_anchor='scheduled' THEN 1 ELSE 0 END) AS anchor_sched, "
+      + "  SUM(CASE WHEN lead_anchor='first_pitch' THEN 1 ELSE 0 END) AS anchor_fp, "
+      + '  SUM(COALESCE(page_has_started,0)) AS started, '
+      + '  SUM(CASE WHEN n_slots=0 THEN 1 ELSE 0 END) AS empty_lineups '
+      + 'FROM lineup_captures '
+      + "WHERE (? IS NULL OR substr(datetime(capture_time,'-7 hours'),1,10) >= ?) "
+      + '  AND (? IS NULL OR horizon = ?) '
+      + 'GROUP BY pt_date, pt_hour, horizon ORDER BY pt_date DESC, pt_hour, horizon LIMIT ?',
+    params: [
+      { name: 'from',    type: 'string', required: false, default: null },
+      { name: 'horizon', type: 'string', required: false, default: null },
+      { name: 'limit',   type: 'int',    required: false, default: 200 },
+    ],
+    bindOrder: ['from', 'from', 'horizon', 'horizon', 'limit'],
+  },
+  {
+    name: 'first-pitch-anchor-coverage',
+    description: 'game_log start-anchor coverage by date. Confirms the first-pitch backfill '
+      + 'is progressing in production, where only 30 of ~1876 rows carried an anchor before '
+      + '2026-08-26. scheduled_start_utc is the column that matters for lineup capture: '
+      + 'first_pitch_utc does not exist for a game that has not started, so a pre-game '
+      + 'capture can only be lead-bucketed against the schedule.',
+    sql:
+      'SELECT game_date, COUNT(*) AS games, '
+      + '  SUM(CASE WHEN game_pk IS NOT NULL THEN 1 ELSE 0 END) AS with_pk, '
+      + '  SUM(CASE WHEN scheduled_start_utc IS NOT NULL THEN 1 ELSE 0 END) AS with_scheduled, '
+      + '  SUM(CASE WHEN first_pitch_utc IS NOT NULL THEN 1 ELSE 0 END) AS with_first_pitch '
+      + 'FROM game_log WHERE (? IS NULL OR game_date >= ?) '
+      + 'GROUP BY game_date ORDER BY game_date DESC LIMIT ?',
+    params: [
+      { name: 'from',  type: 'string', required: false, default: null },
+      { name: 'limit', type: 'int',    required: false, default: 60 },
+    ],
+    bindOrder: ['from', 'from', 'limit'],
+  },
+  {
     name: 'backfill-recent',
     description: 'Most recent backfill_jobs rows across all tasks (or filtered by task).',
     sql:

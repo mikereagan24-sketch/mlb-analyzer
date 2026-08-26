@@ -140,25 +140,64 @@ function scoreSide(projArr, confArr) {
   // Latest clean capture per (game, horizon): the one closest to first
   // pitch that is still pre-start. For next-day that is the whole slate;
   // for same-day it is the last pull before the game began.
+  // lead_minutes as stored is measured against whatever anchor existed AT
+  // CAPTURE TIME -- usually the scheduled start, because first pitch does
+  // not exist before a game begins. `actual_lead` recomputes it against
+  // the real first pitch now that game_log has one. Both are kept: the
+  // stored lead is what a bettor could have known, the actual lead is what
+  // happened, and a rain delay is exactly the gap between them.
   const caps = db.prepare(
     'SELECT c.game_date d, c.game_id gi, c.horizon h, c.side side, c.lineup_json lj, '
-    + ' c.lineup_status st, c.capture_time ct, c.lead_minutes lead, c.page_has_started started, '
+    + ' c.lineup_status st, c.capture_time ct, c.lead_minutes lead, c.lead_anchor anchor, '
+    + ' c.page_has_started started, '
+    + " CAST((julianday(g.first_pitch_utc) - julianday(c.capture_time)) * 1440 AS INTEGER) actual_lead, "
     + ' g.away_lineup_json ca, g.home_lineup_json ch, '
     + ' g.proj_model_total pmt, g.model_total mt '
     + 'FROM lineup_captures c JOIN game_log g '
     + '  ON g.game_date=c.game_date AND g.game_id=c.game_id '
     + 'ORDER BY c.capture_time').all();
 
-  let exclStarted = 0, exclNegLead = 0;
+  let exclStarted = 0, exclNegLead = 0, noLead = 0;
   const best = new Map();          // gi|d|h|side -> row (latest clean)
+  const clean = [];
   for (const r of caps) {
     if (r.started) { exclStarted++; continue; }
-    if (r.lead != null && r.lead < 0) { exclNegLead++; continue; }
+    // Prefer the ACTUAL lead when first pitch is known; fall back to the
+    // stored capture-time lead. A capture after either is post-start.
+    const lead = r.actual_lead != null ? r.actual_lead : r.lead;
+    if (lead != null && lead < 0) { exclNegLead++; continue; }
+    if (lead == null) noLead++;
+    r._lead = lead;
+    clean.push(r);
     best.set(r.d + '|' + r.gi + '|' + r.h + '|' + r.side, r);
   }
   console.log('');
   console.log('  excluded, post-start: ' + exclStarted + ' flagged by the page, '
     + exclNegLead + ' by a negative lead');
+  if (noLead) {
+    console.log('  WARNING: ' + noLead + ' captures have NO lead at all -- game_log had no');
+    console.log('  scheduled_start_utc when they were taken. Those rows cannot be');
+    console.log('  lead-bucketed. Check the first-pitch backfill.');
+  }
+
+  // Lead is the real axis, not the cron hour: a 3PM PT pull is a 1-hour
+  // lead for a 7PM ET game and an 8-hour lead for a 10PM ET one. Bucketing
+  // by clock time would mix those together and call it a horizon effect.
+  if (clean.length) {
+    const BUCKETS = [[0, 60, '0-1h'], [60, 180, '1-3h'], [180, 360, '3-6h'],
+                     [360, 720, '6-12h'], [720, 1440, '12-24h'], [1440, 1e9, '24h+']];
+    console.log('');
+    console.log('  capture lead distribution (the analysis axis):');
+    console.log('    bucket      same_day   next_day');
+    for (const [lo, hi, label] of BUCKETS) {
+      const n = h => clean.filter(r => r.h === h && r._lead != null && r._lead >= lo && r._lead < hi).length;
+      const a = n('same_day'), b = n('next_day');
+      if (a || b) console.log('    ' + label.padEnd(11) + String(a).padStart(8) + String(b).padStart(11));
+    }
+    const anchors = {};
+    for (const r of clean) anchors[r.anchor || 'none'] = (anchors[r.anchor || 'none'] || 0) + 1;
+    console.log('    anchors used: ' + Object.entries(anchors).map(([k, v]) => k + '=' + v).join('  '));
+  }
 
   const sides = { same_day: [], next_day: [] };
   for (const [key, r] of best) {
