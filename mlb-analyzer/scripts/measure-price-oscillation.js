@@ -113,6 +113,77 @@ const pp = x => (x * 100).toFixed(4);
   }
 
   console.log('');
+  // --- (3) COUNTERFACTUAL: what the no-venue-downgrade guard would have done.
+  //
+  // The 'after' number cannot exist until production has run with the guard,
+  // so this replays the guard's predicate over the SAME historical rows: a
+  // `refresh` write is dropped when it moved price_venue from a real venue to
+  // null, which is exactly the condition the guard blocks. Everything else is
+  // replayed unchanged. It is a projection on real data, not a live result --
+  // labelled as such, and it does not substitute for the post-deploy run.
+  if (process.argv.includes('--replay-guard')) {
+    const kept = [];
+    for (const r of rows) {
+      let d; try { d = JSON.parse(r.detail); } catch (e) { continue; }
+      if (!d.market_line) continue;
+      const blocked = r.action === 'refresh' && d.price_venue
+        && d.price_venue.from != null && d.price_venue.to == null;
+      if (!blocked) kept.push({ id: r.signal_id, action: r.action, f: d.market_line.from, t: d.market_line.to });
+    }
+    const prev2 = {};
+    let ch = 0, rev = 0;
+    const per = { refresh: [], refresh_odds_tail: [] };
+    for (const r of kept) {
+      ch++; per[r.action].push(ip(r.t) - ip(r.f));
+      const p = prev2[r.id];
+      if (p && p.to === r.f && p.from === r.t) rev++;
+      prev2[r.id] = { from: r.f, to: r.t, action: r.action };
+    }
+    console.log('');
+    console.log('--- (3) COUNTERFACTUAL with the no-venue-downgrade guard ---');
+    console.log('  PROJECTION over historical rows, not a live measurement.');
+    console.log('  writes dropped (venue -> null on the upsert path): ' + (changes - ch));
+    console.log('  market_line changes : ' + changes + '  ->  ' + ch);
+    console.log('  reversal rate       : ' + (100 * reversals / changes).toFixed(1) + '%  ->  '
+      + (ch ? (100 * rev / ch).toFixed(1) : '0.0') + '%');
+    for (const k of Object.keys(per)) {
+      const a = per[k];
+      if (!a.length) { console.log('  ' + k.padEnd(20) + ' n=0'); continue; }
+      const mean = a.reduce((s, x) => s + x, 0) / a.length;
+      const down = a.filter(x => x < 0).length;
+      console.log('  ' + k.padEnd(20) + ' n=' + String(a.length).padStart(5)
+        + '  mean ' + pp(mean).padStart(9) + 'pp  down ' + (100 * down / a.length).toFixed(1) + '%');
+    }
+    // LIKE-FOR-LIKE. The means above CANNOT reach zero once degradation
+    // stops, and that is not a residual bias -- it is composition. With
+    // venue->null blocked, the surviving upsert writes are
+    // disproportionately null->venue ACQUISITIONS, which legitimately
+    // improve the price (null->poly -0.93pp, null->kalshi -0.99pp). So
+    // 'both writers near 0.0000pp' is the WRONG success criterion in the
+    // presence of a one-way transition.
+    //
+    // The pricing comparison that IS like-for-like is writes where the
+    // venue did not change. That was already near-symmetric before the
+    // guard (-0.2391pp, 53.2% down), which is the same evidence that
+    // killed the bid-vs-ask hypothesis.
+    const same = { refresh: [], refresh_odds_tail: [] };
+    for (const r of rows) {
+      let d; try { d = JSON.parse(r.detail); } catch (e) { continue; }
+      if (!d.market_line || d.price_venue) continue;
+      same[r.action].push(ip(d.market_line.to) - ip(d.market_line.from));
+    }
+    console.log('');
+    console.log('  LIKE-FOR-LIKE (venue unchanged) -- the real pricing comparison:');
+    for (const k of Object.keys(same)) {
+      const a = same[k];
+      if (!a.length) { console.log('    ' + k.padEnd(20) + ' n=0'); continue; }
+      const mean = a.reduce((s, x) => s + x, 0) / a.length;
+      const down = a.filter(x => x < 0).length;
+      console.log('    ' + k.padEnd(20) + ' n=' + String(a.length).padStart(5)
+        + '  mean ' + pp(mean).padStart(9) + 'pp  down ' + (100 * down / a.length).toFixed(1) + '%');
+    }
+  }
+
   console.log('  SUCCESS CRITERION FOR A FIX: both writers near 0.0000pp with a ~50%');
   console.log('  down-split, AND the reversal rate down. The first matters more --');
   console.log('  a bias on non-oscillating writes never shows up in the second.');

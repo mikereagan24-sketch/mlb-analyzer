@@ -583,6 +583,7 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // refreshSignalBaselines uses. Result: all 5 callers get tier-1 without
   // having to thread venue data through 5 call sites by hand.
   let _venueRows = (opts && opts.venueRowsByGid) || null;
+  let _venueDowngradesBlocked = 0;
   // Per-team bullpen wOBA from pit-act data
   const awayParts = (gameRow.game_id||'').split('-');
   const awayAbbr = awayParts[0]||'';
@@ -1289,6 +1290,79 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     // catches it), audit skipped so it doesn't record a phantom refresh.
     const _sigKey = sig.type + '|' + sig.side;
     const _preRow = existingByKey[_sigKey] || null;
+
+    // DO NOT DOWNGRADE A VENUE-SOURCED PRICE. (2026-08-25)
+    //
+    // WHY, measured: processGameSignals lost the venue on 2,093 passes and
+    // overwrote a venue-comparison price with the single-source
+    // Kalshi-direct fallback, which is systematically WORSE --
+    // poly->null +0.6822pp, kalshi->null +0.4437pp. refreshSignalBaselines
+    // then re-acquired the venue and restored it, which is the whole
+    // ping-pong: 2,728 of 5,493 price changes (49.7%) were one writer
+    // undoing the other.
+    //
+    // WHY NOT MAKE THE FALLBACK RELIABLE INSTEAD. All three tiers are
+    // OPPORTUNISTIC and none guarantees coverage:
+    //   (a) opts.venueRowsByGid  -- only 1 of 8 callers supplies it
+    //   (b) peekCachedRowsByGid  -- 60-SECOND TTL sync peek; hits only if
+    //                               something fetched in the last minute
+    //   (c) venue_comparison_snapshot <= 30 min old -- but snapshots are
+    //       written roughly ONCE PER GAME PER DAY (627 rows over 48 days,
+    //       ~15 games/day), so a rescore lands inside that window rarely
+    // Making it reliable means a live venue fetch on every caller,
+    // including the 7AM rerun over a whole slate. That is a network round
+    // trip per game on a path that does not need one.
+    //
+    // So the rule is the stricter one: IF WE CANNOT RESOLVE A VENUE, WE DO
+    // NOT REPLACE A PRICE THAT CAME FROM ONE. Leaving the existing value
+    // is better than degrading it -- a slightly older best-of-venues price
+    // beats a current single-source one, and refreshSignalBaselines will
+    // refresh it properly on its own cadence.
+    //
+    // VERIFIED, per the CLAUDE.md rule that a fix-claim carries its number.
+    // Counterfactual replay of this guard's predicate over the 5,493
+    // historical price writes:
+    //
+    //   writes dropped (venue -> null)   2093
+    //   market_line changes  5493  ->  3400
+    //   REVERSAL RATE        49.7%  ->   5.1%
+    //
+    //   node scripts/measure-price-oscillation.js --replay-guard
+    //
+    // That is a PROJECTION on historical rows, not a live result. The live
+    // before/after needs production days with the guard running; re-run the
+    // same command without --replay-guard against a window after deploy.
+    //
+    // NOTE ON THE OTHER CRITERION. The ticket asked for 'both writers near
+    // 0.0000pp'. That target is WRONG here and the replay shows why: with
+    // venue->null blocked, the surviving upsert writes are disproportionately
+    // null->venue ACQUISITIONS, which legitimately improve the price, so the
+    // mean lands at -0.4005pp by composition rather than bias. The
+    // like-for-like comparison is writes where the venue did NOT change, and
+    // that was already near-symmetric before this change (-0.2391pp, 53.2%
+    // down) -- the same evidence that ruled out bid-vs-ask.
+    //
+    // Narrow by construction: only fires when THIS pass resolved no venue
+    // AND the existing row has one. A pass that resolves a venue writes
+    // normally, including venue->venue moves.
+    let _mktLineOut = _sigMarketLine;
+    let _edgeOut = sig.edge;
+    let _venueOut = _sigVenue;
+    let _staleOut = (_venueAware && (_sigVenue == null)) ? 1 : 0;
+    let _preservedVenue = false;
+    if (sig.type === 'ML' && _venueAware && _sigVenue == null
+        && _preRow && _preRow.price_venue != null && _preRow.market_line != null) {
+      _mktLineOut = _preRow.market_line;
+      _edgeOut    = _preRow.edge_pct;
+      _venueOut   = _preRow.price_venue;
+      _staleOut   = _preRow.venue_stale;
+      _preservedVenue = true;
+      _venueDowngradesBlocked++;
+      console.log('[venue-guard] ' + gameRow.game_id + ' ' + sig.type + '/' + sig.side
+        + ': no venue resolved this pass -- keeping the existing ' + _preRow.price_venue
+        + ' price ' + _preRow.market_line + ' rather than downgrading to '
+        + _sigMarketLine + ' (single-source fallback).');
+    }
     q.upsertSignal.run({
       game_log_id: gl.id,
       game_date: gameRow.game_date,
@@ -1301,11 +1375,11 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       // ('fav'|'dog'|'over'|'under') post-cutover.
       signal_label: sig.label,
       category: sig.category,
-      market_line: _sigMarketLine,
+      market_line: _mktLineOut,
       model_line: sig.type === 'ML'
         ? (sig.side === 'away' ? model.aML : model.hML)
         : parseFloat(model.estTot.toFixed(2)),
-      edge_pct: sig.edge,
+      edge_pct: _edgeOut,
       outcome,
       pnl,
       // Cohort assignment by game_date. The model has gone through several
@@ -1364,8 +1438,8 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       // for totals until Stage 2 lands them). venue_stale=1 marks a v8
       // row that couldn't obtain a fillable venue-best baseline and fell
       // back to Kalshi-direct — visible in backtest so ROI can segment.
-      price_venue: _sigVenue,
-      venue_stale: (_venueAware && (_sigVenue == null)) ? 1 : 0,
+      price_venue: _venueOut,
+      venue_stale: _staleOut,
       // Lineup content hash — used by refreshSignalBaselines' staleness
       // guard. Same for all signals emitted this pass since they share
       // the same gl row. Nulls collapse to empty strings inside the
@@ -1392,12 +1466,12 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
           ? (sig.side === 'away' ? model.aML : model.hML)
           : parseFloat(model.estTot.toFixed(2));
         const _newSnap = {
-          market_line: _sigMarketLine,
+          market_line: _mktLineOut,
           model_line:  _modelLineNew,
-          edge_pct:    sig.edge,
+          edge_pct:    _edgeOut,
           category:    sig.category,
-          price_venue: _sigVenue,
-          venue_stale: (_venueAware && (_sigVenue == null)) ? 1 : 0,
+          price_venue: _venueOut,
+          venue_stale: _staleOut,
         };
         const _delta = {};
         let _changed = false;
