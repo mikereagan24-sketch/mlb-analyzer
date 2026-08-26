@@ -704,6 +704,52 @@ further under any additional filter.
 
 See `docs/rookie-roi-result-2026-08-26.md` §5 for what it cost.
 
+## Re-check a deprioritizing number before treating the decision as settled (2026-08-26)
+
+**A number that was used to STOP work has to be re-run against the current
+corpus before "we decided not to" is quoted as a reason.** This has now
+moved a headline figure enough to change a decision twice.
+
+```
+                                    as reported    on the corrected corpus
+lineup model impact (median)          0.130 runs        0.300 runs   2.3x
+weather-contaminated games                27              797       29x
+```
+
+**Lineup work (2026-08-23 -> 2026-08-26).** The doc closed with *"none of
+those is urgent at a 0.13-run median impact"*, and that sentence is the
+entire basis on which lineup accuracy was set aside. Re-run over the same
+date range on the corrected corpus it is **0.300 runs** — the same order
+as park factors (ON/OFF arm 0.3025, stale→fresh 0.432), which got a
+sourced table, a cron, three guards and a regime column. Two decisions,
+numbers differing by 2.3×, one of them real.
+
+**The decontaminated re-run (2026-08-23 -> 2026-08-24).** The three-arm
+design was run when **27** games carried a weather tag. The corrected
+corpus has **797**, so ~770 known-bad-weather games sat silently in *both*
+arms, and an arm labelled "contaminated" that has had most of one
+contamination class quietly removed cannot bound what exclusion costs.
+See `services/parameter-sweep.js:416`.
+
+### The asymmetry that makes this a rule
+
+A number that *starts* work gets re-derived constantly — every follow-up
+measurement re-computes it. A number that *stops* work is never
+recomputed, because nothing downstream runs. **So a stale
+green-light corrects itself and a stale red-light does not**, and the red
+light is the one nobody looks at again.
+
+### What to do
+
+- Before citing a prior "not worth it", **re-run the statistic** that
+  produced it. It is one command in every case here.
+- If the corpus was refreshed since the decision, treat the decision as
+  **unverified**, not as settled.
+- When the number moves, say so plainly and **annotate the original doc**
+  rather than rewriting it — the record of what was believed matters.
+- Both instances above were found only because something else forced a
+  re-measurement. Neither was found by re-reading the doc.
+
 ## A schedule-share denominator is not a measurement n (2026-08-26)
 
 Cohort sizes quoted from `build-rookie-cohorts.js` are **scheduled games**.
@@ -996,7 +1042,7 @@ current tree.**
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
-| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — seven times so far |
+| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **eight times**, most recently 2026-08-26 when PRs #312 and #313 each merged with their LAST commit missing |
 | **Forward lineup capture stopped** | `node scripts/pipeline-freshness.js` (row `lineup_captures`) | a missed day of same-day capture, which is **unrecoverable** — there is no backfill for what RotoWire said at 10AM on a date that has passed |
 | **Capture horizon logic** | `node scripts/test-lineup-capture.js` | a horizon mislabelled across the ET/PT midnight gap or a DST boundary — an 11PM PT same-day pull is already the next ET day |
 | **A bar inside the noise floor** | `node scripts/resolution-floor.js --n <n> --bar <bar>` | a pre-registered test that could not have resolved either way — run it **before** writing the bar, not after reading the result |
