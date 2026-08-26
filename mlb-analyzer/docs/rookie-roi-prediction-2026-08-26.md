@@ -117,3 +117,30 @@ are denominators.
 
 If the result lands in the INCONCLUSIVE band, **that is what gets
 reported** — not the point estimate dressed as a direction.
+
+---
+
+## ANNOTATION (2026-08-26, after the run) — do not edit the above
+
+Result: `docs/rookie-roi-result-2026-08-26.md`.
+
+**Outcome: INCONCLUSIVE on the rookie leg, as §2 said was most likely.**
+Gap −3.60pp, CI [−22.89, +15.18]. `low_bf` and `vet_callup` both refuted a
+−15pp effect. Calibration flat, no tier change, as §3 predicted.
+
+**Two defects in this document, recorded here so it is not cited as a
+clean pre-registration:**
+
+1. **§2's bar was unresolvable.** It estimated ±15–20pp intervals and set
+   the bar at 15pp. The realised interval was ±19.0pp, so neither verdict
+   was reachable on the rookie leg regardless of the data. Now a standing
+   rule in `CLAUDE.md`.
+
+2. **§2's "260 games" is a schedule share, not the measurement n.** The
+   calibration leg ran on **63** rookie games after contamination
+   filtering and wOBA-snapshot availability. The stated power was ~4×
+   the actual power.
+
+Neither defect changes the verdicts — both predictions were of *no
+distinguishable effect*, and that is what was found. They change how much
+this run should be leaned on as evidence, which is less than §2 implies.

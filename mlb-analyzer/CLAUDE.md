@@ -626,6 +626,37 @@ a different answer. A prose claim has neither property.
   trusting it.** All three were load-bearing: each had been read and
   believed at least once before the contradiction surfaced.
 
+## A pre-registered bar must sit outside the noise floor (2026-08-26)
+
+**Estimate the interval width first, then set the bar wider than it.** The
+rookie-ROI pre-registration estimated ROI intervals of +/-15-20pp and then
+set the confirmation bar at 15pp. The realised interval was **+/-19.0pp**,
+so on the rookie leg *no outcome in the plausible range could have
+confirmed or refuted anything* -- the test was decided before it ran.
+
+Naming INCONCLUSIVE in advance as the likely outcome is necessary and was
+done, but it does not rescue an unresolvable bar. Either:
+
+- set the bar outside the estimated noise floor, or
+- declare the run **descriptive, not a test**, in the pre-registration.
+
+Empirically on this corpus: **ROI questions resolve at n~400 signals and
+do not resolve at n~130.** The two control cohorts in that same run
+(n=432, n=356) did clear the bar; the n=128 cohort could not.
+
+See `docs/rookie-roi-result-2026-08-26.md` s5.
+
+## A schedule-share denominator is not a measurement n (2026-08-26)
+
+Cohort sizes quoted from `build-rookie-cohorts.js` are **scheduled games**.
+A calibration leg sees far fewer: contamination filtering took 1876 -> 897,
+and `woba_data_snapshot` only starts 2026-05-20 (93 of 140 game dates),
+leaving 558. A cohort with **260 scheduled games had 63 scorable ones**.
+
+Quote the n the statistic was actually computed on, in the same table as
+the statistic. A power claim carried over from a different test on the
+same cohort is a 4x overstatement here.
+
 ## The window sign test is not precise at n~350 (2026-08-24)
 
 **Stop quoting "N of 5 windows" to one-window precision on a corpus of a
