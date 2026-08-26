@@ -133,8 +133,10 @@ clean pre-registration:**
 
 1. **§2's bar was unresolvable.** It estimated ±15–20pp intervals and set
    the bar at 15pp. The realised interval was ±19.0pp, so neither verdict
-   was reachable on the rookie leg regardless of the data. Now a standing
-   rule in `CLAUDE.md`.
+   was reachable on the rookie leg regardless of the data. The floor is
+   now measured rather than guessed: `scripts/resolution-floor.js --n 128
+   --bar 15` returns **NOT RESOLVABLE, floor 20.2pp**, and running it is
+   now a required step of any pre-registration here (`CLAUDE.md`).
 
 2. **§2's "260 games" is a schedule share, not the measurement n.** The
    calibration leg ran on **63** rookie games after contamination
