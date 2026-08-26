@@ -2158,11 +2158,24 @@ async function runLineupJob(dateStr) {
     // lineup pull -- the pull feeds pricing, the capture feeds an analysis
     // that does not exist yet. Same rule as the feature-gate health call in
     // the 6AM chain.
+    // The start ANCHOR has to exist before the capture reads it. game_log
+    // only gets scheduled_start_utc from refreshFirstPitch, which the 4AM
+    // score job runs for YESTERDAY -- so without this, today's and
+    // tomorrow's rows carry no anchor when the lineup crons fire, and every
+    // capture would store lead_minutes=NULL. Not backfillable later:
+    // first_pitch_utc does not exist for a game that has not started.
+    //
+    // onlyMissing keeps it cheap. After the first pull of the day there is
+    // nothing left to fetch, so the remaining nine pulls skip it entirely.
+    try { await refreshFirstPitch(dateStr, { onlyMissing: true }); }
+    catch (e) { console.warn('[first-pitch] anchor refresh failed (non-fatal): ' + (e && e.message)); }
+
     try {
       const { captureSlate } = require('./lineup-capture');
       const cap = captureSlate(games, dateStr, rawResp && rawResp.fetched_at);
       console.log('[lineup-capture] ' + dateStr + ' horizon=' + (cap.horizon || 'none')
         + ' rows=' + cap.written + ' started_blocks=' + cap.started
+        + ' no_anchor=' + cap.noAnchor
         + (cap.reason ? ' reason=' + cap.reason : ''));
     } catch (e) {
       console.error('[lineup-capture] failed (non-fatal):', e && e.message);
@@ -3053,10 +3066,25 @@ async function runPitcherUsageBackfill() {
 // slate and persist them. Idempotent: re-running overwrites with fresher
 // values, which is required because firstPitch does not exist until the
 // game actually begins and status changes throughout the day.
-async function refreshFirstPitch(dateStr) {
+async function refreshFirstPitch(dateStr, opts) {
+  opts = opts || {};
   const { fetchFirstPitch } = require('./first-pitch');
+  // opts.onlyMissing -- fetch only rows with no scheduled_start_utc yet.
+  //
+  // Added 2026-08-26 for the lineup-capture path, which needs a START
+  // ANCHOR on TODAY's slate rather than yesterday's. The full refresh is
+  // one statsapi call per game and the lineup crons fire ten times a day;
+  // running it unconditionally on every pull would be 150 calls a day to
+  // re-fetch values that do not change. scheduled_start_utc is known as
+  // soon as the game is scheduled and moves only on a postponement, so
+  // "already have one" is a sound skip for this caller.
+  //
+  // The 4AM score-job caller passes nothing and keeps the full refresh,
+  // which it needs: first_pitch_utc and game_status DO change through the
+  // day, and that path is what fills them in after the fact.
   const rows = db.prepare(
     'SELECT game_date, game_id, game_pk FROM game_log WHERE game_date = ? AND game_pk IS NOT NULL'
+    + (opts.onlyMissing ? ' AND scheduled_start_utc IS NULL' : '')
   ).all(dateStr);
   if (!rows.length) return 0;
   const upd = db.prepare(
@@ -3184,6 +3212,98 @@ function backfillMlClosingLines() {
   })();
   console.log('[closing-backfill] backfilled ' + n + ' ML closing lines (audit-marked as assumed, not observed)');
   return n;
+}
+
+// Historical first-pitch backfill, as a JOB rather than a script.
+// (2026-08-26)
+//
+// scripts/backfill-first-pitch.js opens data/mlb.db directly, which makes
+// it a laptop tool. Production is on Render and the rows that need it are
+// there: 30 of ~1876 game_log rows carry first_pitch_utc in prod versus
+// 1569 on the analysis copy, because refreshFirstPitch has only ever run
+// for YESTERDAY inside the 4AM score job -- one day at a time, since the
+// guard landed on 2026-08-22.
+//
+// PARK-FACTOR SHAPE, DELIBERATELY. That table shipped with a monthly cron
+// and no bootstrap, production came up with zero rows, and every park
+// priced neutral until someone looked. The lesson was that a job which
+// only maintains state needs a partner that ESTABLISHES it. This is the
+// establishing half; refreshFirstPitch in the score job is the maintaining
+// half.
+//
+// Bounded per run and resumable. Two reasons: statsapi is rate-limited at
+// ~120ms per call, so ~1850 rows is roughly four minutes of wall time that
+// must not sit in front of a boot; and a partial run is fine because the
+// query only selects rows that still lack a value, so the next run resumes
+// exactly where this one stopped.
+async function runFirstPitchBackfillJob(opts) {
+  opts = opts || {};
+  const limit = opts.limit || 400;
+  const sleepMs = opts.sleepMs != null ? opts.sleepMs : 120;
+  const { fetchFirstPitch } = require('./first-pitch');
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  const remainingBefore = db.prepare(
+    'SELECT COUNT(*) c FROM game_log WHERE game_pk IS NOT NULL AND scheduled_start_utc IS NULL'
+  ).pluck().get();
+
+  // Newest first. A backfill that starts in April spends its whole budget
+  // on games nobody is about to analyse; the recent slates are the ones
+  // the horizon comparison will pair against first.
+  const rows = db.prepare(
+    'SELECT game_date, game_id, game_pk FROM game_log '
+    + 'WHERE game_pk IS NOT NULL AND scheduled_start_utc IS NULL '
+    + 'ORDER BY game_date DESC LIMIT ?'
+  ).all(limit);
+
+  const upd = db.prepare(
+    'UPDATE game_log SET scheduled_start_utc = COALESCE(?, scheduled_start_utc), '
+    + 'first_pitch_utc = COALESCE(?, first_pitch_utc), game_status = COALESCE(?, game_status) '
+    + 'WHERE game_date = ? AND game_id = ?'
+  );
+
+  let ok = 0, sched = 0, fp = 0, err = 0;
+  for (const r of rows) {
+    try {
+      const f = await fetchFirstPitch(r.game_pk, { timeoutMs: 8000 });
+      upd.run(f.scheduled_start_utc, f.first_pitch_utc, f.game_status, r.game_date, r.game_id);
+      ok++;
+      if (f.scheduled_start_utc) sched++;
+      if (f.first_pitch_utc) fp++;
+    } catch (e) { err++; }
+    if (sleepMs) await sleep(sleepMs);
+  }
+
+  const remainingAfter = db.prepare(
+    'SELECT COUNT(*) c FROM game_log WHERE game_pk IS NOT NULL AND scheduled_start_utc IS NULL'
+  ).pluck().get();
+
+  const res = { success: err === 0, attempted: rows.length, updated: ok, scheduled: sched,
+                first_pitch: fp, errors: err,
+                remaining_before: remainingBefore, remaining_after: remainingAfter };
+  console.log('[first-pitch-backfill] ' + JSON.stringify(res));
+  try { q.logCron.run('first_pitch_backfill', todayStr(), err === 0 ? 'success' : 'partial',
+    JSON.stringify(res), ok); } catch (e) { /* logging must not fail the job */ }
+  return res;
+}
+
+// Boot-time establishment, in the background.
+//
+// NOT awaited by the caller and NOT allowed to delay startup -- a four
+// minute statsapi walk in front of a Render boot would look like a failed
+// deploy. It runs one bounded batch, and the nightly cron finishes the
+// rest over subsequent days.
+function runFirstPitchBackfillIfMissing() {
+  let remaining = 0;
+  try {
+    remaining = db.prepare(
+      'SELECT COUNT(*) c FROM game_log WHERE game_pk IS NOT NULL AND scheduled_start_utc IS NULL'
+    ).pluck().get();
+  } catch (e) { return null; }
+  if (!remaining) { console.log('[first-pitch-backfill] nothing missing at boot'); return null; }
+  console.log('[first-pitch-backfill] ' + remaining + ' rows missing a start anchor at boot; running one batch');
+  return runFirstPitchBackfillJob({ limit: 400 })
+    .catch(e => console.error('[first-pitch-backfill] boot batch failed (non-fatal):', e && e.message));
 }
 
 async function runScoreJob(dateStr) {
@@ -3926,6 +4046,17 @@ function startCronJobs() {
   // ON THE SERVER, not a laptop: Savant and FanGraphs are both behind a
   // Cloudflare interactive challenge from some networks (cf-mitigated:
   // challenge on this repo's dev machine) while Render is not.
+  // --- 3AM PT: finish the first-pitch backfill, a batch at a time ---
+  // Self-terminating: the job selects only rows still missing an anchor,
+  // so once prod is caught up this is a COUNT and a log line. It stays
+  // scheduled rather than being deleted because rows keep arriving, and a
+  // job that quietly does nothing is cheaper than remembering to re-run
+  // one by hand.
+  cron.schedule('0 3 * * *', async () => {
+    try { await runFirstPitchBackfillJob({ limit: 600 }); }
+    catch (e) { console.error('[cron-first-pitch-backfill] failed:', e && e.message); }
+  }, { timezone: 'America/Los_Angeles' });
+
   cron.schedule('0 5 1 * *', async () => {
     console.log('[cron] monthly park-factor refresh');
     try { await runParkFactorsJob(); }
@@ -7171,4 +7302,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

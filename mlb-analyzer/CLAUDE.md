@@ -626,25 +626,129 @@ a different answer. A prose claim has neither property.
   trusting it.** All three were load-bearing: each had been read and
   believed at least once before the contradiction surfaced.
 
-## A pre-registered bar must sit outside the noise floor (2026-08-26)
+## A pre-registration requires a power check, and it is one command (2026-08-26)
 
-**Estimate the interval width first, then set the bar wider than it.** The
-rookie-ROI pre-registration estimated ROI intervals of +/-15-20pp and then
-set the confirmation bar at 15pp. The realised interval was **+/-19.0pp**,
-so on the rookie leg *no outcome in the plausible range could have
-confirmed or refuted anything* -- the test was decided before it ran.
+**Every pre-registration must run `scripts/resolution-floor.js` and paste
+its output before the bar is set.** Not an estimate, not a recollection of
+past interval widths — the command.
 
-Naming INCONCLUSIVE in advance as the likely outcome is necessary and was
-done, but it does not rescue an unresolvable bar. Either:
+```
+node scripts/resolution-floor.js --n <cohort n> --bar <proposed bar>
+```
 
-- set the bar outside the estimated noise floor, or
-- declare the run **descriptive, not a test**, in the pre-registration.
+It prints RESOLVABLE or NOT RESOLVABLE. If NOT RESOLVABLE, the
+pre-registration must do one of three things **before the run**:
 
-Empirically on this corpus: **ROI questions resolve at n~400 signals and
-do not resolve at n~130.** The two control cohorts in that same run
-(n=432, n=356) did clear the bar; the n=128 cohort could not.
+- raise the bar above the floor it printed,
+- grow the cohort to an n where the floor clears the bar, or
+- declare the run **descriptive, not a test**, in writing.
 
-See `docs/rookie-roi-result-2026-08-26.md` s5.
+Naming INCONCLUSIVE in advance as the likely outcome is necessary and does
+not substitute for this. The rookie-ROI pre-registration did name it, and
+the test was still undecidable: it estimated ±15–20pp intervals from
+memory, set the bar at 15pp, and produced ±19.0pp. Run retrospectively at
+`--n 128 --bar 15`, the checker returns **NOT RESOLVABLE, floor 20.2pp** —
+it would have caught this before the run, in 40 seconds.
+
+### The measured ROI floor on this corpus
+
+963 graded, staked signals across 133 dates. **This is not a function of
+cohort size alone — it bottoms out.**
+
+```
+    n     CI half-width    null gap 95% span     smallest resolvable
+   50        ±27.0pp        [-26.6, +25.5]pp          27.0pp
+  100        ±19.1pp        [-20.0, +18.5]pp          20.0pp
+  128        ±17.5pp        [-17.1, +18.9]pp          18.9pp
+  200        ±14.0pp        [-14.0, +14.2]pp          14.2pp
+  300        ±13.1pp        [-13.4, +13.6]pp          13.6pp
+  400        ±12.0pp        [-11.3, +11.8]pp          12.0pp
+  600        ±12.3pp        [-14.3, +11.6]pp          14.3pp
+```
+
+Two things to take from this, both of which correct a looser claim I made
+on 2026-08-26 before measuring it:
+
+1. **The floor plateaus at ~12pp around n=300–400 and does not improve
+   past it** — it even widens at n=600, because a gap is between two
+   groups and the *complement* is what shrinks. So "bigger cohort" stops
+   helping. **No ROI question below ~12pp is answerable on this corpus at
+   any cohort size**, and the fix for those is more corpus, not more
+   slicing.
+2. My earlier phrasing — "ROI resolves at n≈400 and not at n≈130" — was
+   inferred from three cohorts and is wrong in mechanism. **n≈200 already
+   clears a 15pp bar.** Use the table, not the recollection; that is the
+   whole point of having a command.
+
+### The measured log-loss floor, which is the tighter constraint
+
+`--calibration`. 564 scored games across 90 dates, and it plateaus too:
+
+```
+    n     CI half-width    null gap 95% span         smallest resolvable
+   50       ±0.03510       [-0.03287, +0.03266]           0.03510
+  100       ±0.02618       [-0.02730, +0.02891]           0.02891
+  200       ±0.02228       [-0.01848, +0.02028]           0.02228
+  300       ±0.02023       [-0.02048, +0.01948]           0.02048
+```
+
+**No Δ log loss below ~0.020 is detectable on this corpus at any cohort
+size.** For scale, the rookie calibration leg observed **+0.00720** at
+n=63, where the floor is ~0.032 — a quarter of the noise. "No tier change"
+was the only answer that run could produce, and that is worth knowing
+before quoting it as evidence of anything.
+
+This is the harder ceiling of the two, because the calibration corpus is
+smaller than the signal corpus (564 games vs 963 signals) and shrinks
+further under any additional filter.
+
+See `docs/rookie-roi-result-2026-08-26.md` §5 for what it cost.
+
+## Re-check a deprioritizing number before treating the decision as settled (2026-08-26)
+
+**A number that was used to STOP work has to be re-run against the current
+corpus before "we decided not to" is quoted as a reason.** This has now
+moved a headline figure enough to change a decision twice.
+
+```
+                                    as reported    on the corrected corpus
+lineup model impact (median)          0.130 runs        0.300 runs   2.3x
+weather-contaminated games                27              797       29x
+```
+
+**Lineup work (2026-08-23 -> 2026-08-26).** The doc closed with *"none of
+those is urgent at a 0.13-run median impact"*, and that sentence is the
+entire basis on which lineup accuracy was set aside. Re-run over the same
+date range on the corrected corpus it is **0.300 runs** — the same order
+as park factors (ON/OFF arm 0.3025, stale→fresh 0.432), which got a
+sourced table, a cron, three guards and a regime column. Two decisions,
+numbers differing by 2.3×, one of them real.
+
+**The decontaminated re-run (2026-08-23 -> 2026-08-24).** The three-arm
+design was run when **27** games carried a weather tag. The corrected
+corpus has **797**, so ~770 known-bad-weather games sat silently in *both*
+arms, and an arm labelled "contaminated" that has had most of one
+contamination class quietly removed cannot bound what exclusion costs.
+See `services/parameter-sweep.js:416`.
+
+### The asymmetry that makes this a rule
+
+A number that *starts* work gets re-derived constantly — every follow-up
+measurement re-computes it. A number that *stops* work is never
+recomputed, because nothing downstream runs. **So a stale
+green-light corrects itself and a stale red-light does not**, and the red
+light is the one nobody looks at again.
+
+### What to do
+
+- Before citing a prior "not worth it", **re-run the statistic** that
+  produced it. It is one command in every case here.
+- If the corpus was refreshed since the decision, treat the decision as
+  **unverified**, not as settled.
+- When the number moves, say so plainly and **annotate the original doc**
+  rather than rewriting it — the record of what was believed matters.
+- Both instances above were found only because something else forced a
+  re-measurement. Neither was found by re-reading the doc.
 
 ## A schedule-share denominator is not a measurement n (2026-08-26)
 
@@ -938,9 +1042,10 @@ current tree.**
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
-| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — seven times so far |
+| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **eight times**, most recently 2026-08-26 when PRs #312 and #313 each merged with their LAST commit missing |
 | **Forward lineup capture stopped** | `node scripts/pipeline-freshness.js` (row `lineup_captures`) | a missed day of same-day capture, which is **unrecoverable** — there is no backfill for what RotoWire said at 10AM on a date that has passed |
 | **Capture horizon logic** | `node scripts/test-lineup-capture.js` | a horizon mislabelled across the ET/PT midnight gap or a DST boundary — an 11PM PT same-day pull is already the next ET day |
+| **A bar inside the noise floor** | `node scripts/resolution-floor.js --n <n> --bar <bar>` | a pre-registered test that could not have resolved either way — run it **before** writing the bar, not after reading the result |
 
 ### When to re-run the freshness check
 

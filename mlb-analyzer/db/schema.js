@@ -2668,8 +2668,8 @@ q.countParkFactors = db.prepare('SELECT COUNT(*) c FROM park_factors').pluck();
 // without a migration. Populated with one today: 'rotowire'.
 // DDL lives in db/lineup-captures-ddl.js so schema.js and the test build
 // the table from one string rather than two that can drift apart.
-const { LINEUP_CAPTURES_DDL } = require('./lineup-captures-ddl');
-for (const ddl of LINEUP_CAPTURES_DDL) db.exec(ddl);
+const { applyLineupCapturesDdl } = require('./lineup-captures-ddl');
+applyLineupCapturesDdl(db);
 
 q.insertLineupCapture = db.prepare(
   'INSERT OR IGNORE INTO lineup_captures (game_date,game_id,source,horizon,capture_time,side,' +

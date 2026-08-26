@@ -112,9 +112,13 @@ year. This repo has already paid once for a remembered filter instead of a
 column — the park-factor regime — and this is the same shape.
 
 **`lead_minutes` is stored alongside horizon, not instead of it.** Horizon
-is which page was fetched; lead is how close to first pitch. A 6PM PT
+is which page was fetched; lead is how close to the start. A 6PM PT
 same-day pull for a 4PM ET game has a *negative* lead. Both are needed and
 they answer different questions.
+
+**The anchor for that lead is `scheduled_start_utc`, not `first_pitch_utc`
+— a defect in the first version of this, found and fixed the same day.**
+See section 10.
 
 Wired into `runLineupJob` after team normalisation and `game_id`
 recomputation — capturing earlier would store pre-normalisation ids
@@ -188,6 +192,72 @@ It raises the value of this capture rather than lowering it.
 
 The 08-23 doc has been annotated, not rewritten.
 
+### The deprioritization rested on a number that did not survive
+
+Stated plainly, because it is the consequential part: **lineup work was
+deprioritized on the 0.13-run figure, and that figure did not survive
+corpus correction.** The 08-23 doc concluded *"none of those is urgent at
+a 0.13-run median impact"*, and that sentence is the whole basis on which
+this was set aside. On the corrected corpus the same statistic, over the
+same date range, is **0.300 runs**.
+
+Against the largest effect this project has measured — same statistic,
+same units:
+
+| | mean \|Δ model_total\| |
+|---|---|
+| park factors, ON vs OFF arm | **0.3025 runs** |
+| park factors, stale → fresh switch (sensitivity) | **0.432 runs** |
+| **lineup error, next-day projection vs confirmed** | **0.393 runs** |
+
+The lineup median is 0.300, p75 0.560, p90 0.870 — reported alongside the
+mean because the distribution is right-skewed and the mean alone would
+overstate the typical game.
+
+So lineup error is **the same order as park factors, and larger than the
+ON/OFF arm**, measured the same way. Park factors got a sourced table, a
+monthly cron, three guards and a regime column. Lineup accuracy got
+shelved. The two decisions were made on numbers that differ by 2.3×, and
+only one of those numbers was real.
+
+**This is not a claim that same-day will turn out better.** That is the
+open question and it is unmeasured. It is a claim about priority: the
+input error is large enough to be worth measuring, and the reason it was
+judged not to be has been withdrawn.
+### The deprioritization rested on a number that did not survive
+
+Stated plainly, because it is the consequential part: **lineup work was
+deprioritized on the 0.13-run figure, and that figure did not survive
+corpus correction.** The 08-23 doc concluded *"none of those is urgent at
+a 0.13-run median impact"*, and that sentence is the whole basis on which
+this was set aside. On the corrected corpus the same statistic, over the
+same date range, is **0.300 runs**.
+
+Against the largest effect this project has measured, on the same
+statistic and in the same units:
+
+| | mean |d model_total| |
+|---|---|
+| park factors, ON vs OFF arm | **0.3025 runs** |
+| park factors, stale -> fresh switch (sensitivity) | **0.432 runs** |
+| **lineup error, next-day projection vs confirmed** | **0.393 runs** |
+
+Median for the lineup figure is 0.300, p75 0.560, p90 0.870 -- reported
+alongside the mean because the distribution is right-skewed and a mean
+alone would overstate the typical game.
+
+So lineup error is **the same order as park factors and larger than the
+ON/OFF arm**, measured the same way. The park-factor work got a sourced
+table, a monthly cron, three guards and a regime column. Lineup accuracy
+got shelved. The two decisions were made on numbers that differ by 2.3x,
+and only one of those numbers was real.
+
+**This is not a claim that the capture will show same-day is better.**
+That is the open question and it is unmeasured. It is a claim about
+priority: the input error is large enough to be worth measuring, and the
+reason it was judged not to be has been withdrawn.
+
+
 ## 7. What n the model-impact comparison needs
 
 Derived from observed dispersion rather than the ~150–200 estimate in the
@@ -249,6 +319,90 @@ End-to-end against the live pages, into a scratch DB:
   same_day  confirmed  started=0  n=18  avg_slots=9.0
   same_day  confirmed  started=1  n=12  avg_slots=9.0
 ```
+
+## 10. The anchor defect, and the two production items
+
+### The defect
+
+The first version of this computed `lead_minutes` from `first_pitch_utc`
+alone. **First pitch does not exist until the game begins.** Verified
+directly against statsapi on a scheduled game:
+
+```
+gamePk 822694, status Scheduled
+  -> { scheduled_start_utc: '2026-08-27T17:05:00Z',
+       first_pitch_utc: null,
+       game_status: 'Scheduled' }
+```
+
+Every capture is pre-game by construction, so **every row would have
+carried `lead_minutes = NULL`** — on exactly the rows the analysis is
+built from. And no backfill could have repaired it: the value did not
+exist at the moment the row describes. That is a different failure from
+the sparse production coverage reported earlier, and the more serious one,
+because it would have applied locally and in production alike while
+looking healthy in every row count.
+
+Fixed: `pickAnchor` prefers first pitch **when it exists** — a
+rain-delayed game should measure against when play actually began, and
+that is also what makes a post-start capture read negative — and falls
+back to the scheduled start otherwise. Both timestamps and the anchor used
+are stored, so the comparison script can recompute an exact post-hoc lead
+while the stored one remains what a bettor could have known.
+
+Verified end-to-end against the live slate: `no_anchor=0`, **0 of 30
+captures with a NULL lead**, where the pre-fix code would have produced 30
+of 30.
+
+### (1) The anchor has to reach game_log before the capture reads it
+
+`refreshFirstPitch` only ever ran for **yesterday**, inside the 4AM score
+job — so today's slate had no scheduled start when the lineup crons fired.
+`runLineupJob` now calls it with a new `onlyMissing` option before
+capturing: one statsapi call per game on the first pull of the day, a
+no-op on the other nine.
+
+### (2) Production backfill, as a job rather than a script
+
+`scripts/backfill-first-pitch.js` opens `data/mlb.db` directly, which
+makes it a laptop tool; the rows that need it are on Render. Production
+carries the anchor on **30 of ~1876** rows against 1,569 locally.
+
+So it is now `runFirstPitchBackfillJob`, deliberately in the
+**park-factor shape**: a boot-time establishing run
+(`runFirstPitchBackfillIfMissing`, bounded to 400 rows, fire-and-forget so
+four minutes of statsapi does not sit in front of a Render boot) plus a
+3AM PT cron that finishes the rest. That table shipped with a monthly cron
+and no bootstrap, came up empty, and priced every park neutral until
+somebody looked — **a job that only maintains state needs a partner that
+establishes it.**
+
+Newest dates first, since recent slates are what the comparison pairs
+against. Resumable by construction: the query selects only rows still
+missing an anchor, so a partial run resumes exactly where it stopped.
+
+### Confirming it in production
+
+```
+ADMIN_TOKEN=... node scripts/verify-capture-in-prod.js
+```
+
+A green deploy proves nothing about a scheduled job that has never fired.
+This asks production over the admin API — the analysis copy is a
+separately-evolved database and cannot answer a question about prod.
+Three checks, each able to fail independently:
+
+1. captures exist, at **both** horizons;
+2. the **10AM PT hour specifically** produced rows — the new cron;
+3. **`lead_minutes` populated on ≥90%** of captures, i.e. the anchor
+   reached `game_log` before the capture read it.
+
+(3) is the one most likely to fail quietly: captures would still land and
+look healthy in every count while being useless for lead-bucketing.
+
+Two whitelisted admin queries back it — `lineup-capture-health`
+(per-horizon, per-PT-hour inventory with anchor coverage) and
+`first-pitch-anchor-coverage` (the backfill's progress).
 
 ## Related
 

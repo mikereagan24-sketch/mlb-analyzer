@@ -20,7 +20,7 @@ const ok = (cond, label) => { if (cond) { pass++; } else { fail++; console.log('
 const eq = (a, b, label) => ok(a === b, label + '  (got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b) + ')');
 
 // ---- horizonFor: pure, so test it without touching a DB ----------------
-const { horizonFor, leadMinutes } = require(path.join(R, 'services/lineup-capture'));
+const { horizonFor, leadMinutes, pickAnchor } = require(path.join(R, 'services/lineup-capture'));
 
 // 2026-08-26 18:00 UTC = 14:00 ET, 11:00 PT. ET date 2026-08-26.
 const midday = Date.parse('2026-08-26T18:00:00Z');
@@ -55,6 +55,21 @@ eq(leadMinutes('2026-08-26T18:00:00Z', '2026-08-26T20:00:00Z'), -120, 'lead: neg
 eq(leadMinutes(null, '2026-08-26T18:00:00Z'), null, 'lead: null first pitch -> null');
 eq(leadMinutes('garbage', '2026-08-26T18:00:00Z'), null, 'lead: unparseable -> null, not NaN');
 
+// ---- pickAnchor: THE case this exists for -------------------------------
+// A pre-game capture has NO first_pitch_utc -- statsapi returns null for a
+// scheduled game. If the anchor logic preferred first pitch and stopped,
+// every capture would carry lead_minutes=NULL and no backfill could fix it.
+eq(pickAnchor('2026-08-27T17:05:00Z', null).anchor, 'scheduled',
+   'pre-game: falls back to the scheduled start');
+eq(pickAnchor('2026-08-27T17:05:00Z', null).at, '2026-08-27T17:05:00Z',
+   'pre-game: uses the scheduled time as the anchor');
+// Once first pitch exists it wins -- a rain-delayed game should measure
+// against when play actually began.
+eq(pickAnchor('2026-08-27T17:05:00Z', '2026-08-27T19:40:00Z').anchor, 'first_pitch',
+   'post-hoc: real first pitch wins over the schedule');
+eq(pickAnchor(null, null).anchor, null, 'neither anchor: null, not a crash');
+eq(pickAnchor(null, null).at, null, 'neither anchor: no timestamp');
+
 // ---- captureSlate against a scratch DB ---------------------------------
 // The db is INJECTED. This test must never be able to write to
 // data/mlb.db -- db/schema is not required here at all, so there is no
@@ -62,13 +77,13 @@ eq(leadMinutes('garbage', '2026-08-26T18:00:00Z'), null, 'lead: unparseable -> n
 const Database = require(path.join(R, 'node_modules/better-sqlite3'));
 const scratch = path.join(os.tmpdir(), 'lineup-capture-test-' + process.pid + '.db');
 const db = new Database(scratch);
-db.exec('CREATE TABLE game_log (game_date TEXT, game_id TEXT, away_team TEXT, home_team TEXT, first_pitch_utc TEXT, PRIMARY KEY (game_date, game_id))');
-for (const ddl of require(path.join(R, 'db/lineup-captures-ddl')).LINEUP_CAPTURES_DDL) db.exec(ddl);
+db.exec('CREATE TABLE game_log (game_date TEXT, game_id TEXT, away_team TEXT, home_team TEXT, scheduled_start_utc TEXT, first_pitch_utc TEXT, PRIMARY KEY (game_date, game_id))');
+require(path.join(R, 'db/lineup-captures-ddl')).applyLineupCapturesDdl(db);
 const { captureSlate } = require(path.join(R, 'services/lineup-capture'));
 const countRows = () => db.prepare('SELECT COUNT(*) c FROM lineup_captures').pluck().get();
 
-db.prepare('INSERT OR REPLACE INTO game_log (game_date,game_id,away_team,home_team,first_pitch_utc) '
-  + "VALUES ('2026-08-26','nyy-bos','NYY','BOS','2026-08-26T23:05:00Z')").run();
+db.prepare('INSERT OR REPLACE INTO game_log (game_date,game_id,away_team,home_team,scheduled_start_utc,first_pitch_utc) '
+  + "VALUES ('2026-08-26','nyy-bos','NYY','BOS','2026-08-26T23:05:00Z','2026-08-26T23:05:00Z')").run();
 
 const slate = [{
   game_id: 'nyy-bos', away_team: 'NYY', home_team: 'BOS',
@@ -87,6 +102,8 @@ const row = db.prepare("SELECT * FROM lineup_captures WHERE side='away'").get();
 eq(row.horizon, 'same_day', 'row: horizon stored, not inferred');
 eq(row.lead_minutes, 485, 'row: lead_minutes computed from first pitch');
 eq(row.first_pitch_utc, '2026-08-26T23:05:00Z', 'row: first pitch copied in for reproducibility');
+eq(row.scheduled_start_utc, '2026-08-26T23:05:00Z', 'row: scheduled start copied in too');
+eq(row.lead_anchor, 'first_pitch', 'row: anchor recorded, not left to inference');
 eq(row.n_slots, 9, 'row: slot count');
 eq(row.hand_source, 'source', 'row: handedness flagged as source-supplied');
 eq(row.page_has_started, 0, 'row: not started');
@@ -126,6 +143,28 @@ captureSlate(empty, '2026-08-26', '2026-08-26T13:00:00Z', { nowMs: midday, db })
 const e = db.prepare("SELECT * FROM lineup_captures WHERE capture_time='2026-08-26T13:00:00Z' AND side='away'").get();
 eq(e.n_slots, 0, 'empty lineup stored with n_slots=0');
 eq(e.hand_source, null, 'empty lineup has no handedness source');
+
+// THE PRODUCTION CASE: a game that has not started. scheduled_start_utc is
+// known, first_pitch_utc is NULL. This is what every real capture looks
+// like, and it must still produce a usable lead.
+db.prepare('INSERT OR REPLACE INTO game_log (game_date,game_id,scheduled_start_utc,first_pitch_utc) '
+  + "VALUES ('2026-08-26','tor-sea','2026-08-27T02:10:00Z',NULL)").run();
+const preGame = [Object.assign({}, slate[0], { game_id: 'tor-sea' })];
+captureSlate(preGame, '2026-08-26', '2026-08-26T17:00:00Z', { nowMs: midday, db });
+const pg = db.prepare("SELECT * FROM lineup_captures WHERE game_id='tor-sea' AND side='away'").get();
+eq(pg.lead_anchor, 'scheduled', 'pre-game capture anchors on the scheduled start');
+eq(pg.lead_minutes, 550, 'pre-game capture has a REAL lead, not NULL');
+eq(pg.first_pitch_utc, null, 'pre-game capture stores first_pitch as NULL, honestly');
+
+// No anchor at all -> NULL lead and a counted miss, never a crash or a 0.
+db.prepare('INSERT OR REPLACE INTO game_log (game_date,game_id,scheduled_start_utc,first_pitch_utc) '
+  + "VALUES ('2026-08-26','ari-sd',NULL,NULL)").run();
+const noAnchor = [Object.assign({}, slate[0], { game_id: 'ari-sd' })];
+const rNA = captureSlate(noAnchor, '2026-08-26', '2026-08-26T17:00:00Z', { nowMs: midday, db });
+eq(rNA.noAnchor, 1, 'missing anchor is COUNTED, not silently zero');
+const na = db.prepare("SELECT * FROM lineup_captures WHERE game_id='ari-sd' AND side='away'").get();
+eq(na.lead_minutes, null, 'no anchor -> NULL lead, never 0');
+eq(na.lead_anchor, null, 'no anchor -> no anchor label');
 
 // Degenerate inputs must not throw.
 eq(captureSlate([], '2026-08-26', '2026-08-26T13:00:00Z', { nowMs: midday, db }).reason, 'no_games', 'empty slate handled');
