@@ -167,11 +167,59 @@ why this document is not dressed up as a direction. But naming it is not
 the same as fixing it. **The bar has to sit outside the estimated noise
 floor, or the test has to be declared unresolvable before it runs.**
 
-The two control cohorts did resolve, because n is 3× larger — which is the
-constructive version of the same point: **at this corpus size, ROI
-questions are answerable at n≈400 signals and not at n≈130.** Any future
-ROI pre-registration in this project should either target a cohort of that
-size or state up front that it is a descriptive run and not a test.
+### The floor is now measured, and it corrects my first reading of it
+
+The paragraph that stood here said "ROI questions are answerable at n≈400
+signals and not at n≈130", inferred from three cohorts. That was a guess
+dressed as a finding, which is the same error one level up. It is now
+measured — `scripts/resolution-floor.js`, permutation on the real corpus,
+game-level pseudo-cohorts with date-clustered intervals:
+
+```
+    n     CI half-width    null gap 95% span     smallest resolvable
+   50        ±27.0pp        [-26.6, +25.5]pp          27.0pp
+  100        ±19.1pp        [-20.0, +18.5]pp          20.0pp
+  128        ±17.5pp        [-17.1, +18.9]pp          18.9pp
+  200        ±14.0pp        [-14.0, +14.2]pp          14.2pp
+  300        ±13.1pp        [-13.4, +13.6]pp          13.6pp
+  400        ±12.0pp        [-11.3, +11.8]pp          12.0pp
+  600        ±12.3pp        [-14.3, +11.6]pp          14.3pp
+```
+
+**n≈200 already clears a 15pp bar — not 400.** And the floor **plateaus at
+~12pp around n=300–400 and does not improve past it**; at n=600 it widens
+again, because a gap is measured between two groups and past the halfway
+point it is the *complement* that shrinks. The binding constraint is the
+corpus (963 signals, 133 dates), not the cohort.
+
+So the durable version is stronger and less flattering than "target
+n≈400": **no ROI question below ~12pp is answerable on this corpus at any
+cohort size.** Questions in that range need more corpus, not a better
+slice.
+
+The calibration side is tighter still — `--calibration` gives a log-loss
+floor of ~0.032 at n=50 flattening to ~0.020 by n=300, against an observed
+rookie Δ of **+0.00720 at n=63**. That leg could not have returned
+anything but "no tier change."
+
+### It is now a required step, not a lesson
+
+`scripts/resolution-floor.js --n <n> --bar <bar>` prints RESOLVABLE or NOT
+RESOLVABLE. Run retrospectively against the design actually used here:
+
+```
+proposed cohort n = 128,  proposed bar = 15pp
+  CI half-width at this n : ±17.1pp
+  null gap spans          : [-20.2, +17.7]pp
+
+NOT RESOLVABLE. The bar (15pp) sits INSIDE the floor (20.2pp).
+```
+
+**It would have caught this before the run, in 40 seconds.** Every
+pre-registration in this project now has to paste that output before
+setting a bar, and must respond to a NOT RESOLVABLE by raising the bar,
+growing the cohort, or declaring the run descriptive rather than a test —
+in writing, in advance. Added to `CLAUDE.md` and to the review checklist.
 
 ## 6. What this does and does not license
 
