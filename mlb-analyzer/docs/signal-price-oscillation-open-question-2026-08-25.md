@@ -338,3 +338,109 @@ And per `CLAUDE.md` — *"a comment claiming a fix carries the number it was
 verified against"* — the fix ships with `measure-price-oscillation.js`
 output before and after, not a sentence.
 
+
+---
+
+# Reading the metric: the aggregate is NOT the like-for-like number (2026-08-26)
+
+> **If you read the aggregate mean after the fix you will see −0.40pp and
+> conclude the bias survived. It did not.** The aggregate cannot reach
+> zero once degradation stops, for a reason that has nothing to do with
+> pricing.
+
+## The trap
+
+Before the fix, the two writers looked like this:
+
+```
+refresh             mean +0.1769pp    down 31.9%
+refresh_odds_tail   mean -0.4430pp    down 91.9%
+```
+
+After the no-venue-downgrade guard (counterfactual replay):
+
+```
+refresh             mean -0.4005pp    down 61.8%
+refresh_odds_tail   mean -0.4430pp    down 91.9%
+```
+
+`refresh` moved from +0.18 to −0.40. Read as a bias measurement, that
+looks like the problem got *worse* in the other direction.
+
+**It is composition, not bias.** The guard removes `venue -> null`
+writes. What survives on the upsert path is disproportionately
+`null -> venue` **acquisitions**, and those legitimately improve the
+price:
+
+```
+refresh: null -> poly     335   mean -0.9288pp
+refresh: null -> kalshi   118   mean -0.9875pp
+```
+
+So the surviving population is *selected for* price improvement. The mean
+is measuring which transitions remain, not whether either writer is
+mispricing.
+
+## The like-for-like metric
+
+**Writes where `price_venue` did not change.** Same venue before and
+after, so the two prices describe the same source and the comparison is
+about pricing rather than tier:
+
+```
+LIKE-FOR-LIKE (venue unchanged)
+  refresh   n=634   mean -0.2391pp   down 53.2%
+```
+
+**53.2% down is symmetric.** That was true *before* the fix, and it is the
+same evidence that ruled out bid-vs-ask: a writer on the wrong side of a
+spread would be one-way here too, and it is not.
+
+`scripts/measure-price-oscillation.js` prints this breakdown under
+`LIKE-FOR-LIKE` whenever `--replay-guard` is passed, specifically so the
+aggregate is not read alone.
+
+## Which number answers which question
+
+| question | metric | pre-fix | expected post-fix |
+|---|---|---|---|
+| Is the ping-pong fixed? | **reversal rate** | 49.7% | ~5% |
+| Is a writer mispricing? | **like-for-like mean** | −0.2391pp @ 53.2% | unchanged; it was never the problem |
+| *(neither)* | aggregate mean | +0.1769pp | −0.40pp **by composition** |
+
+The third row is the trap. It is a real number that answers no question
+anyone is asking, and it moves in an alarming direction for a benign
+reason.
+
+## Status of the stated prediction (2026-08-26)
+
+The fix shipped with a prediction — reversal rate near 5% — and this is
+the first fix in the repo to carry one, so the follow-through matters more
+than the result.
+
+**Too early to call.** `#310` merged **2026-08-26T01:03Z**, about fourteen
+hours ago:
+
+```
+production pricing writes since deploy   57   (48 refresh, 9 refresh_odds_tail)
+pre-fix rate                             ~170/day  (Jul 4,496/31d, Aug 4,352/25d)
+```
+
+Fifty-seven audit rows over fourteen hours, of which only a subset are
+`market_line` changes at all, is not enough to distinguish 5% from 49.7%
+with any confidence — and the window straddles a single evening slate, so
+time-of-day composition is unrepresentative.
+
+The lower volume is *directionally* what the fix predicts, since blocked
+downgrades are writes that no longer happen. It is not evidence yet.
+
+**Re-run after 2026-08-29** (three full slates):
+
+```
+node scripts/measure-price-oscillation.js --from "2026-08-26 01:03:09"
+```
+
+Near 5% confirms it. **Materially above means the guard is not firing on
+the paths that matter and the projection was optimistic** — which is the
+falsifiable half, and gets reported the same way.
+

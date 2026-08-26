@@ -178,6 +178,24 @@ const QUERIES = [
   // ==================== backfill jobs ====================
 
   {
+    name: 'price-write-details',
+    description: 'signal_id / action / created_at / detail for market_line changes on the '
+      + 'refresh paths. Exists so the reversal rate can be re-measured against PRODUCTION '
+      + 'without a 671MB download -- the fix in PR #310 shipped with a stated prediction '
+      + '(reversal rate ~5%) and the follow-up needs prod rows, not the analysis copy.',
+    sql:
+      "SELECT signal_id, action, created_at, detail FROM bet_signal_audit "
+      + "WHERE action IN ('refresh','refresh_odds_tail') AND detail LIKE '%market_line%' "
+      + 'AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at <= ?) '
+      + 'ORDER BY signal_id, created_at LIMIT ?',
+    params: [
+      { name: 'from',  type: 'string', required: false, default: null },
+      { name: 'to',    type: 'string', required: false, default: null },
+      { name: 'limit', type: 'int',    required: false, default: 1000 },
+    ],
+    bindOrder: ['from', 'from', 'to', 'to', 'limit'],
+  },
+  {
     name: 'signal-audit-actions',
     description: 'bet_signal_audit action counts in a date window. Exists so a REFUSAL '
       + 'path can be confirmed in production without pulling the DB -- a green deploy '
