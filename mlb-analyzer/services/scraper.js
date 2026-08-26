@@ -380,6 +380,19 @@ function parseLineupsHtml(html, dateStr) {
     // 'confirmed' even when the lineup was clearly projected.
     const lineup_status = $(el).find('.lineup__status.is-confirmed').length > 0 ? 'confirmed' : 'projected';
 
+    // RotoWire marks an in-progress game by adding `has-started` to the
+    // block's class list. Only the same-day page ever carries it (verified
+    // 2026-08-26: same-day block classes included 'lineup is-mlb has-started
+    // not-in-slate'; the ?date=tomorrow page had no such variant).
+    //
+    // Extracted because a same-day capture taken late is the lineup
+    // equivalent of a post-first-pitch price -- the page is no longer a
+    // forecast, it is a record of what happened. Flag it at capture so the
+    // horizon comparison can exclude it, rather than discovering later that
+    // "same-day is very accurate" was partly measuring completed games.
+    // The flag is stored, not acted on here; parsing behaviour is unchanged.
+    const page_has_started = /(^|\s)has-started(\s|$)/.test($(el).attr('class') || '') ? 1 : 0;
+
     const parsePlayers = (side) => {
       const players = [];
       $(el).find('.lineup__list.' + side + ' .lineup__player').each((j, p) => {
@@ -418,6 +431,7 @@ function parseLineupsHtml(html, dateStr) {
       home_team: homeTeam,
       time,
       lineup_status,
+      page_has_started,
       away_lineup_status: lineup_status,
       home_lineup_status: lineup_status,
       away_sp: awayPit.name ? { name: awayPit.name, hand: awayPit.hand } : null,

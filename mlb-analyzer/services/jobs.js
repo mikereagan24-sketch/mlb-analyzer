@@ -2140,6 +2140,34 @@ async function runLineupJob(dateStr) {
         : { success: false, error: 'No games returned', date: dateStr };
     }
 
+    // --- Horizon capture (2026-08-26) --------------------------------
+    // Append this pull to lineup_captures, at whatever horizon it is.
+    //
+    // Placed HERE, after team normalisation and game_id recomputation, so
+    // the captured game_id is the same key game_log uses -- capturing
+    // before this point would store pre-normalisation ids (OAK/WSH, no DH
+    // suffix) that no join could ever match.
+    //
+    // The capture is what makes the same-day horizon exist at all: these
+    // same-day pulls already run nine times a day and have been discarded
+    // by the COALESCE on game_log's proj_* snapshot since April. Nothing
+    // below this block changes; the projected-snapshot behaviour is
+    // deliberate and is left alone.
+    //
+    // NON-FATAL BY CONSTRUCTION. A capture failure must never take down a
+    // lineup pull -- the pull feeds pricing, the capture feeds an analysis
+    // that does not exist yet. Same rule as the feature-gate health call in
+    // the 6AM chain.
+    try {
+      const { captureSlate } = require('./lineup-capture');
+      const cap = captureSlate(games, dateStr, rawResp && rawResp.fetched_at);
+      console.log('[lineup-capture] ' + dateStr + ' horizon=' + (cap.horizon || 'none')
+        + ' rows=' + cap.written + ' started_blocks=' + cap.started
+        + (cap.reason ? ' reason=' + cap.reason : ''));
+    } catch (e) {
+      console.error('[lineup-capture] failed (non-fatal):', e && e.message);
+    }
+
     // Stale-row cleanup runs only when statsapi bootstrap didn't fire (it
     // already cleaned up there before its own upsert). Skipping the second
     // cleanup is critical: with bootstrap rows in place, this DELETE would
@@ -3629,8 +3657,20 @@ function startCronJobs() {
   // All schedules below run in America/Los_Angeles. The cron hour is the
   // Pacific-time hour; node-cron handles DST transitions automatically.
 
-  // --- Lineups: 8AM, Noon-6PM hourly, 11PM PT (free RotoWire scrapes) ---
-  [[8,'8AM'],[12,'Noon'],[13,'1PM'],[14,'2PM'],[15,'3PM'],[16,'4PM'],[17,'5PM'],[18,'6PM']].forEach(([h,label]) => {
+  // --- Lineups: 8AM, 10AM, Noon-6PM hourly, 11PM PT (free RotoWire scrapes) ---
+  //
+  // These are all SAME-DAY pulls, and since 2026-08-26 each one appends to
+  // lineup_captures. The grid already spans the whole confirmation window,
+  // so the horizon analysis does not bucket by clock hour -- every capture
+  // stores lead_minutes against first pitch, and a 3PM PT pull is a 1-hour
+  // lead for a 7PM ET game and an 8-hour lead for a 10PM ET game. Lead is
+  // the meaningful axis; the clock is not.
+  //
+  // 10AM added 2026-08-26 to close the one real hole: nothing ran between
+  // 8AM and Noon PT, which is 11AM-3PM ET, and early-afternoon ET starts
+  // have their first pitch inside it. Those games were the only ones with
+  // no capture in the hours when their lineup actually firms up.
+  [[8,'8AM'],[10,'10AM'],[12,'Noon'],[13,'1PM'],[14,'2PM'],[15,'3PM'],[16,'4PM'],[17,'5PM'],[18,'6PM']].forEach(([h,label]) => {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT lineup pull');
       runLineupJob(todayStr());
