@@ -114,16 +114,75 @@ const check = (label, pass, detail) => {
 
   console.log('');
   console.log('--- (3) the start anchor reached game_log before the capture ---');
-  const totalRows = cap.reduce((s, r) => s + r.rows, 0);
-  const withLead = cap.reduce((s, r) => s + r.with_lead, 0);
-  const pct = totalRows ? 100 * withLead / totalRows : 0;
-  check('lead_minutes populated on >=90% of captures', totalRows > 0 && pct >= 90,
-    totalRows ? withLead + '/' + totalRows + ' = ' + pct.toFixed(1) + '%'
-              : 'no rows to judge');
-  if (totalRows && pct < 90) {
-    console.log('        A capture with a NULL lead cannot be bucketed by lead, which is');
-    console.log('        the analysis axis. Check that refreshFirstPitch ran with');
-    console.log('        onlyMissing before the capture, and that the rows have a game_pk.');
+  //
+  // SCOPED TO WHAT THE CHECK CAN ACT ON. The captures written before the
+  // anchor fix (PR #314, merge 2b59693 at 2026-08-26T22:36:05Z) came from
+  // code that computed lead_minutes from first_pitch_utc alone, which is
+  // null for any game that has not started. Those rows are NULL forever
+  // and no run of anything will change that.
+  //
+  // Carried in the denominator they produce a check that can never pass,
+  // and a check that fails forever is a check nobody reads -- the exact
+  // failure just fixed in verify-commits-landed.js, where two false
+  // positives had been sitting in the stranded list for weeks.
+  //
+  // THE BOUNDARY IS OBSERVED, NOT REMEMBERED. It comes from the earliest
+  // capture_time carrying a non-null lead_anchor: a row can only have that
+  // column populated if the fixed code wrote it. Same reasoning as the
+  // park-factor regime, which classifies by comparing stored values
+  // against both tables rather than by trusting a date. The merge time is
+  // used only to SANITY-CHECK the observed boundary, never to set it.
+  const ANCHOR_FIX_MERGED_UTC = '2026-08-26T22:36:05Z';   // PR #314, merge 2b59693
+
+  let boundary = null, pre = null;
+  try {
+    const b = rowsOf(await q('lineup-capture-anchor-boundary', {}))[0];
+    if (b) {
+      boundary = b.first_anchored_at || null;
+      pre = { total: b.total_rows, anchored: b.anchored_rows, first: b.first_capture_at };
+    }
+  } catch (e) {
+    console.log('  (anchor-boundary query unavailable: ' + e.message + ')');
+  }
+
+  if (!boundary) {
+    check('any capture carries a start anchor', false,
+      'NO row anywhere has a lead_anchor. Either the anchor fix is not deployed, '
+      + 'or refreshFirstPitch is not running before the capture.');
+  } else {
+    console.log('  anchor-fix boundary, OBSERVED from the data: ' + boundary);
+    console.log('    (PR #314 merged ' + ANCHOR_FIX_MERGED_UTC + '; the merge time is a'
+      + ' cross-check, not the filter)');
+    if (boundary < ANCHOR_FIX_MERGED_UTC) {
+      console.log('    WARNING: a row carries an anchor from BEFORE the fix merged.');
+      console.log('    That should be impossible; the boundary logic needs re-checking.');
+      failures++;
+    }
+    if (pre && pre.total > pre.anchored) {
+      console.log('  EXCLUDED from this check: ' + (pre.total - pre.anchored)
+        + ' pre-fix row(s), earliest capture ' + pre.first);
+      console.log('    Written before the fix, permanently NULL, unfixable by any rerun.');
+      console.log('    Reported, not dropped -- they are still in the table and still real.');
+    }
+
+    // Re-fetch scoped to post-boundary rows only.
+    let scoped = [];
+    try { scoped = rowsOf(await q('lineup-capture-health', { from: FROM, since_ts: boundary })); }
+    catch (e) { console.log('  (scoped re-fetch failed: ' + e.message + ')'); }
+
+    const totalRows = scoped.reduce((s, r) => s + r.rows, 0);
+    const withLead = scoped.reduce((s, r) => s + r.with_lead, 0);
+    const pct = totalRows ? 100 * withLead / totalRows : 0;
+    check('lead_minutes populated on >=90% of POST-FIX captures',
+      totalRows > 0 && pct >= 90,
+      totalRows ? withLead + '/' + totalRows + ' = ' + pct.toFixed(1) + '%'
+                : 'no post-fix rows in the window yet -- not a pass, just nothing to judge');
+    if (totalRows && pct < 90) {
+      console.log('        A post-fix capture with a NULL lead is a REAL defect -- the');
+      console.log('        exclusion above does not cover it. Check that refreshFirstPitch');
+      console.log('        ran with onlyMissing before the capture, and that the rows have');
+      console.log('        a game_pk.');
+    }
   }
 
   try {

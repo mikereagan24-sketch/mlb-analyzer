@@ -704,6 +704,47 @@ further under any additional filter.
 
 See `docs/rookie-roi-result-2026-08-26.md` §5 for what it cost.
 
+## Scope a check to what it can act on (2026-08-27)
+
+**A check that fails forever on unfixable history is a check nobody
+reads.** It trains the reader to skip the output, which costs more than
+having no check at all — the skipping generalises to the runs where
+something is genuinely wrong.
+
+Two instances in two days:
+
+- **`verify-commits-landed.js`** reported `85d011a` and `e54b0c6` as
+  stranded. Both had landed as cherry-picks with resolved conflicts, so
+  the patch-ids differed forever. One had been wrong for three weeks.
+- **`verify-capture-in-prod.js`** check (3) counted 148 captures written
+  before the anchor fix, whose `lead_minutes` is NULL permanently and
+  cannot be repaired by any rerun. The pass rate only ever moved because
+  the denominator grew.
+
+### The rule
+
+When a check can never pass on part of its input:
+
+1. **Scope it by something OBSERVABLE, not by a remembered date.** The
+   anchor boundary is the earliest `capture_time` carrying a non-null
+   `lead_anchor` — only the fixed code writes that column. The park-factor
+   regime is classified by comparing stored values against both tables.
+   Same principle: a date is a proxy for a fact, so record the fact.
+2. **Cross-check the observed boundary against the known event, and never
+   let the event set the boundary.** PR #314 merged at
+   `2026-08-26T22:36:05Z`; that is used only to assert the observed
+   boundary is not impossibly early.
+3. **The boundary is usually INTRA-day.** That merge was 3:36PM PT, so on
+   2026-08-26 the 8AM–3PM PT pulls are pre-fix and the 4PM–11PM ones are
+   post-fix. A date-level filter would have discarded half a slate of good
+   captures to exclude the other half. Filter on the row, not the day.
+4. **Report the excluded rows — count, reason, boundary — never drop them
+   silently.** An exclusion nobody can see is indistinguishable from the
+   check quietly getting easier.
+5. **The exclusion must not cover the live failure mode.** A *post*-fix
+   capture with a NULL lead is still a real defect and must still fail.
+   Scoping is not the same as lowering the bar.
+
 ## Re-check a deprioritizing number before treating the decision as settled (2026-08-26)
 
 **A number that was used to STOP work has to be re-run against the current

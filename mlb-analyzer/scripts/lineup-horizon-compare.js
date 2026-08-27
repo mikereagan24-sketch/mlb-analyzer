@@ -175,9 +175,33 @@ function scoreSide(projArr, confArr) {
   console.log('  excluded, post-start: ' + exclStarted + ' flagged by the page, '
     + exclNegLead + ' by a negative lead');
   if (noLead) {
-    console.log('  WARNING: ' + noLead + ' captures have NO lead at all -- game_log had no');
-    console.log('  scheduled_start_utc when they were taken. Those rows cannot be');
-    console.log('  lead-bucketed. Check the first-pitch backfill.');
+    // Split the no-lead rows into the two populations, because only one of
+    // them is a defect. Rows written before the anchor fix computed
+    // lead_minutes from first_pitch_utc alone, which is null for any game
+    // that has not started -- they are NULL forever and no rerun changes
+    // that. Rows written AFTER, with no lead, are a live problem.
+    //
+    // The boundary is the earliest capture carrying a lead_anchor: only
+    // the fixed code writes that column. Observed, not remembered -- same
+    // basis as the park-factor regime classification.
+    let firstAnchored = null;
+    try {
+      firstAnchored = db.prepare(
+        'SELECT MIN(capture_time) v FROM lineup_captures WHERE lead_anchor IS NOT NULL'
+      ).pluck().get() || null;
+    } catch (e) { /* column may predate this build */ }
+    const preFix = firstAnchored
+      ? clean.filter(r => r._lead == null && r.ct < firstAnchored).length : 0;
+    const postFix = noLead - preFix;
+    if (preFix) {
+      console.log('  ' + preFix + ' capture(s) predate the anchor fix (before ' + firstAnchored
+        + ') and are permanently unbucketable. Excluded, not a defect.');
+    }
+    if (postFix) {
+      console.log('  WARNING: ' + postFix + ' POST-FIX capture(s) have no lead -- game_log had');
+      console.log('  no scheduled_start_utc when they were taken. That IS a defect: check the');
+      console.log('  first-pitch backfill and that the rows carry a game_pk.');
+    }
   }
 
   // Lead is the real axis, not the cron hour: a 3PM PT pull is a 1-hour
