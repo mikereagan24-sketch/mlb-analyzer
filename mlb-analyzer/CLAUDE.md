@@ -704,6 +704,40 @@ further under any additional filter.
 
 See `docs/rookie-roi-result-2026-08-26.md` §5 for what it cost.
 
+## The consumer applies the producer's floor (2026-08-27)
+
+**When a table is filled from a FILTERED source, the qualifier is one
+exported constant owned by the producer, and no consumer may be looser.**
+
+Two instances in four days:
+
+| table | producer | consumer | what got through |
+|---|---|---|---|
+| `catcher_framing` | pitch volume | pitch volume, **no age** | a frozen May rate outranked a valid historical baseline |
+| `fielding_frv` | 600 outs (`minInnings=200`) | **`outs_total > 0`** | 44 pre-floor rows, one scoring **-2.213 runs/game off 18 outs** |
+
+The FRV consumer was ~100x looser than its producer, so the only rows the
+gap admitted were ones the ingest would have rejected. That is the general
+shape: **a looser consumer does not admit more good data, it admits
+exactly the rejected data.** Stricter is safe; looser never is.
+
+### Rules
+
+- **One constant, exported from the producer**, and the fetch parameter
+  reads from it too. A second literal is how this recurs — `FRV_MIN_OUTS`
+  is `FRV_MIN_INNINGS * 3`, defined once in `services/scraper.js`.
+- **The ingest maintains the invariant**, in the JOB not just a script —
+  a script opens `data/mlb.db` and never reaches production. Guard the
+  prune on a non-empty fetch so a short pull cannot empty the table.
+- **Rows a current producer could not make are residue, not history.**
+  Prune them. Do not build an exception path to keep them — that path's
+  first job would be hiding a real defect.
+- **Check the fallback branch too.** `utils/framing-rate.js` still uses
+  `pitches > 0` on its historical path; inert only because the table's
+  minimum happens to sit above the main floor.
+
+See `docs/consumer-producer-floor-sweep-2026-08-27.md`.
+
 ## Scope a check to what it can act on (2026-08-27)
 
 **A check that fails forever on unfixable history is a check nobody
@@ -1085,6 +1119,7 @@ current tree.**
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
 | **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **eight times**, most recently 2026-08-26 when PRs #312 and #313 each merged with their LAST commit missing |
 | **Forward lineup capture stopped** | `node scripts/pipeline-freshness.js` (row `lineup_captures`) | a missed day of same-day capture, which is **unrecoverable** — there is no backfill for what RotoWire said at 10AM on a date that has passed |
+| **A row its own producer could not make** | `node scripts/audit-producer-floors.js` | a consumer floor looser than the ingest that fills the table — a 6-out FRV sample priced a game at -2.213 runs, and the framing historical fallback is still `pitches > 0` |
 | **Auth failures naming the wrong credential** | `node scripts/test-api-401-handler.js` | a 401 handler that prompts for a credential the server never checks — the old one asked for an "app password" on a rejected admin token and recursed forever |
 | **Capture horizon logic** | `node scripts/test-lineup-capture.js` | a horizon mislabelled across the ET/PT midnight gap or a DST boundary — an 11PM PT same-day pull is already the next ET day |
 | **A bar inside the noise floor** | `node scripts/resolution-floor.js --n <n> --bar <bar>` | a pre-registered test that could not have resolved either way — run it **before** writing the bar, not after reading the result |

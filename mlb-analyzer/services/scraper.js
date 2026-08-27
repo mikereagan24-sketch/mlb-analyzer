@@ -1060,6 +1060,31 @@ async function fetchCatcherFramingHistorical(opts) {
   return [...agg.values()].filter(c => c.pitches >= minPitches);
 }
 
+// THE FRV SAMPLE FLOOR, DEFINED ONCE. (2026-08-27)
+//
+// This is the producer's qualifier, and every consumer must apply the same
+// one. It is exported rather than repeated because a second literal 600 is
+// exactly how the defect it fixes recurs.
+//
+// WHAT IT FIXES. 44 rows survived from a pre-floor ingest generation
+// (season_start/end NULL, updated_at 2026-05-22) with outs_total from 6 to
+// 546 -- every one below this floor, none of them producible by the
+// current fetch. The pricing-path consumer accepted any row with
+// `outs_total > 0`, i.e. it was ~100x more permissive than the ingest that
+// filled the table, so precisely the rows the producer excludes were the
+// ones that survived as leftovers.
+//
+// The consequence was not staleness, it was noise: per-game contribution
+// at OPPS=25 ran to 2.21 runs for a single fielder (Joc Pederson, 18
+// outs, -0.697; Kyle Schwarber, 51 outs, -0.519) against a legitimate-row
+// max of 0.21 -- larger than the entire park-factor effect.
+//
+// Same CLASS of bug as the catcher-framing floor, which checked pitch
+// volume without checking row age: a floor that does not check what the
+// producer checks. See docs/consumer-producer-floor-sweep-2026-08-27.md.
+const FRV_MIN_INNINGS = 200;                    // Savant dropdown value
+const FRV_MIN_OUTS = FRV_MIN_INNINGS * 3;       // 3 outs per inning = 600
+
 // Statcast Fielding Run Value for non-catcher position players. Pulls each
 // non-catcher position (3=1B..9=RF), parses id/name/total_runs/outs_total,
 // and aggregates by mlb_id so a player who appears at multiple positions
@@ -1080,7 +1105,7 @@ async function fetchFieldingFrv(opts) {
   // utility fielders who appear in lineups, high enough to exclude tiny
   // emergency-fill-in samples. (Savant accepts only dropdown values; 200 is
   // the lowest sensible one.)
-  const minInnings = o.minInnings != null ? o.minInnings : 200;
+  const minInnings = o.minInnings != null ? o.minInnings : FRV_MIN_INNINGS;
   const agg = new Map();
   for (const pos of positions) {
     const url = `https://baseballsavant.mlb.com/leaderboard/fielding-run-value`
@@ -1395,4 +1420,4 @@ async function fetchSchedule(dateStr) {
   return results;
 }
 
-module.exports = { fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor, loadParkFactors };
+module.exports = { FRV_MIN_INNINGS, FRV_MIN_OUTS, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchOddsAPI, fetchKalshiDirect, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchSchedule, makeGameId, VENUE_OVERRIDES, pickVenueOverride, resolveParkFactor, loadParkFactors };

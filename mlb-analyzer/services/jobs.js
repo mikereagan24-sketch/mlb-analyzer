@@ -3,7 +3,7 @@
 const cron = require('node-cron');
 const crypto = require('crypto');
 const { q, db } = require('../db/schema');
-const { fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
+const { FRV_MIN_OUTS, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
 const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
@@ -742,6 +742,25 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
           if (!row || !row.outs_total || row.outs_total <= 0) {
             if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
               + ': fielder "' + p.name + '" (id ' + mlbId + ') no FRV row — no defensive value');
+            continue;
+          }
+          // THE PRODUCER'S FLOOR, APPLIED BY THE CONSUMER. (2026-08-27)
+          //
+          // `outs_total > 0` above was ~100x looser than the ingest that
+          // fills this table (minInnings=200 => 600 outs), so the only rows
+          // it ever admitted below the floor were leftovers the current
+          // fetch could not produce. Their rate is a handful of outs
+          // extrapolated to OPPS_PER_GAME: Joc Pederson at 18 outs scored
+          // -0.697 runs/game, against a max of 0.21 across every legitimate
+          // row.
+          //
+          // FRV_MIN_OUTS is imported, never restated. A second literal 600
+          // is how this recurs.
+          if (row.outs_total < FRV_MIN_OUTS) {
+            if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
+              + ': fielder "' + p.name + '" (id ' + mlbId + ') FRV sample '
+              + row.outs_total + ' outs is below the ingest floor of ' + FRV_MIN_OUTS
+              + ' — skipped, not extrapolated');
             continue;
           }
           sum += (row.total_runs / row.outs_total) * oppsPerGame;
@@ -6703,6 +6722,40 @@ async function runFieldingFrvJob(opts) {
     });
     tx(rows);
     console.log('[defense] upserted ' + applied + ' non-catcher fielders (' + startY + '-' + endY + ')');
+
+    // THE INGEST MAINTAINS ITS OWN FLOOR. (2026-08-27)
+    //
+    // The fetch sends minInnings=200, so every row it produces clears
+    // FRV_MIN_OUTS. Rows BELOW it can therefore only be leftovers from an
+    // earlier generation that had no floor -- and 44 such rows survived
+    // here from 2026-05-22, with outs_total from 6 to 546 and per-game
+    // contributions up to 2.21 runs for a single fielder. An upsert never
+    // removes them, because they simply stop being touched.
+    //
+    // Doing this in the JOB rather than only in a script is what reaches
+    // production: a script opens data/mlb.db and is a laptop tool, the
+    // same gap the first-pitch backfill had. Same shape as
+    // utils/prune-missing.js in intent -- the ingest owning its table's
+    // invariant -- but a CRITERION, not a fetch diff, so it cannot empty
+    // the table when a fetch comes back short.
+    //
+    // Guarded by `applied > 0`: if this fetch returned nothing, deleting
+    // on its authority would be exactly the truncated-fetch failure the
+    // delete-missing guard exists to prevent.
+    if (applied > 0) {
+      try {
+        const info = db.prepare('DELETE FROM fielding_frv WHERE outs_total < ?').run(FRV_MIN_OUTS);
+        if (info.changes) {
+          console.log('[defense] pruned ' + info.changes + ' row(s) below the ingest floor of '
+            + FRV_MIN_OUTS + ' outs (pre-floor generation; the fetch cannot produce them)');
+        }
+      } catch (e) {
+        console.warn('[defense] floor prune failed (non-fatal): ' + (e && e.message));
+      }
+    } else {
+      console.warn('[defense] fetch produced 0 rows — skipping the floor prune so a '
+        + 'short fetch can never empty the table');
+    }
     // Daily snapshot — fires after upsert with the same source row
     // set. Each row carries season_start / season_end forward so the
     // archived snapshot retains its trailing-window provenance. PK
