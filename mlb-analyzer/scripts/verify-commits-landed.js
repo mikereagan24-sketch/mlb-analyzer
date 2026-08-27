@@ -72,6 +72,10 @@ const candidates = only
 const branches = candidates.map(b => b.trim()).filter(b => b && b !== 'main');
 
 const stranded = [];
+// Patch-id says absent, but a commit with the same subject IS on main --
+// the signature of a cherry-pick that resolved a conflict. Reported
+// separately and weakly: a subject match is a hint, not proof.
+const relanded = [];
 for (const b of branches) {
   // `git cherry` rather than `git log`. The difference matters: a commit
   // that was CHERRY-PICKED onto a new branch and merged leaves its
@@ -94,6 +98,29 @@ for (const b of branches) {
     const meta = sh('git log -1 --format=%cI ' + sha) || '';
     const subj = sh('git log -1 --format=%s ' + sha) || '';
     if (since && meta && meta < since) continue;
+
+    // SECOND SIGNAL: subject match against main. (2026-08-26)
+    //
+    // `git cherry` compares PATCH IDS, and a cherry-pick whose conflict was
+    // resolved by hand produces a DIFFERENT patch than the original -- so
+    // the original keeps showing as '+' forever even though its content is
+    // on main under a new sha.
+    //
+    // Measured, and it is not hypothetical: 85d011a was re-landed as
+    // 63472d4 in PR #314 with one CLAUDE.md conflict resolved, and this
+    // checker called it stranded afterwards. Reporting a re-landed commit
+    // as stranded is the same failure mode the git-cherry comment above
+    // was written to avoid -- it trains the reader to ignore the output.
+    //
+    // A subject match is NOT proof the content is identical, so it is
+    // reported as a SEPARATE, weaker category rather than being silently
+    // dropped. The reader is told which sha to diff against.
+    const twin = sh('git log ' + mainRef + ' --format=%h --fixed-strings --grep='
+      + JSON.stringify(subj) + ' -1');
+    if (twin) {
+      relanded.push({ branch: b, sha: sha.slice(0, 7), when: meta, subject: subj, twin });
+      continue;
+    }
     stranded.push({ branch: b, sha: sha.slice(0, 7), when: meta, subject: subj });
   }
 }
@@ -141,9 +168,26 @@ if (args.includes('--selftest')) {
   process.exit(2);
 }
 
+// Printed BEFORE the verdict, in both the clean and the stranded case --
+// these are commits whose content is probably on main under a different
+// sha, and the reader needs the twin sha to confirm it themselves.
+function printRelanded() {
+  if (!relanded.length) return;
+  console.log('');
+  console.log('  LIKELY RE-LANDED (' + relanded.length + ') -- patch-id differs, subject matches main.');
+  console.log('  A cherry-pick with a resolved conflict looks exactly like this.');
+  console.log('  Confirm with:  git diff <twin> <sha> -- <files>');
+  for (const r of relanded) {
+    console.log('    ' + r.sha + '  ->  ' + r.twin + '   ' + r.subject.slice(0, 60));
+    console.log('      on ' + r.branch);
+  }
+}
+
 if (!stranded.length) {
   console.log('OK  every commit on every local branch is an ancestor of ' + mainRef
+    + ', or has an equivalent there'
     + (since ? '  (since ' + since + ')' : ''));
+  printRelanded();
   process.exit(0);
 }
 
@@ -166,6 +210,8 @@ console.log('');
 console.log('  Not every one of these is a defect -- an abandoned experiment belongs');
 console.log('  here. What matters is that NONE of them is work you reported as');
 console.log('  delivered. Check each against what you said was shipped.');
+console.log('');
+printRelanded();
 console.log('');
 console.log('  To re-land one:  git checkout main && git pull --ff-only');
 console.log('                   git checkout -b relanded/<name> && git cherry-pick <sha>');
