@@ -234,13 +234,37 @@ const QUERIES = [
       + 'FROM lineup_captures '
       + "WHERE (? IS NULL OR substr(datetime(capture_time,'-7 hours'),1,10) >= ?) "
       + '  AND (? IS NULL OR horizon = ?) '
+      // since_ts is a ROW-LEVEL cutoff on capture_time, deliberately not a
+      // date. The anchor fix (PR #314) deployed at 22:36Z on 2026-08-26 --
+      // 3:36PM PT -- so the boundary falls INSIDE a slate: the 8AM/10AM/
+      // noon-3PM PT pulls that day are pre-fix and the 4PM/5PM/6PM/11PM
+      // ones are post-fix. A date-level filter would throw away half a day
+      // of perfectly good captures to exclude the other half.
+      + '  AND (? IS NULL OR capture_time >= ?) '
       + 'GROUP BY pt_date, pt_hour, horizon ORDER BY pt_date DESC, pt_hour, horizon LIMIT ?',
     params: [
-      { name: 'from',    type: 'string', required: false, default: null },
-      { name: 'horizon', type: 'string', required: false, default: null },
-      { name: 'limit',   type: 'int',    required: false, default: 200 },
+      { name: 'from',     type: 'string', required: false, default: null },
+      { name: 'horizon',  type: 'string', required: false, default: null },
+      { name: 'since_ts', type: 'string', required: false, default: null },
+      { name: 'limit',    type: 'int',    required: false, default: 200 },
     ],
-    bindOrder: ['from', 'from', 'horizon', 'horizon', 'limit'],
+    bindOrder: ['from', 'from', 'horizon', 'horizon', 'since_ts', 'since_ts', 'limit'],
+  },
+  {
+    name: 'lineup-capture-anchor-boundary',
+    description: 'The earliest capture_time carrying a non-null lead_anchor, i.e. OBSERVABLE '
+      + 'evidence of when the anchor-fix code went live. Exists so the anchor-coverage check '
+      + 'can be scoped by comparison against the data rather than by a remembered deploy date '
+      + '-- the same reasoning as the park-factor regime column. Also returns the pre-boundary '
+      + 'row count so those rows are reported as excluded rather than silently dropped.',
+    sql:
+      'SELECT (SELECT MIN(capture_time) FROM lineup_captures WHERE lead_anchor IS NOT NULL) '
+      + '  AS first_anchored_at, '
+      + '  (SELECT COUNT(*) FROM lineup_captures WHERE lead_anchor IS NOT NULL) AS anchored_rows, '
+      + '  (SELECT COUNT(*) FROM lineup_captures) AS total_rows, '
+      + '  (SELECT MIN(capture_time) FROM lineup_captures) AS first_capture_at',
+    params: [],
+    bindOrder: [],
   },
   {
     name: 'first-pitch-anchor-coverage',
