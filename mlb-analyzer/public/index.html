@@ -865,10 +865,31 @@ async function fetchServerWoba(){
   }catch(e){}
 }
 
-let _appPassword = sessionStorage.getItem('mlb_pwd') || '';
+// ONE-TIME CLEANUP (2026-08-27). Whatever is in sessionStorage under
+// 'mlb_pwd' got there from the old 401 handler's "Enter app password:"
+// prompt -- and the thing a user most plausibly typed into that prompt,
+// while trying to fix a rejected admin token, is THE ADMIN TOKEN. That
+// value was then attached as an x-app-password header to every single
+// request, to a gate that never reads it.
+//
+// So this is not tidying: it is clearing a live secret out of a header
+// it should never have been in. Nothing is lost, because nothing on the
+// server has ever validated this credential.
+try { sessionStorage.removeItem('mlb_pwd'); } catch (_) {}
+let _appPassword = '';
 
-async function api(path,opts={}){
+// _retry is internal: the 401 path re-calls api() exactly once after the
+// user supplies a new admin token. It used to recurse unbounded, which
+// turned a rotated token into an endless prompt.
+async function api(path,opts={},_retry){
   const headers={'Content-Type':'application/json'};
+  // x-app-password is a CLIENT-ONLY layer. NOTHING ON THE SERVER READS IT
+  // -- grepped the whole repo outside public/ on 2026-08-27: zero
+  // occurrences in routes/, services/ or server.js. It is still sent in
+  // case a host- or proxy-level gate ever consumes it, but it is NOT what
+  // a 401 from this app means, and no value the user types into a prompt
+  // can satisfy it. Do not add a password prompt back here; see the 401
+  // handler below for what that cost.
   if(_appPassword) headers['x-app-password']=_appPassword;
   // Auto-include X-Admin-Token from localStorage when present. Ungated
   // endpoints ignore it; gated endpoints accept it. This makes the
@@ -884,13 +905,52 @@ async function api(path,opts={}){
     if (adminToken) headers['X-Admin-Token'] = adminToken;
   } catch(_) { /* localStorage disabled — endpoint 401 becomes the signal */ }
   const r=await fetch('/api'+path,{headers,...opts});
+  // ─── Auth failures, named correctly ──────────────────────────────────
+  // WHAT THIS REPLACED, because the shape of the bug is the reason for
+  // the shape of the fix: this handler used to prompt "Enter app
+  // password:", store the answer as x-app-password, and recurse. The
+  // server has never read x-app-password. So a rotated DB_DOWNLOAD_TOKEN
+  // -- the ONLY credential these endpoints check -- produced an endless
+  // prompt for a password that had never existed, and no possible answer
+  // could clear it. Misattributed auth failures cost more than plain
+  // ones: the reader debugs the wrong credential.
+  if(r.status===503){
+    // Misconfiguration, not a bad credential. requireAdminToken returns
+    // this when DB_DOWNLOAD_TOKEN is unset on the server. Prompting here
+    // would be the same mislabelling in a new place -- there is nothing
+    // to compare a typed value against.
+    let b=null; try{ b=await r.json(); }catch(_){}
+    const err=new Error((b&&b.error)||'Endpoint not configured on the server');
+    err.status=503; err.body=b; throw err;
+  }
   if(r.status===401){
-    // Password required or wrong
-    const pwd=prompt('Enter app password:');
-    if(!pwd) throw new Error('Password required');
-    _appPassword=pwd;
-    sessionStorage.setItem('mlb_pwd',pwd);
-    return api(path,opts); // retry
+    let b=null; try{ b=await r.json(); }catch(_){}
+    // Two gates can 401, and their bodies distinguish them:
+    //   requireAdminToken       -> {error:'unauthorized'}   (no code)
+    //   requireBookmarkletToken -> {error:CODE, code:CODE}
+    if(b&&b.code){
+      const err=new Error('Bookmarklet token rejected ('+b.code+'). Rotate it on the Model tab — this is not the admin token.');
+      err.status=401; err.body=b; throw err;
+    }
+    // Admin token. Bounded to ONE retry: if the value the user just
+    // supplied is also rejected, say so and stop rather than re-asking.
+    if(_retry){
+      const err=new Error('Admin token still rejected — the stored value does not match DB_DOWNLOAD_TOKEN on the server.');
+      err.status=401; err.body=b; throw err;
+    }
+    let current=''; try{ current=localStorage.getItem('mlb_admin_token')||''; }catch(_){}
+    const entered=window.prompt(
+      'Admin token rejected by the server.\n\n'
+      +'This is X-Admin-Token, checked against the DB_DOWNLOAD_TOKEN env var. '
+      +'If you rotated that value, paste the new one here — or use the '
+      +'"admin token" button beside Save settings on the Model tab.\n\n'
+      +'This is NOT an app password. There is no app password.',
+      current);
+    if(entered===null||entered===''){
+      const err=new Error('Admin token required'); err.status=401; err.body=b; throw err;
+    }
+    try{ localStorage.setItem('mlb_admin_token',entered); }catch(_){}
+    return api(path,opts,1);
   }
   if(!r.ok){
     // Try to attach the JSON error body so callers (e.g. saveSettings) can

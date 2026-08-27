@@ -1044,6 +1044,7 @@ current tree.**
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
 | **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **eight times**, most recently 2026-08-26 when PRs #312 and #313 each merged with their LAST commit missing |
 | **Forward lineup capture stopped** | `node scripts/pipeline-freshness.js` (row `lineup_captures`) | a missed day of same-day capture, which is **unrecoverable** — there is no backfill for what RotoWire said at 10AM on a date that has passed |
+| **Auth failures naming the wrong credential** | `node scripts/test-api-401-handler.js` | a 401 handler that prompts for a credential the server never checks — the old one asked for an "app password" on a rejected admin token and recursed forever |
 | **Capture horizon logic** | `node scripts/test-lineup-capture.js` | a horizon mislabelled across the ET/PT midnight gap or a DST boundary — an 11PM PT same-day pull is already the next ET day |
 | **A bar inside the noise floor** | `node scripts/resolution-floor.js --n <n> --bar <bar>` | a pre-registered test that could not have resolved either way — run it **before** writing the bar, not after reading the result |
 
