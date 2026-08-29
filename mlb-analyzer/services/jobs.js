@@ -613,18 +613,57 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
   let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;
   let awayBpWoba = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
+  // Pool composition, surfaced onto the game object so the model result and
+  // the UI can both see how many arms the wOBA came from. Null until the
+  // blended lookup runs; a null pool means the lookup never happened, which
+  // is different from a pool of zero.
+  let _bullpenAvail = null;
   try {
     if (q.getBullpenWobaBlended) {
+      // Doubleheader leg, from the game_id suffix the lineup job assigns
+      // (-g2). Drives the same-day availability rule: relievers used in an
+      // earlier leg today are unavailable for the nightcap. 1 for every
+      // ordinary game, which makes the rule inert there.
+      const _dhLeg = (function () {
+        const m = String(gameRow.game_id || '').match(/-g(\d+)$/);
+        return m ? Number(m[1]) : 1;
+      })();
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;
       if (homeBp?.vsLHB) homeBpVsL = homeBp.vsLHB;
       awayBpWoba = awayBp?.woba || LEAGUE_BP;
       homeBpWoba = homeBp?.woba || LEAGUE_BP;
+
+      // PERSIST WHAT THE POOL ACTUALLY WAS. (2026-08-29)
+      //
+      // awayBp.pitchers was already computed here and discarded, so the
+      // number that went into the model carried no record of how many arms
+      // produced it. Fatigue thinned 28 of 30 pools on 2026-08-22 and none
+      // of those games can say so afterwards.
+      //
+      // Non-fatal: a bookkeeping write must never break pricing.
+      try {
+        if (q.updateBullpenAvailability) {
+          _bullpenAvail = {
+            away: { pool: awayBp?.pitchers ?? null, fallbacks: awayBp?.fallbacks ?? null,
+                    excluded: (awayBp && awayBp.excluded) || [] },
+            home: { pool: homeBp?.pitchers ?? null, fallbacks: homeBp?.fallbacks ?? null,
+                    excluded: (homeBp && homeBp.excluded) || [] },
+          };
+          q.updateBullpenAvailability.run(
+            _bullpenAvail.away.pool, _bullpenAvail.home.pool,
+            _bullpenAvail.away.excluded.length ? JSON.stringify(_bullpenAvail.away.excluded) : null,
+            _bullpenAvail.home.excluded.length ? JSON.stringify(_bullpenAvail.home.excluded) : null,
+            _bullpenAvail.away.fallbacks, _bullpenAvail.home.fallbacks,
+            gameRow.game_date, gameRow.game_id
+          );
+        }
+      } catch (e) { console.warn('[bullpen] availability write failed (non-fatal): ' + (e && e.message)); }
     }
   } catch(e) { /* fallback to league avg */ }
   // Catcher framing (per-game run value). Extract each side's catcher
@@ -809,6 +848,9 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     awayBullpenWoba: awayBpWoba, homeBullpenWoba: homeBpWoba,
     awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
     homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
+    // Availability travels with the wOBA onto the game object, so runModel
+    // and every display path can see the pool that produced the number.
+    bullpenAvailability: _bullpenAvail,
     // Starter projected IP (null when no projection uploaded)
     awaySpProjIP: awaySpProjIP, homeSpProjIP: homeSpProjIP,
     // Catcher framing per-game run value (null when ingest not built,
@@ -2974,6 +3016,13 @@ async function fetchPitcherUsage(dateStr) {
           const outingType = wasStarter ? 'start'
                            : (ip >= 3 ? 'long_relief' : 'short_relief');
           out.push({
+            // gamePk and gameNumber were already in scope here and simply
+            // never persisted. Without them a doubleheader collapses: the
+            // table keys on (date, team, pitcher) so leg 2 REPLACES leg 1,
+            // and even when nobody throws twice there is no way to ask
+            // which leg an appearance belongs to.
+            game_pk: g.gamePk,
+            game_number: g.gameNumber || 1,
             team: teamAbbr,
             pitcher_name: name,
             pitcher_mlb_id: pid,
@@ -3043,10 +3092,15 @@ async function runPitcherUsageBackfill() {
         q.upsertPitcherGameLog.run(
           date, u.team, u.pitcher_name, u.pitcher_mlb_id,
           u.pitches_thrown, u.innings_pitched, u.batters_faced,
-          u.was_starter, u.outing_type, 1
+          u.was_starter, u.outing_type, 1, u.game_pk || null, u.game_number || null
         );
         rowsWritten++;
       }
+      // Retire legacy rows superseded by real per-leg rows, so a
+      // re-ingest cannot double-count a pitcher. Guarded on the fetch
+      // having produced something: a short fetch must never delete.
+      try { if (q.dropSupersededPitcherLogRows) q.dropSupersededPitcherLogRows.run(date); }
+      catch (e) { console.warn('[pitcher-usage] legacy-row cleanup failed: ' + (e && e.message)); }
       datesProcessed++;
       if (usage.length > 0) {
         console.log('[pitcher-usage-backfill] ' + date + ': ' + usage.length + ' pitcher rows');
@@ -3454,10 +3508,15 @@ async function runScoreJob(dateStr) {
         q.upsertPitcherGameLog.run(
           dateStr, u.team, u.pitcher_name, u.pitcher_mlb_id,
           u.pitches_thrown, u.innings_pitched, u.batters_faced,
-          u.was_starter, u.outing_type, 1
+          u.was_starter, u.outing_type, 1, u.game_pk || null, u.game_number || null
         );
         pitcherRecords++;
       }
+      // Retire legacy rows superseded by real per-leg rows, so a
+      // re-ingest cannot double-count a pitcher. Guarded on the fetch
+      // having produced something: a short fetch must never delete.
+      try { if (q.dropSupersededPitcherLogRows) q.dropSupersededPitcherLogRows.run(dateStr); }
+      catch (e) { console.warn('[pitcher-usage] legacy-row cleanup failed: ' + (e && e.message)); }
       console.log('[score-job] Recorded ' + pitcherRecords + ' pitcher appearances for ' + dateStr);
     } catch(e) {
       console.log('[score-job] pitcher-usage fetch failed: ' + e.message);

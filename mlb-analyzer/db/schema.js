@@ -914,7 +914,6 @@ db.exec(`
     appeared INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_pgl_date_team_pitcher ON pitcher_game_log(game_date, team, pitcher_name);
   CREATE INDEX IF NOT EXISTS idx_pgl_team_date ON pitcher_game_log(team, game_date);
   CREATE TABLE IF NOT EXISTS pit_proj_ip (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2621,6 +2620,32 @@ db.exec(
 // for when the row was scraped, which is not recorded.
 try { db.exec('ALTER TABLE game_log ADD COLUMN park_factor_source TEXT'); }
 catch (e) { /* already present */ }
+
+// Bullpen availability, persisted per side. (2026-08-29)
+//
+// The pool has always been filtered -- fatigue removed at least one arm
+// from 28 of 30 teams on 2026-08-22 -- and nothing recorded it. The wOBA
+// went into the model and the pool size was computed, returned, and thrown
+// away at the call site. A game priced off 5 arms and a game priced off 9
+// were indistinguishable afterwards, which makes a thin bullpen look like
+// a bad model.
+//
+// _pool is the count that produced the wOBA, _excluded is the JSON list of
+// {name, reasons}, _fallbacks is how many of the pool had no projection row
+// (rostered callups carrying the unknown-wOBA default). All three are
+// needed: pool size alone cannot distinguish "small roster" from "four arms
+// unavailable", and a pool of 7 where 5 are fallbacks is not a real 7.
+for (const c of ['away_bullpen_pool INTEGER', 'home_bullpen_pool INTEGER',
+                 'away_bullpen_excluded TEXT', 'home_bullpen_excluded TEXT',
+                 'away_bullpen_fallbacks INTEGER', 'home_bullpen_fallbacks INTEGER']) {
+  try { db.exec('ALTER TABLE game_log ADD COLUMN ' + c); } catch (e) { /* already present */ }
+}
+q.updateBullpenAvailability = db.prepare(
+  'UPDATE game_log SET away_bullpen_pool=?, home_bullpen_pool=?, '
+  + 'away_bullpen_excluded=?, home_bullpen_excluded=?, '
+  + 'away_bullpen_fallbacks=?, home_bullpen_fallbacks=? '
+  + 'WHERE game_date=? AND game_id=?'
+);
 q.upsertParkFactor = db.prepare(
   'INSERT INTO park_factors (team,factor,source,source_url,source_params,year_range,' +
   ' venue_id,venue_name,n_pa,manual_reason,pulled_at) ' +
@@ -2795,12 +2820,62 @@ q.listLineupOverridesByDate = db.prepare(
 // outing_type, appeared. INSERT OR REPLACE on the (game_date, team,
 // pitcher_name) unique index — re-running fetchPitcherUsage for a date
 // overwrites any partial row cleanly.
+// Doubleheader leg identity. (2026-08-29)
+//
+// pitcher_game_log carried no game identity, and a UNIQUE index on
+// (game_date, team, pitcher_name) with INSERT OR REPLACE meant leg 2
+// DESTROYED leg 1 for any pitcher who threw in both. Measured across all
+// 14 corpus doubleheader dates -- 32 team-doubleheaders, 270 appearances --
+// exactly 2 rows were lost that way (Chase Shugart 2026-04-30, Didier
+// Fuentes 2026-07-29). Rare, but silent, and it also corrupted the
+// pitch-count and 3in4 inputs to getFatiguedPitchers for those pitchers.
+//
+// The larger consequence is that "did this reliever throw in the EARLIER
+// game today" was unanswerable at all, which is what the nightcap
+// availability rule needs.
+//
+// The unique index is widened to include game_pk so the two legs coexist.
+// Rows written before this carry NULL game_pk; COALESCE keeps them
+// collapsing to a single slot exactly as before rather than duplicating.
+for (const c of ['game_pk INTEGER', 'game_number INTEGER']) {
+  try { db.exec('ALTER TABLE pitcher_game_log ADD COLUMN ' + c); } catch (e) { /* present */ }
+}
+// The narrow index is dropped, not merely superseded. It used to be created
+// in the CREATE TABLE block above and that line is GONE -- leaving it there
+// while dropping it here made the schema unloadable on the next boot: the
+// create ran first, hit two-leg data, and threw UNIQUE constraint failed.
+// A migration that fights an unconditional create is not a migration.
+try {
+  db.exec('DROP INDEX IF EXISTS idx_pgl_date_team_pitcher');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_pgl_date_team_pitcher_game '
+    + 'ON pitcher_game_log(game_date, team, pitcher_name, COALESCE(game_pk, 0))');
+} catch (e) { console.warn('[schema] pitcher_game_log index migration: ' + (e && e.message)); }
+
+// Retire the pre-game_pk row for a pitcher once a real leg row exists.
+//
+// The widened unique index lets legacy rows (game_pk NULL) coexist with the
+// new per-leg rows, so a re-ingest DOUBLES every pitcher on that date --
+// which would inflate appearance counts in getFatiguedPitchers and batters-
+// faced accumulation in the cohort builder. Verified on 2026-07-29: TB went
+// from 5 rows to 10.
+//
+// Deliberately NOT a blanket "delete NULL game_pk". A legacy row is dropped
+// only where a replacement for the SAME (date, team, pitcher) now exists,
+// so a date that has never been re-ingested keeps its history intact. Same
+// criterion-based discipline as the FRV floor prune.
+q.dropSupersededPitcherLogRows = db.prepare(
+  'DELETE FROM pitcher_game_log WHERE game_date=? AND game_pk IS NULL AND EXISTS ('
+  + '  SELECT 1 FROM pitcher_game_log p2 WHERE p2.game_date=pitcher_game_log.game_date'
+  + '   AND p2.team=pitcher_game_log.team AND p2.pitcher_name=pitcher_game_log.pitcher_name'
+  + '   AND p2.game_pk IS NOT NULL)'
+);
+
 q.upsertPitcherGameLog = db.prepare(
   `INSERT OR REPLACE INTO pitcher_game_log
    (game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown,
     innings_pitched, batters_faced, was_starter, outing_type,
-    appeared, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    appeared, game_pk, game_number, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
 );
 
 // Projected starter IP (from Steamer or manual override).
@@ -2866,7 +2941,7 @@ q.getPitcherLogForTeam = db.prepare(
 // be excluded from a team's bullpen pool on gameDate based on recent usage.
 // Rules: pitched both yesterday AND the day before (2-consecutive),
 // pitched 3 of last 4 days (3in4), threw >29 pitches yesterday (pitch-count).
-q.getFatiguedPitchers = (teamAbbr, gameDate) => {
+q.getFatiguedPitchers = (teamAbbr, gameDate, gameNumber) => {
   if (!gameDate) return [];
   const teamU = (teamAbbr||'').toUpperCase();
   const base = new Date(gameDate + 'T00:00:00Z');
@@ -2895,6 +2970,31 @@ q.getFatiguedPitchers = (teamAbbr, gameDate) => {
     const yApp = apps.find(a => a.game_date === yesterday);
     if (yApp && (yApp.pitches_thrown||0) > 29) reasons.push('pitch-count');
     if (reasons.length) out.push({ pitcher_name: name, reasons });
+  }
+
+  // SAME-DAY: the doubleheader nightcap. (2026-08-29)
+  //
+  // Every rule above looks at game_date < gameDate, so none of them can
+  // see an arm used in the FIRST leg of today's doubleheader -- the model
+  // priced game 2 against the whole pen including the arms already spent,
+  // and those are usually the high-leverage ones.
+  //
+  // Needs Phase 1's game_number: before it, both legs collapsed into one
+  // row keyed on (date, team, pitcher) and "the earlier game" did not
+  // exist as a question. Guarded on gameNumber > 1 so it is inert for the
+  // ~99% of games that are not nightcaps, and on game_number NOT NULL so a
+  // legacy row can never be mistaken for a leg-1 appearance.
+  if (gameNumber && gameNumber > 1) {
+    const earlier = db.prepare(
+      'SELECT DISTINCT pitcher_name FROM pitcher_game_log '
+      + 'WHERE team=? AND game_date=? AND appeared=1 '
+      + '  AND game_number IS NOT NULL AND game_number < ?'
+    ).all(teamU, gameDate, gameNumber);
+    for (const r of earlier) {
+      const existing = out.find(o => o.pitcher_name === r.pitcher_name);
+      if (existing) { if (!existing.reasons.includes('dh-game1')) existing.reasons.push('dh-game1'); }
+      else out.push({ pitcher_name: r.pitcher_name, reasons: ['dh-game1'] });
+    }
   }
   return out;
 };
@@ -3524,7 +3624,7 @@ function _computeStartFracIndex(anchorDate) {
   return idx;
 }
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber) => {
   if (unknownWoba == null) unknownWoba = 0.335;
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
@@ -3537,13 +3637,40 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const hasRoster = activeRPSet.size > 0;
   if (!projRows.length && !hasRoster) return null;
   // Fatigue log stores full names from MLB Stats API — exact match only, no last-name fallback.
-  const fatiguedSet = new Set(q.getFatiguedPitchers(teamAbbr, gameDate).map(f => normName(f.pitcher_name)));
+  const fatigued = q.getFatiguedPitchers(teamAbbr, gameDate, gameNumber);
+  const fatiguedSet = new Set(fatigued.map(f => normName(f.pitcher_name)));
+  // WHO WAS REMOVED, AND WHY. (2026-08-29)
+  //
+  // The pool has always been filtered here; nothing has ever recorded what
+  // came out. Measured on 2026-08-22, fatigue removed at least one arm from
+  // 28 of 30 teams, and every one of those games priced against a thinner
+  // bullpen with no marker anywhere. A quietly-thinner pool is
+  // indistinguishable from a bad model, which is the same lesson as the
+  // sub-threshold FRV rows and the framing floor.
+  //
+  // Keyed by normalised name so the two filter passes below (projection
+  // rows, then roster fallback injection) cannot double-count one pitcher.
+  const excludedBy = new Map();
+  const note = (name, reason) => {
+    const k = normName(name);
+    if (!k) return;
+    if (!excludedBy.has(k)) excludedBy.set(k, { name: k, reasons: [] });
+    const e = excludedBy.get(k);
+    if (!e.reasons.includes(reason)) e.reasons.push(reason);
+  };
+  const reasonFor = pn => {
+    const f = fatigued.find(x => normName(x.pitcher_name) === pn);
+    return (f && f.reasons.length) ? f.reasons.join('+') : 'fatigued';
+  };
   const bullpenProj = projRows.filter(r => {
     const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
     const pn = normName(nameClean);
     const last = pn.split(' ').pop();
+    // The starter is not an exclusion worth reporting -- he is not a
+    // reliever and was never in the pool. Recording him would bury the
+    // availability signal in noise on every single game.
     if (starterNorm && pn.includes(starterNorm)) return false;
-    if (fatiguedSet.has(pn)) return false;
+    if (fatiguedSet.has(pn)) { note(pn, reasonFor(pn)); return false; }
     if (hasRoster) {
       return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
     }
@@ -3597,12 +3724,12 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
       if (representedFull.has(rName)) continue;
       if (rLast && representedLast.has(rLast)) continue;
       if (starterNorm && rName.includes(starterNorm)) continue;
-      if (fatiguedSet.has(rName)) continue;
+      if (fatiguedSet.has(rName)) { note(rName, reasonFor(rName)); continue; }
       pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true });
     }
   }
 
-  if (!pitchers.length) return null;
+  if (!pitchers.length) return { woba: null, pitchers: 0, fallbacks: 0, excluded: [...excludedBy.values()] };
   const fallbackList = pitchers.filter(p => p.fallback);
   const projPitchers = pitchers.filter(p => !p.fallback);
   const qualifiedProj = projPitchers.filter(p => p.sample >= 5);
@@ -3610,7 +3737,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const primary = qualifiedProj.length >= 3 ? qualifiedProj : projPitchers.slice(0, 8);
   // Always include fallback entries — a rostered callup will throw innings.
   const pool = primary.concat(fallbackList);
-  if (!pool.length) return null;
+  if (!pool.length) return { woba: null, pitchers: 0, fallbacks: 0, excluded: [...excludedBy.values()] };
   // Weighted aggregation across the pool. Each rostered RP (whether
   // established, partial-projection, or fallback callup) contributes to the
   // team's bullpen wOBA average with weight = (1 − start_BF_fraction over
@@ -3636,10 +3763,11 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // downweight collapses the mean. Fall back to equal-weight in that
   // edge case — a bullpen with only failed openers is still a bullpen.
   const woba = sumW > 0.01 ? sumWoba / sumW : pool.reduce((s,p)=>s+p.woba, 0) / pool.length;
-  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
+  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length,
+           excluded: [...excludedBy.values()] };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber) => {
   // Blend the team's bullpen-allowed wOBA using per-handedness strong/weak
   // manager-assumption weights. For each batter in the opposing lineup the
   // manager is assumed to deploy `strongWt` share of the better-matched
@@ -3647,11 +3775,29 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
   // the R/L split tuned separately because righty vs lefty matchup leverage
   // differs in practice. Fallback (no lineup) averages R and L weights.
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
-  if (!vsRHB && !vsLHB) return null;
+  // Pool metrics travel WITH the wOBA, so a caller cannot use the number
+  // without being able to see how many arms produced it. The rhb and lhb
+  // passes filter the same roster, so their exclusion lists agree; merged
+  // by name rather than concatenated so a pitcher is never counted twice.
+  const exMap = new Map();
+  for (const side of [rhb, lhb]) {
+    for (const e of (side && side.excluded) || []) {
+      if (!exMap.has(e.name)) exMap.set(e.name, { name: e.name, reasons: [...e.reasons] });
+      else { const t = exMap.get(e.name); for (const r of e.reasons) if (!t.reasons.includes(r)) t.reasons.push(r); }
+    }
+  }
+  const meta = {
+    pitchers: Math.max((rhb && rhb.pitchers) || 0, (lhb && lhb.pitchers) || 0),
+    fallbacks: Math.max((rhb && rhb.fallbacks) || 0, (lhb && lhb.fallbacks) || 0),
+    excluded: [...exMap.values()],
+  };
+  // Even with no usable wOBA the caller needs the exclusions -- a pool
+  // emptied BY exclusions must not look the same as a team with no data.
+  if (!vsRHB && !vsLHB) return Object.assign({ woba: null, vsRHB: null, vsLHB: null, source: 'empty' }, meta);
   // Defaults mirror the seed values so standalone callers (scripts/) still
   // produce sane results if they forget to pass weights.
   const sR = (bpStrongWtR != null) ? bpStrongWtR : 0.55;
@@ -3670,7 +3816,7 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
       sum += sW * strongWoba + wW * weakWoba;
     }
     const blended = parseFloat((sum / lineup.length).toFixed(4));
-    return { woba: blended, vsRHB, vsLHB, strongWoba, weakWoba, source: 'strong-weak-by-hand' };
+    return Object.assign({ woba: blended, vsRHB, vsLHB, strongWoba, weakWoba, source: 'strong-weak-by-hand' }, meta);
   }
   // No lineup: average the two handedness weight pairs.
   if (vsRHB && vsLHB) {
@@ -3679,9 +3825,9 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
     const avgStrong = (sR + sL) / 2;
     const avgWeak   = (wR + wL) / 2;
     const blended = parseFloat((avgStrong * strongWoba + avgWeak * weakWoba).toFixed(4));
-    return { woba: blended, vsRHB, vsLHB, source: 'strong-weak-fallback' };
+    return Object.assign({ woba: blended, vsRHB, vsLHB, source: 'strong-weak-fallback' }, meta);
   }
-  return { woba: vsRHB || vsLHB, vsRHB, vsLHB, source: 'single-side' };
+  return Object.assign({ woba: vsRHB || vsLHB, vsRHB, vsLHB, source: 'single-side' }, meta);
 };
 
 // Add is_active and notes columns if not present
