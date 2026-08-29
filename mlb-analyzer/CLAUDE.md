@@ -1076,11 +1076,47 @@ to forget. Everything the remediation scripts write is local-only:
 production has the schema but not the data, so a naive refresh silently
 reverts all of it.
 
-## One PR, one push (2026-08-24)
+## One PR, one push (2026-08-24, mechanism measured 2026-08-30)
 
-**Seven times now**, work has been committed, pushed, and reported as
-delivered while sitting on a branch `main` never absorbed. Four of those
-were in a single afternoon.
+**Nine times now**, work has been committed, pushed, and reported as
+delivered while sitting on a branch `main` never absorbed.
+
+### Run the guard BEFORE committing
+
+```
+node scripts/assert-branch-open.js
+```
+
+Exit 1 if the current branch's PR has already merged. That is the whole
+failure mode, and the check has to happen at commit time —
+`verify-commits-landed.js` finds it afterwards, when the work is already
+stranded.
+
+### The mechanism, no longer a guess
+
+Three strandings were the FINAL commit of a PR, which looked like GitHub
+merging a cached PR head. The timestamps say otherwise:
+
+```
+3865bbc committed 21:59:10Z   PR #320 merged 22:03:11Z   ( -4 min)  landed
+0f3d8a8 committed 22:11:27Z   PR #320 merged 22:03:11Z   ( +8 min)  STRANDED
+1ee0486 committed 22:26:34Z   PR #321 merged 22:30:58Z   ( -4 min)  landed
+1366bf0 committed 22:41:35Z   PR #321 merged 22:30:58Z   (+11 min)  STRANDED
+```
+
+**Every stranded commit was written AFTER its PR had already merged.** Not
+a race, not a cached head — an open PR's branch treated as a scratch
+workspace, without re-checking whether the PR was still open.
+
+**The reviewer cannot catch this.** Reloading the PR page and counting
+commits against the body finds nothing missing, because the commit did not
+exist when they merged. Verification on their side is worth doing for
+*other* failure modes; it cannot see this one.
+
+**And a written rule was not enough.** This rule existed and was followed
+for months, then failed twice in one afternoon — because nothing noticed
+the violation at the moment it happened. A rule you have to remember while
+absorbed in something else is not a control; the command is.
 
 ### It is not a race with the reviewer
 
@@ -1155,7 +1191,8 @@ current tree.**
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
-| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **eight times**, most recently 2026-08-26 when PRs #312 and #313 each merged with their LAST commit missing |
+| **Committing onto a merged PR** | `node scripts/assert-branch-open.js` | the cause of all nine strandings — run it BEFORE committing; the landed-commit verifier only finds it afterwards, when the work is already stranded |
+| **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **nine times**; measured cause is committing after the PR merged, so run `assert-branch-open.js` first |
 | **Forward lineup capture stopped** | `node scripts/pipeline-freshness.js` (row `lineup_captures`) | a missed day of same-day capture, which is **unrecoverable** — there is no backfill for what RotoWire said at 10AM on a date that has passed |
 | **A row its own producer could not make** | `node scripts/audit-producer-floors.js` | a consumer floor looser than the ingest that fills the table — a 6-out FRV sample priced a game at -2.213 runs, and the framing historical fallback is still `pitches > 0` |
 | **Bullpen pool silently thinned** | `node scripts/test-bullpen-availability.js` | exclusions applied but not reported, the doubleheader rule firing on ordinary games, or a sub-floor pool averaged instead of suppressed |
