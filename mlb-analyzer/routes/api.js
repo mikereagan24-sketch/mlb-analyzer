@@ -953,6 +953,16 @@ router.get('/games/:date', (req, res) => {
     const { date } = req.params;
     const games = q.getGamesByDate.all(date);
     const signals = q.getSignalsByDate.all(date);
+    // Logged bets the live query cannot see -- deactivated because the
+    // signal stopped qualifying, but still a record of a struck bet. Kept
+    // in their own bucket so nothing that gates on `signals` mistakes one
+    // for an actionable signal.
+    const loggedInactive = q.getLoggedInactiveByDate ? q.getLoggedInactiveByDate.all(date) : [];
+    const loggedByGame = {};
+    loggedInactive.forEach(s => {
+      if (!loggedByGame[s.game_id]) loggedByGame[s.game_id] = [];
+      loggedByGame[s.game_id].push(s);
+    });
     const signalsByGame = {};
     signals.forEach(s => {
       if (!signalsByGame[s.game_id]) signalsByGame[s.game_id] = [];
@@ -1098,6 +1108,7 @@ router.get('/games/:date', (req, res) => {
         home_lineup: homeLU || [],
         is_postponed: isPostponed,
         signals: signalsByGame[g.game_id] || [],
+        logged_bets: loggedByGame[g.game_id] || [],
         odds_quality: oddsQuality,
         lineups_quality: _classifyAge(_ageMs(g.lineups_quality_at, now)),
         weather_quality: _classifyAge(_ageMs(g.weather_quality_at, now)),

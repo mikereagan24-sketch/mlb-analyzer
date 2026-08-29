@@ -1654,8 +1654,24 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       : (dSide === 'away'
           ? (gameRow.market_away_ml != null ? ', mkt=' + gameRow.market_away_ml : '')
           : (gameRow.market_home_ml != null ? ', mkt=' + gameRow.market_home_ml : ''));
+    // NAME THE ACTUAL SUPPRESSION REASON. (2026-08-30)
+    //
+    // This said "Lineup incomplete" for EVERY suppression, which was true
+    // when incomplete_lineup was the only one. It is now one of several --
+    // no_park_factor, bullpen_unavailable, post-start pricing -- and the
+    // note is what a logged bet displays to explain why its signal went
+    // away. A note that names the wrong cause sends the reader after the
+    // wrong thing, which is the same defect as the 401 handler asking for
+    // an app password on a rejected admin token.
+    const REASON_TEXT = {
+      incomplete_lineup:   'Lineup incomplete',
+      bullpen_unavailable: 'Bullpen below the usable floor',
+      no_park_factor:      'No park factor for this venue',
+    };
+    const reasonKey = model && model._suppressed;
     const note = suppressed
-      ? 'Lineup incomplete (' + (model._suppressed_detail || 'no batters') + ') — model output suppressed, signal deactivated.'
+      ? (REASON_TEXT[reasonKey] || ('Model suppressed (' + reasonKey + ')'))
+        + ' (' + (model._suppressed_detail || 'no detail') + ') — model output suppressed, signal deactivated.'
       : 'Model ' + dType.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
     q.deactivateSignal.run(note, gameRow.game_date, gameRow.game_id, dType, dSide);
     try {

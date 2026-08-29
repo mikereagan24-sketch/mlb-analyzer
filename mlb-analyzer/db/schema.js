@@ -2384,6 +2384,29 @@ const q = {
     WHERE game_date = ? AND game_id = ? AND signal_type = ? AND signal_side = ?
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
+  // Logged bets the live signal query cannot see. (2026-08-30)
+  //
+  // getSignalsByDate filters is_active = 1, which is right for "what should
+  // I bet now" and wrong for "what did I bet". When a line moves and the
+  // signal stops clearing the emit floor, or the model gets suppressed, the
+  // rerun sets is_active = 0 -- and the logged bet silently left the card.
+  // 146 of 394 logged bets were invisible when this was found, including
+  // pending ones on an upcoming slate.
+  //
+  // The row itself was never at risk: deactivateSignal touches is_active,
+  // notes and updated_at only, so bet_line / bet_locked_at / closing_line /
+  // clv survive a rerun and a reload. This was a display gap, not data loss.
+  //
+  // Returned as a SEPARATE list rather than by widening getSignalsByDate,
+  // because `signals` gates live behaviour elsewhere (card visibility, the
+  // totals-signal lookup) and a deactivated row appearing there would read
+  // as actionable. The bet-log query at routes/api.js:1598 already carries
+  // the same `OR bs.bet_line IS NOT NULL` escape; this makes the games page
+  // agree with it.
+  getLoggedInactiveByDate: db.prepare(
+    `SELECT * FROM bet_signals
+      WHERE game_date = ? AND bet_line IS NOT NULL AND is_active = 0
+      ORDER BY game_id`),
   getSignalsForBacktest: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? ORDER BY game_id`),
   getSignalsByDateRange: db.prepare(`SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, game_id`),
   getBacktestByDateRange: db.prepare(`SELECT * FROM bet_signals WHERE game_date BETWEEN ? AND ? ORDER BY game_date, game_id`),
