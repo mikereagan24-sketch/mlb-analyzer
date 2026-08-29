@@ -17,6 +17,7 @@
  *      information.
  */
 const path = require('path');
+const fs = require('fs');
 const R = path.join(__dirname, '..');
 
 let pass = 0, fail = 0;
@@ -133,6 +134,45 @@ try {
 } finally {
   db.prepare('DELETE FROM pitcher_game_log WHERE game_date=? AND team=?').run(D, T);
 }
+
+// ---- 3. the leg parser, which shipped broken once ---------------------
+// /-g(d+)$/ matches a literal "d", never fires, and makes the whole rule
+// silently inert. One copy in utils/dh-leg.js, asserted here.
+const { legOf, isNightcap } = require(path.join(R, 'utils/dh-leg'));
+eq(legOf('bos-nyy'), 1, 'an ordinary game is leg 1, not unknown');
+eq(legOf('bos-nyy-g2'), 2, 'the -g2 suffix parses to leg 2');
+eq(legOf('ari-sf-g2'), 2, 'suffix parses regardless of team codes');
+eq(legOf('atl-nym-g3'), 3, 'a third leg parses');
+eq(legOf(null), 1, 'null game_id is leg 1, never NaN');
+eq(legOf(''), 1, 'empty game_id is leg 1');
+eq(legOf('bos-nyy-g'), 1, 'a malformed suffix falls back to leg 1');
+eq(legOf('bos-gnyy'), 1, 'a mid-string g does not parse as a leg');
+eq(isNightcap('bos-nyy'), false, 'ordinary game is not a nightcap');
+eq(isNightcap('bos-nyy-g2'), true, 'leg 2 is a nightcap');
+// The exact failure that shipped: a literal-d regex returns 1 for a real
+// nightcap, which reads as 'feature working, nothing to exclude'.
+ok(legOf('bos-nyy-g2') !== 1, 'a real nightcap never reports leg 1');
+
+// ---- 4. the report and the model must agree ---------------------------
+// They are separate implementations. The report called getFatiguedPitchers
+// WITHOUT the leg, so it showed arms used in game 1 as available while the
+// model pool correctly excluded them -- the 2026-08-29 BOS nightcap.
+const apiSrc = fs.readFileSync(path.join(R, 'routes/api.js'), 'utf8');
+// Plain string matching, deliberately. Writing these as regexes is how the
+// literal-d bug got here in the first place -- an escaped backslash does
+// not survive every editing path, and a regex that silently stops matching
+// makes a test pass while asserting nothing.
+ok(apiSrc.includes('getFatiguedPitchers(teamU, date, gameNumber)'),
+   'the bullpen report passes the leg to getFatiguedPitchers');
+ok(apiSrc.includes('buildTeamReport(g.away_team, g.away_sp, homeLU, legOf(g.game_id))'),
+   'the report call site derives the leg from the game_id');
+const jobsSrc2 = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');
+// Match the CODE form, not the bare string. The first version of this
+// asserted on '-g(d+)$' and failed against a source COMMENT that describes
+// the bug -- a test that cannot tell the defect from the note explaining
+// it. `.match(/-g(` only appears when someone hand-writes the regex.
+ok(!(apiSrc + jobsSrc2).includes('.match(/-g('),
+   'no hand-written leg regex outside utils/dh-leg.js -- one copy only');
 
 console.log('');
 console.log(pass + ' passed, ' + fail + ' failed');
