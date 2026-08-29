@@ -76,41 +76,63 @@ m = quiet(() => runModel(baseGame({ awayLineup: lineup(4), bullpenAvailability: 
   away: { pool: 1, excluded: [] }, home: { pool: 8, excluded: [] } } }), {}, settings, 'opener_aware', true));
 eq(m && m._suppressed, 'incomplete_lineup', 'incomplete lineup takes precedence over the bullpen floor');
 
-// ---- 2. the doubleheader rule, against real data -----------------------
-const { q } = require(path.join(R, 'db/schema'));
+// ---- 2. the doubleheader rule, on data this test OWNS -----------------
+//
+// The first version of this asserted against a real corpus doubleheader
+// (2026-07-29 ATL/NYM) and passed -- until the local DB stopped carrying
+// the re-ingested leg rows, at which point it failed for a reason that had
+// nothing to do with the code under test. A test whose result depends on
+// whether somebody happened to re-run a score job is not a test.
+//
+// So it seeds its own rows under a team code that cannot collide with a
+// real one, asserts, and removes them in a finally. The assertions are the
+// same; only the provenance of the data changed.
+const { q, db } = require(path.join(R, 'db/schema'));
 
-// 2026-07-29 ATL/NYM is a real split doubleheader in the corpus, and
-// Didier Fuentes threw in BOTH legs -- the case whose leg-1 row used to be
-// destroyed by INSERT OR REPLACE.
-const DH_DATE = '2026-07-29', DH_TEAM = 'ATL';
-const legOf = n => q.getFatiguedPitchers(DH_TEAM, DH_DATE, n).filter(x => x.reasons.includes('dh-game1'));
+const T = 'ZZT';                 // not an MLB abbreviation
+const D = '2026-06-02';          // a date with no real ZZT rows
+const ins = db.prepare(
+  'INSERT OR REPLACE INTO pitcher_game_log (game_date, team, pitcher_name, pitcher_mlb_id, '
+  + 'pitches_thrown, innings_pitched, batters_faced, was_starter, outing_type, appeared, '
+  + 'game_pk, game_number, created_at) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,datetime(\x27now\x27))');
 
-eq(legOf(1).length, 0, 'leg 1 has no dh-game1 exclusions -- there is no earlier game');
-ok(legOf(2).length > 0, 'leg 2 excludes arms used in leg 1');
-eq(q.getFatiguedPitchers(DH_TEAM, DH_DATE).filter(x => x.reasons.includes('dh-game1')).length, 0,
-   'omitting gameNumber entirely -> rule inert (every ordinary caller)');
-eq(q.getFatiguedPitchers(DH_TEAM, DH_DATE, 1).filter(x => x.reasons.includes('dh-game1')).length, 0,
-   'gameNumber=1 -> rule inert');
+try {
+  // Leg 1: a starter and two relievers. Leg 2: a different starter only.
+  ins.run(D, T, 'Zed Starter One', 900001, 90, 5.0, 20, 1, 'start', 991, 1);
+  ins.run(D, T, 'Zed Reliever A',  900002, 18, 1.0,  4, 0, 'short_relief', 991, 1);
+  ins.run(D, T, 'Zed Reliever B',  900003, 22, 1.0,  5, 0, 'short_relief', 991, 1);
+  ins.run(D, T, 'Zed Starter Two', 900004, 85, 5.0, 19, 1, 'start', 992, 2);
 
-// The exclusion must reach the POOL, not just the fatigue list.
-const bp = n => q.getBullpenWobaBlended(DH_TEAM, '', [], 0.55, 0.45, 0.35, 0.65,
-  0.65, 0.35, DH_DATE, 0.335, 100, true, 0.25, 0.75, n);
-const leg1 = bp(1), leg2 = bp(2);
-ok(leg2.pitchers < leg1.pitchers,
-   'the nightcap pool is smaller than leg 1 (' + leg2.pitchers + ' vs ' + leg1.pitchers + ')');
-ok(leg2.excluded.some(e => e.reasons.includes('dh-game1')),
-   'the pool exclusion list carries the dh-game1 reason');
-eq(leg1.excluded.filter(e => e.reasons.includes('dh-game1')).length, 0,
-   'leg 1 pool has no dh-game1 exclusions');
+  const dh = n => q.getFatiguedPitchers(T, D, n).filter(x => x.reasons.includes('dh-game1'));
 
-// Phase 1 is what makes any of this answerable: both legs must exist.
-const fuentes = require(path.join(R, 'db/schema')).db.prepare(
-  "SELECT game_number, pitches_thrown FROM pitcher_game_log "
-  + "WHERE game_date=? AND pitcher_name LIKE '%Fuentes%' ORDER BY game_number").all(DH_DATE);
-eq(fuentes.length, 2, 'the both-legs pitcher has TWO rows, not one (Phase 1)');
-ok(fuentes.every(r => r.game_number != null), 'both rows carry a leg number');
-ok(fuentes[0].pitches_thrown !== fuentes[1].pitches_thrown,
-   'the two legs hold different pitch counts -- leg 1 was not overwritten');
+  eq(dh(1).length, 0, 'leg 1 has no dh-game1 exclusions -- there is no earlier game');
+  eq(dh(2).length, 3, 'leg 2 excludes all three leg-1 pitchers');
+  eq(q.getFatiguedPitchers(T, D).filter(x => x.reasons.includes('dh-game1')).length, 0,
+     'omitting gameNumber entirely -> rule inert (every ordinary caller)');
+  ok(dh(2).some(x => x.pitcher_name === 'Zed Starter One'),
+     'the leg-1 STARTER is excluded too -- he cannot relieve in the nightcap');
+  ok(!dh(2).some(x => x.pitcher_name === 'Zed Starter Two'),
+     'the leg-2 starter is NOT excluded by his own appearance');
+
+  // A legacy row (game_number NULL) must never be read as a leg-1
+  // appearance -- that would exclude arms on the strength of missing data.
+  ins.run(D, T, 'Zed Legacy Row', 900005, 20, 1.0, 4, 0, 'short_relief', null, null);
+  ok(!q.getFatiguedPitchers(T, D, 2).some(x => x.pitcher_name === 'Zed Legacy Row'),
+     'a NULL game_number row is not treated as a leg-1 appearance');
+
+  // Leg identity survives a both-legs pitcher -- the Phase 1 guarantee,
+  // asserted on rows this test controls rather than on corpus state.
+  ins.run(D, T, 'Zed Both Legs', 900006, 11, 0.7, 3, 0, 'short_relief', 991, 1);
+  ins.run(D, T, 'Zed Both Legs', 900006, 17, 1.0, 4, 0, 'short_relief', 992, 2);
+  const both = db.prepare(
+    'SELECT game_number, pitches_thrown FROM pitcher_game_log WHERE game_date=? AND team=? '
+    + 'AND pitcher_name=? ORDER BY game_number').all(D, T, 'Zed Both Legs');
+  eq(both.length, 2, 'a both-legs pitcher keeps TWO rows (Phase 1; leg 1 not overwritten)');
+  eq(both[0].pitches_thrown, 11, 'leg 1 pitch count survives');
+  eq(both[1].pitches_thrown, 17, 'leg 2 pitch count is its own row');
+} finally {
+  db.prepare('DELETE FROM pitcher_game_log WHERE game_date=? AND team=?').run(D, T);
+}
 
 console.log('');
 console.log(pass + ' passed, ' + fail + ' failed');

@@ -42,24 +42,13 @@ function ptDate(offsetDays) {
 const FROM = argOf('--from', ptDate(-1));
 const NEW_CRON_HOUR = 10;          // the pull added 2026-08-26
 
-function token() {
-  if (process.env.ADMIN_TOKEN) return process.env.ADMIN_TOKEN.trim();
-  for (const p of ['.admin-token', path.join(__dirname, '..', '.admin-token')]) {
-    try { return fs.readFileSync(p, 'utf8').trim(); } catch (e) { /* next */ }
-  }
-  return null;
-}
+// Token loading and the admin fetch live in utils/admin-client.js. They
+// used to live here, and when measure-price-oscillation.js needed the same
+// thing a second copy was the obvious move -- which is how the duplicate-
+// implementation problem starts. One module, two callers.
+const admin = require(path.join(__dirname, '..', 'utils/admin-client'));
+const q = (name, params) => admin.query(name, params, { base: BASE });
 
-async function q(name, params) {
-  const tok = token();
-  if (!tok) throw new Error('no admin token: set ADMIN_TOKEN or create .admin-token');
-  const url = new URL(BASE + '/api/admin/query/' + name);
-  for (const [k, v] of Object.entries(params || {})) if (v != null) url.searchParams.set(k, v);
-  const r = await fetch(url, { headers: { 'X-Admin-Token': tok } });
-  const body = await r.text();
-  if (!r.ok) throw new Error(name + ' -> HTTP ' + r.status + ': ' + body.slice(0, 300));
-  try { return JSON.parse(body); } catch (e) { throw new Error(name + ' -> unparseable: ' + body.slice(0, 200)); }
-}
 const rowsOf = j => (Array.isArray(j) ? j : (j && (j.rows || j.data || j.result)) || []);
 
 let failures = 0;

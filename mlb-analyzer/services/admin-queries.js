@@ -187,13 +187,19 @@ const QUERIES = [
       "SELECT signal_id, action, created_at, detail FROM bet_signal_audit "
       + "WHERE action IN ('refresh','refresh_odds_tail') AND detail LIKE '%market_line%' "
       + 'AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at <= ?) '
+      + 'AND (? IS NULL OR signal_id > ?) '
       + 'ORDER BY signal_id, created_at LIMIT ?',
     params: [
       { name: 'from',  type: 'string', required: false, default: null },
       { name: 'to',    type: 'string', required: false, default: null },
+      // Keyset cursor for paging. The endpoint caps at MAX_ROWS and has no
+      // OFFSET, so a full-history run would silently measure the first 1000
+      // rows without it -- and a reversal rate computed on a truncated set is
+      // wrong in a way nothing downstream can detect.
+      { name: 'after_signal_id', type: 'int', required: false, default: null },
       { name: 'limit', type: 'int',    required: false, default: 1000 },
     ],
-    bindOrder: ['from', 'from', 'to', 'to', 'limit'],
+    bindOrder: ['from', 'from', 'to', 'to', 'after_signal_id', 'after_signal_id', 'limit'],
   },
   {
     name: 'signal-audit-actions',
