@@ -738,6 +738,44 @@ exactly the rejected data.** Stricter is safe; looser never is.
 
 See `docs/consumer-producer-floor-sweep-2026-08-27.md`.
 
+## A counterfactual models what the fix DOES, not what it prevents (2026-08-29)
+
+**Replaying a guard by DELETING the writes it would block underestimates,
+and the error is super-linear.** The oscillation projection dropped every
+venue->null write from historical rows and predicted a 5% reversal rate;
+production came back at **11.2%**, and the interval (~6-19%) excludes 5%.
+
+The guard does not delete the write. It **preserves the prior venue and
+still writes the row.** Deleting removes both halves of every reversal
+pair, and in a sustained A->B->A->B chain it collapses the whole chain --
+which is why dropping 38% of writes cut reversals by 94%, a ratio that is
+impossible if each removal cost one reversal.
+
+### The corrected form, which validated
+
+Classify the events by the transition the guard acts on. Predict:
+
+    residual events / (total - events the guard removes - their partners)
+
+On pre-fix data that gives **12.5%** against **11.3%** observed. Available
+as `scripts/measure-price-oscillation.js --classify`, which prints the
+projection with its inputs so it is re-derivable rather than remembered.
+
+### And check whether the residual is a FLOOR before calling it a miss
+
+Classify what is LEFT by whether the fix could have acted on it at all.
+Post-fix, **0 of 11** reversals were in a guard-coverable class against
+**94.6%** before -- so the residual is a floor, and two of the four
+same-venue cases were totals lines moving a half run, i.e. real market
+movement. Driving that number lower would mean suppressing correct
+behaviour.
+
+A residual with no coverable class in it is not a failure to finish the
+job. Saying so requires the composition, not the rate.
+
+See `docs/oscillation-post-deploy-result-2026-08-29.md`.
+
+
 ## Scope a check to what it can act on (2026-08-27)
 
 **A check that fails forever on unfixable history is a check nobody
