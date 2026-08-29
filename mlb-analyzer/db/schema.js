@@ -914,7 +914,6 @@ db.exec(`
     appeared INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_pgl_date_team_pitcher ON pitcher_game_log(game_date, team, pitcher_name);
   CREATE INDEX IF NOT EXISTS idx_pgl_team_date ON pitcher_game_log(team, game_date);
   CREATE TABLE IF NOT EXISTS pit_proj_ip (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2821,12 +2820,62 @@ q.listLineupOverridesByDate = db.prepare(
 // outing_type, appeared. INSERT OR REPLACE on the (game_date, team,
 // pitcher_name) unique index — re-running fetchPitcherUsage for a date
 // overwrites any partial row cleanly.
+// Doubleheader leg identity. (2026-08-29)
+//
+// pitcher_game_log carried no game identity, and a UNIQUE index on
+// (game_date, team, pitcher_name) with INSERT OR REPLACE meant leg 2
+// DESTROYED leg 1 for any pitcher who threw in both. Measured across all
+// 14 corpus doubleheader dates -- 32 team-doubleheaders, 270 appearances --
+// exactly 2 rows were lost that way (Chase Shugart 2026-04-30, Didier
+// Fuentes 2026-07-29). Rare, but silent, and it also corrupted the
+// pitch-count and 3in4 inputs to getFatiguedPitchers for those pitchers.
+//
+// The larger consequence is that "did this reliever throw in the EARLIER
+// game today" was unanswerable at all, which is what the nightcap
+// availability rule needs.
+//
+// The unique index is widened to include game_pk so the two legs coexist.
+// Rows written before this carry NULL game_pk; COALESCE keeps them
+// collapsing to a single slot exactly as before rather than duplicating.
+for (const c of ['game_pk INTEGER', 'game_number INTEGER']) {
+  try { db.exec('ALTER TABLE pitcher_game_log ADD COLUMN ' + c); } catch (e) { /* present */ }
+}
+// The narrow index is dropped, not merely superseded. It used to be created
+// in the CREATE TABLE block above and that line is GONE -- leaving it there
+// while dropping it here made the schema unloadable on the next boot: the
+// create ran first, hit two-leg data, and threw UNIQUE constraint failed.
+// A migration that fights an unconditional create is not a migration.
+try {
+  db.exec('DROP INDEX IF EXISTS idx_pgl_date_team_pitcher');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_pgl_date_team_pitcher_game '
+    + 'ON pitcher_game_log(game_date, team, pitcher_name, COALESCE(game_pk, 0))');
+} catch (e) { console.warn('[schema] pitcher_game_log index migration: ' + (e && e.message)); }
+
+// Retire the pre-game_pk row for a pitcher once a real leg row exists.
+//
+// The widened unique index lets legacy rows (game_pk NULL) coexist with the
+// new per-leg rows, so a re-ingest DOUBLES every pitcher on that date --
+// which would inflate appearance counts in getFatiguedPitchers and batters-
+// faced accumulation in the cohort builder. Verified on 2026-07-29: TB went
+// from 5 rows to 10.
+//
+// Deliberately NOT a blanket "delete NULL game_pk". A legacy row is dropped
+// only where a replacement for the SAME (date, team, pitcher) now exists,
+// so a date that has never been re-ingested keeps its history intact. Same
+// criterion-based discipline as the FRV floor prune.
+q.dropSupersededPitcherLogRows = db.prepare(
+  'DELETE FROM pitcher_game_log WHERE game_date=? AND game_pk IS NULL AND EXISTS ('
+  + '  SELECT 1 FROM pitcher_game_log p2 WHERE p2.game_date=pitcher_game_log.game_date'
+  + '   AND p2.team=pitcher_game_log.team AND p2.pitcher_name=pitcher_game_log.pitcher_name'
+  + '   AND p2.game_pk IS NOT NULL)'
+);
+
 q.upsertPitcherGameLog = db.prepare(
   `INSERT OR REPLACE INTO pitcher_game_log
    (game_date, team, pitcher_name, pitcher_mlb_id, pitches_thrown,
     innings_pitched, batters_faced, was_starter, outing_type,
-    appeared, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    appeared, game_pk, game_number, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
 );
 
 // Projected starter IP (from Steamer or manual override).

@@ -3008,6 +3008,13 @@ async function fetchPitcherUsage(dateStr) {
           const outingType = wasStarter ? 'start'
                            : (ip >= 3 ? 'long_relief' : 'short_relief');
           out.push({
+            // gamePk and gameNumber were already in scope here and simply
+            // never persisted. Without them a doubleheader collapses: the
+            // table keys on (date, team, pitcher) so leg 2 REPLACES leg 1,
+            // and even when nobody throws twice there is no way to ask
+            // which leg an appearance belongs to.
+            game_pk: g.gamePk,
+            game_number: g.gameNumber || 1,
             team: teamAbbr,
             pitcher_name: name,
             pitcher_mlb_id: pid,
@@ -3077,10 +3084,15 @@ async function runPitcherUsageBackfill() {
         q.upsertPitcherGameLog.run(
           date, u.team, u.pitcher_name, u.pitcher_mlb_id,
           u.pitches_thrown, u.innings_pitched, u.batters_faced,
-          u.was_starter, u.outing_type, 1
+          u.was_starter, u.outing_type, 1, u.game_pk || null, u.game_number || null
         );
         rowsWritten++;
       }
+      // Retire legacy rows superseded by real per-leg rows, so a
+      // re-ingest cannot double-count a pitcher. Guarded on the fetch
+      // having produced something: a short fetch must never delete.
+      try { if (q.dropSupersededPitcherLogRows) q.dropSupersededPitcherLogRows.run(date); }
+      catch (e) { console.warn('[pitcher-usage] legacy-row cleanup failed: ' + (e && e.message)); }
       datesProcessed++;
       if (usage.length > 0) {
         console.log('[pitcher-usage-backfill] ' + date + ': ' + usage.length + ' pitcher rows');
@@ -3488,10 +3500,15 @@ async function runScoreJob(dateStr) {
         q.upsertPitcherGameLog.run(
           dateStr, u.team, u.pitcher_name, u.pitcher_mlb_id,
           u.pitches_thrown, u.innings_pitched, u.batters_faced,
-          u.was_starter, u.outing_type, 1
+          u.was_starter, u.outing_type, 1, u.game_pk || null, u.game_number || null
         );
         pitcherRecords++;
       }
+      // Retire legacy rows superseded by real per-leg rows, so a
+      // re-ingest cannot double-count a pitcher. Guarded on the fetch
+      // having produced something: a short fetch must never delete.
+      try { if (q.dropSupersededPitcherLogRows) q.dropSupersededPitcherLogRows.run(dateStr); }
+      catch (e) { console.warn('[pitcher-usage] legacy-row cleanup failed: ' + (e && e.message)); }
       console.log('[score-job] Recorded ' + pitcherRecords + ' pitcher appearances for ' + dateStr);
     } catch(e) {
       console.log('[score-job] pitcher-usage fetch failed: ' + e.message);
