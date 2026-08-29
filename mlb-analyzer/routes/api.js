@@ -6808,8 +6808,14 @@ router.get('/debug/model-trace', (req, res) => {
     const awayLineupArr = tryParseLocal(gameRow.away_lineup_json) || [];
     try {
       if (q.getBullpenWobaBlended) {
-        const aBp = q.getBullpenWobaBlended(awayAbbr, gameRow.away_sp || gameRow.away_pitcher || '', homeLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, BP_MIN_BF_, BP_DWS_, BP_WP_, BP_WA_);
-        const hBp = q.getBullpenWobaBlended(homeAbbr, gameRow.home_sp || gameRow.home_pitcher || '', awayLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, BP_MIN_BF_, BP_DWS_, BP_WP_, BP_WA_);
+        // THE LEG, same as processGameSignals. Without it this trace
+        // recomputes leg-1 numbers for a nightcap and reports them as
+        // what the model used -- which is exactly how a working exclusion
+        // was mistaken for a broken one on the 2026-08-29 BOS g2: the
+        // trace showed NYY identical across both legs while the model had
+        // already dropped five arms.
+        const aBp = q.getBullpenWobaBlended(awayAbbr, gameRow.away_sp || gameRow.away_pitcher || '', homeLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, BP_MIN_BF_, BP_DWS_, BP_WP_, BP_WA_, legOf(gameRow.game_id));
+        const hBp = q.getBullpenWobaBlended(homeAbbr, gameRow.home_sp || gameRow.home_pitcher || '', awayLineupArr, BP_SR_, BP_WR_, BP_SL_, BP_WL_, W_PROJ_, W_ACT_, gameRow.game_date, UNK_, BP_MIN_BF_, BP_DWS_, BP_WP_, BP_WA_, legOf(gameRow.game_id));
         if (aBp?.vsRHB) awayBpVsR = aBp.vsRHB;
         if (aBp?.vsLHB) awayBpVsL = aBp.vsLHB;
         if (hBp?.vsRHB) homeBpVsR = hBp.vsRHB;
