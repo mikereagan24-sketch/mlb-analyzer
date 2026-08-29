@@ -624,10 +624,10 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       // (-g2). Drives the same-day availability rule: relievers used in an
       // earlier leg today are unavailable for the nightcap. 1 for every
       // ordinary game, which makes the rule inert there.
-      const _dhLeg = (function () {
-        const m = String(gameRow.game_id || '').match(/-g(\d+)$/);
-        return m ? Number(m[1]) : 1;
-      })();
+      // legOf lives in utils/dh-leg.js. This regex shipped broken once --
+      // /-g(d+)$/, matching a literal "d" -- and a silently inert rule is
+      // the hardest failure to spot, so there is one copy now.
+      const _dhLeg = require('../utils/dh-leg').legOf(gameRow.game_id);
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
       const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);

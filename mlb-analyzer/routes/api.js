@@ -49,6 +49,7 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
 const { runParkFactorsJob, runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
+const { legOf } = require('../utils/dh-leg');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats, weightOr } = require('../services/model');
 const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
@@ -6619,7 +6620,7 @@ router.get('/debug/bullpen-report', (req, res) => {
     ).all(date);
     const rosterStmt = db.prepare('SELECT player_name, role, hand FROM team_rosters WHERE team=? ORDER BY role, player_name');
 
-    const buildTeamReport = (teamAbbr, spName, opposingLineup) => {
+    const buildTeamReport = (teamAbbr, spName, opposingLineup, gameNumber) => {
       const teamU = (teamAbbr||'').toUpperCase();
       const spNorm = normName(spName);
       const spLast = spNorm.split(' ').pop();
@@ -6629,7 +6630,12 @@ router.get('/debug/bullpen-report', (req, res) => {
       // from the pool AVERAGE but they still rendered as rows). Filter to
       // pitcher roles here.
       const roster = rosterStmt.all(teamU).filter(p => p.role === 'SP' || p.role === 'RP');
-      const fatigued = q.getFatiguedPitchers(teamU, date);
+      // THE LEG MATTERS HERE. Without it the dh-game1 rule cannot fire and
+      // the report shows arms already used in game 1 as available -- which
+      // is exactly what happened for the 2026-08-29 BOS nightcap (Guerrero,
+      // Whitlock, Moran). The model pool had the leg; this report did not,
+      // so the two disagreed about who was available.
+      const fatigued = q.getFatiguedPitchers(teamU, date, gameNumber);
       const fatigueByExact = {};
       for (const f of fatigued) {
         fatigueByExact[normName(f.pitcher_name)] = f.reasons;
@@ -6729,8 +6735,8 @@ router.get('/debug/bullpen-report', (req, res) => {
         game_id: g.game_id,
         away_team: g.away_team,
         home_team: g.home_team,
-        away: buildTeamReport(g.away_team, g.away_sp, homeLU),
-        home: buildTeamReport(g.home_team, g.home_sp, awayLU),
+        away: buildTeamReport(g.away_team, g.away_sp, homeLU, legOf(g.game_id)),
+        home: buildTeamReport(g.home_team, g.home_sp, awayLU, legOf(g.game_id)),
       };
     });
 
