@@ -227,6 +227,66 @@ const pp = x => (x * 100).toFixed(4);
     }
   }
 
+  // --- (4) REVERSAL COMPOSITION, and whether the rate is a FLOOR --------
+  //
+  // The reversal rate alone cannot say whether a residual is a miss or a
+  // floor. The guard addresses exactly one class -- a `refresh` write that
+  // moved price_venue from a real venue to null -- plus the null->venue
+  // re-acquisition that pairs with it. Anything else is outside its reach
+  // BY CONSTRUCTION, and counting those as failures would mean chasing a
+  // number that cannot go down.
+  //
+  // Measured 2026-08-29 on the post-fix window: 0 of 11 reversals were in
+  // a guard-coverable class, against 94.6% pre-fix. That is a floor.
+  if (process.argv.includes('--classify')) {
+    const prev2 = {};
+    let ch2 = 0;
+    const rev = { downgrade: 0, acquire: 0, vswitch: 0, unchanged: 0 };
+    const wr  = { downgrade: 0, acquire: 0, vswitch: 0, unchanged: 0 };
+    const klass = pv => !pv ? 'unchanged'
+      : (pv.from != null && pv.to == null) ? 'downgrade'
+      : (pv.from == null && pv.to != null) ? 'acquire' : 'vswitch';
+    for (const r of rows) {
+      let d; try { d = JSON.parse(r.detail); } catch (e) { continue; }
+      if (!d.market_line) continue;
+      const f = d.market_line.from, t = d.market_line.to;
+      if (f == null || t == null) continue;
+      ch2++; wr[klass(d.price_venue)]++;
+      const p = prev2[r.signal_id];
+      if (p && p.to === f && p.from === t) rev[klass(d.price_venue)]++;
+      prev2[r.signal_id] = { from: f, to: t };
+    }
+    const tot = rev.downgrade + rev.acquire + rev.vswitch + rev.unchanged;
+    const covered = rev.downgrade + rev.acquire;
+    console.log('');
+    console.log('--- (4) REVERSAL COMPOSITION ---');
+    console.log('  reversals: ' + tot + ' of ' + ch2 + ' writes'
+      + (ch2 ? '  (' + (100 * tot / ch2).toFixed(1) + '%)' : ''));
+    console.log('    venue -> null   (guard covers) : ' + rev.downgrade);
+    console.log('    null -> venue   (its partner)  : ' + rev.acquire);
+    console.log('    venue switch    (NOT covered)  : ' + rev.vswitch);
+    console.log('    venue unchanged (NOT covered)  : ' + rev.unchanged);
+    console.log('');
+    if (tot) {
+      const pct = 100 * covered / tot;
+      console.log('  guard-coverable share of reversals: ' + pct.toFixed(1) + '%');
+      console.log('  ' + (pct < 5
+        ? '-> FLOOR. Almost nothing left is a class the guard can act on;'
+        : '-> NOT a floor. A coverable class is still reversing.'));
+    }
+    // The projection that can be validated NEXT time, stated with its
+    // inputs so it is re-derivable rather than remembered.
+    const surviving = ch2 - wr.downgrade - wr.acquire;
+    const residual = rev.vswitch + rev.unchanged;
+    if (surviving > 0) {
+      console.log('');
+      console.log('  PROJECTION for a window where the guard is NOT yet live:');
+      console.log('    surviving writes = ' + ch2 + ' - ' + wr.downgrade + ' - ' + wr.acquire + ' = ' + surviving);
+      console.log('    residual reversals = ' + residual);
+      console.log('    predicted post-guard rate = ' + (100 * residual / surviving).toFixed(1) + '%');
+    }
+  }
+
   console.log('  SUCCESS CRITERION FOR A FIX: both writers near 0.0000pp with a ~50%');
   console.log('  down-split, AND the reversal rate down. The first matters more --');
   console.log('  a bias on non-oscillating writes never shows up in the second.');

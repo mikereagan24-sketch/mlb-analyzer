@@ -444,3 +444,28 @@ Near 5% confirms it. **Materially above means the guard is not firing on
 the paths that matter and the projection was optimistic** — which is the
 falsifiable half, and gets reported the same way.
 
+
+---
+
+## RESOLVED (2026-08-29) -- do not edit the above
+
+Production, 98 writes over 3.8 days since the 2026-08-26 deploy:
+
+- **Bias criterion PASSED.** Head-to-head sign-split z **-42.39 -> -0.58**.
+  Both writers symmetric. This was the criterion that mattered.
+- **Reversal rate 11.2%** against the ~5% projection. CI roughly 6-19%, so
+  5% sits just outside. **Directionally confirmed, point estimate
+  unresolved -- not a hit.**
+
+**The residual is a FLOOR.** 0 of 11 reversals are in a class the guard can
+act on, against 94.6% pre-fix. What is left is 7 venue switches (the
+venue-aware feature working) and 4 same-venue moves, two of which are
+totals lines flipping a half run -- real market movement.
+
+**The projection method was biased low by ~2.2x**, because it modelled the
+guard as deleting writes when it actually preserves a value and still
+writes. Corrected method predicts 12.5% against 11.3% observed.
+
+Write volume also fell **117/day -> 25/day**.
+
+Full result: `docs/oscillation-post-deploy-result-2026-08-29.md`.
