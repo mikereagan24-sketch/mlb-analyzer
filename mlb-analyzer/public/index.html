@@ -2357,6 +2357,7 @@ async function renderMatchupGame(id){
     +renderModelOutput(g)
     +renderLineupDiff(g)
     +renderFramingImpact(g)
+    +renderBullpenAvailability(g)
     +renderLineupBsr(g)
     +renderPolyKalshiOdds(g)
     +'<div class="grid-2" style="gap:16px"><div>'+mt(aLU,g.home_sp,g.home_sp_hand||'R',pH,g.away_team)+'</div><div>'+mt(hLU,g.away_sp,g.away_sp_hand||'R',pA,g.home_team)+'</div></div>'
@@ -2375,6 +2376,46 @@ async function renderMatchupGame(id){
 // read. Honest empty states: 'lineup pending' / 'no framing data' /
 // 'framing disabled' — never display 0 as if the catcher had zero
 // impact.
+// Bullpen availability (2026-08-29). Shows the pool the bullpen wOBA was
+// actually computed from, and who was removed.
+//
+// WHY IT IS ON SCREEN AT ALL: the pool has always been filtered and the
+// size was computed, returned by getBullpenWoba, and discarded at the call
+// site. On 2026-08-22 fatigue thinned 28 of 30 pools; every one of those
+// games priced against fewer arms with nothing recording it, so a thin
+// bullpen was indistinguishable from a bad model.
+//
+// Honest empty states, same rule as the framing block: a null pool means
+// the lookup never ran, which is NOT the same as a pool of zero, and
+// neither renders as a bare blank.
+function renderBullpenAvailability(g){
+  if (!g || !g.bullpen_availability) return '';
+  const ba = g.bullpen_availability;
+  const side = (label, s) => {
+    if (!s || s.pool == null) {
+      return '<div style="font-size:11px;color:var(--text3)">' + label + ': not computed</div>';
+    }
+    const ex = s.excluded || [];
+    // Thin is a judgement the reader should not have to make by counting.
+    const thin = s.pool < 5;
+    const col = thin ? 'var(--warn, #c88)' : 'var(--text)';
+    let html = '<div style="font-size:11px;color:' + col + '">' + label
+      + ': <b>' + s.pool + '</b> arm' + (s.pool === 1 ? '' : 's')
+      + (s.fallbacks ? ' (' + s.fallbacks + ' no projection)' : '')
+      + (thin ? ' — thin' : '') + '</div>';
+    if (ex.length) {
+      html += '<div style="font-size:10px;color:var(--text3);margin-left:8px">out: '
+        + ex.map(e => e.name + ' (' + (e.reasons || []).join(',') + ')').join(', ')
+        + '</div>';
+    }
+    return html;
+  };
+  return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
+    + '<div style="font-size:10px;color:var(--text2);margin-bottom:4px">Bullpen availability</div>'
+    + side('Away', ba.away) + side('Home', ba.home)
+    + '</div>';
+}
+
 function renderFramingImpact(g){
   if (!g || !g.framing_impact) return '';
   const fi = g.framing_impact;

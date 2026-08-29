@@ -2621,6 +2621,32 @@ db.exec(
 // for when the row was scraped, which is not recorded.
 try { db.exec('ALTER TABLE game_log ADD COLUMN park_factor_source TEXT'); }
 catch (e) { /* already present */ }
+
+// Bullpen availability, persisted per side. (2026-08-29)
+//
+// The pool has always been filtered -- fatigue removed at least one arm
+// from 28 of 30 teams on 2026-08-22 -- and nothing recorded it. The wOBA
+// went into the model and the pool size was computed, returned, and thrown
+// away at the call site. A game priced off 5 arms and a game priced off 9
+// were indistinguishable afterwards, which makes a thin bullpen look like
+// a bad model.
+//
+// _pool is the count that produced the wOBA, _excluded is the JSON list of
+// {name, reasons}, _fallbacks is how many of the pool had no projection row
+// (rostered callups carrying the unknown-wOBA default). All three are
+// needed: pool size alone cannot distinguish "small roster" from "four arms
+// unavailable", and a pool of 7 where 5 are fallbacks is not a real 7.
+for (const c of ['away_bullpen_pool INTEGER', 'home_bullpen_pool INTEGER',
+                 'away_bullpen_excluded TEXT', 'home_bullpen_excluded TEXT',
+                 'away_bullpen_fallbacks INTEGER', 'home_bullpen_fallbacks INTEGER']) {
+  try { db.exec('ALTER TABLE game_log ADD COLUMN ' + c); } catch (e) { /* already present */ }
+}
+q.updateBullpenAvailability = db.prepare(
+  'UPDATE game_log SET away_bullpen_pool=?, home_bullpen_pool=?, '
+  + 'away_bullpen_excluded=?, home_bullpen_excluded=?, '
+  + 'away_bullpen_fallbacks=?, home_bullpen_fallbacks=? '
+  + 'WHERE game_date=? AND game_id=?'
+);
 q.upsertParkFactor = db.prepare(
   'INSERT INTO park_factors (team,factor,source,source_url,source_params,year_range,' +
   ' venue_id,venue_name,n_pa,manual_reason,pulled_at) ' +
@@ -3537,13 +3563,40 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const hasRoster = activeRPSet.size > 0;
   if (!projRows.length && !hasRoster) return null;
   // Fatigue log stores full names from MLB Stats API — exact match only, no last-name fallback.
-  const fatiguedSet = new Set(q.getFatiguedPitchers(teamAbbr, gameDate).map(f => normName(f.pitcher_name)));
+  const fatigued = q.getFatiguedPitchers(teamAbbr, gameDate);
+  const fatiguedSet = new Set(fatigued.map(f => normName(f.pitcher_name)));
+  // WHO WAS REMOVED, AND WHY. (2026-08-29)
+  //
+  // The pool has always been filtered here; nothing has ever recorded what
+  // came out. Measured on 2026-08-22, fatigue removed at least one arm from
+  // 28 of 30 teams, and every one of those games priced against a thinner
+  // bullpen with no marker anywhere. A quietly-thinner pool is
+  // indistinguishable from a bad model, which is the same lesson as the
+  // sub-threshold FRV rows and the framing floor.
+  //
+  // Keyed by normalised name so the two filter passes below (projection
+  // rows, then roster fallback injection) cannot double-count one pitcher.
+  const excludedBy = new Map();
+  const note = (name, reason) => {
+    const k = normName(name);
+    if (!k) return;
+    if (!excludedBy.has(k)) excludedBy.set(k, { name: k, reasons: [] });
+    const e = excludedBy.get(k);
+    if (!e.reasons.includes(reason)) e.reasons.push(reason);
+  };
+  const reasonFor = pn => {
+    const f = fatigued.find(x => normName(x.pitcher_name) === pn);
+    return (f && f.reasons.length) ? f.reasons.join('+') : 'fatigued';
+  };
   const bullpenProj = projRows.filter(r => {
     const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
     const pn = normName(nameClean);
     const last = pn.split(' ').pop();
+    // The starter is not an exclusion worth reporting -- he is not a
+    // reliever and was never in the pool. Recording him would bury the
+    // availability signal in noise on every single game.
     if (starterNorm && pn.includes(starterNorm)) return false;
-    if (fatiguedSet.has(pn)) return false;
+    if (fatiguedSet.has(pn)) { note(pn, reasonFor(pn)); return false; }
     if (hasRoster) {
       return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
     }
@@ -3597,12 +3650,12 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
       if (representedFull.has(rName)) continue;
       if (rLast && representedLast.has(rLast)) continue;
       if (starterNorm && rName.includes(starterNorm)) continue;
-      if (fatiguedSet.has(rName)) continue;
+      if (fatiguedSet.has(rName)) { note(rName, reasonFor(rName)); continue; }
       pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true });
     }
   }
 
-  if (!pitchers.length) return null;
+  if (!pitchers.length) return { woba: null, pitchers: 0, fallbacks: 0, excluded: [...excludedBy.values()] };
   const fallbackList = pitchers.filter(p => p.fallback);
   const projPitchers = pitchers.filter(p => !p.fallback);
   const qualifiedProj = projPitchers.filter(p => p.sample >= 5);
@@ -3610,7 +3663,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const primary = qualifiedProj.length >= 3 ? qualifiedProj : projPitchers.slice(0, 8);
   // Always include fallback entries — a rostered callup will throw innings.
   const pool = primary.concat(fallbackList);
-  if (!pool.length) return null;
+  if (!pool.length) return { woba: null, pitchers: 0, fallbacks: 0, excluded: [...excludedBy.values()] };
   // Weighted aggregation across the pool. Each rostered RP (whether
   // established, partial-projection, or fallback callup) contributes to the
   // team's bullpen wOBA average with weight = (1 − start_BF_fraction over
@@ -3636,7 +3689,8 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // downweight collapses the mean. Fall back to equal-weight in that
   // edge case — a bullpen with only failed openers is still a bullpen.
   const woba = sumW > 0.01 ? sumWoba / sumW : pool.reduce((s,p)=>s+p.woba, 0) / pool.length;
-  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length };
+  return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length,
+           excluded: [...excludedBy.values()] };
 };
 
 q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
@@ -3651,7 +3705,25 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
   const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
-  if (!vsRHB && !vsLHB) return null;
+  // Pool metrics travel WITH the wOBA, so a caller cannot use the number
+  // without being able to see how many arms produced it. The rhb and lhb
+  // passes filter the same roster, so their exclusion lists agree; merged
+  // by name rather than concatenated so a pitcher is never counted twice.
+  const exMap = new Map();
+  for (const side of [rhb, lhb]) {
+    for (const e of (side && side.excluded) || []) {
+      if (!exMap.has(e.name)) exMap.set(e.name, { name: e.name, reasons: [...e.reasons] });
+      else { const t = exMap.get(e.name); for (const r of e.reasons) if (!t.reasons.includes(r)) t.reasons.push(r); }
+    }
+  }
+  const meta = {
+    pitchers: Math.max((rhb && rhb.pitchers) || 0, (lhb && lhb.pitchers) || 0),
+    fallbacks: Math.max((rhb && rhb.fallbacks) || 0, (lhb && lhb.fallbacks) || 0),
+    excluded: [...exMap.values()],
+  };
+  // Even with no usable wOBA the caller needs the exclusions -- a pool
+  // emptied BY exclusions must not look the same as a team with no data.
+  if (!vsRHB && !vsLHB) return Object.assign({ woba: null, vsRHB: null, vsLHB: null, source: 'empty' }, meta);
   // Defaults mirror the seed values so standalone callers (scripts/) still
   // produce sane results if they forget to pass weights.
   const sR = (bpStrongWtR != null) ? bpStrongWtR : 0.55;
@@ -3670,7 +3742,7 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
       sum += sW * strongWoba + wW * weakWoba;
     }
     const blended = parseFloat((sum / lineup.length).toFixed(4));
-    return { woba: blended, vsRHB, vsLHB, strongWoba, weakWoba, source: 'strong-weak-by-hand' };
+    return Object.assign({ woba: blended, vsRHB, vsLHB, strongWoba, weakWoba, source: 'strong-weak-by-hand' }, meta);
   }
   // No lineup: average the two handedness weight pairs.
   if (vsRHB && vsLHB) {
@@ -3679,9 +3751,9 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
     const avgStrong = (sR + sL) / 2;
     const avgWeak   = (wR + wL) / 2;
     const blended = parseFloat((avgStrong * strongWoba + avgWeak * weakWoba).toFixed(4));
-    return { woba: blended, vsRHB, vsLHB, source: 'strong-weak-fallback' };
+    return Object.assign({ woba: blended, vsRHB, vsLHB, source: 'strong-weak-fallback' }, meta);
   }
-  return { woba: vsRHB || vsLHB, vsRHB, vsLHB, source: 'single-side' };
+  return Object.assign({ woba: vsRHB || vsLHB, vsRHB, vsLHB, source: 'single-side' }, meta);
 };
 
 // Add is_active and notes columns if not present

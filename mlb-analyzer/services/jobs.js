@@ -613,6 +613,11 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   let awayBpVsR = LEAGUE_BP, awayBpVsL = LEAGUE_BP;
   let homeBpVsR = LEAGUE_BP, homeBpVsL = LEAGUE_BP;
   let awayBpWoba = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
+  // Pool composition, surfaced onto the game object so the model result and
+  // the UI can both see how many arms the wOBA came from. Null until the
+  // blended lookup runs; a null pool means the lookup never happened, which
+  // is different from a pool of zero.
+  let _bullpenAvail = null;
   try {
     if (q.getBullpenWobaBlended) {
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
@@ -625,6 +630,32 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       if (homeBp?.vsLHB) homeBpVsL = homeBp.vsLHB;
       awayBpWoba = awayBp?.woba || LEAGUE_BP;
       homeBpWoba = homeBp?.woba || LEAGUE_BP;
+
+      // PERSIST WHAT THE POOL ACTUALLY WAS. (2026-08-29)
+      //
+      // awayBp.pitchers was already computed here and discarded, so the
+      // number that went into the model carried no record of how many arms
+      // produced it. Fatigue thinned 28 of 30 pools on 2026-08-22 and none
+      // of those games can say so afterwards.
+      //
+      // Non-fatal: a bookkeeping write must never break pricing.
+      try {
+        if (q.updateBullpenAvailability) {
+          _bullpenAvail = {
+            away: { pool: awayBp?.pitchers ?? null, fallbacks: awayBp?.fallbacks ?? null,
+                    excluded: (awayBp && awayBp.excluded) || [] },
+            home: { pool: homeBp?.pitchers ?? null, fallbacks: homeBp?.fallbacks ?? null,
+                    excluded: (homeBp && homeBp.excluded) || [] },
+          };
+          q.updateBullpenAvailability.run(
+            _bullpenAvail.away.pool, _bullpenAvail.home.pool,
+            _bullpenAvail.away.excluded.length ? JSON.stringify(_bullpenAvail.away.excluded) : null,
+            _bullpenAvail.home.excluded.length ? JSON.stringify(_bullpenAvail.home.excluded) : null,
+            _bullpenAvail.away.fallbacks, _bullpenAvail.home.fallbacks,
+            gameRow.game_date, gameRow.game_id
+          );
+        }
+      } catch (e) { console.warn('[bullpen] availability write failed (non-fatal): ' + (e && e.message)); }
     }
   } catch(e) { /* fallback to league avg */ }
   // Catcher framing (per-game run value). Extract each side's catcher
@@ -809,6 +840,9 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     awayBullpenWoba: awayBpWoba, homeBullpenWoba: homeBpWoba,
     awayBullpenVsR: awayBpVsR, awayBullpenVsL: awayBpVsL,
     homeBullpenVsR: homeBpVsR, homeBullpenVsL: homeBpVsL,
+    // Availability travels with the wOBA onto the game object, so runModel
+    // and every display path can see the pool that produced the number.
+    bullpenAvailability: _bullpenAvail,
     // Starter projected IP (null when no projection uploaded)
     awaySpProjIP: awaySpProjIP, homeSpProjIP: homeSpProjIP,
     // Catcher framing per-game run value (null when ingest not built,

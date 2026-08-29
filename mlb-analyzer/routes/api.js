@@ -1162,6 +1162,29 @@ router.get('/games/:date', (req, res) => {
           netEdgeTeam = null;
         }
       }
+      // Bullpen availability (2026-08-29). Surfaced BEFORE framing so a
+      // thinned pool is visible on the same screen as the number it
+      // produced. Fatigue removed at least one arm from 28 of 30 teams on
+      // 2026-08-22 and nothing said so -- a pool of 5 and a pool of 9 read
+      // identically once the wOBA was computed.
+      //
+      // A null pool means the lookup never ran for this game, which is not
+      // the same as a pool of zero, so the two are kept distinguishable
+      // rather than both rendering as blank.
+      const _bpEx = s => { try { return s ? JSON.parse(s) : []; } catch (e) { return []; } };
+      out.bullpen_availability = {
+        away: {
+          pool:      g.away_bullpen_pool,
+          fallbacks: g.away_bullpen_fallbacks,
+          excluded:  _bpEx(g.away_bullpen_excluded),
+        },
+        home: {
+          pool:      g.home_bullpen_pool,
+          fallbacks: g.home_bullpen_fallbacks,
+          excluded:  _bpEx(g.home_bullpen_excluded),
+        },
+      };
+
       out.framing_impact = {
         enabled:           _enabled,
         mute,
