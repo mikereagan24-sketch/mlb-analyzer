@@ -2941,7 +2941,7 @@ q.getPitcherLogForTeam = db.prepare(
 // be excluded from a team's bullpen pool on gameDate based on recent usage.
 // Rules: pitched both yesterday AND the day before (2-consecutive),
 // pitched 3 of last 4 days (3in4), threw >29 pitches yesterday (pitch-count).
-q.getFatiguedPitchers = (teamAbbr, gameDate) => {
+q.getFatiguedPitchers = (teamAbbr, gameDate, gameNumber) => {
   if (!gameDate) return [];
   const teamU = (teamAbbr||'').toUpperCase();
   const base = new Date(gameDate + 'T00:00:00Z');
@@ -2970,6 +2970,31 @@ q.getFatiguedPitchers = (teamAbbr, gameDate) => {
     const yApp = apps.find(a => a.game_date === yesterday);
     if (yApp && (yApp.pitches_thrown||0) > 29) reasons.push('pitch-count');
     if (reasons.length) out.push({ pitcher_name: name, reasons });
+  }
+
+  // SAME-DAY: the doubleheader nightcap. (2026-08-29)
+  //
+  // Every rule above looks at game_date < gameDate, so none of them can
+  // see an arm used in the FIRST leg of today's doubleheader -- the model
+  // priced game 2 against the whole pen including the arms already spent,
+  // and those are usually the high-leverage ones.
+  //
+  // Needs Phase 1's game_number: before it, both legs collapsed into one
+  // row keyed on (date, team, pitcher) and "the earlier game" did not
+  // exist as a question. Guarded on gameNumber > 1 so it is inert for the
+  // ~99% of games that are not nightcaps, and on game_number NOT NULL so a
+  // legacy row can never be mistaken for a leg-1 appearance.
+  if (gameNumber && gameNumber > 1) {
+    const earlier = db.prepare(
+      'SELECT DISTINCT pitcher_name FROM pitcher_game_log '
+      + 'WHERE team=? AND game_date=? AND appeared=1 '
+      + '  AND game_number IS NOT NULL AND game_number < ?'
+    ).all(teamU, gameDate, gameNumber);
+    for (const r of earlier) {
+      const existing = out.find(o => o.pitcher_name === r.pitcher_name);
+      if (existing) { if (!existing.reasons.includes('dh-game1')) existing.reasons.push('dh-game1'); }
+      else out.push({ pitcher_name: r.pitcher_name, reasons: ['dh-game1'] });
+    }
   }
   return out;
 };
@@ -3599,7 +3624,7 @@ function _computeStartFracIndex(anchorDate) {
   return idx;
 }
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber) => {
   if (unknownWoba == null) unknownWoba = 0.335;
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
@@ -3612,7 +3637,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const hasRoster = activeRPSet.size > 0;
   if (!projRows.length && !hasRoster) return null;
   // Fatigue log stores full names from MLB Stats API — exact match only, no last-name fallback.
-  const fatigued = q.getFatiguedPitchers(teamAbbr, gameDate);
+  const fatigued = q.getFatiguedPitchers(teamAbbr, gameDate, gameNumber);
   const fatiguedSet = new Set(fatigued.map(f => normName(f.pitcher_name)));
   // WHO WAS REMOVED, AND WHY. (2026-08-29)
   //
@@ -3742,7 +3767,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
            excluded: [...excludedBy.values()] };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber) => {
   // Blend the team's bullpen-allowed wOBA using per-handedness strong/weak
   // manager-assumption weights. For each batter in the opposing lineup the
   // manager is assumed to deploy `strongWt` share of the better-matched
@@ -3750,8 +3775,8 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
   // the R/L split tuned separately because righty vs lefty matchup leverage
   // differs in practice. Fallback (no lineup) averages R and L weights.
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   // Pool metrics travel WITH the wOBA, so a caller cannot use the number

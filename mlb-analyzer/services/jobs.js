@@ -620,10 +620,18 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   let _bullpenAvail = null;
   try {
     if (q.getBullpenWobaBlended) {
+      // Doubleheader leg, from the game_id suffix the lineup job assigns
+      // (-g2). Drives the same-day availability rule: relievers used in an
+      // earlier leg today are unavailable for the nightcap. 1 for every
+      // ordinary game, which makes the rule inert there.
+      const _dhLeg = (function () {
+        const m = String(gameRow.game_id || '').match(/-g(\d+)$/);
+        return m ? Number(m[1]) : 1;
+      })();
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;

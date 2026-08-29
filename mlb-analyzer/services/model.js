@@ -725,6 +725,50 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
       _suppressed_detail: 'away=' + awayLineupCount + ' batters, home=' + homeLineupCount + ' batters',
     };
   }
+
+  // BULLPEN FLOOR. (2026-08-29)
+  //
+  // Below three usable arms the bullpen wOBA is not a team estimate, it is
+  // an average over whoever happened to survive the availability filters --
+  // and getBullpenWoba's own convention already treats 3 as the line where
+  // a pool stops being trustworthy (qualifiedProj.length >= 3).
+  //
+  // This matters because exclusions are large, not marginal: pool size runs
+  // a median of 7, and a doubleheader game-1 removes a median of 3
+  // relievers (p75 4, max 10). A nightcap can land at 3 or fewer, and
+  // averaging over two arms and calling it a bullpen is precisely the
+  // silently-thin failure Phase 0 exists to expose.
+  //
+  // SUPPRESS RATHER THAN SUBSTITUTE. Falling back to BULLPEN_AVG would
+  // produce a confident number from no information, which is worse than
+  // refusing: processGameSignals keys off _suppressed and will not emit.
+  // Only fires when availability was actually computed -- a null pool means
+  // the lookup never ran, which is not evidence of a thin pen.
+  const BULLPEN_MIN_POOL = 3;
+  const _ba = game.bullpenAvailability;
+  if (_ba) {
+    const thin = [];
+    for (const side of ['away', 'home']) {
+      const p = _ba[side] && _ba[side].pool;
+      if (p != null && p < BULLPEN_MIN_POOL) {
+        const ex = (_ba[side].excluded || []).length;
+        thin.push(side + '=' + p + ' arm' + (p === 1 ? '' : 's')
+          + (ex ? ' (' + ex + ' excluded)' : ''));
+      }
+    }
+    if (thin.length) {
+      return {
+        aTeamWoba: null, hTeamWoba: null,
+        aRuns: null, hRuns: null,
+        rawHW: null, adjHW: null, adjAW: null,
+        aML: null, hML: null,
+        estTot: null,
+        windFactor: 0, windRunAdj: 0,
+        _suppressed: 'bullpen_unavailable',
+        _suppressed_detail: thin.join(', ') + '; floor is ' + BULLPEN_MIN_POOL,
+      };
+    }
+  }
     // Treat null/undefined/'' as missing — see note in services/jobs.js. An
     // empty string in app_settings would otherwise coerce via Number('')===0.
     const num = (v, def) => {
