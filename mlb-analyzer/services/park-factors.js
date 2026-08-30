@@ -101,9 +101,37 @@ const REQUIRED_TEAMS = [
  *              keyed on venue 5340, bypasses this table entirely, and fired
  *              on 2 games this season.
  */
+// Empirical relationship between Savant's two indices, measured
+// 2026-08-30 across all 29 listed parks:
+//
+//   index_woba = 1 + (index_runs - 1) * 0.497      mean |err| 0.0005
+//
+// Near-exact, so the wOBA column is derivable if Savant ever drops it.
+// It is a DOCUMENTED FALLBACK, not the primary path -- reading the
+// published column costs nothing and cannot drift from Savant's own
+// definition, whereas a fitted constant silently would.
+//
+// This also corrects the claim that stood in park-factors-woba.js, which
+// put the ratio at 0.60-0.80 on the basis of approximation rather than
+// measurement.
+const WOBA_FROM_RUN_K = 0.497;
+const wobaFromRun = runFactor => (runFactor == null || !isFinite(runFactor))
+  ? null : 1 + (runFactor - 1) * WOBA_FROM_RUN_K;
+
 const MANUAL = {
   ATH: {
     factor: 1.19,
+    // Same treatment as the run factor, and for the same reason: there is
+    // no Savant venue row to prefer. Derived through WOBA_FROM_RUN_K
+    // rather than invented, so the two manual numbers cannot drift apart
+    // -- 1 + (1.19 - 1) * 0.497 = 1.094.
+    woba_factor: 1.094,
+    woba_reason: 'No Savant venue row for Sutter Health Park, so no published '
+          + 'index_woba either. Derived from the manual RUN factor via the '
+          + 'measured index_woba/index_runs relationship (k=0.497, mean |err| '
+          + '0.0005 across 29 parks) rather than picked independently, so the '
+          + 'two manual values stay consistent. REVISIT with the run factor '
+          + 'when Savant lists the venue.',
     reason: 'Savant has NO ATHLETICS ROW on any window (checked 2023-2026 x '
           + 'rolling 1/2/3). Savant keys park factors by VENUE, and the club '
           + 'left Oakland Coliseum for Sutter Health Park, which has no '
@@ -145,9 +173,27 @@ async function fetchSavantParkFactors(params) {
     if (!abbr) { unmapped.push(r.name_display_club); continue; }
     const idx = Number(r.index_runs);
     if (!isFinite(idx) || idx <= 0) continue;
+    // index_woba, from the SAME blob. (2026-08-30)
+    //
+    // It was always here -- the payload carries index_runs, index_woba,
+    // index_wobacon, index_obp, index_hr and a dozen more -- and this
+    // parser read only index_runs regardless of the `stat` query param.
+    // Meanwhile services/park-factors-woba.js kept a separate hardcoded
+    // wOBA table because nobody checked whether Savant published one.
+    //
+    // The `stat` param only drives which column the PAGE sorts by; it
+    // does not change the blob. Passing stat=index_wOBA and re-reading
+    // index_runs is what made an earlier check conclude, wrongly, that
+    // Savant's wOBA index equalled its run index.
+    //
+    // Null rather than a fallback when absent: a wOBA factor that quietly
+    // becomes the run factor would over-neutralize by ~2x, since the two
+    // scales differ by almost exactly half (see WOBA_FROM_RUN_K).
+    const widx = Number(r.index_woba);
     out.push({
       team: abbr,
       factor: idx / 100,
+      woba_factor: (isFinite(widx) && widx > 0) ? widx / 100 : null,
       venue_id: r.venue_id != null ? Number(r.venue_id) : null,
       venue_name: r.venue_name || null,
       n_pa: r.n_pa != null ? Number(r.n_pa) : null,
@@ -179,7 +225,17 @@ function assertAllTeamsResolve(byTeam) {
   // `|| 1.0` fallback produced, so it is worth naming rather than trusting.
   const suspicious = REQUIRED_TEAMS.filter(t => byTeam[t] && Number(byTeam[t].factor) === 1
     && byTeam[t].source !== 'manual');
-  return { ok: missing.length === 0, missing, suspicious, checked: REQUIRED_TEAMS.length };
+  // The wOBA column gets the same treatment, because it now feeds
+  // neutralization on ~84% of games. A team resolving its run factor while
+  // silently losing its wOBA factor would fall back to the hardcoded
+  // literal for that park only -- a mixed table, which is harder to notice
+  // than an empty one.
+  const missingWoba = REQUIRED_TEAMS.filter(t => {
+    const v = byTeam[t];
+    return v == null || !isFinite(Number(v.woba_factor)) || Number(v.woba_factor) <= 0;
+  });
+  return { ok: missing.length === 0 && missingWoba.length === 0,
+           missing, missingWoba, suspicious, checked: REQUIRED_TEAMS.length };
 }
 
 // Cached table read, shared by the SCRAPER (write path) and the MODEL
@@ -205,5 +261,5 @@ function loadParkFactors(force) {
 module.exports = {
   fetchSavantParkFactors, assertAllTeamsResolve, loadParkFactors,
   SOURCE_NAME, SOURCE_BASE, SOURCE_PARAMS, sourceUrl, paramString,
-  CLUB_TO_ABBR, REQUIRED_TEAMS, MANUAL,
+  CLUB_TO_ABBR, REQUIRED_TEAMS, MANUAL, WOBA_FROM_RUN_K, wobaFromRun,
 };

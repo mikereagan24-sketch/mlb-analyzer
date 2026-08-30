@@ -2,12 +2,25 @@
 
 // wOBA-scale park factors for input neutralization (feat/park-neutral-inputs).
 //
-// Distinct from services/scraper.js PARK_FACTORS, which are RUN-scale
-// multipliers applied to the aTeamWoba × RUN_MULT product at game time
-// in services/model.js runModel (~line 686). Run-scale factors run 0.92
-// (SF Oracle) to 1.25 (Coors); wOBA-scale factors are compressed
-// because wOBA has less variance than raw runs (roughly ~0.60-0.80 of
-// the run-scale deviation, park-dependent).
+// Distinct from the RUN-scale factors in park_factors.factor, which
+// multiply the aTeamWoba × RUN_MULT product at game time in
+// services/model.js runModel. Run-scale factors run 0.85 (SEA) to 1.25
+// (COL); wOBA-scale factors are compressed because wOBA has less variance
+// than raw runs.
+//
+// THE COMPRESSION RATIO IS 0.50, NOT 0.60-0.80. (corrected 2026-08-30)
+// This header claimed 0.60-0.80 "park-dependent" on the basis of
+// approximation. Measured against Savant's own two indices across all 29
+// listed parks:
+//
+//   index_woba = 1 + (index_runs - 1) * 0.497     mean |err| 0.0005
+//
+// Near-deterministic, not park-dependent. services/park-factors.js exports
+// it as WOBA_FROM_RUN_K and uses it to derive the ATH manual override,
+// which has no Savant venue row.
+//
+// SOURCE, since 2026-08-30: park_factors.woba_factor, read from Savant's
+// index_woba in the same pull as the run factor. See getWobaParkFactor.
 //
 // PURPOSE: neutralize the ~half of a player's PA that comes at his home
 // park so the game-time PARK_FACTORS multiplier is the ONLY place park
@@ -22,18 +35,27 @@
 // team's home park (documented — v1 tradeoff; PA-weighted blend across
 // stints is a follow-up if the population turns out to be non-trivial).
 //
-// SOURCE: FanGraphs 5-year rolling wOBA park factors (approximations
-// calibrated so the owner's expected spot-checks hold — COL hitter
-// drops ~4-5%, SEA/SD hitters up ~2%, league-average parks unchanged).
-// Static baseline for v1 per the brief; FG Daily Sync could later pull
-// the live per-season factors and write them into a settings row so the
-// table refreshes with the daily push.
+// HISTORICAL, and the reason this was replaced. The literal below was
+// described as "FanGraphs 5-year rolling wOBA park factors", but the
+// values were approximations calibrated so a set of expected spot-checks
+// held — COL down ~4-5%, SEA/SD up ~2%, league-average parks unchanged.
+// A table fitted to expectations rather than measured, carrying a comment
+// that named a source it did not come from, with no timestamp and no way
+// for the freshness check to see it. That is the same shape as the
+// PARK_FACTORS literal replaced on 2026-08-25, and it survived that work
+// because nobody grepped for a second copy.
 //
-// Values move slowly (park factors update on ~5yr rolling windows);
-// republish annually or after a stadium change. Keys must match the
-// team abbreviations produced by services/scraper.js normalizeAbbr,
-// same set as PARK_FACTORS.
+// Measured against Savant index_woba on 2026-08-30, the fitted values were
+// off by a mean of 0.0207, with TEX and CHC on the WRONG SIDE of neutral.
+//
+// Keys must match the team abbreviations services/scraper.js produces.
 
+// FROZEN FALLBACK -- DO NOT EDIT. Superseded 2026-08-30 by
+// park_factors.woba_factor. Retained only so a cold table degrades to the
+// previous behaviour instead of to 1.00, which would silently switch
+// neutralization off. Its worst errors against the sourced values were
+// TEX +0.09 and CHC +0.06 -- both the WRONG SIGN -- which is what a table
+// fitted to expected spot-checks rather than measured produces.
 const WOBA_PARK_FACTORS = {
   COL: 1.10, // Coors — altitude drives it
   ATH: 1.09, // Sutter Health Park (Sacramento) — AAA hitter-friendly temp home
@@ -73,10 +95,62 @@ const WOBA_PARK_FACTORS = {
 // teams silently become no-ops rather than throwing. Callers already
 // gate on the PARK_NEUTRAL_INPUTS_ENABLED flag before invoking, so a
 // 1.00 default here is safe.
+// TABLE FIRST, LITERAL AS FALLBACK. (2026-08-30)
+//
+// park_factors.woba_factor comes from Savant's index_woba, in the same
+// pull, row and pulled_at as the run factor -- so it inherits the monthly
+// cron, the boot assertion and the freshness entry that the literal below
+// could never have, being a literal.
+//
+// The literal stays as a last resort for a cold table (fresh clone, boot
+// before the first pull) rather than being deleted, because returning 1.00
+// there would silently disable neutralization instead of degrading it. It
+// is NOT a maintained source and should not be edited; see the header.
+//
+// Cached per process. The table changes monthly and every batter and
+// pitcher lookup calls this, so a query per call would be thousands of
+// reads per rescore for a value that moves four times a year.
+let _wobaCache = null;
+function _loadWobaFactors() {
+  if (_wobaCache) return _wobaCache;
+  try {
+    const { q } = require('../db/schema');
+    const rows = q.listParkFactors.all();
+    const m = {};
+    for (const r of rows) if (r.woba_factor != null) m[r.team] = r.woba_factor;
+    // Only trust the table if it actually covers the league. A partial
+    // table mixed with literal fallbacks is harder to reason about than
+    // either source alone.
+    _wobaCache = Object.keys(m).length >= 30 ? m : null;
+  } catch (e) {
+    _wobaCache = null;   // table not built yet
+  }
+  return _wobaCache;
+}
+
 function getWobaParkFactor(teamAbbr) {
   if (!teamAbbr) return 1.00;
   const key = String(teamAbbr).toUpperCase();
+  const tbl = _loadWobaFactors();
+  if (tbl && tbl[key] != null) return tbl[key];
   return WOBA_PARK_FACTORS[key] != null ? WOBA_PARK_FACTORS[key] : 1.00;
+}
+
+// TEST SEAM, for A/B measurement only. Not used in production.
+//
+// services/model.js DESTRUCTURES getWobaParkFactor at require time
+// (`const { getWobaParkFactor } = require(...)`), so reassigning the
+// module export does NOT change what the model calls. An A/B that swaps
+// the export therefore compares two identical runs and reports that
+// nothing moved -- which reads exactly like "the change is safe" and is
+// the same failure as an instrument that is not wired to what it claims
+// to measure.
+//
+// Overriding the CACHE works because getWobaParkFactor reads it on every
+// call, so the substitution reaches the model through the live path
+// rather than around it. Pass null to restore normal loading.
+function __setWobaFactorsForTest(map) {
+  _wobaCache = map;
 }
 
 // Neutralization transform:
@@ -128,4 +202,5 @@ module.exports = {
   getWobaParkFactor,
   neutralizeWoba,
   computeStintWeightedFactor,
+  __setWobaFactorsForTest,
 };
