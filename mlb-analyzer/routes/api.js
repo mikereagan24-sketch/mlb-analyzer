@@ -2499,7 +2499,11 @@ router.get('/suppressed-signals/:date', (req, res) => {
       "INNER JOIN ( " +
       "  SELECT MAX(id) AS max_id " +
       "  FROM bet_signal_audit " +
-      "  WHERE game_date = ? AND action = 'suppressed_edge_cap' " +
+      // Market-gate suppressions are surfaced here too. They are a
+      // DIFFERENT action so the edge-cap burst alarm stays clean, but the
+      // operator needs to see both -- 'no signal and no explanation' is
+      // the exact thing this endpoint exists to prevent.
+      "  WHERE game_date = ? AND action IN ('suppressed_edge_cap','suppressed_market_gate') " +
       "  GROUP BY game_id, signal_type, signal_side " +
       ") latest ON bsa.id = latest.max_id " +
       "JOIN game_log gl ON gl.game_date = bsa.game_date AND gl.game_id = bsa.game_id " +
