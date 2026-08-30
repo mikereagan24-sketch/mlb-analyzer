@@ -41,6 +41,7 @@ const STATUS = {
   AWAITING_DECISION: 'awaiting_decision',   // ⚠ precondition met, gate still shut
   BLOCKED: 'blocked',                       // precondition genuinely unmet
   NO_CRITERION: 'no_criterion',             // ⚠ nobody wrote down what would decide it
+  REEVAL_DUE: 'reeval_due',               // the evidence a past decision lacked has arrived
 };
 
 // Preconditions are functions of the db so the check reflects reality
@@ -58,6 +59,32 @@ const PRECONDITIONS = {
   },
   hand_conditional_shadow_accumulating: (db) =>
     scalar(db, 'SELECT COUNT(*) v FROM game_log WHERE home_sp_weight_used IS NOT NULL') > 0,
+  // COUNT-BASED, and the count is derived rather than picked. (2026-08-30)
+  //
+  // The park-neutral A/B is a PAIRED design -- the same games scored twice
+  // with one flag flipped -- and its measured 95% half-width is +/-0.000608
+  // at n=801. The standing point estimate is -0.00055, i.e. 0.90x the
+  // resolvable threshold: underpowered, but only just.
+  //
+  // Interval width scales as 1/sqrt(n), so resolving 0.00055 needs
+  // 801 * (0.000608/0.00055)^2 = 979 games. That is +178, weeks of season.
+  //
+  // REGISTERED AS A TRIGGER so the morning check surfaces it, rather than
+  // depending on anyone remembering. The gate sits at 'on for the
+  // mechanism'; this is what tells us the evidence has caught up.
+  //
+  // The corpus definition MATCHES the floor measurement exactly -- clean on
+  // both contamination reasons, decided result, a market ML, and a wOBA
+  // snapshot for the date. A looser count would trip the trigger before the
+  // design could actually resolve anything.
+  park_neutral_resolvable_979: (db) => scalar(db,
+    'SELECT COUNT(*) v FROM game_log g WHERE g.weather_contamination_reason IS NULL '
+    + 'AND g.market_contamination_reason IS NULL AND g.model_total IS NOT NULL '
+    + 'AND g.home_score IS NOT NULL AND g.away_score IS NOT NULL '
+    + 'AND g.home_score != g.away_score AND g.market_home_ml IS NOT NULL '
+    + 'AND EXISTS (SELECT 1 FROM woba_data_snapshot s WHERE s.snapshot_date = g.game_date)'
+  ) >= 979,
+
   at_emit_columns_populated: (db) =>
     scalar(db, 'SELECT COUNT(*) v FROM bet_signals WHERE model_home_ml_at_emit IS NOT NULL') > 0,
 
@@ -105,18 +132,30 @@ const GATES = [
     decision: { date: '2026-07-05', outcome: 'enabled', ref: 'docs/framing-mute-semantics-2026-07-05.md' } },
 
   { id: 'park_neutral_inputs_enabled', key: 'park_neutral_inputs_enabled', on_expected: true,
-    criterion: 'Calibration A/B: log loss / Brier / ECE over all games, with vs without.',
-    criterion_type: 'calibration', window_end: null,
-    decision: { date: '2026-08-23', outcome: 'validated_directionally_not_significant',
-                ref: 'docs/gate-evaluations-2026-08-23.md' },
-    note: 'CORRECTION to the 2026-08-23 inventory, which filed this as forgotten. An A/B DOES exist — PR #142, '
-        + 'scripts/backtest-park-neutral.js, +3.32pp totals ROI. Two problems with it: it is ROI-based (therefore '
-        + 'selection-contaminated) and it PREDATES a correction to the feature itself (the 2026-07-02 audit found '
-        + 'over-neutralization of ~2.2pp on extreme-park hitters; the actuals-only fix landed at model.js:381 and '
-        + 'was never re-validated). Re-run on calibration 2026-08-23: the flag moves p(home) on 84.4% of games and '
-        + 'is better on ALL FIVE metrics (log loss 0.68975 vs 0.69029, Brier, ECE, AUC, edge slope), but '
-        + 'delta log loss -0.00055 CI [-0.00117, +0.00012] does not clear zero. Directionally validated, not '
-        + 'statistically established. No case to turn it off.' },
+    criterion: 'ON for the mechanism. Calibration cannot adjudicate at this n; '
+             + 'paired A/B becomes resolvable at 979 clean scorable games (currently 801).',
+    criterion_type: 'mechanism',
+    reeval_precondition: 'park_neutral_resolvable_979',
+    window_end: null,
+    decision: { date: '2026-08-30', outcome: 'on_for_mechanism_trigger_registered',
+                ref: 'docs/park-neutral-resolvability-2026-08-30.md' },
+    note: 'RESTING STATE, set 2026-08-30, replacing "directionally validated, awaiting '
+        + 'significance" -- which implied a pending verdict and had sat implying one for a week. '
+        + 'TWO HALVES, both stated because either alone misleads. '
+        + 'MECHANISM: neutralizing park out of the actuals before re-applying a park factor at '
+        + 'game time is more correct than not, independent of measurement -- otherwise the same '
+        + 'park effect is counted twice, once in the input and once in the multiplier. That is '
+        + 'why the flag is ON, and it does not depend on the A/B. '
+        + 'EVIDENCE: calibration cannot adjudicate at this n. The paired 95% half-width is '
+        + '+/-0.000608 at n=801 against a standing point estimate of -0.00055, i.e. 0.90x the '
+        + 'resolvable threshold. Underpowered, but only just. '
+        + 'THE ~0.020 FIGURE FROM resolution-floor.js --calibration DOES NOT APPLY: that is a '
+        + 'BETWEEN-COHORT design and is 28x noisier than this paired one on the same corpus. '
+        + 'Quoting it would have made an answerable question look permanently unanswerable. '
+        + 'TRIGGER: precondition park_neutral_resolvable_979 -- +178 games, weeks not years. '
+        + 'The prior ROI-based A/B (PR #142, +3.32pp totals) is selection-contaminated per the '
+        + '2026-08-21 finding and predates the actuals-only fix; it is not calibration evidence. '
+        + 'See docs/park-neutral-resolvability-2026-08-30.md.' },
 
   { id: 'signal_venue_aware_enabled', key: 'signal_venue_aware_enabled', on_expected: true,
     criterion: 'Best net at-size price across Poly + Kalshi with fillable-at-stake guard.',
@@ -325,6 +364,10 @@ function evaluateGates(db, opts) {
     const raw = g.key ? readSetting(db, g.key) : null;
     const prodValue = g.key ? (raw == null ? '(unset — schema default)' : raw) : '(not a setting)';
     let precondMet = null;
+    let reevalMet = null;
+    if (g.reeval_precondition && PRECONDITIONS[g.reeval_precondition]) {
+      try { reevalMet = !!PRECONDITIONS[g.reeval_precondition](db); } catch (e) { reevalMet = null; }
+    }
     if (g.precondition && PRECONDITIONS[g.precondition]) {
       try { precondMet = !!PRECONDITIONS[g.precondition](db); } catch (e) { precondMet = null; }
     }
@@ -335,6 +378,20 @@ function evaluateGates(db, opts) {
     // CANNOT be flipped is not awaiting a decision, and reporting it as
     // such would send someone to make a decision they cannot act on.
     if (g.blocked_reason) status = STATUS.BLOCKED;
+    // RE-EVALUATION TRIGGER, checked BEFORE `decided`. (2026-08-30)
+    //
+    // A `precondition` answers "may this gate be flipped yet". A
+    // `reeval_precondition` answers a different question: "has the evidence
+    // that was unavailable when we decided finally arrived". The two need
+    // separating, because the decided-branch below short-circuits every
+    // precondition check -- so a trigger attached to a DECIDED gate could
+    // never fire, which is exactly the remember-it-yourself failure the
+    // registry exists to remove.
+    //
+    // Found by registering park_neutral_resolvable_979 against a gate that
+    // already carried a decision and checking whether it would ever
+    // surface. It would not have.
+    else if (g.reeval_precondition && reevalMet === true) status = STATUS.REEVAL_DUE;
     else if (g.decision) status = STATUS.DECIDED;
     else if (elapsed) status = STATUS.ELAPSED_NO_DECISION;
     else if (g.window_end) status = STATUS.IN_WINDOW;
@@ -355,10 +412,12 @@ function evaluateGates(db, opts) {
       window_elapsed: elapsed,
       precondition: g.precondition || null,
       precondition_met: precondMet,
+      reeval_precondition: g.reeval_precondition || null,
+      reeval_met: reevalMet,
       decision: g.decision || null,
       blocked_reason: g.blocked_reason || null,
       status,
-      needs_attention: status === STATUS.ELAPSED_NO_DECISION
+      needs_attention: status === STATUS.ELAPSED_NO_DECISION || status === STATUS.REEVAL_DUE
         || status === STATUS.AWAITING_DECISION
         || status === STATUS.NO_CRITERION
         // A gate blocked by a WIRING defect is a bug, not a decision to
@@ -398,7 +457,11 @@ function logGateHealth(db, opts) {
     console.warn('  [' + g.status + '] ' + g.id
       + (g.settings_key ? ' (' + g.settings_key + '=' + g.prod_value + ')' : '')
       + (g.window_elapsed ? ' — window ended ' + g.window_end : '')
-      + (g.precondition_met === true ? ' — precondition "' + g.precondition + '" HAS CLEARED' : ''));
+      + (g.precondition_met === true ? ' — precondition "' + g.precondition + '" HAS CLEARED' : '')
+      + (g.reeval_met === true
+          ? ' — RE-EVALUATE: "' + g.reeval_precondition + '" has cleared. The evidence the '
+            + 'recorded decision lacked has now arrived; re-run the A/B as a real test.'
+          : ''));
   }
   if (r.selection_contaminated) {
     console.warn('  ' + r.selection_contaminated + ' gate(s) carry an ROI-based criterion, which measures '

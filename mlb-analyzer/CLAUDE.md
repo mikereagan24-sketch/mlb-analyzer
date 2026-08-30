@@ -650,6 +650,37 @@ memory, set the bar at 15pp, and produced ±19.0pp. Run retrospectively at
 `--n 128 --bar 15`, the checker returns **NOT RESOLVABLE, floor 20.2pp** —
 it would have caught this before the run, in 40 seconds.
 
+### FIRST decide which DESIGN you are measuring (2026-08-30)
+
+**`resolution-floor.js` measures a BETWEEN-COHORT split. If your test is
+PAIRED, its floor does not apply and using it overstates the difficulty by
+more than an order of magnitude.**
+
+Between-cohort: two disjoint groups of games, compared. Rookie-vs-rest is
+this. Paired: the SAME games scored twice under two configurations, e.g.
+any feature-flag A/B. Both measured on the same 801-game corpus:
+
+    between-cohort, n=400 : +/-0.01714
+    paired,         n=801 : +/-0.000608
+                    ratio :  28x
+
+Paired predictions are almost perfectly correlated, so the difference
+carries far less variance. Quoting the cohort floor for a flag A/B would
+have made an answerable question (+178 games) look permanently
+unanswerable -- the same class of error as quoting a schedule share as a
+measurement n.
+
+For a paired design use `scripts/park-neutral-paired-floor.js` as the
+template: it reports dispersion only and suppresses the signed mean, so
+the bar is set before the answer is visible.
+
+**Every FLAG A/B in the gate registry is a paired design.** As of
+2026-08-30 none had been wrongly declared unresolvable on the cohort
+floor -- the only prior use was the rookie cohort work, which genuinely
+was a cohort split -- but the risk is prospective and this is where it
+would have entered.
+
+
 ### The measured ROI floor on this corpus
 
 963 graded, staked signals across 133 dates. **This is not a function of
