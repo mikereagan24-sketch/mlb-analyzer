@@ -65,6 +65,7 @@ input[type=date], .btn{padding:7px 12px;font-size:12px;border:.5px solid var(--b
 .tbl tr.is-sp td:first-child::after{content:' ★';color:var(--yellow);font-size:9px}
 .fatigue-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600;background:var(--yellow-bg);color:var(--yellow);border:.5px solid var(--yellow-border);letter-spacing:.02em;opacity:.85}
 .fatigue-badge + .fatigue-badge{margin-left:3px}
+.roster-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600;background:var(--red-bg,#3a1d1d);color:var(--red,#e5787d);border:.5px solid var(--red-border,#5c2b2b);letter-spacing:.02em;opacity:.9}
 .name{font-weight:500;color:var(--text)}
 .role-sp{color:var(--blue);font-weight:500}
 .role-rp{color:var(--text2)}
@@ -223,6 +224,13 @@ function renderTeam(team, teamAbbr, weights) {
     if (p.name === team.sp_name) classes.push('is-sp');
 
     var badges = '';
+    // A pool candidate with no roster row was admitted by the surname
+    // fallback in q.getBullpenWoba, not by the roster. Open bug:
+    // bullpen_pool_lastname_fallback in the gate registry.
+    if (p.on_roster === false) {
+      badges += '<span class="roster-badge" title="Not on the team roster. '
+        + 'Admitted as a pool candidate by surname match -- known open bug.">not on roster</span>';
+    }
     var reasons = p.fatigue_reasons || [];
     for (var j = 0; j < reasons.length; j++) {
       var r = reasons[j];

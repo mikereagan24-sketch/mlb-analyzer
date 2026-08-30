@@ -6565,40 +6565,11 @@ router.get('/debug/bullpen-report', (req, res) => {
     const SP_MIN_BF = settings.MIN_BF != null ? Number(settings.MIN_BF) : 100;
     const MIN_BF = settings.BULLPEN_MIN_BF != null ? Number(settings.BULLPEN_MIN_BF) : SP_MIN_BF;
 
-    const KEYS = ['pit-proj-lhb','pit-proj-rhb','pit-act-lhb','pit-act-rhb'];
-    // Use getWobaIndex() rather than re-building from raw SQL — this
-    // ensures pitcher_woba_override entries are applied. Direct SQL
-    // queries against woba_data miss the override layer (same bug
-    // class previously fixed in /debug/bullpen and /debug/woba-lookup).
-    const fullIdx = getWobaIndex();
-    const idx = {};
-    for (const k of KEYS) {
-      idx[k] = fullIdx[k] || {};
-    }
-
-    const lookup = (key, name, teamAbbr) => {
-      const nm = normName(name);
-      const tl = (teamAbbr||'').toLowerCase();
-      if (tl && idx[key][nm+' '+tl]) return idx[key][nm+' '+tl];
-      if (idx[key][nm]) return idx[key][nm];
-      const sk = stripSfx(nm);
-      if (sk !== nm) {
-        if (tl && idx[key][sk+' '+tl]) return idx[key][sk+' '+tl];
-        if (idx[key][sk]) return idx[key][sk];
-      }
-      return null;
-    };
-    // actObj is the full {woba, sample} lookup result (or null) so the gate
-    // can compare actuals sample size against MIN_BF. Below threshold the
-    // actuals are dropped — same behavior as q.getBullpenWoba.
-    const blend = (proj, actObj) => {
-      const useAct = actObj && actObj.woba != null && actObj.sample >= MIN_BF;
-      if (proj != null && useAct) return parseFloat((W_PROJ*proj + W_ACT*actObj.woba).toFixed(4));
-      if (proj != null) return parseFloat(proj.toFixed(4));
-      if (useAct) return parseFloat(actObj.woba.toFixed(4));
-      return null;
-    };
-    const mean = (arr) => arr.length ? parseFloat((arr.reduce((s,x)=>s+x,0)/arr.length).toFixed(4)) : null;
+    // The wOBA-index machinery that used to live here (KEYS, fullIdx, idx,
+    // stripSfx, lookup, blend, mean) has been DELETED. It existed only to
+    // let this endpoint compute its own per-pitcher blends and its own team
+    // average -- i.e. it was the mirror. q.getBullpenWobaBlended returns the
+    // pre-blend components now, so there is nothing left to recompute.
 
     // Chronological order — parse game_time ("7:05 PM" / "10:05 AM") to
     // minutes-since-midnight so strings like "10:05 PM" don't sort before
@@ -6618,113 +6589,157 @@ router.get('/debug/bullpen-report', (req, res) => {
       "      CAST(TRIM(SUBSTR(game_time,INSTR(game_time,':')+1,2)) AS INT) " +
       "  END ASC, game_id ASC"
     ).all(date);
+    // Dependencies of the shared-source path. The bullpen blend weights
+    // are read here rather than defaulted inside the call, so the report
+    // and the pricing path are demonstrably fed the same settings.
+    const _mdl = require('../services/model');
+    const _pfw = require('../services/park-factors-woba');
+    // Mirrors services/jobs.js:607 exactly -- strict opt-in, not opt-out.
+    // A looser test here would silently re-diverge the report from pricing
+    // whenever the settings row is absent.
+    const DOWNWEIGHT_STARTERS = !!(settings && (settings.BULLPEN_DOWNWEIGHT_STARTERS === true
+      || settings.BULLPEN_DOWNWEIGHT_STARTERS === 'true'));
+
     const rosterStmt = db.prepare('SELECT player_name, role, hand FROM team_rosters WHERE team=? ORDER BY role, player_name');
 
+    // SINGLE SOURCE. The report consumes q.getBullpenWobaBlended and renders
+    // its output; it no longer recomputes the blend. (2026-08-31)
+    //
+    // WHAT THE MIRROR COST. This function used to re-derive the pool from
+    // scratch, and its own comments said so -- "mirrors q.getBullpenWoba",
+    // "mirrors q.getBullpenWobaBlended's primary branch". Six behaviours
+    // were duplicated and FOUR had already drifted out of step:
+    //
+    //   missing: the no-lineup fallback branch
+    //   missing: the downweight-starters weighting
+    //   missing: the qualified>=3 else slice(0,8) pool-selection rule
+    //   missing: park neutralization (2026-08-31)
+    //
+    // plus the doubleheader leg, which had to be fixed here twice. Every one
+    // was the same failure: the report is a second implementation, so a
+    // change to the model reaches it only if someone remembers.
+    //
+    // in_pool IS PRESERVED AND IS NOW HONEST. The old flag was
+    // `role==='RP' && !isSP && !fatigued`, i.e. CANDIDACY -- everything that
+    // passed those three tests read as in-pool whether or not the model
+    // actually averaged it. The shared function reports true pool
+    // membership. Measured on 2026-08-30 the difference is small (1 dropped,
+    // 1 added across 30 teams) but it was never visible before.
+    //
+    // EVERY RP IS STILL LISTED. Excluded arms are rows with in_pool=false
+    // and their reasons attached, not omissions -- seeing who is unavailable
+    // and why is most of what this report is for.
     const buildTeamReport = (teamAbbr, spName, opposingLineup, gameNumber) => {
-      const teamU = (teamAbbr||'').toUpperCase();
-      const spNorm = normName(spName);
-      const spLast = spNorm.split(' ').pop();
-      // team_rosters.role is one of SP / RP / POS. The report covers pitchers
-      // only; POS (position players) were leaking into the per-pitcher table
-      // because the roster query was unfiltered (the in_pool flag excluded them
-      // from the pool AVERAGE but they still rendered as rows). Filter to
-      // pitcher roles here.
-      const roster = rosterStmt.all(teamU).filter(p => p.role === 'SP' || p.role === 'RP');
-      // THE LEG MATTERS HERE. Without it the dh-game1 rule cannot fire and
-      // the report shows arms already used in game 1 as available -- which
-      // is exactly what happened for the 2026-08-29 BOS nightcap (Guerrero,
-      // Whitlock, Moran). The model pool had the leg; this report did not,
-      // so the two disagreed about who was available.
-      const fatigued = q.getFatiguedPitchers(teamU, date, gameNumber);
-      const fatigueByExact = {};
-      for (const f of fatigued) {
-        fatigueByExact[normName(f.pitcher_name)] = f.reasons;
-      }
-      const pitchers = roster.map(p => {
-        const pNorm = normName(p.player_name);
-        const pLast = pNorm.split(' ').pop();
-        const projL = lookup('pit-proj-lhb', p.player_name, teamU);
-        const projR = lookup('pit-proj-rhb', p.player_name, teamU);
-        const actL  = lookup('pit-act-lhb',  p.player_name, teamU);
-        const actR  = lookup('pit-act-rhb',  p.player_name, teamU);
-        let blended_vs_lhb = blend(projL?.woba, actL);
-        let blended_vs_rhb = blend(projR?.woba, actR);
-        const isSP = !!spLast && (pNorm === spNorm || pLast === spLast);
-        const fatigue_reasons = fatigueByExact[pNorm] || null;
-        const fatigued_flag = !!fatigue_reasons;
-        // An RP rostered with no proj data will be injected into the model's
-        // pool using UNKNOWN_PITCHER_WOBA — reflect that here too so the
-        // debug report matches the model's actual pool average.
-        const uses_fallback_woba = p.role === 'RP' && !isSP && !fatigued_flag
-          && projL == null && projR == null && actL == null && actR == null;
-        if (uses_fallback_woba) {
-          blended_vs_lhb = UNKNOWN_PITCHER_WOBA;
-          blended_vs_rhb = UNKNOWN_PITCHER_WOBA;
-        }
-        const in_pool = p.role === 'RP' && !isSP && !fatigued_flag;
+      const teamU = (teamAbbr || '').toUpperCase();
+
+      // The resolver, built exactly as services/jobs.js builds it for the
+      // pricing path, so the report neutralizes identically. Returns null
+      // when the flag is off, leaving the actuals raw.
+      const neutralizeFor = (pitcherName, rawWoba) => {
+        try {
+          const fac = _mdl.resolveNeutralizationFactor(teamU, settings,
+            { playerName: pitcherName, isPitcher: true });
+          return fac == null ? null : _pfw.neutralizeWoba(rawWoba, fac);
+        } catch (e) { return null; }
+      };
+
+      const res = q.getBullpenWobaBlended(
+        teamU, spName || '', opposingLineup || [],
+        BP_SR, BP_WR, BP_SL, BP_WL, W_PROJ_GLOBAL, W_ACT_GLOBAL,
+        date, UNKNOWN_PITCHER_WOBA, MIN_BF, DOWNWEIGHT_STARTERS,
+        W_PROJ, W_ACT, gameNumber, neutralizeFor);
+
+      // Roster metadata the pool function does not carry, joined here. role
+      // and hand are attributes of the player, not of the calculation, so
+      // reading them from team_rosters is not a second implementation of
+      // anything.
+      const rosterRows = rosterStmt.all(teamU).filter(p => p.role === 'SP' || p.role === 'RP');
+      // Members carry NORMALISED names. When the roster join misses, the
+      // raw normalised form would render lowercase. Title-case the
+      // fallback so the table stays readable -- and note that a missing
+      // roster row is itself information: see the last-name-fallback
+      // open item in the gate registry.
+      const titleCase = n => String(n).split(' ')
+        .map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+      const metaByName = {};
+      for (const p of rosterRows) metaByName[normName(p.player_name)] = p;
+
+      const excludedByName = {};
+      for (const e of (res && res.excluded) || []) excludedByName[e.name] = e.reasons;
+
+      const members = (res && res.members) || [];
+      const seen = new Set();
+      const pitchers = members.map(m => {
+        seen.add(m.name);
+        const meta = metaByName[m.name] || {};
+        const L = m.vs_lhb || {}, Rr = m.vs_rhb || {};
         return {
-          name: p.player_name,
-          role: p.role,
-          hand: p.hand,
-          proj_vs_lhb: projL?.woba ?? null,
-          proj_vs_rhb: projR?.woba ?? null,
-          // Gate displayed actuals at MIN_BF — matches the blend logic so
-          // the report doesn't show contributing-looking values that the
-          // model ignored. The act_sample_* fields stay populated either
-          // way, letting a reader see why a value was gated.
-          act_vs_lhb: (actL && actL.sample >= MIN_BF) ? actL.woba : null,
-          act_vs_rhb: (actR && actR.sample >= MIN_BF) ? actR.woba : null,
-          act_sample_lhb: actL?.sample ?? null,
-          act_sample_rhb: actR?.sample ?? null,
-          blended_vs_lhb,
-          blended_vs_rhb,
-          fatigued: fatigued_flag,
-          fatigue_reasons,
-          uses_fallback_woba,
-          in_pool,
+          name: meta.player_name || titleCase(m.name),
+          // True when this arm is a pool candidate but has no roster row --
+          // i.e. it was admitted by the last-name fallback in getBullpenWoba.
+          on_roster: !!meta.player_name,
+          role: meta.role || 'RP',
+          hand: meta.hand || null,
+          proj_vs_lhb: L.proj ?? null,
+          proj_vs_rhb: Rr.proj ?? null,
+          act_vs_lhb: L.used_act ? L.act : null,
+          act_vs_rhb: Rr.used_act ? Rr.act : null,
+          act_sample_lhb: L.act_sample ?? null,
+          act_sample_rhb: Rr.act_sample ?? null,
+          blended_vs_lhb: L.blended ?? null,
+          blended_vs_rhb: Rr.blended ?? null,
+          // What neutralization did to this pitcher's actuals, per hand.
+          // Null when the flag is off or he has no qualifying actuals.
+          neutralized_vs_lhb: (L.act_raw != null && L.act_neutralized != null
+            && L.act_raw !== L.act_neutralized) ? L.act_neutralized : null,
+          neutralized_vs_rhb: (Rr.act_raw != null && Rr.act_neutralized != null
+            && Rr.act_raw !== Rr.act_neutralized) ? Rr.act_neutralized : null,
+          no_projection: !!m.fallback,
+          fatigued: false,
+          fatigue_reasons: [],
+          in_pool: !!m.in_pool,
         };
       });
-      const poolL = pitchers.filter(p => p.in_pool && p.blended_vs_lhb != null).map(p => p.blended_vs_lhb);
-      const poolR = pitchers.filter(p => p.in_pool && p.blended_vs_rhb != null).map(p => p.blended_vs_rhb);
-      const vsLHB = mean(poolL);
-      const vsRHB = mean(poolR);
-      // Per-handedness strong/weak blend — mirrors q.getBullpenWobaBlended's
-      // primary branch. Walk the opposing lineup and apply the R/L weight
-      // pair per batter (switch hitters average the two). When no lineup is
-      // available (preseason, very early am) fall back to averaging the R
-      // and L weight pairs, mirroring the function's fallback branch.
-      let bullpenWoba = null;
-      if (vsLHB != null && vsRHB != null) {
-        const strong = Math.min(vsLHB, vsRHB);
-        const weak   = Math.max(vsLHB, vsRHB);
-        if (opposingLineup && opposingLineup.length > 0) {
-          let sum = 0;
-          for (const b of opposingLineup) {
-            let sW, wW;
-            if (b.hand === 'R')      { sW = BP_SR;            wW = BP_WR;            }
-            else if (b.hand === 'L') { sW = BP_SL;            wW = BP_WL;            }
-            else                     { sW = (BP_SR + BP_SL)/2; wW = (BP_WR + BP_WL)/2; }
-            sum += sW * strong + wW * weak;
-          }
-          bullpenWoba = parseFloat((sum / opposingLineup.length).toFixed(4));
-        } else {
-          const avgS = (BP_SR + BP_SL) / 2;
-          const avgW = (BP_WR + BP_WL) / 2;
-          bullpenWoba = parseFloat((avgS * strong + avgW * weak).toFixed(4));
-        }
-      } else if (vsLHB != null) {
-        bullpenWoba = vsLHB;
-      } else if (vsRHB != null) {
-        bullpenWoba = vsRHB;
+
+      // Excluded arms appear as rows too, with their reasons. They are not
+      // in `members` -- the pool function drops them before building it --
+      // so they are added here rather than silently missing.
+      for (const [name, reasons] of Object.entries(excludedByName)) {
+        if (seen.has(name)) continue;
+        const meta = metaByName[name] || {};
+        pitchers.push({
+          name: meta.player_name || titleCase(name),
+          on_roster: !!meta.player_name,
+          role: meta.role || 'RP',
+          hand: meta.hand || null,
+          proj_vs_lhb: null, proj_vs_rhb: null,
+          act_vs_lhb: null, act_vs_rhb: null,
+          act_sample_lhb: null, act_sample_rhb: null,
+          blended_vs_lhb: null, blended_vs_rhb: null,
+          neutralized_vs_lhb: null, neutralized_vs_rhb: null,
+          no_projection: false,
+          fatigued: true,
+          fatigue_reasons: reasons || [],
+          in_pool: false,
+        });
       }
+
+      pitchers.sort((a, b) => (b.in_pool - a.in_pool) || String(a.name).localeCompare(String(b.name)));
+
       return {
         sp_name: spName || null,
         pitchers,
-        team_bullpen_woba: bullpenWoba,
-        team_bullpen_woba_vs_lhb: vsLHB,
-        team_bullpen_woba_vs_rhb: vsRHB,
+        team_bullpen_woba: res ? res.woba : null,
+        team_bullpen_woba_vs_lhb: res ? res.vsLHB : null,
+        team_bullpen_woba_vs_rhb: res ? res.vsRHB : null,
+        // Surfaced so a reader can see the pool the number came from
+        // without counting rows.
+        pool_size: res ? res.pitchers : null,
+        pool_fallbacks: res ? res.fallbacks : null,
+        excluded_count: res ? (res.excluded || []).length : null,
       };
     };
+
 
     const tryParseLineup = j => { try { return j ? JSON.parse(j) : null; } catch(e) { return null; } };
     const report = games.map(g => {

@@ -131,8 +131,42 @@ try {
   eq(both.length, 2, 'a both-legs pitcher keeps TWO rows (Phase 1; leg 1 not overwritten)');
   eq(both[0].pitches_thrown, 11, 'leg 1 pitch count survives');
   eq(both[1].pitches_thrown, 17, 'leg 2 pitch count is its own row');
+
+  // ---- the leg reaches the POOL, not just getFatiguedPitchers ----------
+  // The source assertion this replaced could only prove an argument was
+  // spelled correctly. This proves it is honoured: same team, same date,
+  // two legs, and the nightcap must lose the arms that worked leg 1.
+  //
+  // Needs a roster and projections, because the pool is built from
+  // projection rows filtered against the active RP set.
+  db.prepare('INSERT OR REPLACE INTO team_rosters (player_name, team, role) VALUES (?,?,?)')
+    .run('Zed Reliever A', T, 'RP');
+  db.prepare('INSERT OR REPLACE INTO team_rosters (player_name, team, role) VALUES (?,?,?)')
+    .run('Zed Reliever B', T, 'RP');
+  db.prepare('INSERT OR REPLACE INTO team_rosters (player_name, team, role) VALUES (?,?,?)')
+    .run('Zed Reliever C', T, 'RP');
+  const insW = db.prepare('INSERT OR REPLACE INTO woba_data (data_key, player_name, woba, sample_size) VALUES (?,?,?,?)');
+  for (const hand of ['lhb', 'rhb']) {
+    insW.run('pit-proj-' + hand, 'Zed Reliever A ' + T, 0.310, 40);
+    insW.run('pit-proj-' + hand, 'Zed Reliever B ' + T, 0.320, 40);
+    insW.run('pit-proj-' + hand, 'Zed Reliever C ' + T, 0.330, 40);
+  }
+  const BPleg = n => q.getBullpenWobaBlended(T, '', [], 0.55, 0.45, 0.35, 0.65,
+    0.45, 0.55, D, 0.335, 50, true, 0.25, 0.75, n, null);
+  const p1 = BPleg(1), p2 = BPleg(2);
+  ok(p1 && p2, 'the seeded ZZT pool resolves for both legs');
+  if (p1 && p2) {
+    eq(p1.pitchers, 3, 'leg 1 pools all three seeded relievers');
+    eq(p2.pitchers, 1, 'the nightcap pools only the arm that did not work leg 1');
+    const ex2 = (p2.excluded || []).map(e => e.name).sort().join(',');
+    ok(ex2.includes('zed reliever a') && ex2.includes('zed reliever b'),
+       'and both leg-1 relievers appear in the nightcap exclusion list (got: ' + ex2 + ')');
+    ok(p2.woba !== p1.woba, 'the nightcap wOBA differs -- the exclusion reached the NUMBER');
+  }
 } finally {
   db.prepare('DELETE FROM pitcher_game_log WHERE game_date=? AND team=?').run(D, T);
+  db.prepare('DELETE FROM team_rosters WHERE team=?').run(T);
+  db.prepare("DELETE FROM woba_data WHERE player_name LIKE '%' || ? ").run(T);
 }
 
 // ---- 3. the leg parser, which shipped broken once ---------------------
@@ -162,8 +196,26 @@ const apiSrc = fs.readFileSync(path.join(R, 'routes/api.js'), 'utf8');
 // literal-d bug got here in the first place -- an escaped backslash does
 // not survive every editing path, and a regex that silently stops matching
 // makes a test pass while asserting nothing.
-ok(apiSrc.includes('getFatiguedPitchers(teamU, date, gameNumber)'),
-   'the bullpen report passes the leg to getFatiguedPitchers');
+//
+// REWRITTEN 2026-08-30, when the report stopped being a second
+// implementation. The old assertion here was:
+//
+//   apiSrc.includes('getFatiguedPitchers(teamU, date, gameNumber)')
+//
+// which required the report to make the leg-aware call ITSELF. That was the
+// right assertion while the report was a mirror, and it is the wrong one
+// now: the report no longer calls getFatiguedPitchers at all, because
+// getBullpenWobaBlended does it. Keeping the old form would have forced the
+// mirror to be re-created to satisfy a test written to protect it.
+//
+// So assert the two things that actually matter, and are stable under the
+// refactor: the report does NOT re-implement the lookup, and the leg still
+// reaches the pool.
+ok(!apiSrc.includes('getFatiguedPitchers(teamU'),
+   'the bullpen report does NOT call getFatiguedPitchers itself -- no second copy');
+ok(apiSrc.includes('gameNumber, neutralizeFor);'),
+   'the report passes the leg through to getBullpenWobaBlended instead');
+
 ok(apiSrc.includes('buildTeamReport(g.away_team, g.away_sp, homeLU, legOf(g.game_id))'),
    'the report call site derives the leg from the game_id');
 const jobsSrc2 = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');

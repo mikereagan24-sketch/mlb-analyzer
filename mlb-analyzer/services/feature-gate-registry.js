@@ -412,7 +412,36 @@ const GATES = [
         + 'without re-measuring the threshold converts a silent inconsistency into a '
         + 'noisy false alarm, which is worse.' },
 
-
+  { id: 'bullpen_pool_lastname_fallback', key: null, on_expected: null,
+    criterion: 'Open bug, found 2026-08-30, deliberately NOT fixed in the report PR. '
+             + 'The bullpen pool admits pitchers who are not on the roster, by SURNAME.',
+    criterion_type: 'mechanism',
+    window_end: null,
+    decision: { date: '2026-08-30', outcome: 'registered_unfixed',
+                ref: 'docs/bullpen-report-single-source-2026-08-30.md' },
+    note: 'THE CODE. db/schema.js q.getBullpenWoba, roster filter: '
+        + 'activeRPSet.has(pn) OR any rostered name ending in a space plus the '
+        + 'candidate surname (endsWith on last). '
+        + 'The second clause admits ANY projection row whose surname matches ANY '
+        + 'rostered RP. It was presumably there to survive accent/nickname drift, but '
+        + 'it does not check the first name at all. '
+        + 'MEASURED 2026-08-30: 22 non-roster pitchers were admitted as pool '
+        + 'candidates across 14 teams. ONE reached a PRICED pool: CWS/Shane Smith, '
+        + 'admitted because Hagen Smith is a CWS RP. He is not on the roster table, '
+        + 'and he carries 338/278 BF of actuals, so he clears BULLPEN_MIN_BF=50 and '
+        + 'gets the actuals-heavy 0.25/0.75 blend -- i.e. he is actively moving a '
+        + 'priced number. The other 21 were dropped by the pool-selection rule '
+        + '(their projections were poor), which is luck, not a safeguard. '
+        + 'WHY NOT FIXED HERE: this changes the MODEL number, not the report. It was '
+        + 'found while deleting the report mirror, and folding a pricing change into '
+        + 'a no-pricing-change PR is exactly what makes a diff unreviewable. '
+        + 'CONFOUNDER TO RESOLVE FIRST: Shane Smith is a real CWS pitcher. So the '
+        + 'roster table may simply be STALE rather than the match being wrong, and '
+        + 'the two failure modes need separating before either is fixed -- tightening '
+        + 'the match while the roster is stale would drop a legitimate arm. Check '
+        + 'roster freshness for the 22 before touching the filter. '
+        + 'VISIBILITY NOW: the rebuilt report renders on_roster=false on these rows, '
+        + 'so they are at least no longer invisible while this sits open.' },
 ];
 
 // ---------------------------------------------------------------------
