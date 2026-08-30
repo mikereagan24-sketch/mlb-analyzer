@@ -628,10 +628,30 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       // /-g(d+)$/, matching a literal "d" -- and a silently inert rule is
       // the hardest failure to spot, so there is one copy now.
       const _dhLeg = require('../utils/dh-leg').legOf(gameRow.game_id);
+      // Park-neutralization for the bullpen pool, built HERE because
+      // db/schema.js cannot require services/park-factors-woba without a
+      // cycle (that module reads the park_factors table). Passing a
+      // resolver keeps the dependency one-way and reuses model.js's
+      // resolveNeutralizationFactor verbatim -- same transform, same
+      // table, same PA/TBF stint weighting for traded relievers -- rather
+      // than a second copy in the schema layer.
+      //
+      // Returns null when the flag is off, which leaves the actuals term
+      // untouched and the un-neutralized path byte-identical.
+      const _mdl = require('./model');
+      const _pfw = require('./park-factors-woba');
+      const _mkNeutralizer = (teamAbbr) => (pitcherName, rawWoba) => {
+        try {
+          const f = _mdl.resolveNeutralizationFactor(teamAbbr, settings,
+            { playerName: pitcherName, isPitcher: true });
+          if (f == null) return null;
+          return _pfw.neutralizeWoba(rawWoba, f);
+        } catch (e) { return null; }
+      };
       const homeLineupArr = tryParse(gameRow.home_lineup_json) || [];
       const awayLineupArr = tryParse(gameRow.away_lineup_json) || [];
-      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);
-      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg);
+      const awayBp = q.getBullpenWobaBlended(awayAbbr, awaySpName, homeLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg, _mkNeutralizer(awayAbbr));
+      const homeBp = q.getBullpenWobaBlended(homeAbbr, homeSpName, awayLineupArr, _bpStrongR, _bpWeakR, _bpStrongL, _bpWeakL, _wProj, _wAct, gameRow.game_date, _unknownWoba, _bullpenMinBF, _downweightStarters, _bullpenWProj, _bullpenWAct, _dhLeg, _mkNeutralizer(homeAbbr));
       if (awayBp?.vsRHB) awayBpVsR = awayBp.vsRHB;
       if (awayBp?.vsLHB) awayBpVsL = awayBp.vsLHB;
       if (homeBp?.vsRHB) homeBpVsR = homeBp.vsRHB;

@@ -2247,4 +2247,4 @@ function applyCatcherFramingDelta(rvPerGame, settings) {
   return rvPerGame * mute;
 }
 
-module.exports = { normName,weightOr,blendWoba,BATTER_ACT_FULL_WEIGHT_PA,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };
+module.exports = { normName,resolveNeutralizationFactor,weightOr,blendWoba,BATTER_ACT_FULL_WEIGHT_PA,buildWobaIndex,getBatterWoba,getPitcherWoba,runModel,getSignals,calcPnl,calcRunlinePnl,impliedP,buildSpStartIndex,forecastSpIP,computeSpPitWeightFromForecast,computeOpenerPitWeightFromForecast,computeBulkPitWeightFromForecast,applyCatcherFramingDelta,getRosterGateStats,resetRosterGateStats,buildRosterGatedIdx,VENUE_ID_OVERRIDES };
