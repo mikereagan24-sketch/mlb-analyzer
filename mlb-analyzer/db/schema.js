@@ -3776,7 +3776,25 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
     const woba = useAct
       ? BP_W_PROJ * proj.woba + BP_W_ACT * actWoba
       : proj.woba;
-    return { name: pName, woba, sample: proj.sample_size, fallback: false };
+    // The PRE-BLEND components travel with the blended value. (2026-08-31)
+    //
+    // They are all in scope right here and were being discarded, the same
+    // way pool size and the exclusion list were before Phase 0. The bullpen
+    // REPORT needs them to render its per-pitcher table, and the only
+    // reason it had a parallel implementation is that this function kept
+    // them to itself. Returning them is what lets the mirror be deleted
+    // rather than kept in sync.
+    return {
+      name: pName, woba, sample: proj.sample_size, fallback: false,
+      proj_woba: proj.woba,
+      act_woba: actMatch ? actMatch.woba : null,
+      act_sample: actMatch ? actMatch.sample_size : null,
+      used_act: !!useAct,
+      // The raw actuals value before neutralization, so a reader can see
+      // what the park adjustment did rather than only its result.
+      act_woba_raw: useAct ? actMatch.woba : null,
+      act_woba_neutralized: useAct ? actWoba : null,
+    };
   });
 
   // Inject fallback entries for active RPs who have no proj row (injury
@@ -3794,7 +3812,9 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
       if (rLast && representedLast.has(rLast)) continue;
       if (starterNorm && rName.includes(starterNorm)) continue;
       if (fatiguedSet.has(rName)) { note(rName, reasonFor(rName)); continue; }
-      pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true });
+      pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true,
+        proj_woba: null, act_woba: null, act_sample: null, used_act: false,
+        act_woba_raw: null, act_woba_neutralized: null });
     }
   }
 
@@ -3832,8 +3852,18 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // downweight collapses the mean. Fall back to equal-weight in that
   // edge case — a bullpen with only failed openers is still a bullpen.
   const woba = sumW > 0.01 ? sumWoba / sumW : pool.reduce((s,p)=>s+p.woba, 0) / pool.length;
+  // MEMBERS, with an honest in_pool flag on every candidate.
+  //
+  // Not just the survivors: the report exists to show WHO is excluded and
+  // why, so a shorter list of survivors would remove most of its value.
+  // `pitchers` is every candidate (projection-matched plus rostered
+  // fallbacks); `pool` is the subset the qualified>=3 / slice(0,8) rule
+  // actually averages. A candidate outside the pool is a real state the
+  // report has never been able to show, because it did not know the rule.
+  const inPool = new Set(pool.map(p => p.name));
+  const members = pitchers.map(p => Object.assign({}, p, { in_pool: inPool.has(p.name) }));
   return { woba: parseFloat(woba.toFixed(4)), pitchers: pool.length, fallbacks: fallbackList.length,
-           excluded: [...excludedBy.values()] };
+           members, excluded: [...excludedBy.values()] };
 };
 
 q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber, neutralizeFn) => {
@@ -3859,10 +3889,34 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
       else { const t = exMap.get(e.name); for (const r of e.reasons) if (!t.reasons.includes(r)) t.reasons.push(r); }
     }
   }
+  // Merge the two per-hand member lists into one row per pitcher, so the
+  // report renders a single table rather than two. A pitcher can be in the
+  // pool for one hand and not the other (the qualified>=3 rule is applied
+  // per hand), so in_pool is kept per hand AND as an OR -- hiding that
+  // distinction would be a new mirror of exactly the kind being deleted.
+  const memberBy = new Map();
+  const takeSide = (side, key) => {
+    for (const m of (side && side.members) || []) {
+      if (!memberBy.has(m.name)) memberBy.set(m.name, { name: m.name, fallback: m.fallback });
+      const t = memberBy.get(m.name);
+      t[key] = {
+        blended: m.woba, proj: m.proj_woba, act: m.act_woba, act_sample: m.act_sample,
+        used_act: m.used_act, act_raw: m.act_woba_raw, act_neutralized: m.act_woba_neutralized,
+        in_pool: m.in_pool,
+      };
+    }
+  };
+  takeSide(rhb, 'vs_rhb');
+  takeSide(lhb, 'vs_lhb');
+  for (const t of memberBy.values()) {
+    t.in_pool = !!((t.vs_rhb && t.vs_rhb.in_pool) || (t.vs_lhb && t.vs_lhb.in_pool));
+  }
+
   const meta = {
     pitchers: Math.max((rhb && rhb.pitchers) || 0, (lhb && lhb.pitchers) || 0),
     fallbacks: Math.max((rhb && rhb.fallbacks) || 0, (lhb && lhb.fallbacks) || 0),
     excluded: [...exMap.values()],
+    members: [...memberBy.values()],
   };
   // Even with no usable wOBA the caller needs the exclusions -- a pool
   // emptied BY exclusions must not look the same as a team with no data.
