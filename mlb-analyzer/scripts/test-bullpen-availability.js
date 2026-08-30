@@ -174,6 +174,21 @@ const jobsSrc2 = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');
 ok(!(apiSrc + jobsSrc2).includes('.match(/-g('),
    'no hand-written leg regex outside utils/dh-leg.js -- one copy only');
 
+// ---- 5. every consumer of the pool must pass the leg -------------------
+// There are four call sites of getBullpenWobaBlended/getFatiguedPitchers:
+// the model (processGameSignals), the bullpen report, and the model-trace
+// endpoint. Each one that omits the leg silently reports leg-1 numbers for
+// a nightcap. The report was found that way on 2026-08-29; model-trace was
+// found the same way the day after, while checking whether the report fix
+// had worked -- the trace showed NYY identical across both legs while the
+// persisted game_log row already had five arms excluded.
+ok(apiSrc.includes('BP_WA_, legOf(gameRow.game_id))'),
+   'model-trace passes the leg to getBullpenWobaBlended');
+// split, not a regex. This assertion has now been mangled twice by an
+// eaten backslash; a counting check does not need one.
+ok(apiSrc.split('legOf(').length - 1 >= 4,
+   'every leg-dependent call site in the API derives the leg');
+
 console.log('');
 console.log(pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
