@@ -56,7 +56,7 @@ if (branch === 'main' || branch === 'master') {
 // gh is the only source that knows PR state. Its absence must not block
 // work, but it also must not read as a pass -- say which happened.
 const raw = sh('gh pr list --head ' + branch + ' --state all --limit 5 '
-  + '--json number,state,mergedAt,headRefName');
+  + '--json number,state,mergedAt,headRefName,baseRefName');
 if (!raw) {
   console.log('UNKNOWN  could not query GitHub for ' + branch + '.');
   console.log('  Not a pass. If gh is unavailable, check the PR by hand before committing.');
@@ -68,7 +68,25 @@ try { prs = JSON.parse(raw); } catch (e) { prs = []; }
 prs = prs.filter(p => p.headRefName === branch);
 
 if (!prs.length) {
-  console.log('OK  ' + branch + ' has no PR yet — safe to commit.');
+  // No PR yet -- check what this branch was CUT FROM, because that is what
+  // the PR will default its base to. Catching it here is cheaper than
+  // catching it after a merge that reported success.
+  // The BRANCH, not HEAD. Using HEAD ignored the branch argument, so
+  // `assert-branch-open.js <other-branch>` silently checked the current
+  // one instead — a checker that reports on the wrong subject is worse
+  // than no checker, which is the whole reason this file exists.
+  const mergeBase = sh('git merge-base ' + branch + ' origin/main');
+  const mainHead = sh('git rev-parse origin/main');
+  if (mergeBase && mainHead && mergeBase !== mainHead) {
+    const behind = sh('git rev-list --count ' + mergeBase + '..' + mainHead);
+    console.log('WARNING  ' + branch + ' is not cut from current origin/main'
+      + (behind ? ' (' + behind + ' commit(s) behind)' : '') + '.');
+    console.log('  If it was branched from another feature branch, the PR will');
+    console.log('  default its base there -- and a stacked base that merges first');
+    console.log('  reports MERGED while main receives nothing. Rebuild from main.');
+    process.exit(1);
+  }
+  console.log('OK  ' + branch + ' has no PR yet, cut from current origin/main — safe to commit.');
   process.exit(0);
 }
 
@@ -76,7 +94,32 @@ const merged = prs.filter(p => p.state === 'MERGED');
 const open = prs.filter(p => p.state === 'OPEN');
 
 if (open.length) {
-  console.log('OK  ' + branch + ' → PR #' + open[0].number + ' is OPEN.');
+  const p = open[0];
+  // A STACKED PR IS WORSE THAN A STRANDED COMMIT. (2026-08-30)
+  //
+  // PR #323 was opened against another feature branch rather than main.
+  // When that base merged first, merging #323 put the commit into an
+  // already-merged branch -- so GitHub reported MERGED, main never
+  // received 9e39575, and a manual deploy re-triggered the base's commit
+  // because it was already main's head.
+  //
+  // That is strictly worse than the earlier strandings. There the PR was
+  // at least honest about what it contained; here the PR STATE ITSELF
+  // lies, so neither the commit count nor the merge status can catch it.
+  if (p.baseRefName && p.baseRefName !== 'main' && p.baseRefName !== 'master') {
+    console.log('*** STOP — PR #' + p.number + ' is based on "' + p.baseRefName + '", not main.');
+    console.log('');
+    console.log('  Merging it will merge into that branch, not into main. If the base');
+    console.log('  has already merged, GitHub will report MERGED while main receives');
+    console.log('  nothing — exactly what happened to #323 / 9e39575.');
+    console.log('');
+    console.log('  Re-target the PR to main, or rebuild the branch from main:');
+    console.log('    git checkout main && git pull --ff-only');
+    console.log('    git checkout -b <new-branch> && git cherry-pick <sha>...');
+    console.log('');
+    process.exit(1);
+  }
+  console.log('OK  ' + branch + ' → PR #' + p.number + ' is OPEN, based on ' + p.baseRefName + '.');
   console.log('  Pushing here still reaches the PR. Verify the commit count in the');
   console.log('  body after merge with: node scripts/verify-commits-landed.js');
   process.exit(0);

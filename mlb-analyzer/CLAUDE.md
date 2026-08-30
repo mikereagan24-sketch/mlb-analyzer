@@ -1081,6 +1081,30 @@ reverts all of it.
 **Nine times now**, work has been committed, pushed, and reported as
 delivered while sitting on a branch `main` never absorbed.
 
+### Every branch comes off main. No stacking. (2026-08-30)
+
+**A PR whose base is another feature branch can report MERGED while main
+receives nothing.** PR #323 was based on `relanded/report-leg-and-oscillation-result`.
+That base merged first via #322; merging #323 then put 9e39575 into an
+already-merged branch. GitHub said MERGED, main never got it, and the
+manual deploy re-triggered #322 because bd0fb07 was already main's head.
+
+**This is worse than a stranding.** A stranded commit at least leaves an
+honest PR -- the commit is visibly not in it. Here the PR STATE ITSELF is
+wrong, so neither the commit count nor the merge status can catch it. It
+is the same failure signature -- merge success, code absent -- with one
+more surface lying.
+
+If work depends on an unmerged branch, the options are: wait for it to
+merge, or cherry-pick what you need onto a branch cut from main. Not a
+stacked base. The temptation is to avoid invalidating an open PR's SHA
+list by stacking instead -- that trade is not worth it, and it is exactly
+the reasoning that produced #323.
+
+The guard checks both halves: an open PR based off non-main, and a branch
+cut from something other than current origin/main before its PR exists.
+
+
 ### Run the guard BEFORE committing
 
 ```
@@ -1191,7 +1215,7 @@ current tree.**
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
-| **Committing onto a merged PR** | `node scripts/assert-branch-open.js` | the cause of all nine strandings — run it BEFORE committing; the landed-commit verifier only finds it afterwards, when the work is already stranded |
+| **Committing onto a merged PR** | `node scripts/assert-branch-open.js` | the cause of all nine strandings, and a stacked (non-main) PR base, which reports MERGED while main receives nothing — run it BEFORE committing; the landed-commit verifier only finds it afterwards, when the work is already stranded |
 | **Commits that never reached main** | `node scripts/verify-commits-landed.js` | work committed, pushed, reported as delivered, and sitting on a branch `main` never absorbed — **nine times**; measured cause is committing after the PR merged, so run `assert-branch-open.js` first |
 | **Forward lineup capture stopped** | `node scripts/pipeline-freshness.js` (row `lineup_captures`) | a missed day of same-day capture, which is **unrecoverable** — there is no backfill for what RotoWire said at 10AM on a date that has passed |
 | **A row its own producer could not make** | `node scripts/audit-producer-floors.js` | a consumer floor looser than the ingest that fills the table — a 6-out FRV sample priced a game at -2.213 runs, and the framing historical fallback is still `pitches > 0` |
