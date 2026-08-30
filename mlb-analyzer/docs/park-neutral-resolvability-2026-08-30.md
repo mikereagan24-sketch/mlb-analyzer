@@ -133,6 +133,33 @@ if the true effect is half that does "never" become the right word.
   actually be live, rather than one about to change.
 - Contamination filters as standard: both reasons NULL.
 
+
+## 7. Does this apply to the other gates? Checked, not assumed
+
+**Every flag A/B in the registry is a paired design** -- same games, flag
+on vs off -- so the cohort floor would understate all of their power the
+same way it understated this one.
+
+**But no gate was actually harmed.** Surveyed on 2026-08-30: the cohort
+floor has only ever been cited in the rookie-cohort work, which genuinely
+WAS a between-cohort split and used it correctly. The calibration-typed
+gates -- `defense_frv_enabled`, `bsr_baserunning`, `totals_selection_edge` --
+carry **no recorded decision at all**, so there is no "unresolvable"
+status to be overstated. `catcher_framing_mute` and `defense_frv_mute` have
+no criterion written down, which is a different problem the registry
+already flags as `no_criterion`.
+
+So the exposure is **prospective, not retrospective**: the next person to
+assess FRV or a MUTE against the cohort floor would conclude it was
+unresolvable when it may not be. That entry point was the CLAUDE.md rule
+saying to run `resolution-floor.js` for every pre-registration without
+distinguishing design; it now names the distinction and points at the
+paired template.
+
+Worth doing when FRV or the MUTEs are next assessed, rather than a
+backlog to work through now: measure the paired floor first, then decide
+whether the question is answerable at the current n.
+
 ## Related
 
 - `scripts/park-neutral-paired-floor.js` — the floor, re-runnable.
