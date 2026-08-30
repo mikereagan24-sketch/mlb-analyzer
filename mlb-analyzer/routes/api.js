@@ -6314,11 +6314,23 @@ router.get('/debug/bullpen', (req, res) => {
     const activeRPs = new Set(rosterRows.filter(r=>r.role==='RP').map(r=>norm(r.player_name)));
     const hasRoster = activeRPs.size > 0;
     // Tag each pitcher with roster role
+    // EXACT NAME ONLY, matching q.getBullpenWoba. (2026-08-30)
+    //
+    // This was the third copy of the surname-only identity match. It read:
+    //   activeRPs.has(norm(p.name)) || [...activeRPs].some(n=>n.endsWith(' '+last))
+    // and tagged any same-surname projection row as role 'RP', which put
+    // non-roster players into this endpoint's displayed pool.
+    //
+    // The role lookup underneath had the same flaw and is now exact too, so a
+    // player who is genuinely absent reads 'not_on_roster' instead of
+    // borrowing a namesake's role.
     pitchers.forEach(p => {
-      const last = norm(p.name).split(' ').pop();
       if (hasRoster) {
-        const inRoster = activeRPs.has(norm(p.name)) || [...activeRPs].some(n=>n.endsWith(' '+last));
-        p.role = inRoster ? 'RP' : (rosterRows.find(r=>norm(r.player_name).endsWith(' '+last))?.role||'not_on_roster');
+        const pn = norm(p.name);
+        const inRoster = activeRPs.has(pn);
+        p.role = inRoster
+          ? 'RP'
+          : (rosterRows.find(r => norm(r.player_name) === pn)?.role || 'not_on_roster');
       }
     });
     const pool=pitchers.filter(p=>p.role==='RP'&&p.proj_sample>=5);

@@ -13,17 +13,7 @@
     "entry needs a reason and a next step, and 'classification: unexplained'",
     "is a standing request to look at it, not a permission slip."
   ],
-
   "expected_failures": {
-    "test-edge-sanity-cap.js": {
-      "failures": 12,
-      "classification": "unexplained",
-      "first_seen": "on or before 2026-08-30",
-      "what": "Every moneyline assertion fails; every Totals assertion passes. The ML path emits no signal at all under this fixture -- not suppressed, absent.",
-      "why_it_matters": "Test 2's '45pp signal NOT emitted' PASSES for the wrong reason. A vacuous pass inside a failing test is worse than the failure, because it reads as coverage.",
-      "next_step": "Determine whether the ML fixture stopped producing a candidate (stale fixture) or ML emission regressed (real). Do not reclassify as benign without that answer.",
-      "benign": false
-    },
     "test-sp-forecast-abbrev-resolver.js": {
       "failures": 1,
       "classification": "stale-fixture",
@@ -43,7 +33,6 @@
       "benign": true
     }
   },
-
   "recently_fixed": {
     "test-stint-weighted-neutralization.js": {
       "was": 7,
@@ -51,6 +40,13 @@
       "what": "The file hardcoded COL=1.10, LAD=1.00, SF=0.94. The wOBA park-source switch moved them to 1.12 / 1.01 / 0.97 and all seven assertions began failing.",
       "why_it_matters": "Not a regression -- but the test had been validating nothing since that PR, and it was MY change that broke it. It should have been updated there. It is the clearest example of the accepted-count problem: a wholesale-failing test looks the same as a hard one.",
       "fix": "Read the factors from getWobaParkFactor instead of hardcoding, and assert the WEIGHTING MATH over them (including a betweenness property no literal can fake). A future source change now moves both sides together."
+    },
+    "test-edge-sanity-cap.js": {
+      "was": 12,
+      "fixed": "2026-08-30",
+      "what": "The fixture priced its synthetic market at +100/+100. utils/market-sanity checkMarketMLPairSanity -- added AFTER this test (27f2ded, the CLE-CIN DH incident) -- correctly rejects that pair as structurally impossible (both sides positive, no favorite, implied sum 1.0000). getSignals set haveAnyML=false and emitted no ML signal at all, so every ML assertion failed for a reason unrelated to the cap. Totals use a separate gate, which is why they passed throughout.",
+      "why_it_matters": "Test 2's '45pp signal NOT emitted' was PASSING, vacuously -- no ML signal was emitted for any input, so it could not fail. The ML half of the edge cap (hard cap, soft cap, edge_suspect) was therefore unverified from 27f2ded until this fix. A vacuous pass inside a failing suite is worse than the failure: it reads as coverage.",
+      "fix": "Market is now -110/-110 (implied 0.5238 a side, sum 1.0476, passes sanity) and model lines are derived as MARKET_P + the edge under test rather than hardcoded off a 0.500 baseline. Added Test 0, which asserts the fixture's own market passes checkMarketMLPairSanity -- so a future sanity rule that empties the ML path names itself instead of looking like a cap regression. Verified the suppression is caused by the CAP: raising the hard cap to 0.99 emits the 45pp signal (edge=0.450, 0 suppressions)."
     }
   }
 }

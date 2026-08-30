@@ -9,6 +9,29 @@
 //
 // Run: node scripts/test-edge-sanity-cap.js
 
+// FIXTURE REPAIRED 2026-08-30.
+//
+// Every moneyline assertion in this file had been failing while every
+// Totals assertion passed, and it was carried as an accepted failure count
+// for weeks. The cause was NOT the edge cap.
+//
+// The fixture priced its synthetic market at +100 / +100. utils/market-sanity
+// checkMarketMLPairSanity -- added AFTER this test (27f2ded, the CLE-CIN DH
+// incident) -- correctly rejects that pair: both sides positive means no
+// favorite in a two-outcome market, implied sum 1.0000. getSignals then sets
+// haveAnyML=false and emits no ML signal at all, so every ML assertion failed
+// for a reason that had nothing to do with the cap. Totals use a separate
+// gate, which is why they were unaffected.
+//
+// THE PART THAT MATTERED: Test 2's '45pp signal NOT emitted' was PASSING --
+// vacuously. No ML signal was emitted for ANY input, so the assertion could
+// not fail. The ML half of the edge cap (hard cap, soft cap, edge_suspect)
+// has therefore been unverified since 27f2ded shipped.
+//
+// The market is now -110 / -110 (implied 0.5238 a side, sum 1.0476), which
+// passes sanity, and model probabilities are derived as MARKET_P + the edge
+// under test rather than hardcoded off a 0.500 baseline.
+
 const model = require('../services/model');
 
 let failed = 0;
@@ -34,6 +57,15 @@ function mlForImplied(p) {
   return Math.round(100 * (1 - p) / p);
 }
 
+// A market pair that passes checkMarketMLPairSanity. -110/-110 is the
+// standard no-lean price; +100/+100 is structurally impossible and is
+// rejected before any edge is computed.
+const MARKET_ML = -110;
+const MARKET_P  = impliedP(MARKET_ML);          // 0.52381
+// The model line that produces exactly `edge` probability points on the
+// away side against that market.
+const modelForEdge = edge => mlForImplied(MARKET_P + edge);
+
 function buildGame(marketAwayMl, marketHomeMl, marketTotal, overPrice, underPrice) {
   return {
     market_away_ml: marketAwayMl,
@@ -50,13 +82,27 @@ function buildModel(aML, hML, estTot) {
   return { aML, hML, estTot };
 }
 
+// ── Test 0: the fixture's own market must pass sanity ────────────────
+// Without this, a future sanity rule can silently empty the ML path again
+// and the failures will look like a cap regression. This assertion names
+// the real precondition.
+console.log('\n=== Test 0: fixture market passes checkMarketMLPairSanity ===');
+{
+  const { checkMarketMLPairSanity } = require('../utils/market-sanity');
+  const verdict = checkMarketMLPairSanity(MARKET_ML, MARKET_ML);
+  expect('the synthetic market pair is structurally valid',
+    verdict == null, verdict ? String(verdict) : '');
+  expect('and the old +100/+100 pair is correctly rejected',
+    checkMarketMLPairSanity(100, 100) != null);
+}
+
 // ── Test 1: cap disabled → output identical to no-cap ─────────────────
 console.log('\n=== Test 1: cap DISABLED — no filtering, no edge_suspect ===');
 {
-  const marketML = 100;   // implied 0.500
-  const modelML  = mlForImplied(0.545);   // 4.5pp edge → below any cap
+  const marketML = MARKET_ML;
+  const modelML  = modelForEdge(0.045);   // 4.5pp edge → below any cap
   const game  = buildGame(marketML, marketML, 8.5, -110, -110);
-  const mr    = buildModel(modelML, mlForImplied(0.500), 8.5);
+  const mr    = buildModel(modelML, mlForImplied(MARKET_P), 8.5);
   const settings = { SIGNAL_EMIT_FLOOR_PP: 0.01, SIGNAL_EDGE_CAP_ENABLED: false };
   const supp = [];
   const sigs = model.getSignals(game, mr, settings, supp);
@@ -70,10 +116,10 @@ console.log('\n=== Test 1: cap DISABLED — no filtering, no edge_suspect ===');
 // ── Test 2: 45pp edge → HARD-cap suppressed ───────────────────────────
 console.log('\n=== Test 2: synthetic 45pp edge with cap ENABLED → suppressed ===');
 {
-  const marketML = 100;
-  const modelML  = mlForImplied(0.95);   // 45pp edge
+  const marketML = MARKET_ML;
+  const modelML  = modelForEdge(0.45);   // 45pp edge
   const game  = buildGame(marketML, marketML, 8.5, -110, -110);
-  const mr    = buildModel(modelML, mlForImplied(0.500), 8.5);
+  const mr    = buildModel(modelML, mlForImplied(MARKET_P), 8.5);
   const settings = {
     SIGNAL_EMIT_FLOOR_PP: 0.01,
     SIGNAL_EDGE_CAP_ENABLED: true,
@@ -94,10 +140,10 @@ console.log('\n=== Test 2: synthetic 45pp edge with cap ENABLED → suppressed =
 // ── Test 3: 8pp edge → emitted unchanged (below SOFT cap) ─────────────
 console.log('\n=== Test 3: synthetic 8pp edge with cap ENABLED → emit clean ===');
 {
-  const marketML = 100;
-  const modelML  = mlForImplied(0.58);   // 8pp edge
+  const marketML = MARKET_ML;
+  const modelML  = modelForEdge(0.08);   // 8pp edge
   const game  = buildGame(marketML, marketML, 8.5, -110, -110);
-  const mr    = buildModel(modelML, mlForImplied(0.500), 8.5);
+  const mr    = buildModel(modelML, mlForImplied(MARKET_P), 8.5);
   const settings = {
     SIGNAL_EMIT_FLOOR_PP: 0.01,
     SIGNAL_EDGE_CAP_ENABLED: true,
@@ -116,10 +162,10 @@ console.log('\n=== Test 3: synthetic 8pp edge with cap ENABLED → emit clean ==
 // ── Test 4: 15pp edge → emitted with edge_suspect=true (in [SOFT, HARD)) ─
 console.log('\n=== Test 4: synthetic 15pp edge → emit with edge_suspect ===');
 {
-  const marketML = 100;
-  const modelML  = mlForImplied(0.65);   // 15pp edge
+  const marketML = MARKET_ML;
+  const modelML  = modelForEdge(0.15);   // 15pp edge
   const game  = buildGame(marketML, marketML, 8.5, -110, -110);
-  const mr    = buildModel(modelML, mlForImplied(0.500), 8.5);
+  const mr    = buildModel(modelML, mlForImplied(MARKET_P), 8.5);
   const settings = {
     SIGNAL_EMIT_FLOOR_PP: 0.01,
     SIGNAL_EDGE_CAP_ENABLED: true,
@@ -144,7 +190,7 @@ console.log('\n=== Test 5: Total 45pp edge → hard-suppressed ===');
   // overEdge = 0.80 - 0.524 = 0.276 → in [SOFT=0.10, HARD=0.25) → soft flag
   // For >25pp overEdge, need model close to 1.0 and market close to 0 → hard to hit without changing clamp.
   // Use runDiff=100 (unrealistic) + settings.TOT_PROB_HI=0.99 to allow model close to 1.0
-  const game  = buildGame(100, 100, 8.5, -110, -110);
+  const game  = buildGame(MARKET_ML, MARKET_ML, 8.5, -110, -110);
   const mr    = buildModel(-110, -110, 100);  // absurdly high estTot to force massive overEdge
   const settings = {
     SIGNAL_EMIT_FLOOR_PP: 0.01,
