@@ -6510,17 +6510,19 @@ async function runParkFactorsJob(opts) {
     const { rows, url, params } = await pf.fetchSavantParkFactors(o.params);
     const byTeam = {};
     for (const r of rows) {
-      byTeam[r.team] = { factor: r.factor, source: pf.SOURCE_NAME, url, params,
+      byTeam[r.team] = { factor: r.factor, woba_factor: r.woba_factor,
+                         source: pf.SOURCE_NAME, url, params,
                          year_range: r.year_range, venue_id: r.venue_id,
-                         venue_name: r.venue_name, n_pa: r.n_pa, manual_reason: null };
+                         venue_name: r.venue_name, n_pa: r.n_pa,
+                         manual_reason: null, woba_manual_reason: null };
     }
     // Manual entries LAST so they win, and each carries its reason into
     // the row. A manual factor whose reason is null is a regression.
     for (const t of Object.keys(pf.MANUAL)) {
       const m = pf.MANUAL[t];
-      byTeam[t] = { factor: m.factor, source: 'manual', url: null, params: null,
+      byTeam[t] = { factor: m.factor, woba_factor: m.woba_factor != null ? m.woba_factor : null, source: 'manual', url: null, params: null,
                     year_range: null, venue_id: null, venue_name: null, n_pa: null,
-                    manual_reason: m.reason };
+                    manual_reason: m.reason, woba_manual_reason: m.woba_reason || null };
     }
 
     // THE ASSERTION, before any write. A partial pull that overwrites a
@@ -6529,10 +6531,13 @@ async function runParkFactorsJob(opts) {
     // from a neutral park.
     const check = pf.assertAllTeamsResolve(byTeam);
     if (!check.ok) {
-      const msg = 'park-factors REFUSING TO WRITE -- ' + check.missing.length + ' of '
-        + check.checked + ' teams did not resolve: ' + check.missing.join(', ')
-        + '. A missing team silently becomes 1.0, which reads as a neutral park.';
-      console.error('[park-factors] ' + msg);
+      const parts = [];
+      if (check.missing.length) parts.push(check.missing.length + ' run factor(s): ' + check.missing.join(', '));
+      if (check.missingWoba && check.missingWoba.length) parts.push(check.missingWoba.length + ' wOBA factor(s): ' + check.missingWoba.join(', '));
+      const msg = 'park-factors REFUSING TO WRITE -- of ' + check.checked + ' teams, '
+        + parts.join('; ') + ' did not resolve. A missing run factor silently becomes 1.0'
+        + ' (a neutral park); a missing wOBA factor silently falls back to the hardcoded'
+        + ' literal for that park only, which is a MIXED table and harder to spot.';
       return { success: false, error: msg, missing: check.missing };
     }
     if (check.suspicious.length) {
@@ -6544,8 +6549,8 @@ async function runParkFactorsJob(opts) {
     const tx = db.transaction((entries) => {
       for (const t of Object.keys(entries)) {
         const e = entries[t];
-        q.upsertParkFactor.run(t, e.factor, e.source, e.url, e.params, e.year_range,
-          e.venue_id, e.venue_name, e.n_pa, e.manual_reason);
+        q.upsertParkFactor.run(t, e.factor, e.woba_factor, e.source, e.url, e.params, e.year_range,
+          e.venue_id, e.venue_name, e.n_pa, e.manual_reason, e.woba_manual_reason);
       }
     });
     tx(byTeam);

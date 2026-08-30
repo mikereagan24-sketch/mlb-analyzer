@@ -2669,15 +2669,32 @@ q.updateBullpenAvailability = db.prepare(
   + 'away_bullpen_fallbacks=?, home_bullpen_fallbacks=? '
   + 'WHERE game_date=? AND game_id=?'
 );
+// wOBA-scale factor, as a SECOND COLUMN on the same row. (2026-08-30)
+//
+// Not a second table: it is the same park, the same pull, the same
+// pulled_at and the same monthly cron. A separate table would need its own
+// freshness entry, its own boot assertion and its own manual-override
+// story, and would be free to drift out of step with the run factor for
+// the same venue -- which is exactly how services/park-factors-woba.js
+// ended up 8 weeks stale and unmonitored while the run table was rebuilt.
+//
+// Savant publishes index_woba in the SAME blob as index_runs; the parser
+// simply never read it. Nullable because a park can be listed without it,
+// and a null must stay null rather than silently borrowing the run factor
+// -- the two scales differ by ~2x.
+for (const c of ['woba_factor REAL', 'woba_manual_reason TEXT']) {
+  try { db.exec('ALTER TABLE park_factors ADD COLUMN ' + c); } catch (e) { /* present */ }
+}
+
 q.upsertParkFactor = db.prepare(
-  'INSERT INTO park_factors (team,factor,source,source_url,source_params,year_range,' +
-  ' venue_id,venue_name,n_pa,manual_reason,pulled_at) ' +
-  "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now')) " +
-  'ON CONFLICT(team) DO UPDATE SET factor=excluded.factor, source=excluded.source,' +
+  'INSERT INTO park_factors (team,factor,woba_factor,source,source_url,source_params,year_range,' +
+  ' venue_id,venue_name,n_pa,manual_reason,woba_manual_reason,pulled_at) ' +
+  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now')) " +
+  'ON CONFLICT(team) DO UPDATE SET factor=excluded.factor, woba_factor=excluded.woba_factor, source=excluded.source,' +
   ' source_url=excluded.source_url, source_params=excluded.source_params,' +
   ' year_range=excluded.year_range, venue_id=excluded.venue_id,' +
   ' venue_name=excluded.venue_name, n_pa=excluded.n_pa,' +
-  ' manual_reason=excluded.manual_reason, pulled_at=excluded.pulled_at'
+  ' manual_reason=excluded.manual_reason, woba_manual_reason=excluded.woba_manual_reason, pulled_at=excluded.pulled_at'
 );
 q.listParkFactors = db.prepare('SELECT * FROM park_factors ORDER BY factor DESC');
 q.getParkFactor = db.prepare('SELECT * FROM park_factors WHERE team=?');
