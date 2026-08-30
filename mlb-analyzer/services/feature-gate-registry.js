@@ -42,6 +42,7 @@ const STATUS = {
   BLOCKED: 'blocked',                       // precondition genuinely unmet
   NO_CRITERION: 'no_criterion',             // ⚠ nobody wrote down what would decide it
   REEVAL_DUE: 'reeval_due',               // the evidence a past decision lacked has arrived
+  OPEN_DECISION: 'open_decision',        // criterion written, decision deliberately deferred
 };
 
 // Preconditions are functions of the db so the check reflects reality
@@ -344,6 +345,72 @@ const GATES = [
     decision: { date: '2026-08-20', outcome: 'documented_dead', ref: 'docs/sea-canopy-roof-scope-2026-08-20.md' },
     note: 'Dead by construction — no park carries roofType, so the branch and the "partial" roof state never fire. '
         + 'Documented rather than removed, deliberately, as the fallback path.' },
+  // ---- registered open items, not settings flags ----
+  //
+  // Neither is a toggle. They are registered because the alternative was
+  // living in prose in a doc, findable only by someone remembering it --
+  // which is the failure the ARI roof scraper is the monument to.
+  //
+  // Both are DELIBERATELY QUIET. They report as open_decision / decided
+  // rather than needs_attention, because a check that is red every morning
+  // for something nobody intends to act on today trains the reader to skip
+  // it -- the fielding_frv permanent-CRITICAL lesson. Findable is the goal,
+  // not loud.
+
+  { id: 'bullpen_woba_neutralization', key: null, on_expected: null,
+    criterion: 'Mechanism, same footing as park_neutral_inputs_enabled: the batter '
+             + 'and SP wOBA inputs are park-neutralized and the BULLPEN pool is not, '
+             + 'which is internally inconsistent regardless of what calibration can see.',
+    criterion_type: 'mechanism',
+    window_end: null,
+    deferred: true,
+    decision: null,
+    note: 'THE ASYMMETRY. getBatterWoba and getPitcherWoba both call '
+        + 'resolveNeutralizationFactor and divide the ACTUALS term by the park factor. '
+        + 'q.getBullpenWoba (db/schema.js) does neither -- it never imports '
+        + 'park-factors-woba at all -- so within one perBatterEW call, '
+        + 'pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW blends a NEUTRALIZED '
+        + 'SP term with an UN-NEUTRALIZED bullpen term. '
+        + 'DIRECTION: a Coors reliever, whose actuals are inflated by his park, stays '
+        + 'inflated -- so Colorado relievers look WORSE than they are, and the error '
+        + 'scales with RELIEF_PIT_WEIGHT. Symmetrically, SF/SEA relievers look better. '
+        + 'WHY NOT FIXED YET: it changes a live input on every game, so it wants its '
+        + 'own decision rather than a drive-by extension of an existing feature. '
+        + 'NOT BLOCKED ON THE PARK-NEUTRAL A/B: the mechanism argument stands on its '
+        + 'own, exactly as it does for park_neutral_inputs_enabled -- park is otherwise '
+        + 'counted twice on the SP side and once on the bullpen side, which is not a '
+        + 'defensible resting state either way. '
+        + 'IMPLEMENTATION NOTE: getBullpenWoba lives in db/schema.js, which has no '
+        + 'access to services/park-factors-woba. That boundary is why this was never '
+        + 'extended -- it is not a recorded judgement, it is where the code stopped. '
+        + 'See docs/park-neutral-resolvability-2026-08-30.md.' },
+
+  { id: 'debug_bullpen_endpoint_divergence', key: null, on_expected: null,
+    criterion: 'Known divergence, deliberately left. GET /api/debug/bullpen is a THIRD '
+             + 'implementation of the bullpen pool and applies no availability filter at all.',
+    criterion_type: 'mechanism',
+    window_end: null,
+    decision: { date: '2026-08-30', outcome: 'left_diverged_deliberately',
+                ref: 'docs/register-bullpen-open-items-2026-08-30.md' },
+    note: 'WHAT DIVERGES. routes/api.js GET /debug/bullpen has zero references to '
+        + 'getFatiguedPitchers and ignores the `date` param the UI sends it, so it '
+        + 'applies NO fatigue exclusions -- not the doubleheader rule, and not the '
+        + 'pre-existing 2-consecutive / 3in4 / pitch-count rules either. The model '
+        + 'pool (q.getBullpenWoba) and the bullpen REPORT (/debug/bullpen-report) both '
+        + 'apply them; this one does not. '
+        + 'WHY LEFT: it backs a pool-size quality warning in the UI '
+        + '("bullpen: no wOBA data (pool=N) -- pull rosters"), not a pricing path. '
+        + 'Adding exclusions would shrink every pool it reports and change when that '
+        + 'warning fires. '
+        + 'THE THING NOT TO LOSE: if this is ever fixed, RE-MEASURE THE WARNING '
+        + 'THRESHOLD FIRST. The current trigger is pool < 2, chosen against un-excluded '
+        + 'pools. Post-fix, measured pools run a median of 7 with fatigue removing a '
+        + 'median of 3 and up to 10, so the same threshold against excluded pools would '
+        + 'fire on healthy bullpens and read as a data outage. Fixing the divergence '
+        + 'without re-measuring the threshold converts a silent inconsistency into a '
+        + 'noisy false alarm, which is worse.' },
+
+
 ];
 
 // ---------------------------------------------------------------------
@@ -397,6 +464,10 @@ function evaluateGates(db, opts) {
     else if (g.window_end) status = STATUS.IN_WINDOW;
     else if (precondMet === true) status = STATUS.AWAITING_DECISION;
     else if (precondMet === false) status = STATUS.BLOCKED;
+    // A decision deliberately DEFERRED is not the same as one nobody ever
+    // wrote down. NO_CRITERION means the criterion is missing; this means
+    // the criterion is written and the call has not been made yet.
+    else if (g.deferred) status = STATUS.OPEN_DECISION;
     else status = STATUS.NO_CRITERION;
 
     out.push({
@@ -447,6 +518,19 @@ function logGateHealth(db, opts) {
     console.warn('[gate-health] evaluation failed (non-fatal): ' + e.message);
     return null;
   }
+  // Open decisions print ALWAYS, and separately from the attention list.
+  //
+  // Registered-but-silent is not findable -- it is a source file someone has
+  // to think to grep. Registered-and-alarming is worse: a line that is red
+  // every morning for something nobody intends to act on today trains the
+  // reader to skip the whole check, which is the fielding_frv
+  // permanent-CRITICAL lesson. One informational line is the balance.
+  const open = r.gates.filter(g => g.status === STATUS.OPEN_DECISION);
+  if (open.length) {
+    console.log('[gate-health] ' + open.length + ' open decision(s) on record (not blocking): '
+      + open.map(g => g.id).join(', '));
+  }
+
   const flagged = r.gates.filter(g => g.needs_attention);
   if (!flagged.length) {
     console.log('[gate-health] ' + r.total + ' gates, none needing attention');
