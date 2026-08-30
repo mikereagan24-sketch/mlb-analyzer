@@ -3664,7 +3664,7 @@ function _computeStartFracIndex(anchorDate) {
   return idx;
 }
 
-q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber) => {
+q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber, neutralizeFn) => {
   if (unknownWoba == null) unknownWoba = 0.335;
   const teamLower = teamAbbr.toLowerCase();
   const starterNorm = normName(starterName).split(' ').pop();
@@ -3744,8 +3744,37 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
     const pName = normName(proj.player_name.replace(/ [A-Z]+$/, ''));
     const actMatch = fuzzyLookup(actIdx, pName, teamAbbr);
     const useAct = actMatch && actMatch.woba && actMatch.sample_size >= minSample;
+    // PARK-NEUTRALIZE THE ACTUALS TERM, exactly as getBatterWoba and
+    // getPitcherWoba do. (2026-08-31)
+    //
+    // Actuals only: the Steamer projection is already park-neutral by
+    // construction, so dividing it too is the double-count the 2026-07-02
+    // audit found and the actuals-only fix removed.
+    //
+    // The factor arrives as a RESOLVER passed in by the caller rather than
+    // being looked up here. db/schema.js cannot require
+    // services/park-factors-woba -- that module requires db/schema for the
+    // park_factors table, so the dependency would be circular. Handing in a
+    // function keeps the direction one-way AND reuses model.js's
+    // resolveNeutralizationFactor verbatim, including its PA/TBF stint
+    // weighting for traded relievers, instead of a second copy that could
+    // drift.
+    //
+    // A null resolver, a null factor, or a factor of 1.0 all leave the term
+    // untouched, so the un-neutralized path stays byte-identical.
+    let actWoba = useAct ? actMatch.woba : null;
+    if (useAct && typeof neutralizeFn === 'function') {
+      // NON-FATAL, like every other enrichment on this path. The resolver
+      // reaches into the stint cache and the park table; if either is
+      // unavailable the pool must still price, degrading to the raw
+      // actuals rather than taking the game down. A neutralization
+      // failure is a worse number, not a missing one.
+      let nv = null;
+      try { nv = neutralizeFn(pName, actMatch.woba); } catch (e) { nv = null; }
+      if (nv != null && isFinite(nv)) actWoba = nv;
+    }
     const woba = useAct
-      ? BP_W_PROJ * proj.woba + BP_W_ACT * actMatch.woba
+      ? BP_W_PROJ * proj.woba + BP_W_ACT * actWoba
       : proj.woba;
     return { name: pName, woba, sample: proj.sample_size, fallback: false };
   });
@@ -3807,7 +3836,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
            excluded: [...excludedBy.values()] };
 };
 
-q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber) => {
+q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR, bpStrongWtL, bpWeakWtL, wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber, neutralizeFn) => {
   // Blend the team's bullpen-allowed wOBA using per-handedness strong/weak
   // manager-assumption weights. For each batter in the opposing lineup the
   // manager is assumed to deploy `strongWt` share of the better-matched
@@ -3815,8 +3844,8 @@ q.getBullpenWobaBlended = (teamAbbr, starterName, lineup, bpStrongWtR, bpWeakWtR
   // the R/L split tuned separately because righty vs lefty matchup leverage
   // differs in practice. Fallback (no lineup) averages R and L weights.
   // lineup = [{hand:'R'|'L'|'S'}] — the batting lineup the bullpen will face
-  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber);
-  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber);
+  const rhb = q.getBullpenWoba(teamAbbr, starterName, 'rhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber, neutralizeFn);
+  const lhb = q.getBullpenWoba(teamAbbr, starterName, 'lhb', wProj, wAct, gameDate, unknownWoba, minBF, downweightStarters, bullpenWProj, bullpenWAct, gameNumber, neutralizeFn);
   const vsRHB = rhb?.woba || null;
   const vsLHB = lhb?.woba || null;
   // Pool metrics travel WITH the wOBA, so a caller cannot use the number

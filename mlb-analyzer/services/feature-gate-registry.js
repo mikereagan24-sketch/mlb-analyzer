@@ -359,31 +359,33 @@ const GATES = [
 
   { id: 'bullpen_woba_neutralization', key: null, on_expected: null,
     criterion: 'Mechanism, same footing as park_neutral_inputs_enabled: the batter '
-             + 'and SP wOBA inputs are park-neutralized and the BULLPEN pool is not, '
-             + 'which is internally inconsistent regardless of what calibration can see.',
+             + 'and SP wOBA inputs are park-neutralized and the BULLPEN pool was not, '
+             + 'which was internally inconsistent regardless of what calibration can see.',
     criterion_type: 'mechanism',
     window_end: null,
-    deferred: true,
-    decision: null,
-    note: 'THE ASYMMETRY. getBatterWoba and getPitcherWoba both call '
-        + 'resolveNeutralizationFactor and divide the ACTUALS term by the park factor. '
-        + 'q.getBullpenWoba (db/schema.js) does neither -- it never imports '
-        + 'park-factors-woba at all -- so within one perBatterEW call, '
-        + 'pitW = pitWvsBatter * spPitW + bullpenWoba * relPitW blends a NEUTRALIZED '
-        + 'SP term with an UN-NEUTRALIZED bullpen term. '
-        + 'DIRECTION: a Coors reliever, whose actuals are inflated by his park, stays '
-        + 'inflated -- so Colorado relievers look WORSE than they are, and the error '
-        + 'scales with RELIEF_PIT_WEIGHT. Symmetrically, SF/SEA relievers look better. '
-        + 'WHY NOT FIXED YET: it changes a live input on every game, so it wants its '
-        + 'own decision rather than a drive-by extension of an existing feature. '
-        + 'NOT BLOCKED ON THE PARK-NEUTRAL A/B: the mechanism argument stands on its '
-        + 'own, exactly as it does for park_neutral_inputs_enabled -- park is otherwise '
-        + 'counted twice on the SP side and once on the bullpen side, which is not a '
-        + 'defensible resting state either way. '
-        + 'IMPLEMENTATION NOTE: getBullpenWoba lives in db/schema.js, which has no '
-        + 'access to services/park-factors-woba. That boundary is why this was never '
-        + 'extended -- it is not a recorded judgement, it is where the code stopped. '
-        + 'See docs/park-neutral-resolvability-2026-08-30.md.' },
+    decision: { date: '2026-08-31', outcome: 'extended_on_mechanism',
+                ref: 'docs/bullpen-park-neutral-2026-08-31.md' },
+    note: 'CLOSED 2026-08-31 by extending neutralization to the bullpen actuals term. '
+        + 'Same transform, same park_factors.woba_factor table, actuals-only, and the '
+        + 'same PA/TBF stint weighting for traded relievers. '
+        + 'IMPACT: level shift -0.0007 runs -- essentially nil, which was the ship '
+        + 'criterion, since the model already carries a -0.5752 total bias that a '
+        + 'one-way push would compound. 821 of 821 games moved; mean |d total| 0.0095 '
+        + 'runs, p90 0.0246, max 0.0572. Per-team the direction is right: COL improves '
+        + '0.0078 once its inflation is divided out, SEA worsens 0.0065. '
+        + 'PERMANENTLY UNRESOLVABLE BY CALIBRATION, and shipped knowing that: paired '
+        + 'd log loss +0.000019 against a +/-0.000217 interval, which would need '
+        + '~105,000 games to resolve against the 979 that makes the parent feature '
+        + 'resolvable. A full 30-club season is ~2,400. So this is NOT "underpowered, '
+        + 'resolvable at N" -- it is mechanism-only, and the resting state says so '
+        + 'rather than implying a pending verdict. '
+        + 'IMPLEMENTATION: db/schema.js cannot require services/park-factors-woba '
+        + '(that module requires db/schema for the park_factors table, so the '
+        + 'dependency would be circular). The factor arrives as a RESOLVER passed in '
+        + 'by services/jobs.js, which keeps the direction one-way and reuses '
+        + 'model.js resolveNeutralizationFactor verbatim instead of a fourth copy. '
+        + 'That boundary is what the pre-close note predicted: the reason this was '
+        + 'never extended was where the code stopped, not a judgement.' },
 
   { id: 'debug_bullpen_endpoint_divergence', key: null, on_expected: null,
     criterion: 'Known divergence, deliberately left. GET /api/debug/bullpen is a THIRD '
