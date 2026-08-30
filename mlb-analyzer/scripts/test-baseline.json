@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "EXPECTED test failures, with a reason each. Checked by scripts/run-tests.js.",
+    "",
+    "WHY THIS FILE EXISTS. Four tests had been failing for weeks and were being",
+    "carried in PR write-ups as 'unchanged from baseline' -- a count I compared",
+    "by eye. That is how a real regression eventually hides inside an accepted",
+    "failure count: the number stays 4, and nobody notices which 4.",
+    "",
+    "The runner now fails if ANY of these change: a new test fails, a listed",
+    "test's failure count moves, or a listed test starts passing (fix it and",
+    "delete the entry). An unexplained entry is not a resting state -- every",
+    "entry needs a reason and a next step, and 'classification: unexplained'",
+    "is a standing request to look at it, not a permission slip."
+  ],
+
+  "expected_failures": {
+    "test-edge-sanity-cap.js": {
+      "failures": 12,
+      "classification": "unexplained",
+      "first_seen": "on or before 2026-08-30",
+      "what": "Every moneyline assertion fails; every Totals assertion passes. The ML path emits no signal at all under this fixture -- not suppressed, absent.",
+      "why_it_matters": "Test 2's '45pp signal NOT emitted' PASSES for the wrong reason. A vacuous pass inside a failing test is worse than the failure, because it reads as coverage.",
+      "next_step": "Determine whether the ML fixture stopped producing a candidate (stale fixture) or ML emission regressed (real). Do not reclassify as benign without that answer.",
+      "benign": false
+    },
+    "test-sp-forecast-abbrev-resolver.js": {
+      "failures": 1,
+      "classification": "stale-fixture",
+      "first_seen": "on or before 2026-08-30",
+      "what": "'S. Arrighetti @ HOU resolves' returns null. Spencer Arrighetti was traded HOU -> TOR: 20 appearances for HOU through 2026-07-24, then TOR, and team_rosters now lists him TOR/SP.",
+      "why_it_matters": "The resolver is working. The fixture is pinned to a team the player no longer plays for, so the assertion tests roster history rather than the resolver.",
+      "next_step": "Repoint the fixture at the player's current team, or pick a player who has not moved. Low priority, fully explained.",
+      "benign": true
+    },
+    "test-sp-weight-haircut.js": {
+      "failures": 1,
+      "classification": "stale-fixture",
+      "first_seen": "on or before 2026-08-30",
+      "what": "'Max Scherzer: short_leash_pattern flagged on some recent start'. The test header documents the IP sequence it was written against (4.0/4.7/5.0/6.0/2.0/2.3/6.0/2.3). His trailing eight are now 5.0/4.0/5.0/5.3/6.0/2.7/3.3/2.3 -- no longer short-leash, and the single 2.0 IP / 36p anomaly-base start (2026-04-06) has aged out of the trailing window the pattern searches.",
+      "why_it_matters": "Detector is fine; the other Scherzer assertions in the same test still pass. But the fixture is pinned to a LIVE player's rolling form, so it is guaranteed to drift again.",
+      "next_step": "Re-pin to a frozen synthetic start sequence rather than a live player, so it stops rotting with the season.",
+      "benign": true
+    }
+  },
+
+  "recently_fixed": {
+    "test-stint-weighted-neutralization.js": {
+      "was": 7,
+      "fixed": "2026-08-30",
+      "what": "The file hardcoded COL=1.10, LAD=1.00, SF=0.94. The wOBA park-source switch moved them to 1.12 / 1.01 / 0.97 and all seven assertions began failing.",
+      "why_it_matters": "Not a regression -- but the test had been validating nothing since that PR, and it was MY change that broke it. It should have been updated there. It is the clearest example of the accepted-count problem: a wholesale-failing test looks the same as a hard one.",
+      "fix": "Read the factors from getWobaParkFactor instead of hardcoding, and assert the WEIGHTING MATH over them (including a betweenness property no literal can fake). A future source change now moves both sides together."
+    }
+  }
+}

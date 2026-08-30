@@ -141,17 +141,54 @@ a priced number. CIN alone carries three separate phantom "Garcia" rows.
 The other 21 were dropped by the pool-selection rule because their projections
 were poor. That is luck, not a safeguard.
 
-**Not fixed here, for two reasons.** It changes the *model's* number, and
-folding a pricing change into a no-pricing-change PR is what makes a diff
-unreviewable. And there is a confounder to resolve first: **Shane Smith is a
-real CWS pitcher**, so the roster table may simply be stale rather than the
-match being wrong. Tightening the surname match while the roster is stale
-would drop a legitimate arm. Roster freshness for those 22 has to be checked
-before the filter is touched.
+**Not fixed here:** it changes the *model's* number, and folding a pricing
+change into a no-pricing-change PR is what makes a diff unreviewable.
 
-Registered as `bullpen_pool_lastname_fallback` (`registered_unfixed`). In the
-meantime the report renders a **"not on roster"** badge on those rows, so the
-condition is visible while it sits open.
+### Roster freshness — checked, and the roster is not the problem
+
+The open question was whether `team_rosters` is stale (different fix, and
+tightening the match against a stale roster would drop a legitimate arm) or
+current (the match is wrong). **Checked 2026-08-30 — it is current.**
+
+- All 784 roster rows carry one identical `updated_at` (`2026-08-29
+  21:19:49`) — a full-table rewrite, **23.8h old**.
+- `team_rosters` is **already watched** by `utils/pipeline-freshness.js`,
+  with a per-row lag sub-check. **There is no unmonitored freshness gap here.**
+
+The discriminator is appearances: `pitcher_game_log` is complete and
+continuous (177 dates, 2026-03-03 → 2026-08-29, ~3,200–4,500 rows/month), so
+it is a valid test of who actually pitched for whom.
+
+```
+                        appearances for that team   last outing
+20 of 22                                        0   never
+CWS / Shane Smith                               5   2026-04-07
+TOR / Grant Rogers                              1   2026-03-15
+```
+
+**Verdict: the match is wrong, in all 22 cases.** Twenty never threw a pitch
+for the team that admitted them. The two who did last appeared four to five
+months ago and are correctly absent from a current roster. The stale-roster
+hypothesis is refuted and should not be re-raised.
+
+Two things make Shane Smith worse than a name collision:
+
+- **He is a starter.** All five logged outings are `was_starter=1`, so he
+  would not belong in a *bullpen* pool even if he were rostered.
+- **His actuals are not this season's.** 338/278 BF against 84 BF logged —
+  a ratio of **7.33×**, where every current pitcher checked runs 0.6–1.2×
+  (Hicks 1.20, Taylor 0.90, Whitlock 0.95, Skubal 0.93). Those actuals
+  dominate the actuals-heavy 0.25/0.75 bullpen blend.
+
+**Measured cost today:** removing him moves CWS's team bullpen wOBA by only
+**−0.0006**, but the handedness splits move **+0.0028 vsLHB** and **−0.0033
+vsRHB** and partly cancel in the blend. Small, not zero — and it is one
+phantom. The other 21 were held out by the pool-selection rule, which is luck,
+not a safeguard.
+
+Registered as `bullpen_pool_lastname_fallback` (`registered_unfixed`), audit
+re-runnable via `scripts/audit-lastname-fallback-roster.js`. The report renders
+a **"not on roster"** badge on those rows meanwhile.
 
 ## 7. Two wiring defects caught while building this
 
@@ -203,10 +240,33 @@ correctly; this proves it is honoured.
   appears as a row; `on_roster` present on every row.
 - `scripts/test-bullpen-availability.js` — 38 → **44 assertions**, 0 failed.
 - `scripts/bullpen-report-source-diff.js` — both diffs, re-runnable.
-- Full suite: no new failures. The four pre-existing failures
-  (`edge-sanity-cap` 12, `stint-weighted-neutralization` 7,
-  `sp-forecast-abbrev-resolver` 1, `sp-weight-haircut` 1) are unchanged from
-  the pre-change baseline, confirmed by stashing.
+- `scripts/run-tests.js` — **new**, runs all 18 suites and diffs against
+  `scripts/test-baseline.json`. Reports `OK`.
+
+### The carried failures, now itemised rather than counted
+
+"Unchanged from baseline" had been doing too much work: four suites had been
+failing for weeks and the claim was a count compared by eye. **That is how a
+regression hides — the number stays 4 and nobody checks which 4.** Itemising
+them found that one was ours:
+
+| Suite | Was | Now | What it actually was |
+|---|---|---|---|
+| `stint-weighted-neutralization` | 7 | **0 — fixed** | Hardcoded `COL=1.10, LAD=1.00, SF=0.94`. **Our own wOBA park-source switch** moved them to `1.12 / 1.01 / 0.97`. Not a regression — but it had been validating nothing since that PR, and should have been updated there. |
+| `sp-forecast-abbrev-resolver` | 1 | 1 | **Stale fixture.** Spencer Arrighetti was traded HOU→TOR; the fixture is pinned to his old team. Resolver is fine. |
+| `sp-weight-haircut` | 1 | 1 | **Stale fixture.** Scherzer's trailing eight are now `5.0/4.0/5.0/5.3/6.0/2.7/3.3/2.3`, no longer short-leash, and his one 2.0 IP anomaly aged out of the trailing window. Pinned to a *live* player's rolling form, so it will drift again. |
+| `edge-sanity-cap` | 12 | 12 | **Unexplained — not benign.** Every moneyline assertion fails while every Totals assertion passes: the ML path emits nothing at all, neither suppressed nor emitted. Worse, Test 2's *"45pp signal NOT emitted"* **passes for the wrong reason** — a vacuous pass inside a failing suite reads as coverage. |
+
+The `stint-weighted-neutralization` fix reads the factors from
+`getWobaParkFactor` rather than hardcoding them, and asserts the **weighting
+math** over them — including a betweenness property (`LAD < weighted < COL`)
+that no literal can fake. A future source change now moves both sides together.
+
+`run-tests.js` makes the comparison mechanical and strict in **both**
+directions: a new failure, a moved failure count, *or* a baselined test that
+starts passing all fail the run. That last arm matters as much as the first —
+a baseline that is never pruned becomes a list nobody rechecks. All three arms
+were verified to fire.
 
 ## 10. Related
 
