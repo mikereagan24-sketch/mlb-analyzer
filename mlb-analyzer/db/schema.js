@@ -3705,14 +3705,38 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const bullpenProj = projRows.filter(r => {
     const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
     const pn = normName(nameClean);
-    const last = pn.split(' ').pop();
     // The starter is not an exclusion worth reporting -- he is not a
     // reliever and was never in the pool. Recording him would bury the
     // availability signal in noise on every single game.
     if (starterNorm && pn.includes(starterNorm)) return false;
     if (fatiguedSet.has(pn)) { note(pn, reasonFor(pn)); return false; }
     if (hasRoster) {
-      return activeRPSet.has(pn) || [...activeRPSet].some(n => n.endsWith(' '+last));
+      // EXACT NAME ONLY. (2026-08-30)
+      //
+      // This used to fall back to a SURNAME match:
+      //   || [...activeRPSet].some(n => n.endsWith(' '+last))
+      // which never checked the first name, so any projection row sharing a
+      // surname with a rostered RP was admitted as a pool candidate.
+      //
+      // MEASURED 2026-08-30, all 30 teams (scripts/measure-roster-match-rules.js):
+      //   EXACT   admits 249 -- which is ALL 249 rostered RPs, 1:1
+      //   SURNAME admits 271 -- the extra 22 are all non-roster players
+      //
+      // So the fallback rescued NOTHING legitimate: every rostered reliever
+      // already has an exactly-matching projection row. Its only effect was
+      // the phantoms -- CWS/Shane Smith (admitted via Hagen Smith) reached a
+      // PRICED pool carrying actuals that are not even this season's.
+      //
+      // A first-initial rule was measured too and is NOT enough: it still
+      // admits SF/Darien Smith off the roster's Dylan Smith.
+      //
+      // Matching on mlb_id is not available here -- projection rows carry
+      // only a 'Name TEAM' string with no id -- and is unnecessary at 249/249.
+      //
+      // SAFE AGAINST NAME-FORMAT DRIFT: a rostered arm that loses its exact
+      // projection match is not silently dropped. It falls through to the
+      // roster-fallback injection below and surfaces in `fallbacks`.
+      return activeRPSet.has(pn);
     }
     return r.sample_size >= 5;
   });
@@ -3799,17 +3823,22 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
 
   // Inject fallback entries for active RPs who have no proj row (injury
   // callups, recent trades, etc). Skip the SP and any fatigued pitchers.
-  // Last-name collision with an existing proj entry = treat as same person.
+  //
+  // THE SURNAME COLLISION SKIP WAS REMOVED HERE TOO. (2026-08-30)
+  // It read `if (rLast && representedLast.has(rLast)) continue;` -- i.e.
+  // 'someone with this surname is already in the pool, so this must be the
+  // same person'. That is the same identity assumption as the filter bug
+  // above, and it fails the same way: it would drop a genuinely rostered
+  // reliever because an unrelated namesake was already present, silently,
+  // with no note() recording it. Now that admission is exact-name, a roster
+  // RP who is not already represented genuinely has no projection row and
+  // belongs in the fallback list where he is visible as such.
   if (hasRoster) {
     const representedFull = new Set(pitchers.map(p => p.name));
-    const representedLast = new Set(pitchers.map(p => { var parts = p.name.split(' '); return parts[parts.length-1]; }));
     for (const r of rosterRows) {
       const rName = normName(r.player_name);
-      const rParts = rName.split(' ');
-      const rLast = rParts[rParts.length-1];
       if (!rName) continue;
       if (representedFull.has(rName)) continue;
-      if (rLast && representedLast.has(rLast)) continue;
       if (starterNorm && rName.includes(starterNorm)) continue;
       if (fatiguedSet.has(rName)) { note(rName, reasonFor(rName)); continue; }
       pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true,
