@@ -1460,9 +1460,19 @@ function renderGameGrid(games,date){
                     : sup.reason === 'edge_soft_cap' ? 'SOFT-CAP'
                     : String(sup.reason || 'CAPPED').toUpperCase();
     var typeSide = (sup.signal_type || '?').toUpperCase() + ' ' + (sup.signal_side || '?').toUpperCase();
-    var tt = 'Signal suppressed by edge cap. Model line ' + (sup.model_line != null ? sup.model_line : '?')
-           + ' vs market ' + (sup.market_line != null ? sup.market_line : '?')
-           + ' → ' + edge + ' edge exceeded the cap threshold. Not a play.';
+    // The tooltip used to assert 'suppressed by edge cap' for every reason.
+    // Market-gate suppressions have no trustworthy edge -- the market pair
+    // is the thing that failed -- so claiming one exceeded a threshold would
+    // be inventing a number about a market we just rejected.
+    var isCap = sup.reason === 'edge_hard_cap' || sup.reason === 'edge_soft_cap';
+    var tt = isCap
+      ? ('Signal suppressed by edge cap. Model line ' + (sup.model_line != null ? sup.model_line : '?')
+         + ' vs market ' + (sup.market_line != null ? sup.market_line : '?')
+         + ' -> ' + edge + ' edge exceeded the cap threshold. Not a play.')
+      : ('ML signals suppressed before pricing: ' + String(sup.reason || 'market gate') + '. '
+         + 'The market shown on this game was rejected as untrustworthy, so no edge was '
+         + 'computed against it. Model line ' + (sup.model_line != null ? sup.model_line : '?')
+         + ', rejected market ' + (sup.market_line != null ? sup.market_line : '?') + '. Not a play.');
     return '<span class="sig-pill suppressed" title="' + tt.replace(/"/g,'&quot;') + '">'
          + '<span class="sup-glyph">⊘</span>'
          + edge + ' ' + typeSide

@@ -1607,6 +1607,42 @@ function getSignals(game, modelResult, settings, outSuppressed) {
   // rows use just the direction. catKey is intentionally NOT used for
   // new emissions — it embeds the now-null label as 'star-' which
   // would corrupt category-based grouping.
+  // SILENT-GATE SUPPRESSION IS RECORDED. (2026-08-31)
+  //
+  // Before this, every gate that ran BEFORE the push above was invisible.
+  // outSuppressed was populated only by the edge-cap loop further down,
+  // and that loop iterates over signals that were already pushed -- so a
+  // signal killed by haveAnyML could not produce an audit row or a pill.
+  // The operator saw a market price in the UI (the game_log row is
+  // deliberately left unmodified) and no signal, with nothing anywhere
+  // saying why.
+  //
+  // signalsForGame nulls the runtime market_*_ml on three conditions --
+  // structural pair impossibility, sources disagreeing on the favorite,
+  // and a DH-crossed source rejection -- and now passes the reason and the
+  // pre-null lines through on the game object so this can record them.
+  //
+  // Recorded BEFORE the cap logic, and deliberately outside it: a market
+  // gate has nothing to do with the edge cap and must be visible whether
+  // or not SIGNAL_EDGE_CAP_ENABLED is on.
+  //
+  // edge is NULL on purpose. The market pair that triggered the gate is
+  // the thing we do not trust, so any edge computed against it would be a
+  // fabricated number in an operator-facing pill. The pill renders '??pp'
+  // and the reason, which is the honest pair.
+  if (!haveAnyML && game._mlGateReason && Array.isArray(outSuppressed)) {
+    outSuppressed.push({
+      type: 'ML',
+      side: 'both',
+      reason: game._mlGateReason,
+      edge: null,
+      marketLine: game._mlGateRawAway != null ? game._mlGateRawAway : null,
+      modelLine: modelResult.aML != null ? modelResult.aML : null,
+      category: 'market_gate',
+      gate: true,
+    });
+  }
+
   const categorized = signals.map(s => {
     let category;
     if (s.type === 'ML') {

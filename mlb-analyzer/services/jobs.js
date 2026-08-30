@@ -962,6 +962,19 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     console.warn('[signal-suppress] ' + gameRow.game_date + '/' + gameRow.game_id
       + ': ML signals suppressed — ' + reason
       + ' (market_away_ml=' + game.market_away_ml + ' market_home_ml=' + game.market_home_ml + ')');
+    // CARRY THE REASON, don't just null. (2026-08-31)
+    //
+    // Nulling alone made this gate invisible: getSignals saw a null
+    // market, never pushed an ML signal, and outSuppressed is only
+    // populated by the edge-cap loop over already-pushed signals. So the
+    // operator got a market price in the UI (this row is deliberately
+    // NOT modified, for post-lock immutability) and no signal, with no
+    // pill and nothing in bet_signal_audit. The console.warn above was
+    // the only trace, and nobody reads server logs to find out why a
+    // game is quiet.
+    game._mlGateReason = reason;
+    game._mlGateRawAway = game.market_away_ml;
+    game._mlGateRawHome = game.market_home_ml;
     game.market_away_ml = null;
     game.market_home_ml = null;
   }
@@ -1027,7 +1040,11 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
           game_id: gameRow.game_id,
           signal_type: sup.type,
           signal_side: sup.side,
-          action: 'suppressed_edge_cap',
+          // A market gate is not an edge cap. Writing both under the same
+          // action would make 'burst of edge-cap suppressions' -- the
+          // input-breakage alarm this table exists for -- fire on a
+          // completely different failure.
+          action: sup.gate ? 'suppressed_market_gate' : 'suppressed_edge_cap',
           bet_line: null,
           closing_line: null,
           clv: null,
