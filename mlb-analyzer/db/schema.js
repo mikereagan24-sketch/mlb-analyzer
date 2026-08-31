@@ -2370,6 +2370,38 @@ const q = {
       updated_at                 = datetime('now')
     WHERE bet_signals.bet_locked_at IS NULL
   `),
+  // Reactivate a LOCKED row whose signal is emitting again. (2026-08-30)
+  //
+  // upsertSignal sets is_active = 1, but that assignment lives inside its
+  // `WHERE bet_signals.bet_locked_at IS NULL` guard, so it never reaches a
+  // locked row. deactivateSignal has no such guard -- its own comment says
+  // the lock freezes the BASELINE, not the is_active state. The two
+  // disagreed in effect: for a locked bet, deactivation was a ONE-WAY DOOR.
+  // It could go dark and never come back however good the edge got, and
+  // `notes` was stuck behind the same guard so the card kept displaying the
+  // explanation written at the moment it went dark.
+  //
+  // Observed 2026-08-30 on prod: cin-chc ML/away deactivated at 8.29pp (a
+  // hard-cap suppression), then sat inactive at 5.81pp -- above the 1pp
+  // floor, below the 6pp soft cap, i.e. a clean emit -- still showing the
+  // 8.29pp note. 2 of 7 ML logged bets that day were stuck this way.
+  //
+  // THE SET LIST IS DELIBERATELY TWO COLUMNS PLUS updated_at. Everything the
+  // lock exists to protect -- market_line, model_line, edge_pct, bet_line,
+  // bet_locked_at, price_venue, closing_line, clv, the emit-time snapshot --
+  // is absent by construction, not by a WHERE clause. That is the whole
+  // point of doing this as a separate statement rather than loosening the
+  // guard on upsertSignal: a re-priced locked bet corrupts CLV and grading,
+  // and this statement cannot re-price anything because it names no price.
+  reactivateLockedSignal: db.prepare(`
+    UPDATE bet_signals SET
+      is_active  = 1,
+      notes      = NULL,
+      updated_at = datetime('now')
+    WHERE game_date = ? AND game_id = ? AND signal_type = ? AND signal_side = ?
+      AND bet_locked_at IS NOT NULL
+      AND is_active = 0
+  `),
   // Deactivate a row whose signal no longer emits. Applies to BOTH locked
   // and unlocked rows — the lock semantically freezes the *baseline*
   // (market_line, edge_pct, price_venue) not the *is_active* state.
