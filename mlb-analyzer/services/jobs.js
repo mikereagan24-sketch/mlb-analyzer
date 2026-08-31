@@ -563,6 +563,28 @@ function checkBookDivergence(awayML, homeML, xcheckAwayML, xcheckHomeML, xcheckS
  *
  * notes: free-form deactivation reason or manual annotation.
  */
+// Name the actual reason a signal stopped being emitted. (2026-08-30)
+//
+// outSuppressed carries what getSignals removed and why. A gate record
+// uses side 'both' because the ML market is rejected as a pair, so match
+// it against either side.
+function _deactivationReason(dType, dSide, finalMdl, mktRef, outSuppressed) {
+  const base = 'Model ' + dType.toLowerCase() + ' at rerun: ' + finalMdl + mktRef;
+  const rec = (Array.isArray(outSuppressed) ? outSuppressed : []).find(x =>
+    x && x.type === dType && (x.side === dSide || x.side === 'both'));
+  if (!rec) return base + ' — edge no longer meets threshold.';
+  if (rec.reason === 'edge_hard_cap') {
+    const pp = (rec.edge != null) ? (rec.edge * 100).toFixed(1) + 'pp' : 'the computed edge';
+    // Stated so it cannot be misread as the model going cold.
+    return base + ' — edge ' + pp + ' EXCEEDED the hard cap and was suppressed as'
+      + ' implausible. The model still likes this side; the number is distrusted.';
+  }
+  if (rec.gate) {
+    return base + ' — ML market rejected before pricing (' + String(rec.reason)
+      + '). No edge was computed against it.';
+  }
+  return base + ' — suppressed (' + String(rec.reason || 'unspecified') + ').';
+}
 function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // opts.venueRowsByGid: optional map { [game_id]: comparisonRow } from
   // services/odds-comparison.js runComparison, prefetched slate-wide so
@@ -1709,7 +1731,29 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     const note = suppressed
       ? (REASON_TEXT[reasonKey] || ('Model suppressed (' + reasonKey + ')'))
         + ' (' + (model._suppressed_detail || 'no detail') + ') — model output suppressed, signal deactivated.'
-      : 'Model ' + dType.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';
+      : _deactivationReason(dType, dSide, finalMdl, mktRef, outSuppressed);
+
+    // WHY THE SIGNAL LEFT, not an assumption about why. (2026-08-30)
+    //
+    // The line above used to be an unconditional
+    //   '... — edge no longer meets threshold.'
+    // for every non-_suppressed deactivation. That is only ONE of the ways
+    // a signal drops out of `signals`. The edge cap removes signals AFTER
+    // they are computed, so a capped signal is equally absent from the
+    // array and got the below-floor text.
+    //
+    // Observed on a real logged bet, col-atl 2026-08-30, both rows written
+    // in the same second:
+    //   18:29:47 suppressed_edge_cap  {"reason":"edge_hard_cap","edge":0.1004}
+    //   18:29:47 deactivated          '... edge no longer meets threshold.'
+    //
+    // The note said the OPPOSITE of the truth. The model had not cooled on
+    // that bet -- it liked it at 10.04pp, so much that the 8pp hard cap
+    // rejected it as implausible. 'Model went off it' and 'model is wildly
+    // on it and we distrust the number' point a reader in opposite
+    // directions when deciding whether to hedge. Same defect the
+    // 'Lineup incomplete' hardcode had, in its sibling branch.
+
     q.deactivateSignal.run(note, gameRow.game_date, gameRow.game_id, dType, dSide);
     try {
       q.insertBetSignalAudit({

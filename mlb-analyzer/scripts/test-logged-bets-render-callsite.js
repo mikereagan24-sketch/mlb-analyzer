@@ -109,6 +109,17 @@ const apiSrc = fs.readFileSync(path.join(R, 'routes/api.js'), 'utf8');
 ok(apiSrc.includes('logged_bets: loggedByGame[g.game_id] || []'),
    'the API still attaches logged_bets to each game');
 
+// ---- 6. the deactivation note names the REAL reason -------------------
+// A logged bet displays its note as the explanation for why the signal
+// went away. col-atl 2026-08-30 was hard-capped at 10.04pp and the note
+// said 'edge no longer meets threshold' -- the opposite of the truth.
+const jobsSrc = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');
+ok(jobsSrc.includes('function _deactivationReason('),
+   'the deactivation note is built by a reason-aware helper');
+ok(!/: 'Model ' + dType.toLowerCase() + ' at rerun: ' + finalMdl + mktRef + ' — edge no longer meets threshold.';/.test(jobsSrc),
+   'the unconditional below-floor note is gone from the deactivation branch');
+ok(jobsSrc.includes('EXCEEDED the hard cap'),
+   'a hard-capped signal says so, rather than claiming the edge went weak');
 console.log('');
 console.log(pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
