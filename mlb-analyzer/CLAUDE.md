@@ -1359,6 +1359,87 @@ inside a **comment** counts as a hit. For an audit that is the correct
 direction: a false positive costs a glance, a false negative costs six
 months.
 
+## A new cause needs a new message — grep the old one (2026-08-31)
+
+When you add a cause to an existing branch point, **grep for user-facing
+strings that describe the old cause unconditionally.** A message written when
+one cause was the *only* cause becomes a lie the moment a second cause
+reaches the same code path, and it keeps being emitted with total confidence.
+
+Three instances in one sequence. All were cheap to fix; all cost real
+confusion first.
+
+| Message | Written when | Broke when | Cost |
+|---|---|---|---|
+| `api()` 401 → "enter app password" | a 401 could only mean a bad app password | admin-token auth was added | sent the operator hunting for a password they had never set |
+| `'Lineup incomplete'` on every model suppression | `incomplete_lineup` was the only `_suppressed` reason | `no_park_factor`, `bullpen_unavailable`, post-start pricing were added | named the wrong input to go fix |
+| `'edge no longer meets threshold'` on every deactivation | below-floor was the only way to stop emitting | the edge cap, then the market gates, were added | said the model had **cooled** on a bet it liked at 10.04pp — the opposite reading, while deciding whether to hedge |
+
+### The shape
+
+All three are the same defect:
+
+1. A branch point has one cause.
+2. A message is written that names that cause **without a conditional** —
+   correct, and cheap, at the time.
+3. A second cause is added upstream that reaches the same branch point.
+4. The message is not touched, because nothing in the diff points at it.
+
+Step 4 is the trap. The new cause is added in a different file from the
+message, and no test fails: the string is still produced, still well-formed,
+still displayed. Only its *truth* changed, and nothing type-checks truth.
+
+**The failure is worse than silence.** A missing explanation makes the reader
+look. A confident wrong one makes them look in the wrong place — and in the
+deactivation case, told them the opposite of what was true.
+
+### The check
+
+When a change adds a cause to an existing branch point — a new `_suppressed`
+reason, a new rejection path, a new auth failure mode, a new reason a signal
+stops emitting — grep the branch point for message construction that has no
+conditional:
+
+```bash
+# the string literals a user could read, near the branch you touched
+grep -rn "note = \|message = \|reason = \|detail: \|title=\|textContent" \
+  services/ routes/ public/ utils/ | grep -v node_modules
+
+# and specifically: assignments with NO ternary or lookup table on the line
+# (an unconditional string where the cause count just went up)
+```
+
+For each hit, ask: **could my new cause reach this line?** If yes, the message
+needs a branch, a lookup table keyed by cause, or the cause passed through to
+it.
+
+### What "fixed" looks like
+
+Not "add my new case to the string". The correct shape is a **lookup keyed by
+the actual cause**, so the *next* cause fails loudly rather than inheriting
+someone else's text:
+
+```js
+const REASON_TEXT = {
+  incomplete_lineup:   'Lineup incomplete',
+  bullpen_unavailable: 'Bullpen below the usable floor',
+  no_park_factor:      'No park factor for this venue',
+};
+// unknown key falls through to a form that NAMES the gap
+REASON_TEXT[reasonKey] || ('Model suppressed (' + reasonKey + ')')
+```
+
+The fallback matters as much as the table. `REASON_TEXT[k] || 'Lineup
+incomplete'` would have reproduced the original bug.
+
+### Why this earns a checklist line
+
+It is not caught by tests, types, or review of the diff in isolation — the
+message lives outside the diff. It is only caught by asking, at the moment a
+cause is added, *what already explains this branch to a human.* Three
+occurrences in one working sequence is enough to make it a habit rather than
+a lesson.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
