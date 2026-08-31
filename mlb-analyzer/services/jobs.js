@@ -1575,6 +1575,45 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       model_home_ml_at_emit:      _stdModelHomeMlAtEmit,
       model_away_ml_at_emit:      _stdModelAwayMlAtEmit,
     });
+
+    // REACTIVATE A LOCKED ROW THAT IS EMITTING AGAIN. (2026-08-30)
+    //
+    // upsertSignal above sets is_active = 1, but that lives inside its
+    // WHERE bet_locked_at IS NULL guard and never reaches a locked row.
+    // deactivateSignal has no such guard, so for a locked bet going dark
+    // was a one-way door -- and notes was stuck behind the same guard,
+    // which is why the card kept showing the explanation written at the
+    // moment it went dark rather than the current situation.
+    //
+    // Runs only when the pre-pass row was LOCKED and INACTIVE. The
+    // statement touches is_active, notes and updated_at only; every
+    // field the lock protects is absent from its SET list by
+    // construction, so this cannot re-price a locked bet.
+    if (_preRow && _preRow.bet_locked_at && _preRow.is_active === 0) {
+      try {
+        const _rr = q.reactivateLockedSignal.run(
+          gameRow.game_date, gameRow.game_id, sig.type, sig.side);
+        if (_rr && _rr.changes) {
+          console.log('[signal-reactivate] ' + gameRow.game_date + '/' + gameRow.game_id
+            + ' ' + sig.type + '/' + sig.side + ': locked bet is emitting again'
+            + ' (edge ' + (sig.edge != null ? (sig.edge * 100).toFixed(2) + 'pp' : 'n/a')
+            + ') -- reactivated, baseline left frozen at lock time.');
+          try {
+            q.insertBetSignalAudit({
+              signal_id: _preRow.id, game_date: gameRow.game_date, game_id: gameRow.game_id,
+              signal_type: sig.type, signal_side: sig.side, action: 'reactivated',
+              bet_line: _preRow.bet_line, closing_line: _preRow.closing_line, clv: _preRow.clv,
+              source: 'process_game_signals_upsert',
+              detail: 'locked bet re-emitting at edge '
+                + (sig.edge != null ? (sig.edge * 100).toFixed(2) + 'pp' : 'n/a')
+                + '; baseline frozen at lock time',
+            });
+          } catch (e) { /* audit failure must not block the lifecycle */ }
+        }
+      } catch (e) {
+        console.error('[signal-reactivate] failed for ' + gameRow.game_id + ': ' + e.message);
+      }
+    }
     // Refresh audit trail. Records action='insert' on first sight and
     // action='refresh' on every subsequent pass that changes a tracked
     // column. Locked rows produce no audit because the WHERE guard on
