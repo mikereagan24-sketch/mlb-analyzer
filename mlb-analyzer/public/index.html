@@ -78,7 +78,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .gml{font-weight:500}.gtot{color:var(--text2)}
 /* Stage 3b — per-play venue flags on slate cards */
 .gcard-play-venue{display:flex;flex-direction:column;gap:2px;margin:4px 0 2px}
-      renderLoggedBets(g)+
 .pv-line{font-size:11px;padding:2px 6px;border-radius:3px;line-height:1.35}
 .pv-poly  {background:rgba(74,144,226,0.10);color:#4a90e2;border-left:3px solid #4a90e2}
 .pv-kalshi{background:rgba(46,204,113,0.10);color:#2ecc71;border-left:3px solid #2ecc71}
@@ -1566,6 +1565,11 @@ function renderGameGrid(games,date){
       // after the async odds-comparison fetch. Empty by default; only
       // fills for games with ≥1 emitted signal. See renderPlayVenueFlags().
       (!g.is_postponed && sigs.length ? '<div class="gcard-play-venue" id="gcpv-'+g.game_id+'"></div>' : '')+
+      // Logged bets with no live signal. NOT gated on sigs.length -- the
+      // entire point is a struck bet the model no longer emits for, so
+      // gating it on the presence of a signal would re-hide exactly the
+      // rows it exists to show.
+      renderLoggedBets(g)+
       '<div class="gactions">'+
       '<button class="gcard-btn ga-analyze" onclick="analyzeGame(\''+g.game_id+'\',\''+date+'\')">▶ Analyze</button>'+
       '<button class="gcard-btn ga-matchup" onclick="openMatchup(\''+g.game_id+'\')">Matchup</button>'+
