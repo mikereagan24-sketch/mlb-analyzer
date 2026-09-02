@@ -923,7 +923,36 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   let _venueByMarket = { ml_away: null, ml_home: null }; // filled in when override applies
   let _venueStaleFlag = _venueAware; // start true; cleared once a valid override lands
   let _venueServedFromSnapshot = false; // audit flag when tier-1 came from snapshot
-  if (_venueAware) {
+  // START STATE, COMPUTED ONCE AND EARLY. (2026-09-02)
+  //
+  // This used to be evaluated only at the refusal further down, AFTER the
+  // venue override had re-fetched live prices, after the market gate had
+  // rejected them, and after the suppression audit row that puts a pill on
+  // the operator's card had already been written. The refusal did its job
+  // -- no signal price was written -- but three artifacts of a live in-game
+  // market had already landed by the time it ran. sd-cin 2026-09-02.
+  //
+  // Non-fatal: an unknown start state must not take the pass down, and
+  // false means "proceed as before", which is the pre-existing behaviour.
+  let _startedNow = false;
+  try { _startedNow = !!gameHasStarted(gameRow, gameRow.game_date); }
+  catch (e) { _startedNow = false; }
+
+  // FIX 3: the venue override does not run on a started game.
+  //
+  // _pickBestML reads whatever Kalshi/Poly are quoting RIGHT NOW. On a
+  // live game that is an in-game price (-1775/-2580 on sd-cin, top of the
+  // 8th). Nothing here consulted odds_locked_at or the start state, so the
+  // odds job could correctly freeze game_log at the pre-game price while
+  // this path kept pulling live quotes into the pricing inputs every pass.
+  // The magnitude guard rejected them, which is the second line of defence
+  // working; this is the first.
+  if (_venueAware && _startedNow) {
+    console.log('[venue-guard] ' + gameRow.game_id + ': game has started --'
+      + ' skipping the venue-aware override; live in-game quotes are not a'
+      + ' pre-game market.');
+  }
+  if (_venueAware && !_startedNow) {
     // Tier discipline (mirrors refreshSignalBaselines):
     //   (a) prefetched opts.venueRowsByGid (only runLineupJob provides this)
     //   (b) sync peek of runComparisonCached (60s TTL, shared with jobs+route)
@@ -974,7 +1003,19 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   //      last-good market via COALESCE, but that value is now
   //      untrustworthy relative to the fresh source signal, so we
   //      suppress until the next clean pass.
-  const _pairReason = checkMarketMLPairSanity(game.market_away_ml, game.market_home_ml);
+  // FIX 2: name the real cause. checkMarketMLPairSanity is source-agnostic
+  // and, for out-of-band magnitudes, says "treating as corrupt feed data".
+  // That is right for a feed sentinel and WRONG for a started game, where
+  // an extreme line is a legitimate in-game market. The message sent the
+  // first reader of sd-cin to the April corrupt-feed class. market-sanity
+  // stays pure; the caller, which is the thing that knows the game state,
+  // rewords it.
+  let _pairReason = checkMarketMLPairSanity(game.market_away_ml, game.market_home_ml);
+  if (_pairReason && _startedNow) {
+    _pairReason = 'live in-game market on a started game ('
+      + game.market_away_ml + ' / ' + game.market_home_ml
+      + ') -- not a pre-game price, and not corrupt feed data';
+  }
   const _favDisagree = /disagree on favorite/i.test(gameRow.odds_flag_reason || '');
   const _dhCrossed = /start-time mismatch|DH-crossed|wrong-leg market/i.test(gameRow.odds_flag_reason || '');
   if (_pairReason || _favDisagree || _dhCrossed) {
@@ -1053,7 +1094,23 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // input-breakage alarm.
   const outSuppressed = [];
   const signals = suppressed ? [] : getSignals(game, model, settings, outSuppressed);
-  if (outSuppressed.length) {
+  // FIX 1: no operator-facing suppression artifact from a post-start pass.
+  //
+  // This block writes the bet_signal_audit row that renders as a pill. It
+  // sits ~290 lines ABOVE the post-start refusal, so a started game could
+  // produce a pill describing a live in-game market while the refusal
+  // below correctly declined to price it. The guard was not failing --
+  // it simply did not cover the artifact added in #332.
+  //
+  // The refusal still runs below and still writes refused_post_start_pricing,
+  // so the pass is not silent; it just does not editorialise about a market
+  // it has already decided not to trust.
+  if (_startedNow && outSuppressed.length) {
+    console.log('[signals] ' + gameRow.game_id + ': game has started -- not writing '
+      + outSuppressed.length + ' suppression audit row(s); the post-start refusal below'
+      + ' is the correct record for this pass.');
+  }
+  if (!_startedNow && outSuppressed.length) {
     for (const sup of outSuppressed) {
       try {
         q.insertBetSignalAudit({
@@ -1351,9 +1408,9 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   //
   // A REFUSAL, not a flag: the price it would write is a live in-game
   // price, which is the thing this whole exercise is about.
-  let _startedNow = false;
-  try { _startedNow = !!gameHasStarted(gameRow, gameRow.game_date); }
-  catch (e) { _startedNow = false; }
+  // _startedNow is computed once, near the top of this function, so the
+  // venue override, the gate wording, the suppression audit and this
+  // refusal all agree about one thing rather than re-deciding it.
   if (_startedNow && signals.length) {
     console.log('[signals] ' + gameRow.game_id + ': game has started -- refusing to'
       + ' write ' + signals.length + ' signal price(s). Closing capture and grading are'
@@ -3278,7 +3335,10 @@ async function runPitcherUsageBackfill() {
 async function refreshFirstPitch(dateStr, opts) {
   opts = opts || {};
   const { fetchFirstPitch } = require('./first-pitch');
-  // opts.onlyMissing -- fetch only rows with no scheduled_start_utc yet.
+  // opts.onlyMissing -- fetch rows that are still missing something we need:
+  // no start anchor at all, OR a game whose scheduled start has passed and
+  // whose real first pitch has not been recorded yet. See the note on the
+  // query below for why the second clause exists and why it stays bounded.
   //
   // Added 2026-08-26 for the lineup-capture path, which needs a START
   // ANCHOR on TODAY's slate rather than yesterday's. The full refresh is
@@ -3291,9 +3351,35 @@ async function refreshFirstPitch(dateStr, opts) {
   // The 4AM score-job caller passes nothing and keeps the full refresh,
   // which it needs: first_pitch_utc and game_status DO change through the
   // day, and that path is what fills them in after the fact.
+  // ONLY-MISSING NOW MEANS "missing something we still need". (2026-09-02)
+  //
+  // The predicate was `scheduled_start_utc IS NULL`. That is a sound skip
+  // for the lineup-capture caller's OWN need -- it wants a start anchor and
+  // an anchor does not change. But it is the reason first_pitch_utc was
+  // never populated during a live slate: the first lineup pass of the day
+  // sets scheduled_start_utc, and every pass after it skips the game
+  // entirely. The only full refresh runs in the 4AM score job FOR
+  // YESTERDAY, so first_pitch_utc has only ever been a retrospective value.
+  //
+  // Measured 2026-09-02, mid-slate: 0/15 games had first_pitch_utc, all 15
+  // read game_status 'Scheduled', while one was in the top of the 8th.
+  // Yesterday's and the day before's slates: 15/15 and 12/12 populated.
+  // So gameHasStarted's authoritative branch has never once fired inside
+  // the live window it exists to protect -- every started-game decision has
+  // come from the scheduled_start_utc fallback since #306 shipped.
+  //
+  // WHY THIS IS BOUNDED, which is what the old predicate was protecting.
+  // We add only games whose scheduled start has PASSED and which still have
+  // no recorded first pitch. That set is empty before the day's first game,
+  // and each game leaves it permanently as soon as its first pitch lands.
+  // It cannot become the 150-calls-a-day re-fetch the original skip avoided.
   const rows = db.prepare(
     'SELECT game_date, game_id, game_pk FROM game_log WHERE game_date = ? AND game_pk IS NOT NULL'
-    + (opts.onlyMissing ? ' AND scheduled_start_utc IS NULL' : '')
+    + (opts.onlyMissing
+        ? " AND (scheduled_start_utc IS NULL"
+          + "      OR (first_pitch_utc IS NULL"
+          + "          AND scheduled_start_utc <= strftime('%Y-%m-%dT%H:%M:%SZ','now')))"
+        : '')
   ).all(dateStr);
   if (!rows.length) return 0;
   const upd = db.prepare(
