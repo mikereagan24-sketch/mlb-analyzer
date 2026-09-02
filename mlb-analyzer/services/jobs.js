@@ -3373,13 +3373,26 @@ async function refreshFirstPitch(dateStr, opts) {
   // no recorded first pitch. That set is empty before the day's first game,
   // and each game leaves it permanently as soon as its first pitch lands.
   // It cannot become the 150-calls-a-day re-fetch the original skip avoided.
+  // REVERTED 2026-09-02 during the OOM incident. The widened predicate
+  // below is the ONLY new allocation path #338 introduced: it made every
+  // lineup pass fetch statsapi's feed/live -- the largest payload it
+  // serves, megabytes of JSON per game -- for every started game without a
+  // recorded first pitch, ~10 times a day instead of once.
+  //
+  // It is NOT established that this caused the crash loop; the failures at
+  // 16:29-16:35 PT preceded the 5PM lineup pass, and boot fires five
+  // concurrent heavy jobs on a 512MB instance against a ~670MB database,
+  // which is the structural problem. But this is a new recurring
+  // multi-megabyte parse, it is mine, and it buys an observable rather
+  // than a protection -- so it goes first and it goes without argument.
+  //
+  // The widened form, to restore once boot memory is bounded:
+  //   AND (scheduled_start_utc IS NULL
+  //        OR (first_pitch_utc IS NULL
+  //            AND scheduled_start_utc <= strftime('%Y-%m-%dT%H:%M:%SZ','now')))
   const rows = db.prepare(
     'SELECT game_date, game_id, game_pk FROM game_log WHERE game_date = ? AND game_pk IS NOT NULL'
-    + (opts.onlyMissing
-        ? " AND (scheduled_start_utc IS NULL"
-          + "      OR (first_pitch_utc IS NULL"
-          + "          AND scheduled_start_utc <= strftime('%Y-%m-%dT%H:%M:%SZ','now')))"
-        : '')
+    + (opts.onlyMissing ? ' AND scheduled_start_utc IS NULL' : '')
   ).all(dateStr);
   if (!rows.length) return 0;
   const upd = db.prepare(
