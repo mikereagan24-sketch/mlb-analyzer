@@ -3373,27 +3373,61 @@ async function refreshFirstPitch(dateStr, opts) {
   // no recorded first pitch. That set is empty before the day's first game,
   // and each game leaves it permanently as soon as its first pitch lands.
   // It cannot become the 150-calls-a-day re-fetch the original skip avoided.
-  // REVERTED 2026-09-02 during the OOM incident. The widened predicate
-  // below is the ONLY new allocation path #338 introduced: it made every
-  // lineup pass fetch statsapi's feed/live -- the largest payload it
-  // serves, megabytes of JSON per game -- for every started game without a
-  // recorded first pitch, ~10 times a day instead of once.
+  // RE-LANDED 2026-09-03, BOUNDED. Original in #338, reverted in #340
+  // during the OOM incident, restored here now that boot is serialised
+  // (#341). The revert was expedient, not diagnostic -- #339, which
+  // triggered the crash-looping deploy, added one unreferenced script
+  // file, and the failures preceded the first lineup pass on the new code.
   //
-  // It is NOT established that this caused the crash loop; the failures at
-  // 16:29-16:35 PT preceded the 5PM lineup pass, and boot fires five
-  // concurrent heavy jobs on a 512MB instance against a ~670MB database,
-  // which is the structural problem. But this is a new recurring
-  // multi-megabyte parse, it is mine, and it buys an observable rather
-  // than a protection -- so it goes first and it goes without argument.
+  // WHY IT MATTERS. The old predicate was `scheduled_start_utc IS NULL`.
+  // The first lineup pass of the day sets that column, so every later pass
+  // skipped the game, and the only full refresh runs in the 4AM score job
+  // FOR YESTERDAY. first_pitch_utc has therefore only ever been a
+  // retrospective value: measured 2026-09-02 mid-slate it was 0/15 with
+  // one game in the 8th, against 15/15 and 12/12 on the two finished days.
+  // gameHasStarted's authoritative branch has never fired inside the live
+  // window it exists to protect -- every decision has come from the
+  // scheduled_start_utc fallback, which errs conservative (a delayed game
+  // reads as started, so we refuse rather than misprice) and is why this
+  // has cost nothing yet.
   //
-  // The widened form, to restore once boot memory is bounded:
-  //   AND (scheduled_start_utc IS NULL
-  //        OR (first_pitch_utc IS NULL
-  //            AND scheduled_start_utc <= strftime('%Y-%m-%dT%H:%M:%SZ','now')))
-  const rows = db.prepare(
-    'SELECT game_date, game_id, game_pk FROM game_log WHERE game_date = ? AND game_pk IS NOT NULL'
-    + (opts.onlyMissing ? ' AND scheduled_start_utc IS NULL' : '')
-  ).all(dateStr);
+  // WHAT IS DIFFERENT THIS TIME: A PER-PASS CAP.
+  //
+  // fetchFirstPitch hits the v1.1 feed/live endpoint, which carries every
+  // play of a game -- megabytes of JSON. The loop is serial so peak memory
+  // is one parse regardless, but the un-capped form re-allocated that for
+  // every started game on every one of ~10 daily passes. On a 512MB
+  // instance that churn is not free, and it was the only new allocation
+  // path in the release that crash-looped, so it re-lands with a bound
+  // rather than on the argument that it was probably innocent.
+  //
+  // CAP CHOSEN FROM THE INCIDENT, not from taste. On 2026-09-02 the uncapped
+  // form selected 9 started games at 16:29:48 PT, wrote 6, and stopped --
+  // inside the 16:29-16:35 window that OOM-killed the instance four times.
+  // The 5PM pass wrote the remaining 3. A serial walk of 9 feed/live
+  // payloads that halts after 6 during the crash is the best evidence
+  // available about what this path costs, and 6 is therefore NOT a safe
+  // bound: it is roughly the number that died. Three.
+  //
+  // FP_LIVE_CAP games per pass, oldest scheduled start first, so the games
+  // most likely to have actually started are served before the ones that
+  // may not have. At 10 passes a day a cap of 6 covers a 15-game slate
+  // within two passes and converges to zero as first pitches land.
+  const FP_LIVE_CAP = 3;
+  const rows = opts.onlyMissing
+    ? db.prepare(
+        'SELECT game_date, game_id, game_pk FROM game_log '
+        + 'WHERE game_date = ? AND game_pk IS NOT NULL '
+        + '  AND (scheduled_start_utc IS NULL '
+        + '       OR (first_pitch_utc IS NULL '
+        + "           AND scheduled_start_utc <= strftime('%Y-%m-%dT%H:%M:%SZ','now'))) "
+        + 'ORDER BY scheduled_start_utc IS NULL DESC, scheduled_start_utc ASC '
+        + 'LIMIT ?'
+      ).all(dateStr, FP_LIVE_CAP)
+    : db.prepare(
+        'SELECT game_date, game_id, game_pk FROM game_log '
+        + 'WHERE game_date = ? AND game_pk IS NOT NULL'
+      ).all(dateStr);
   if (!rows.length) return 0;
   const upd = db.prepare(
     'UPDATE game_log SET scheduled_start_utc = COALESCE(?, scheduled_start_utc), '
