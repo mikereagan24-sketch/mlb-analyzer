@@ -101,7 +101,72 @@ function missingEntirely(rows, fields, pick) {
     .filter(f => !rows.some(r => { const g = get(r); return g && g[f] != null; }));
 }
 
+
+// ── the bullpen term for an OFFLINE REPLAY ─────────────────────────────
+//
+// MEASURED 2026-09-03 over 1,171 games / 2,340 sides, June-August:
+//
+//   do nothing (today)      signed +0.0066   mean |d| 0.0074   max 0.0294
+//   pass all 17 args        signed +0.0009   mean |d| 0.0044   max 0.0255
+//   read the persisted col  exact
+//
+//   2,329 of 2,340 sides differed. 60.3% by more than 0.005.
+//
+// TWO DEFECTS WERE STACKED, and they partially CANCEL, which is why
+// neither shows up as an obvious outlier:
+//
+//   DATE   getBullpenWobaBlended reads woba_data, wiped and reloaded
+//          daily. Replaying a June game prices its bullpen off today's
+//          projections. The batter and SP terms ARE date-corrected via
+//          getWobaIndexAsOf against woba_data_snapshot -- the bullpen
+//          term was the one input that silently was not.
+//   ARITY  the harnesses passed 10 of 17 parameters, so minBF defaulted
+//          to 100 against production's 50, downweight-starters was off,
+//          the blend fell back to the GLOBAL 0.45/0.55 instead of the
+//          bullpen's 0.25/0.75, the DH nightcap rule was inert, and no
+//          park neutralisation was applied.
+//
+// game_log already carries what the model actually used, on 1944/1944
+// rows since 2026-04-04. Reading it is exact by construction and cannot
+// drift again; recomputing can only ever approximate it.
+//
+// The recompute path is kept for rows without a persisted value, and it
+// now passes ALL 17 arguments so that fallback is the +0.0009 shape
+// rather than the +0.0066 one.
+function bullpenTermForReplay(q, gameRow, side, settings, opts) {
+  opts = opts || {};
+  const persisted = side === 'away'
+    ? { woba: gameRow.away_bullpen_woba,
+        vsL:  gameRow.away_bullpen_woba_vs_l,
+        vsR:  gameRow.away_bullpen_woba_vs_r }
+    : { woba: gameRow.home_bullpen_woba,
+        vsL:  gameRow.home_bullpen_woba_vs_l,
+        vsR:  gameRow.home_bullpen_woba_vs_r };
+  if (persisted.woba != null) {
+    return { woba: persisted.woba, vsLHB: persisted.vsL, vsRHB: persisted.vsR,
+             source: 'persisted' };
+  }
+  if (!q || !q.getBullpenWobaBlended) return null;
+  const N = (v, d) => (v != null ? Number(v) : d);
+  const s = settings || {};
+  try {
+    const r = q.getBullpenWobaBlended(
+      opts.team, opts.starter || '', opts.lineup || [],
+      N(s.BP_STRONG_WEIGHT_R, 0.55), N(s.BP_WEAK_WEIGHT_R, 0.45),
+      N(s.BP_STRONG_WEIGHT_L, 0.35), N(s.BP_WEAK_WEIGHT_L, 0.65),
+      N(s.W_PROJ, 0.65), N(s.W_ACT, 0.35), gameRow.game_date,
+      N(s.UNKNOWN_PITCHER_WOBA, 0.335),
+      N(s.BULLPEN_MIN_BF, N(s.MIN_BF, 100)),
+      !!(s.BULLPEN_DOWNWEIGHT_STARTERS === true || s.BULLPEN_DOWNWEIGHT_STARTERS === 'true'),
+      N(s.BULLPEN_W_PROJ, N(s.W_PROJ, 0.65)),
+      N(s.BULLPEN_W_ACT, N(s.W_ACT, 0.35)),
+      opts.gameNumber || 1);
+    return r ? { woba: r.woba, vsLHB: r.vsLHB, vsRHB: r.vsRHB, source: 'recomputed' } : null;
+  } catch (e) { return null; }
+}
+
 module.exports = {
+  bullpenTermForReplay,
   CALLER_POPULATED_FIELDS,
   populateCallerInputs,
   coverage,
