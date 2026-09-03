@@ -4120,7 +4120,62 @@ async function runWeatherJob(date, opts) {
   }
 }
 
+// PER-JOB MEMORY INSTRUMENTATION. (2026-09-03)
+//
+// Five OOM kills on 2026-09-03 between 11:18 and 12:48 PT, minutes to an
+// hour apart with recovery between -- not a boot loop. Which job actually
+// costs what was being INFERRED from payload sizes, which is how the
+// feed/live parse got blamed before anyone measured it. Measure instead.
+//
+// RSS is logged alongside heapUsed on purpose: the container kills on RSS,
+// and heapUsed misses Buffers and other external allocations, which is
+// exactly where an HTTP-heavy job spends. A job showing a small heap delta
+// and a large RSS delta is the one to look at.
+function _mb(n) { return (n / 1048576).toFixed(1) + 'MB'; }
+async function _mem(label, fn) {
+  const b = process.memoryUsage();
+  const t0 = Date.now();
+  let failed = false;
+  try {
+    return await fn();
+  } catch (e) {
+    failed = true;
+    throw e;
+  } finally {
+    const a = process.memoryUsage();
+    const dh = (a.heapUsed - b.heapUsed) / 1048576;
+    const dr = (a.rss - b.rss) / 1048576;
+    console.log('[job-mem] ' + label
+      + '  heap ' + _mb(b.heapUsed) + ' -> ' + _mb(a.heapUsed)
+      + ' (' + (dh >= 0 ? '+' : '') + dh.toFixed(1) + 'MB)'
+      + '  rss ' + _mb(b.rss) + ' -> ' + _mb(a.rss)
+      + ' (' + (dr >= 0 ? '+' : '') + dr.toFixed(1) + 'MB)'
+      + '  ext ' + _mb(a.external)
+      + '  ' + (Date.now() - t0) + 'ms'
+      + (failed ? '  FAILED' : ''));
+  }
+}
+
+// HEARTBEAT. Answers "what does the heap actually peak at in a normal
+// hour" without waiting for a crash, and a steady climb across samples is
+// what RETENTION looks like as opposed to one large transient. Every 60s;
+// unref'd so it never holds the process open.
+let _memPeakRss = 0, _memPeakHeap = 0;
+function _startMemHeartbeat() {
+  const t = setInterval(() => {
+    const m = process.memoryUsage();
+    if (m.rss > _memPeakRss) _memPeakRss = m.rss;
+    if (m.heapUsed > _memPeakHeap) _memPeakHeap = m.heapUsed;
+    console.log('[mem] rss ' + _mb(m.rss) + '  heap ' + _mb(m.heapUsed)
+      + '/' + _mb(m.heapTotal) + '  ext ' + _mb(m.external)
+      + '  peakRss ' + _mb(_memPeakRss) + '  peakHeap ' + _mb(_memPeakHeap));
+  }, 60000);
+  if (t.unref) t.unref();
+  return t;
+}
+
 function startCronJobs() {
+  _startMemHeartbeat();
   // All schedules below run in America/Los_Angeles. The cron hour is the
   // Pacific-time hour; node-cron handles DST transitions automatically.
 
@@ -4140,7 +4195,7 @@ function startCronJobs() {
   [[8,'8AM'],[10,'10AM'],[12,'Noon'],[13,'1PM'],[14,'2PM'],[15,'3PM'],[16,'4PM'],[17,'5PM'],[18,'6PM']].forEach(([h,label]) => {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT lineup pull');
-      runLineupJob(todayStr());
+      _mem('lineup ' + label, () => runLineupJob(todayStr()));
     }, { timezone: 'America/Los_Angeles' });
   });
   cron.schedule('0 23 * * *', () => {
@@ -4153,14 +4208,14 @@ function startCronJobs() {
   [[8,'8AM'],[11,'11AM'],[15,'3PM'],[17,'5PM']].forEach(([h,label]) => {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT odds pull');
-      runOddsJob(todayStr());
+      _mem('odds ' + label, () => runOddsJob(todayStr()));
     }, { timezone: 'America/Los_Angeles' });
   });
 
   // --- Scores: 4AM PT ---
   cron.schedule('0 4 * * *', () => {
     console.log('[cron] 4AM PT score pull');
-    runScoreJob(yesterdayStr());
+    _mem('score', () => runScoreJob(yesterdayStr()));
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 5:30AM PT FG wOBA sync: projections + actuals with retry/backoff ---

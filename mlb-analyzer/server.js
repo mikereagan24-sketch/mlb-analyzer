@@ -432,10 +432,20 @@ app.listen(PORT, () => {
       // is individually non-fatal: a failure logs and the chain continues,
       // which is what the four independent .catch() calls used to buy.
       setTimeout(async () => {
+        const mb = n => (n / 1048576).toFixed(1) + 'MB';
         const step = async (label, fn) => {
+          const b = process.memoryUsage();
+          const t0 = Date.now();
           try { await fn(); }
           catch (e) { console.warn('[boot-chain] ' + label + ' failed (non-fatal): '
             + (e && e.message)); }
+          finally {
+            const a = process.memoryUsage();
+            console.log('[boot-chain] ' + label
+              + '  heap ' + mb(b.heapUsed) + ' -> ' + mb(a.heapUsed)
+              + '  rss ' + mb(b.rss) + ' -> ' + mb(a.rss)
+              + '  ' + (Date.now() - t0) + 'ms');
+          }
         };
 
         console.log('[boot-chain] starting deferred boot work, one job at a time');
