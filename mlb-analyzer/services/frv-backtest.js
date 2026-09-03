@@ -100,18 +100,22 @@ function buildBacktestGame(gameRow, settings) {
   let awayVsR = LEAGUE_BP, awayVsL = LEAGUE_BP, homeVsR = LEAGUE_BP, homeVsL = LEAGUE_BP;
   let awayBpWoba = LEAGUE_BP, homeBpWoba = LEAGUE_BP;
   try {
-    if (q.getBullpenWobaBlended) {
-      const hLU = tryParse(gameRow.home_lineup_json) || [];
-      const aLU = tryParse(gameRow.away_lineup_json) || [];
-      const aBp = q.getBullpenWobaBlended(awayAbbr, awaySp, hLU, bpSR, bpWR, bpSL, bpWL, wProj, wAct, gameRow.game_date);
-      const hBp = q.getBullpenWobaBlended(homeAbbr, homeSp, aLU, bpSR, bpWR, bpSL, bpWL, wProj, wAct, gameRow.game_date);
-      if (aBp && aBp.vsRHB) awayVsR = aBp.vsRHB;
-      if (aBp && aBp.vsLHB) awayVsL = aBp.vsLHB;
-      if (hBp && hBp.vsRHB) homeVsR = hBp.vsRHB;
-      if (hBp && hBp.vsLHB) homeVsL = hBp.vsLHB;
-      awayBpWoba = (aBp && aBp.woba) || LEAGUE_BP;
-      homeBpWoba = (hBp && hBp.woba) || LEAGUE_BP;
-    }
+    // Persisted emit-time value first; recompute only when absent, and
+    // then with ALL 17 args. See harness-inputs.bullpenTermForReplay for
+    // the measurement that made this exact rather than approximate.
+    const _hi = require('./harness-inputs');
+    const hLU = tryParse(gameRow.home_lineup_json) || [];
+    const aLU = tryParse(gameRow.away_lineup_json) || [];
+    const aBp = _hi.bullpenTermForReplay(q, gameRow, 'away', settings,
+      { team: awayAbbr, starter: awaySp, lineup: hLU });
+    const hBp = _hi.bullpenTermForReplay(q, gameRow, 'home', settings,
+      { team: homeAbbr, starter: homeSp, lineup: aLU });
+    if (aBp && aBp.vsRHB) awayVsR = aBp.vsRHB;
+    if (aBp && aBp.vsLHB) awayVsL = aBp.vsLHB;
+    if (hBp && hBp.vsRHB) homeVsR = hBp.vsRHB;
+    if (hBp && hBp.vsLHB) homeVsL = hBp.vsLHB;
+    awayBpWoba = (aBp && aBp.woba) || LEAGUE_BP;
+    homeBpWoba = (hBp && hBp.woba) || LEAGUE_BP;
   } catch (e) { /* fall back */ }
 
   const awayTeamUpper = awayAbbr.toUpperCase();
