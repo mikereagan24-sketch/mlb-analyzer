@@ -398,67 +398,75 @@ try {
 app.listen(PORT, () => {
   console.log(`MLB Analyzer running on port ${PORT}`);
   startCronJobs();
-  // One-shot roster refresh on startup. Bridges the gap when the server
-  // starts up after the 6AM PT cron window — without this, rosters would
-  // sit at last-cron-state until the following morning. Failure here must
-  // not block the listen() callback returning, so the call is fire-and-forget.
-  runRosterJob().catch(e => console.warn('[startup-roster] failed:', e && e.message));
 
-  // One-shot park-factor top-up. Runs if the table is EMPTY or older than
-  // 30 days. The table shipped empty on 2026-08-25 because the ingest was
-  // scheduled monthly with no bootstrap, so production came up with zero
-  // rows -- and an empty park_factors makes resolveParkFactor return null,
-  // which makes the model price every park as NEUTRAL (COL 1.00 instead of
-  // 1.25) until the first cron fires. A monthly job needs a boot path or
-  // its first month runs on nothing. Fire-and-forget, like the roster pull.
-  runParkFactorsJobIfStale()
-    .catch(e => console.warn('[startup-park-factors] failed:', e && e.message));
-
-  // One-shot first-pitch / scheduled-start top-up. Same shape and the same
-  // reason as the park-factor line above: refreshFirstPitch has only ever
-  // run for YESTERDAY inside the 4AM score job, so production carries the
-  // start anchor on 30 of ~1876 rows while the analysis copy has 1569.
+  // BOOT IS SERIAL AND DEFERRED. (2026-09-03)
   //
-  // Without scheduled_start_utc every lineup capture stores
-  // lead_minutes=NULL, and that is NOT repairable later: first_pitch_utc
-  // does not exist for a game that has not started, so there is no value
-  // to backfill for the moment the capture describes.
+  // This block used to fire four fire-and-forget jobs the instant listen()
+  // returned, plus a 30s-delayed prefetch that runs three more. On a 512MB
+  // Render instance against a ~670MB database that is what OOM-killed the
+  // service on 2026-09-02 (four instance failures 16:29-16:35 PT, one exit
+  // 134). The trigger was a deploy of a script-only PR -- i.e. nothing in
+  // the diff. A restart alone was enough, which is the signature of boot
+  // being over budget rather than of a regression.
   //
-  // Bounded to one batch and NOT awaited -- the full walk is ~1850
-  // statsapi calls at 120ms, about four minutes, which must not sit in
-  // front of a Render boot. The 3AM cron finishes the remainder.
-  try { runFirstPitchBackfillIfMissing(); }
-  catch (e) { console.warn('[startup-first-pitch-backfill] failed:', e && e.message); }
+  // Worse, the loop is SELF-SUSTAINING: every restart re-runs the same
+  // heavy boot, so one bad boot becomes a crash loop with no code change
+  // and no way out.
+  //
+  // THE MEMORY IS statsapi JSON, NOT SQLITE. runFirstPitchBackfillIfMissing
+  // walks up to 400 games through the v1.1 feed/live endpoint, which
+  // carries every play of a game -- megabytes of JSON per call. Four of
+  // those parses alive at once is the whole budget.
+  //
+  // So: one job at a time, awaited, and only the roster pull runs on the
+  // boot critical path. Everything else waits behind the existing delay.
+  // Total network work is unchanged; peak concurrent allocation is not.
 
-  // One-shot pitcher_game_log backfill (PR A). Self-gating via the
-  // 'pitcher_usage_backfill_done' app_settings flag — runs at most once
-  // per database. Fires after the roster pull so it doesn't compete for
-  // statsapi attention during the boot critical path. Fire-and-forget;
-  // a partial run will simply resume on the next start (the flag only
-  // flips when every date in the 60-day window completed cleanly).
-  runPitcherUsageBackfill().catch(e =>
-    console.warn('[startup-pitcher-usage-backfill] failed:', e && e.message));
+  // (a) Rosters first and alone. Everything downstream resolves names
+  // against team_rosters, so a stale roster degrades the model rather than
+  // just delaying a backfill. It is the one job worth the critical path.
+  runRosterJob()
+    .catch(e => console.warn('[startup-roster] failed:', e && e.message))
+    .then(() => {
+      // (b) Everything else, SEQUENTIALLY, after a settle delay. Each step
+      // is individually non-fatal: a failure logs and the chain continues,
+      // which is what the four independent .catch() calls used to buy.
+      setTimeout(async () => {
+        const step = async (label, fn) => {
+          try { await fn(); }
+          catch (e) { console.warn('[boot-chain] ' + label + ' failed (non-fatal): '
+            + (e && e.message)); }
+        };
 
-  // One-shot tomorrow-slate prefetch on startup. Bridges the gap when the
-  // server starts up after the 8PM/11PM PT prefetch crons — without this,
-  // tomorrow's odds/weather/lineups would be missing until the next cron
-  // window. Delayed 30s so the startup roster pull and other boot work
-  // can settle before three sequential network calls fire.
-  setTimeout(async () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-    console.log('[startup-prefetch] tomorrow-slate ' + dateStr);
-    try {
-      const oddsR    = await runOddsJob(dateStr);
-      const weatherR = await runWeatherJob(dateStr);
-      const lineupR  = await runLineupJob(dateStr);
-      console.log('[startup-prefetch] ' + dateStr
-        + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
-        + ', weather updated ' + ((weatherR && weatherR.updated) || 0)
-        + ', lineups ' + ((lineupR && lineupR.gamesUpdated) || 0));
-    } catch (e) {
-      console.warn('[startup-prefetch] failed:', e && e.message);
-    }
-  }, 30000);
+        console.log('[boot-chain] starting deferred boot work, one job at a time');
+
+        // Park factors before anything that prices: an empty table makes
+        // every park read NEUTRAL.
+        await step('park-factors', () => runParkFactorsJobIfStale());
+
+        // The heaviest job, now alone in memory rather than competing with
+        // three others for the same 512MB.
+        await step('first-pitch-backfill', () => runFirstPitchBackfillIfMissing());
+
+        await step('pitcher-usage-backfill', () => runPitcherUsageBackfill());
+
+        // Tomorrow-slate prefetch last -- it is the most deferrable, since
+        // the 8PM and 11PM PT crons cover the same ground.
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+        console.log('[startup-prefetch] tomorrow-slate ' + dateStr);
+        await step('startup-prefetch', async () => {
+          const oddsR    = await runOddsJob(dateStr);
+          const weatherR = await runWeatherJob(dateStr);
+          const lineupR  = await runLineupJob(dateStr);
+          console.log('[startup-prefetch] ' + dateStr
+            + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
+            + ', weather updated ' + ((weatherR && weatherR.updated) || 0)
+            + ', lineups ' + ((lineupR && lineupR.gamesUpdated) || 0));
+        });
+
+        console.log('[boot-chain] deferred boot work complete');
+      }, 30000);
+    });
 });
