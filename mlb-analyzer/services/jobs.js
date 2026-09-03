@@ -3401,11 +3401,19 @@ async function refreshFirstPitch(dateStr, opts) {
   // path in the release that crash-looped, so it re-lands with a bound
   // rather than on the argument that it was probably innocent.
   //
+  // CAP CHOSEN FROM THE INCIDENT, not from taste. On 2026-09-02 the uncapped
+  // form selected 9 started games at 16:29:48 PT, wrote 6, and stopped --
+  // inside the 16:29-16:35 window that OOM-killed the instance four times.
+  // The 5PM pass wrote the remaining 3. A serial walk of 9 feed/live
+  // payloads that halts after 6 during the crash is the best evidence
+  // available about what this path costs, and 6 is therefore NOT a safe
+  // bound: it is roughly the number that died. Three.
+  //
   // FP_LIVE_CAP games per pass, oldest scheduled start first, so the games
   // most likely to have actually started are served before the ones that
   // may not have. At 10 passes a day a cap of 6 covers a 15-game slate
   // within two passes and converges to zero as first pitches land.
-  const FP_LIVE_CAP = 6;
+  const FP_LIVE_CAP = 3;
   const rows = opts.onlyMissing
     ? db.prepare(
         'SELECT game_date, game_id, game_pk FROM game_log '
