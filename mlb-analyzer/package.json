@@ -5,7 +5,7 @@
   "description": "MLB Betting Analyzer 2026-04-11T20:14:12.074Z",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node --max-old-space-size=384 server.js",
     "dev": "nodemon server.js"
   },
   "dependencies": {
