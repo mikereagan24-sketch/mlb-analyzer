@@ -1430,7 +1430,76 @@ function renderGameGrid(games,date){
   // specific threshold (fav>=2.0pp, dog>=4.5pp, under>=7.0pp; overs
   // never highlight), else s1. Pre-cutover .toUpperCase() on null
   // crashed the whole grid render.
-  function sigPillHtml(s) {
+  // EMIT-TIME vs LIVE. (2026-09-03)
+  //
+  // The pp figure is stored edge_pct, frozen at emit (and, for a locked
+  // row, frozen for good by upsertSignal's guard -- that is what protects
+  // CLV). The model and market printed directly beneath it are LIVE. The
+  // card therefore put two numbers from different moments side by side
+  // with nothing saying so.
+  //
+  // BOS@BAL 2026-09-03: badge 3.5PP, card showing model -130 vs -124.
+  // Those do not reconcile at any market price -- the reader worked back
+  // to a market of -113 that appears nowhere, because the variable that
+  // moved was the MODEL: -142 at emit on 09-02 14:03, -130 a day later.
+  // market_line -124 was exactly the Poly net all along.
+  //
+  // BOTH numbers, not a replacement: a signal decaying 3.3 -> 0.8 is a
+  // different situation from one that was always marginal, and showing
+  // only the current edge would erase that distinction.
+  //
+  // ML ONLY for the live figure. The totals edge needs TOT_SLOPE and the
+  // clamp band, which live server-side; recomputing it here would invent
+  // a number that disagrees with the engine. Totals get the timestamp
+  // without a "now", which is honest about what the client can know.
+  function _impliedP(ml) {
+    const m = Number(ml);
+    if (!isFinite(m) || m === 0) return null;
+    return m < 0 ? Math.abs(m) / (Math.abs(m) + 100) : 100 / (m + 100);
+  }
+  function _liveEdgePp(s, g) {
+    if (!g || String(s.signal_type).toUpperCase() !== 'ML') return null;
+    const side = String(s.signal_side).toLowerCase();
+    const mdl = side === 'away' ? g.model_away_ml : g.model_home_ml;
+    const mkt = side === 'away' ? g.market_away_ml : g.market_home_ml;
+    const a = _impliedP(mdl), b = _impliedP(mkt);
+    if (a == null || b == null) return null;
+    return (a - b) * 100;
+  }
+  function _emitStamp(s) {
+    const raw = s.bet_locked_at || s.created_at;
+    if (!raw) return null;
+    // Stored UTC ("YYYY-MM-DD HH:MM:SS"); show local M-D HH:MM.
+    const d = new Date(String(raw).replace(' ', 'T') + 'Z');
+    if (isNaN(d.getTime())) return String(raw).slice(5, 16);
+    const p = n => String(n).padStart(2, '0');
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  function sigProvenanceHtml(s, g) {
+    const stamp = _emitStamp(s);
+    if (!stamp) return '';
+    const emitPp = (s.edge_pct || 0) * 100;
+    const live = _liveEdgePp(s, g);
+    // Only annotate when the two actually differ enough to confuse, or
+    // when the row is locked (where the freeze makes divergence certain
+    // to grow). A fresh unlocked signal whose edge still matches needs
+    // no chip -- noise on every pill would train the eye to skip it.
+    const diverged = live != null && Math.abs(live - emitPp) >= 0.5;
+    if (!s.bet_locked_at && !diverged) return '';
+    const nowTxt = live != null
+      ? ' &middot; now ' + live.toFixed(1) + 'pp'
+      : '';
+    const tt = 'Badge is the edge AT EMIT: ' + emitPp.toFixed(2) + 'pp'
+      + ' (model ' + (s.model_line != null ? s.model_line : '?')
+      + ' vs market ' + (s.market_line != null ? s.market_line : '?') + ')'
+      + ', frozen ' + (s.bet_locked_at ? 'when the bet was locked' : 'at emit') + ' ' + stamp + '.'
+      + (live != null
+          ? ' Live now: ' + live.toFixed(2) + 'pp against the current model/market shown below.'
+          : ' A live figure is not shown for this market type because the client cannot recompute it the way the engine does.');
+    return '<span class="sig-prov" title="' + tt.replace(/"/g, '&quot;') + '">@'
+      + stamp + nowTxt + '</span>';
+  }
+  function sigPillHtml(s, g) {
     if (s.signal_label !== null && s.signal_label !== undefined) {
       const cls = s.signal_label === '3★' ? 's3' : s.signal_label === '2★' ? 's2' : 's1';
       return '<span class="sig-pill ' + cls + '">' + s.signal_label.toUpperCase() + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>';
@@ -1441,7 +1510,8 @@ function renderGameGrid(games,date){
     // fall to s1 here too — signalMeetsHighlightThreshold returns
     // false for them regardless of edge.
     const cls = signalMeetsHighlightThreshold(s) ? 's2' : 's1';
-    return '<span class="sig-pill ' + cls + '">' + scoreText + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>';
+    return '<span class="sig-pill ' + cls + '">' + scoreText + ' ' + s.signal_side.toUpperCase() + ' ' + s.signal_type.toUpperCase() + '</span>'
+      + sigProvenanceHtml(s, g);
   }
   // Suppressed-signal pill (feat/display-suppressed-signal-edge).
   // Renders the pre-cap computed edge with a strikethrough +
@@ -1501,7 +1571,7 @@ function renderGameGrid(games,date){
       ((g.game_number||1)>1?' <span style="color:var(--text2);font-size:11px;font-weight:500;margin-left:4px">(G'+g.game_number+')</span>':'')+
       (g.is_postponed?' <span style="background:#cc3333;color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px;letter-spacing:0.5px">POSTPONED</span>':'')+
       (score?' <span style="color:var(--text2);font-size:12px;font-weight:400">'+score+'</span>':'')+
-      (!g.is_postponed&&sigs.length?' '+sigs.map(sigPillHtml).join(' '):'')+
+      (!g.is_postponed&&sigs.length?' '+sigs.map(function(s){return sigPillHtml(s, g);}).join(' '):'')+
       // Suppressed-signal pills — rendered after actionable pills so
       // the actionable ones read left-to-right first. Type is visible
       // in each pill's label (ML/TOTAL/etc.) so a Total suppressed
@@ -1615,7 +1685,20 @@ function renderGameGrid(games,date){
           return '<div class="emp-spread-pair">'+g.map(pickRow).join('')+'</div>';
         }).join('');
         var cell=es.cell_label?(' '+es.cell_label+' (n='+es.cell_sample_size+')'):'';
-        return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+'</span></div>'+rows+'</div>';
+        // The pp figures here are ALSO from a past moment -- the engine
+        // stamps generated_at on each odds pass. The API has always sent it
+        // and the card never showed it, which is the same defect the signal
+        // badge had: a pp number with no indication of when it was true.
+        var _gen = es.generated_at
+          ? (function(){
+              var d = new Date(String(es.generated_at).replace(" ","T")
+                + (/[Zz]|[+-]dd:?dd$/.test(String(es.generated_at)) ? "" : "Z"));
+              if (isNaN(d.getTime())) return "";
+              var p = function(n){ return String(n).padStart(2,"0"); };
+              return " as of " + p(d.getHours()) + ":" + p(d.getMinutes());
+            })()
+          : "";
+        return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+_gen+'</span></div>'+rows+'</div>';
       })() : '')+
       '<div class="gresult '+(!g.is_postponed&&g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
       (!g.is_postponed&&g.model_away_ml?renderGameResult(g):'')+
