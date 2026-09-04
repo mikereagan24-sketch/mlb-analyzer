@@ -42,7 +42,11 @@ ok('ML boxes print the LIVE market',
    && page.indexOf("mkt '+fmtML(g.market_home_ml)") !== -1);
 ok('Total box still uses the frozen resolver',
    page.indexOf('_resolveTotalMkt(g, sigs)') !== -1);
-ok('header chip reads as the prior value', page.indexOf("'was ' + emitPp.toFixed(1)") !== -1);
+ok('ML box renders the live figure to TWO decimals',
+   page.indexOf('? livePp.toFixed(2)') !== -1);
+ok('Total box keeps ONE decimal on its rounded emit score',
+   page.indexOf("* 0.5).toFixed(1)) + 'PP'") !== -1);
+ok('header chip stays at ONE decimal', page.indexOf("'was ' + emitPp.toFixed(1)") !== -1);
 ok('header chip carries the frozen price', page.indexOf("' at ' + (Number(ml) > 0") !== -1);
 
 // ---- the logic, mirrored ---------------------------------------------
@@ -115,8 +119,14 @@ if (!mn) {
   ok('mil-nym would have been GREEN under the old 0.5-rounded basis',
      gate(mn, undefined) === true,
      'rounded emit ' + (Math.round(emitPp / 0.5) * 0.5).toFixed(1) + 'pp >= 2.0 -- this is the change');
-  ok('it prints "2.0PP" while not green (raw just under the floor)',
-     live.toFixed(1) === '2.0' && gate(mn, live) === false);
+  // Was: asserted it prints "2.0PP" while not green. That was the defect
+  // two decimals fixes -- a raw 1.9854 displayed AS its floor and did not
+  // green, which reads as a broken highlight rather than a near miss.
+  ok('two-decimal display no longer reads as the floor it misses',
+     live.toFixed(2) !== '2.00' && Number(live.toFixed(2)) < 2.0
+     && gate(mn, live) === false,
+     'prints ' + live.toFixed(2) + 'PP, not green (one decimal gave '
+       + live.toFixed(1) + ')');
 }
 
 // ---- no ML row may green without clearing its own raw floor ----------
@@ -140,6 +150,27 @@ for (const s of all) {
 }
 ok('every ML row greens iff its raw live pp clears its own floor',
    viol === 0, checked + ' rows checked, ' + greens + ' green, ' + viol + ' violations');
+
+// THE INVARIANT TWO DECIMALS BUYS. A box that is not green must not print
+// a number that reads as clearing its floor, and vice versa. At one
+// decimal this failed for any raw value in [floor-0.05, floor).
+let mis1 = 0, mis2 = 0, worst = null;
+for (const s of all) {
+  const live = liveEdgePpML(s, s);
+  if (live == null) continue;
+  const floor = s.market_line < 0 ? 2.0 : s.market_line > 0 ? 4.5 : null;
+  if (floor == null) continue;
+  const green = live >= floor;
+  if ((Number(live.toFixed(1)) >= floor) !== green) {
+    mis1++;
+    if (!worst) worst = s.game_id + ' ' + s.signal_side + ' raw ' + live.toFixed(4);
+  }
+  if ((Number(live.toFixed(2)) >= floor) !== green) mis2++;
+}
+ok('at TWO decimals, no box prints a number contradicting its own colour',
+   mis2 === 0, mis2 + ' contradictions');
+ok('the change is load-bearing: ONE decimal did contradict on this corpus',
+   mis1 > 0, mis1 + ' row(s) would misread, e.g. ' + (worst || 'n/a'));
 ok('the corpus actually exercises both outcomes', greens > 0 && greens < checked,
    greens + ' of ' + checked);
 
