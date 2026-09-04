@@ -4171,6 +4171,33 @@ async function _mem(label, fn) {
   }
 }
 
+// A SCHEDULED JOB'S FAILURE MUST NOT KILL THE PROCESS. (2026-09-04)
+//
+// cron.schedule callbacks were calling _mem(...) without awaiting it and
+// without a catch. _mem rethrows so its finally-block log still runs, which
+// means the returned promise rejects with nobody attached -- and Node 20
+// terminates the process on an unhandled rejection by default. One failed
+// odds pull therefore took the whole service down.
+//
+// WHAT THE OLD BEHAVIOUR BOUGHT, since this weakens it: a crash is
+// impossible to ignore. Swapping it for a silent catch would trade a loud
+// failure for an invisible one, which is worse. So this logs at
+// console.error under a tag that exists nowhere else in the codebase --
+// grep [cron-failed] -- and the job's own _mem END line still prints with
+// its FAILED marker. The failure stays as visible as it was; only the
+// process death goes away.
+//
+// Takes an already-started promise rather than a thunk: every call site
+// here has one in hand, and wrapping the invocation instead would change
+// when the job starts.
+function _cronFire(label, p) {
+  Promise.resolve(p).catch(e => {
+    console.error('[cron-failed] ' + label + ': '
+      + (e && e.message ? e.message : String(e)));
+    if (e && e.stack) console.error(e.stack);
+  });
+}
+
 // HEARTBEAT. Answers "what does the heap actually peak at in a normal
 // hour" without waiting for a crash, and a steady climb across samples is
 // what RETENTION looks like as opposed to one large transient. Every 60s;
@@ -4219,12 +4246,13 @@ function startCronJobs() {
   [[8,'8AM'],[10,'10AM'],[12,'Noon'],[13,'1PM'],[14,'2PM'],[15,'3PM'],[16,'4PM'],[17,'5PM'],[18,'6PM']].forEach(([h,label]) => {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT lineup pull');
-      _mem('lineup ' + label, () => runLineupJob(todayStr()));
+      _cronFire(label + ' PT lineup pull',
+        _mem('lineup ' + label, () => runLineupJob(todayStr())));
     }, { timezone: 'America/Los_Angeles' });
   });
   cron.schedule('0 23 * * *', () => {
     console.log('[cron] 11PM PT lineup pull');
-    runLineupJob(todayStr());
+    _cronFire('11PM PT lineup pull', runLineupJob(todayStr()));
   }, { timezone: 'America/Los_Angeles' });
 
   // --- Odds: 4 pulls today (8AM, 11AM, 3PM, 5PM PT) ---
@@ -4232,14 +4260,15 @@ function startCronJobs() {
   [[8,'8AM'],[11,'11AM'],[15,'3PM'],[17,'5PM']].forEach(([h,label]) => {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT odds pull');
-      _mem('odds ' + label, () => runOddsJob(todayStr()));
+      _cronFire(label + ' PT odds pull',
+        _mem('odds ' + label, () => runOddsJob(todayStr())));
     }, { timezone: 'America/Los_Angeles' });
   });
 
   // --- Scores: 4AM PT ---
   cron.schedule('0 4 * * *', () => {
     console.log('[cron] 4AM PT score pull');
-    _mem('score', () => runScoreJob(yesterdayStr()));
+    _cronFire('4AM PT score pull', _mem('score', () => runScoreJob(yesterdayStr())));
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 5:30AM PT FG wOBA sync: projections + actuals with retry/backoff ---
