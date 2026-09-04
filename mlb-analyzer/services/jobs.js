@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const { q, db } = require('../db/schema');
 const { FRV_MIN_OUTS, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
-const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds } = require('./unabated');
+const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds, sliceForSnapshot } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
@@ -4442,7 +4442,14 @@ function startCronJobs() {
     // Run sequentially, not in parallel — keeps logs readable and avoids
     // rate-limit collisions across odds/weather/lineup providers.
     try {
-      const oddsR    = await runOddsJob(d);
+      // skipChainedMorningCapture: this block ALREADY runs weather and
+      // lineups for the same date, and the 7:30AM PT cron calls
+      // runMorningCaptureJob(tomorrow) directly. Letting runOddsJob chain
+      // it here made the slot run odds x2, weather x2 and lineups x2 in one
+      // tick -- the second odds pass is what carried the peak from ~400MB
+      // to 485MB. The capture itself is not skipped, only its duplicate
+      // invocation from this context.
+      const oddsR    = await runOddsJob(d, { skipChainedMorningCapture: true });
       const weatherR = await runWeatherJob(d);
       const lineupR  = await runLineupJob(d);
       console.log('[cron-prefetch] ' + d
@@ -4462,7 +4469,11 @@ function startCronJobs() {
     const d = tomorrowStr();
     console.log('[cron] 11PM PT tomorrow-slate refresh for ' + d);
     try {
-      const oddsR    = await runOddsJob(d);
+      // skipChainedMorningCapture: same reasoning as the 8PM block above.
+      // This slot also collides with the 11PM PT lineup pull, which fires
+      // from its own cron at the same minute, so it is the worst place to
+      // be running a second odds pass.
+      const oddsR    = await runOddsJob(d, { skipChainedMorningCapture: true });
       const weatherR = await runWeatherJob(d);
       console.log('[cron-prefetch-refresh] ' + d
         + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
@@ -4994,9 +5005,28 @@ async function runOddsJob(dateStr, opts) {
     let unabatedRows = [];
     try {
       console.log('[odds] Fetching from Unabated...');
-      const unabatedRawJson = await fetchUnabatedRaw();
-      writeSnapshot('odds', dateStr, unabatedRawJson);
-      unabatedRows = parseUnabatedOdds(unabatedRawJson, dateStr);
+      // SLICE FIRST, THEN DROP THE FULL FEED. (2026-09-04)
+      //
+      // This block used to snapshot and parse the entire 88.3MB Unabated
+      // feed. writeSnapshot does JSON.stringify + gzipSync on what it is
+      // given, both synchronous and both alive at once: measured 89.5MB of
+      // string, ~198MB of external buffers, and 2721ms of blocked event
+      // loop per call -- and runOddsJob runs TWICE per morning-capture
+      // chain. Peak rss for one runOddsJob was 485.4MB from a 58.4MB base,
+      // which is what OOM-killed the 512MB instance at 8PM, 11PM and 7AM.
+      //
+      // sliceForSnapshot keeps only what parseUnabatedOdds reads and shares
+      // (does not copy) those sub-objects, so nulling unabatedRawJson makes
+      // the other 116 leagues unreachable immediately rather than at some
+      // later GC -- specifically before the chained morning capture runs a
+      // second full odds pass on top of this frame.
+      //
+      // Re-measure: node scripts/measure-odds-snapshot-cost.js
+      let unabatedRawJson = await fetchUnabatedRaw();
+      const unabatedMlb = sliceForSnapshot(unabatedRawJson);
+      unabatedRawJson = null;
+      writeSnapshot('odds', dateStr, unabatedMlb);
+      unabatedRows = parseUnabatedOdds(unabatedMlb, dateStr);
       console.log('[odds] Unabated returned '+unabatedRows.length+' games');
       if (!unabatedRows.length) throw new Error('Unabated returned 0 games');
     } catch(e) {
