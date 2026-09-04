@@ -695,4 +695,36 @@ function parseUnabatedOdds(data, dateStr) {
   return results;
 }
 
-module.exports = { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds };
+// SNAPSHOT SLICE. (2026-09-04) UB_URL is one static CDN file carrying every
+// league Unabated covers. Measured on the 2026-09-04 capture: 117 league
+// keys, 31,012 events, 88.3MB uncompressed. MLB (lg5:pt1:pregame) is 322
+// events and 4.9MB of that -- 5.5%. The other 94.5% is downloaded, parsed,
+// stringified and gzipped on every odds pass, and runOddsJob runs twice per
+// morning-capture chain.
+//
+// The feed is also GROWING: 40.45MB on 2026-08-11, 47.76MB on 2026-08-22,
+// 88.30MB on 2026-09-04. Nothing in this repo changed; the payload grew
+// into the 512MB instance.
+//
+// Safe to narrow because parseUnabatedOdds reads exactly two paths off the
+// raw object -- data.teams and data.gameOddsEvents[MLB_KEY] -- so a
+// snapshot holding only those replays identically. Asserted rather than
+// argued: node scripts/test-unabated-snapshot-slice.js deep-compares
+// parseUnabatedOdds(full) against parseUnabatedOdds(slice) on a real
+// captured feed, and also confirms the reader still opens pre-existing
+// full-feed snapshots unchanged.
+//
+// SHARES sub-objects with `raw` rather than copying them. That is the
+// point: the caller drops its reference to the full feed immediately
+// afterwards, which makes the 94.5% that is not MLB unreachable while the
+// MLB events stay live. A deep copy would defeat both halves.
+function sliceForSnapshot(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const events = raw.gameOddsEvents || {};
+  return {
+    teams: raw.teams,
+    gameOddsEvents: { [MLB_KEY]: events[MLB_KEY] || [] },
+  };
+}
+
+module.exports = { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds, sliceForSnapshot, MLB_KEY };

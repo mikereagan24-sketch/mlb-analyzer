@@ -491,7 +491,11 @@ app.listen(PORT, () => {
         const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
         console.log('[startup-prefetch] tomorrow-slate ' + dateStr);
         await step('startup-prefetch', async () => {
-          const oddsR    = await runOddsJob(dateStr);
+          // skipChainedMorningCapture: this block already runs weather and
+          // lineups for the same date, and the 7:30AM PT cron calls
+          // runMorningCaptureJob directly. Chaining it here made boot run
+          // odds x2, weather x2 and lineups x2 -- the boot-kill loop.
+          const oddsR    = await runOddsJob(dateStr, { skipChainedMorningCapture: true });
           const weatherR = await runWeatherJob(dateStr);
           const lineupR  = await runLineupJob(dateStr);
           console.log('[startup-prefetch] ' + dateStr
