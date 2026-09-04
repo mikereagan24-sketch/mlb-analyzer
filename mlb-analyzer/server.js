@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { startCronJobs, runParkFactorsJobIfStale, runFirstPitchBackfillIfMissing, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill } = require('./services/jobs');
+const { startCronJobs, runParkFactorsJobIfStale, runFirstPitchBackfillIfMissing, runRosterJob, runOddsJob, runWeatherJob, runLineupJob, runPitcherUsageBackfill, withMemLog } = require('./services/jobs');
 
 // One-shot row migrations. db/schema.js's require() opened the DB and
 // ran its schema migrations (CREATE TABLE IF NOT EXISTS, idempotent
@@ -43,11 +43,36 @@ try { cleanupOrphanedBackfillJobs(q, nowPtIso); }
 catch (e) { console.warn('[backfill-cleanup] boot cleanup failed:', e && e.message); }
 
 // Empirical-spread ROI readout boot smoke. Exercises the full
-// buildReadout pipeline once on a 30-day window so a ReferenceError
+// buildReadout pipeline once on a 7-day window so a ReferenceError
 // or similar JS-level failure surfaces in the deploy log instead of
 // 500-ing on the operator's first curl. Picked up after a missing-
 // variable bug in the FIX 1 enrichPlay rewrite (commit 17232dd)
 // shipped to prod and broke every readout call until the hotfix.
+//
+// WINDOW NARROWED 30d -> 7d, 2026-09-04, because the 30-day readout is
+// the single largest allocation in boot and it runs BEFORE listen().
+// Measured on the 676.9MB local DB, fresh process per row, RSS around the
+// buildReadout call only:
+//
+//     window    peak rss    heap delta    time     bets
+//       1d       58.7MB       +0.1MB      102ms       0
+//       3d       58.5MB       +0.0MB      101ms       0
+//       7d       73.3MB       +8.6MB      302ms     126
+//      30d      246.8MB     +161.3MB     4532ms    1932
+//
+// The 161MB at 30d is LIVE heap for the duration of the call, not
+// garbage: re-running under --max-old-space-size of 384/256/192 gave a
+// peak of 246.4/246.8/246.6MB respectively, so no heap cap bounds it and
+// #350's cap could not have stopped the resulting container kills.
+//
+// 7d rather than 1d: at 1d and 3d the window returns zero bets, so the
+// smoke exercises only the empty-window envelope and never the row
+// handling -- enrichPlay and friends -- which is the code the smoke exists
+// to catch a ReferenceError in. 7d returns 126 bets, covering those paths,
+// for 8.6MB and 302ms.
+//
+// Re-measure by calling buildReadout at each window in a fresh process and
+// sampling process.memoryUsage() either side of the call.
 // Synchronous + boot-blocking guard logs but does NOT abort listen()
 // — the readout being broken shouldn't keep the rest of the app
 // from serving its routes; the log line + an externally-monitored
@@ -55,7 +80,7 @@ catch (e) { console.warn('[backfill-cleanup] boot cleanup failed:', e && e.messa
 try {
   const { buildReadout } = require('./services/empirical-spread-roi');
   const _now = new Date();
-  const _ago = new Date(_now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const _ago = new Date(_now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const _fmt = (d) => d.toISOString().slice(0, 10);
   const _res = buildReadout(db, _fmt(_ago), _fmt(_now), false);
   // Tiny sanity — should always return a window envelope. If we got
@@ -425,27 +450,26 @@ app.listen(PORT, () => {
   // (a) Rosters first and alone. Everything downstream resolves names
   // against team_rosters, so a stale roster degrades the model rather than
   // just delaying a backfill. It is the one job worth the critical path.
-  runRosterJob()
+  // Wrapped so the ONE job on the critical path is instrumented too. It was
+  // the only boot job with no memory logging of any kind, which made it
+  // indistinguishable from "nothing ran" in a boot-kill log.
+  withMemLog('boot:roster', () => runRosterJob())
     .catch(e => console.warn('[startup-roster] failed:', e && e.message))
     .then(() => {
       // (b) Everything else, SEQUENTIALLY, after a settle delay. Each step
       // is individually non-fatal: a failure logs and the chain continues,
       // which is what the four independent .catch() calls used to buy.
       setTimeout(async () => {
-        const mb = n => (n / 1048576).toFixed(1) + 'MB';
+        // Memory logging delegates to withMemLog so there is ONE
+        // instrumentation implementation rather than a boot-local copy that
+        // drifts from the cron one, and so boot jobs get the START line --
+        // which is the half that names a job killed mid-flight. The catch
+        // stays here: a failing step must log and let the chain continue,
+        // which is what the four independent .catch() calls used to buy.
         const step = async (label, fn) => {
-          const b = process.memoryUsage();
-          const t0 = Date.now();
-          try { await fn(); }
+          try { await withMemLog('boot:' + label, fn); }
           catch (e) { console.warn('[boot-chain] ' + label + ' failed (non-fatal): '
             + (e && e.message)); }
-          finally {
-            const a = process.memoryUsage();
-            console.log('[boot-chain] ' + label
-              + '  heap ' + mb(b.heapUsed) + ' -> ' + mb(a.heapUsed)
-              + '  rss ' + mb(b.rss) + ' -> ' + mb(a.rss)
-              + '  ' + (Date.now() - t0) + 'ms');
-          }
         };
 
         console.log('[boot-chain] starting deferred boot work, one job at a time');

@@ -4132,10 +4132,25 @@ async function runWeatherJob(date, opts) {
 // exactly where an HTTP-heavy job spends. A job showing a small heap delta
 // and a large RSS delta is the one to look at.
 function _mb(n) { return (n / 1048576).toFixed(1) + 'MB'; }
+// START AND END, not end only. (2026-09-04) The end line lives in a
+// finally block, so a job that is OOM-killed mid-flight logs NOTHING and
+// the log cannot name it. On 2026-09-04 that produced a boot-kill loop
+// diagnosed with zero [job-mem] lines in hand -- the absence looked like
+// evidence that no job had started, when in fact _mem wrapped only the
+// three cron jobs and none of the boot-path ones.
+//
+// The END line's format is deliberately unchanged: scripts/analyze-mem-log.js
+// parses it with a regex requiring "heap A -> B (+D)", and the START line
+// does not match that shape, so the analyzer ignores START lines rather
+// than miscounting them as job entries.
 async function _mem(label, fn) {
   const b = process.memoryUsage();
   const t0 = Date.now();
   let failed = false;
+  console.log('[job-mem] START ' + label
+    + '  rss ' + _mb(b.rss)
+    + '  heap ' + _mb(b.heapUsed)
+    + '  ext ' + _mb(b.external));
   try {
     return await fn();
   } catch (e) {
@@ -4161,15 +4176,24 @@ async function _mem(label, fn) {
 // what RETENTION looks like as opposed to one large transient. Every 60s;
 // unref'd so it never holds the process open.
 let _memPeakRss = 0, _memPeakHeap = 0;
+function _memSample() {
+  const m = process.memoryUsage();
+  if (m.rss > _memPeakRss) _memPeakRss = m.rss;
+  if (m.heapUsed > _memPeakHeap) _memPeakHeap = m.heapUsed;
+  console.log('[mem] rss ' + _mb(m.rss) + '  heap ' + _mb(m.heapUsed)
+    + '/' + _mb(m.heapTotal) + '  ext ' + _mb(m.external)
+    + '  peakRss ' + _mb(_memPeakRss) + '  peakHeap ' + _mb(_memPeakHeap));
+}
 function _startMemHeartbeat() {
-  const t = setInterval(() => {
-    const m = process.memoryUsage();
-    if (m.rss > _memPeakRss) _memPeakRss = m.rss;
-    if (m.heapUsed > _memPeakHeap) _memPeakHeap = m.heapUsed;
-    console.log('[mem] rss ' + _mb(m.rss) + '  heap ' + _mb(m.heapUsed)
-      + '/' + _mb(m.heapTotal) + '  ext ' + _mb(m.external)
-      + '  peakRss ' + _mb(_memPeakRss) + '  peakHeap ' + _mb(_memPeakHeap));
-  }, 60000);
+  // SAMPLE IMMEDIATELY, THEN EVERY 60s. (2026-09-04) With interval-only
+  // sampling the first line lands 60s after listen(), so a process killed
+  // during boot emits at most one heartbeat and there is no reading of the
+  // post-boot baseline to compare it against. The immediate sample IS that
+  // baseline: it is taken after the synchronous pre-listen work (schema
+  // open, migrations, boot smoke, route registration) and before any job
+  // has run.
+  _memSample();
+  const t = setInterval(_memSample, 60000);
   if (t.unref) t.unref();
   return t;
 }
@@ -7743,4 +7767,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _mem, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
