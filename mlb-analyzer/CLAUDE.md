@@ -153,6 +153,125 @@ Pre-flight for any PR that adds a new `bet_signals` writer:
    (e.g. `POST /signals/manual`), that's fine — the ruling only
    binds automated writers. User writes are the source of truth.
 
+## Ingest-not-hot-path rule (2026-07-24)
+
+**Do not put general-case filters on the pricing hot path to fix
+narrow data problems. Fix the data at ingest. Monitors report; they
+don't decide. Verification against synthetic data doesn't count for
+anything that touches live pricing — prod-shaped fixtures or it
+doesn't ship.**
+
+Origin: the Victor Mesa shadow (VVM MIA farmhand's Steamer projection
+collided with Victor Mesa Jr. TB's projection under fuzzyLookup's
+Stage 2 no-suffix lookup, contaminating 30 games and 42 signals over
+May–July 2026). Two attempts at a general-case roster-membership
+filter on `getBatterWoba` — the pricing hot path — each caused
+prod-wide mass rejections (79 and 107 batters, respectively, roughly
+88% and 90% of the slate) forcing emergency hotfixes to disable the
+filter. Both attempts passed unit-test suites (29/29 and 39/39
+respectively) and both "passed" a local-DB slate replay that could not
+actually exercise the failure mode because the dev DB's
+`team_rosters` snapshot was corrupted in ways I hadn't noticed.
+
+The correct fix was structural, at the ingest layer (PR
+`fix/woba-ingest-dedup`): our own `ingestWobaCSV` fabricated the
+shadow rows by doubling every Steamer entry as bare-name AND
+name+team. Dropping the bare-name row for team-tagged players +
+a hardcoded exclusion list for the one known cross-Steamer-row
+collision (Victor Mesa) removed the bug without any hot-path change.
+
+Applying this rule:
+
+1. **When narrowly-scoped data bugs surface**, look first for a fix
+   at the layer where the bad data enters the system (ingest, upsert,
+   snapshot). Ask "why does this bad row exist?" before "how do I
+   filter it out at read time?" Ingest-layer fixes have bounded blast
+   radius (they run once per refresh, off-critical-path) and are
+   trivially reversible.
+2. **Reserve hot-path filters** for genuinely runtime-varying
+   conditions the ingest layer cannot know at write time (e.g.,
+   current-slate market prices, cohort filters). Even then, the
+   filter must be verified against **production-shaped data**, not
+   local dev fixtures or synthetic constructions.
+3. **Monitors report; they don't decide.** A weekly audit script
+   (`tmp/audit-mesa-class-shadows.js`) that flags candidate shadows
+   for review is the right pattern — it surfaces the class without
+   making pricing decisions on its own. Any new shadow discovered
+   gets a targeted `SHADOW_EXCLUSIONS` entry, not a filter that
+   might mis-reject other batters.
+4. **Synthetic verification does not count for hot-path changes.**
+   Unit tests and injected fixtures verify local logic; they cannot
+   verify that a filter matches every name-form class production
+   emits. Any PR touching live pricing must run against a snapshot
+   of the prod DB (via `/admin/download-db` or equivalent) and
+   report actual pass counts on the current slate BEFORE merge.
+5. **When a hot-path change causes an incident**, the correct
+   response is disable first (targeted revert or short-circuit
+   in the two callsites), diagnose second. Do not attempt a
+   patch-on-the-live-code fix — the same class of failure will
+   recur under a slightly different name variant. Cut the branch,
+   verify with prod-shaped fixtures, then re-enable.
+
+Related: `_rosterGateStats` / `getRosterGateStats` /
+`buildRosterGatedIdx` in `services/model.js` are dead code kept as
+disabled infrastructure. If a future edit is tempted to re-enable
+them, revisit this section first.
+
+### Companion: an observability mechanism must not be able to take down the thing it observes (2026-09-04)
+
+**A monitor, snapshot, audit, or heartbeat must be bounded in COST, not
+just bounded in authority.** Rule 3 above — *monitors report, they don't
+decide* — bounds what a monitor may **conclude**. It says nothing about
+what a monitor may **consume**, and that half turned out to matter more.
+
+Founding instance: `writeSnapshot('odds', ...)` captured the raw Unabated
+feed so `POST /api/replay/odds` could re-run a parse without re-fetching.
+It decided nothing. It also ran `JSON.stringify` + `gzipSync` over the
+entire feed, synchronously, on every odds pass. That feed is one static
+CDN file carrying every league Unabated covers:
+
+```
+2026-08-11   40.45MB
+2026-08-22   47.76MB
+2026-09-04   88.30MB   117 league keys, 31,012 events
+```
+
+MLB was 322 events, 4.9MB — **5.5%** of what was being captured. The cost:
+89.5MB of string, ~198MB of external buffers, **2721ms of blocked event
+loop**, twice per morning-capture chain. Peak rss for one `runOddsJob`
+reached **485.4MB on a 512MB instance**. It OOM-killed the service nightly
+at 8PM, 11PM and 7AM PT and turned every restart into a boot loop — for a
+capability nothing in production was reading.
+
+**Why this is the ingest rule's blind spot rather than a separate
+subject.** The rule above prefers the ingest layer *precisely because*
+ingest work "has bounded blast radius — it runs once per refresh,
+off-critical-path." That is an assumption, not a property. Here the ingest
+job ran twice per chain, blocked the loop for 2.7s, and allocated ~200MB
+in a 512MB box. Moving work to ingest does not make it free. It only moves
+where the cost lands, and nothing was watching for it there.
+
+Applying it:
+
+1. **Size the capture against the CONSUMER, not the producer.** Persist
+   what a reader actually reads. `parseUnabatedOdds` reads exactly
+   `data.teams` and `data.gameOddsEvents[MLB_KEY]`, so the snapshot now
+   holds only those: 88.3MB → 4.9MB with byte-identical replay output.
+   Verify: `node scripts/test-unabated-snapshot-slice.js`.
+2. **An upstream payload you do not control is a moving target.** This one
+   more than doubled in three weeks with no change on our side, and the
+   incident had no diff behind it. Any unbounded `JSON.parse` /
+   `stringify` / `gzipSync` of a third-party response is a latent incident
+   waiting on somebody else's release.
+3. **Synchronous is a cost in its own right.** A blocking call stops
+   everything, *including the instrument meant to catch it* — see the
+   heartbeat caveat beside `_startMemHeartbeat` in `services/jobs.js`.
+4. **Losing the monitor must be cheaper than losing the service.**
+   `writeSnapshot` already swallowed its own errors so that a capture
+   failure could never break an ingest. That instinct was right and did
+   not go far enough: it protected against the monitor **throwing**, never
+   against the monitor being **expensive**.
+
 ## Skewed-residual analysis discipline (2026-08-06)
 
 **Run-total residuals are right-skewed with a hard floor around 4-6

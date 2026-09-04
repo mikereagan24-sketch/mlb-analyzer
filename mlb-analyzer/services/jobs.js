@@ -4202,6 +4202,21 @@ function _cronFire(label, p) {
 // hour" without waiting for a crash, and a steady climb across samples is
 // what RETENTION looks like as opposed to one large transient. Every 60s;
 // unref'd so it never holds the process open.
+//
+// CAVEAT: IT CANNOT SAMPLE DURING SYNCHRONOUS WORK. (2026-09-04) The
+// interval only fires when the event loop is free, so any peak reached
+// inside a blocking call -- JSON.parse of a large payload, gzipSync, a
+// long synchronous loop -- is invisible to it. A quiet heartbeat does NOT
+// rule out a peak; it rules out a peak the loop was idle enough to
+// observe.
+//
+// Not hypothetical, and the number is the point: a peak sampler written
+// this way reported 0.0MB for a region that actually reached 423.7MB,
+// because every step in that region was synchronous. It found nothing and
+// looked like good news.
+//
+// To measure a synchronous region, take explicit checkpoints between its
+// steps instead. scripts/measure-odds-snapshot-cost.js is the template.
 let _memPeakRss = 0, _memPeakHeap = 0;
 function _memSample() {
   const m = process.memoryUsage();
