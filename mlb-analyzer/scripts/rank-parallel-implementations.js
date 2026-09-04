@@ -105,6 +105,18 @@ for (const [name, copies] of Object.entries(defs)) {
   //          isHighlightedSignal sits here: four copies across four
   //          backtest harnesses, 32% apart, so the four are measuring
   //          different populations.
+  //          COUNT REVISED 2026-09-04: six, not four. The scanner only
+  //          sees services/*.js, so it missed two in public/index.html --
+  //          signalMeetsHighlightThreshold, plus an inline copy inside
+  //          renderGameResult's vd(). The vd() copy has since been folded
+  //          into signalMeetsHighlightThreshold, leaving FIVE: the four
+  //          harnesses (settings-driven, ui_highlight_* from app_settings)
+  //          and the client (hardcoded 2.0/4.5/7.0). Those two families
+  //          agree today -- 0.02/0.045/0.07/overs-false -- so nothing is
+  //          drifting yet, but an operator changing a setting would move
+  //          the backtests and not the UI. Unifying them is the remaining
+  //          consolidation and is NOT done: it changes the published
+  //          population of every result the harnesses have produced.
   //   >75%   almost certainly UNRELATED functions sharing a common name.
   //          projectAgg scored 93% and is two different functions -- one
   //          projects CLV stats, the other projects buckets.

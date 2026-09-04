@@ -706,18 +706,87 @@ function effAwayML(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.o
 function effHomeML(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_home_ml!=null?g.opener_model_home_ml:g.model_home_ml;}
 function effTotal(g){return (g.is_opener_game_away||g.is_opener_game_home)&&g.opener_model_total!=null?g.opener_model_total:g.model_total;}
 
+// Implied win probability from an American price. HOISTED to top level
+// (2026-09-04): it used to live inside renderGameGrid, out of reach of
+// renderGameResult's bet boxes. Hoisting rather than copying — a second
+// copy of this is how the highlight gate got to six.
+function _impliedP(ml) {
+  const m = Number(ml);
+  if (!isFinite(m) || m === 0) return null;
+  return m < 0 ? Math.abs(m) / (Math.abs(m) + 100) : 100 / (m + 100);
+}
+
+// CURRENT edge for an ML signal: LIVE model vs LIVE market, both from
+// the game row, so every number in the bet box is from the same moment.
+// (2026-09-04)
+//
+// Model is effAwayML/effHomeML — the opener-aware value the box actually
+// prints — not the raw model_*_ml, so the pp reconciles with the line
+// shown above it.
+//
+// Market is game.market_{away,home}_ml, NOT the signal's frozen
+// market_line. That column is already Kalshi-first by construction: the
+// Kalshi-direct override is the sole writer of ML market baselines
+// (post-#230), and rows fall to polymarket only where Kalshi had no
+// coverage — currently kalshi 941 / polymarket 623. So no source
+// ordering is re-implemented here; doing that in the client would be one
+// more copy of a rule that already lives upstream.
+//
+// ML ONLY. A totals edge needs TOT_SLOPE and the clamp band, both
+// server-side; recomputing it here would invent a number that disagrees
+// with the engine, so the Total box keeps its emit-time score.
+function liveEdgePpML(s, g) {
+  if (!s || !g) return null;
+  if (String(s.signal_type).toUpperCase() !== 'ML') return null;
+  const side = String(s.signal_side).toLowerCase();
+  const mdl = side === 'away' ? effAwayML(g) : effHomeML(g);
+  const mkt = side === 'away' ? g.market_away_ml : g.market_home_ml;
+  const a = _impliedP(mdl), b = _impliedP(mkt);
+  if (a == null || b == null) return null;
+  return (a - b) * 100;
+}
+
 // Shared highlight-threshold gate. Used by sig pill rendering
-// (renderGameGrid) and per-bet-box tinting (renderGameResult). Legacy
-// rows: only 2★/3★ qualify — 1★ was always low-emphasis pre-cutover
-// and shouldn't trigger the box tint. New continuous-edge rows: the
-// rounded 0.5pp score must clear a direction-specific threshold
-// (favs ≥2.0pp, dogs ≥4.5pp, unders ≥7.0pp; overs never).
-function signalMeetsHighlightThreshold(s) {
+// (renderGameGrid) and per-bet-box tinting + verdict colour
+// (renderGameResult). Legacy rows: only 2★/3★ qualify — 1★ was always
+// low-emphasis pre-cutover and shouldn't trigger the box tint. New
+// continuous-edge rows: the score must clear a direction-specific
+// threshold (favs ≥2.0pp, dogs ≥4.5pp, unders ≥7.0pp; overs never).
+//
+// TWO COMPARISON BASES, AND THE DIFFERENCE IS DELIBERATE. (2026-09-04)
+//
+//   no rawLivePp  → the emit-time edge ROUNDED to 0.5pp. This is the
+//                   long-standing convention, and settings-schema.js
+//                   documents why: "comparison is against the ROUNDED
+//                   0.5pp score, not the raw edge, so the UI display and
+//                   highlight condition stay consistent." The header
+//                   badge prints that same rounded score, so they agree.
+//
+//   rawLivePp     → the live edge RAW, unrounded. The bet box prints the
+//                   live edge to ONE decimal, so rounding to 0.5 would
+//                   break the very consistency the rule above protects:
+//                   a box reading "1.8pp" would round to 2.0 and light up
+//                   green against a 2.0 floor.
+//
+// Consequence worth knowing: a raw 1.985pp prints as "2.0PP" and is NOT
+// green, because 1.985 < 2.0. That looks like a bug and is not one — it
+// is the honest rendering of a value sitting just under its floor.
+// mil-nym away on 2026-09-04 is exactly this case.
+//
+// DIRECTION still comes from s.market_line, the FROZEN emit-time line,
+// unchanged from before. A signal that emitted as a favourite keeps the
+// 2.0 floor even if the market later flips it to a dog; re-deciding the
+// floor from the live line would silently move the bar under a bet the
+// operator already placed.
+function signalMeetsHighlightThreshold(s, rawLivePp) {
   if (!s) return false;
   if (s.signal_label !== null && s.signal_label !== undefined) {
     return s.signal_label === '2★' || s.signal_label === '3★';
   }
-  const score = Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
+  const useRaw = typeof rawLivePp === 'number' && isFinite(rawLivePp);
+  const score = useRaw
+    ? rawLivePp
+    : Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
   if (s.signal_type === 'ML') {
     if (s.market_line < 0) return score >= 2.0;
     if (s.market_line > 0) return score >= 4.5;
@@ -1452,20 +1521,10 @@ function renderGameGrid(games,date){
   // clamp band, which live server-side; recomputing it here would invent
   // a number that disagrees with the engine. Totals get the timestamp
   // without a "now", which is honest about what the client can know.
-  function _impliedP(ml) {
-    const m = Number(ml);
-    if (!isFinite(m) || m === 0) return null;
-    return m < 0 ? Math.abs(m) / (Math.abs(m) + 100) : 100 / (m + 100);
-  }
-  function _liveEdgePp(s, g) {
-    if (!g || String(s.signal_type).toUpperCase() !== 'ML') return null;
-    const side = String(s.signal_side).toLowerCase();
-    const mdl = side === 'away' ? g.model_away_ml : g.model_home_ml;
-    const mkt = side === 'away' ? g.market_away_ml : g.market_home_ml;
-    const a = _impliedP(mdl), b = _impliedP(mkt);
-    if (a == null || b == null) return null;
-    return (a - b) * 100;
-  }
+  // _impliedP and the live-edge helper were here. Both are now top-level
+  // (see liveEdgePpML) so the bet boxes can use the same code rather than
+  // a second copy. The nested _liveEdgePp also used the RAW model_*_ml,
+  // which disagreed with the opener-aware value the boxes print.
   function _emitStamp(s) {
     const raw = s.bet_locked_at || s.created_at;
     if (!raw) return null;
@@ -1479,25 +1538,39 @@ function renderGameGrid(games,date){
     const stamp = _emitStamp(s);
     if (!stamp) return '';
     const emitPp = (s.edge_pct || 0) * 100;
-    const live = _liveEdgePp(s, g);
+    const live = liveEdgePpML(s, g);
     // Only annotate when the two actually differ enough to confuse, or
     // when the row is locked (where the freeze makes divergence certain
     // to grow). A fresh unlocked signal whose edge still matches needs
     // no chip -- noise on every pill would train the eye to skip it.
     const diverged = live != null && Math.abs(live - emitPp) >= 0.5;
     if (!s.bet_locked_at && !diverged) return '';
-    const nowTxt = live != null
-      ? ' &middot; now ' + live.toFixed(1) + 'pp'
+    // THE CHIP IS NOW THE PRIOR VALUE, WHOLE. (2026-09-04) It used to
+    // read "@07:01 &middot; now 1.8pp" -- the timestamp belonged to the
+    // badge's emit-time pp, but the "now" belonged to a different moment,
+    // so the chip carried both moments at once. The current edge moved
+    // into the ML bet box, which is where the live model and live market
+    // it is computed from are printed. What is left here is one coherent
+    // statement about emit: the edge, when, and AT WHAT PRICE -- the
+    // frozen market_line, which is the piece that was missing and the
+    // reason BOS@BAL could not be reconciled by eye.
+    const ml = s.market_line;
+    const atLine = ml != null
+      ? ' at ' + (Number(ml) > 0 ? '+' : '') + ml
       : '';
-    const tt = 'Badge is the edge AT EMIT: ' + emitPp.toFixed(2) + 'pp'
+    const txt = 'was ' + emitPp.toFixed(1) + 'pp @' + stamp + atLine;
+    const tt = 'PRIOR VALUE, frozen '
+      + (s.bet_locked_at ? 'when the bet was locked' : 'at emit') + ' ' + stamp + ': '
+      + emitPp.toFixed(2) + 'pp'
       + ' (model ' + (s.model_line != null ? s.model_line : '?')
-      + ' vs market ' + (s.market_line != null ? s.market_line : '?') + ')'
-      + ', frozen ' + (s.bet_locked_at ? 'when the bet was locked' : 'at emit') + ' ' + stamp + '.'
+      + ' vs market ' + (ml != null ? ml : '?') + ').'
       + (live != null
-          ? ' Live now: ' + live.toFixed(2) + 'pp against the current model/market shown below.'
-          : ' A live figure is not shown for this market type because the client cannot recompute it the way the engine does.');
-    return '<span class="sig-prov" title="' + tt.replace(/"/g, '&quot;') + '">@'
-      + stamp + nowTxt + '</span>';
+          ? ' The bet box below shows the CURRENT edge, ' + live.toFixed(2)
+            + 'pp, against the live model and live market printed there.'
+          : ' No current edge is shown for this market type: the client cannot'
+            + ' recompute a totals edge the way the engine does.');
+    return '<span class="sig-prov" title="' + tt.replace(/"/g, '&quot;') + '">'
+      + txt + '</span>';
   }
   function sigPillHtml(s, g) {
     if (s.signal_label !== null && s.signal_label !== undefined) {
@@ -2125,17 +2198,34 @@ function renderGameResult(g){
       const col = {'3★':'#4477cc','2★':'var(--green)','1★':'var(--yellow)'}[sig.signal_label] || 'var(--yellow)';
       return '<span style="color:' + col + ';font-size:9px;font-weight:500">' + sig.signal_label.toUpperCase() + '</span>';
     }
-    const score = Math.round((sig.edge_pct || 0) * 100 / 0.5) * 0.5;
-    const scoreText = score.toFixed(1) + 'PP';
-    let isHighlight = false;
-    if (sig.signal_type === 'ML') {
-      if (sig.market_line < 0) isHighlight = score >= 2.0;
-      else if (sig.market_line > 0) isHighlight = score >= 4.5;
-    } else if (sig.signal_type === 'Total' && sig.signal_side === 'under') {
-      isHighlight = score >= 7.0;
-    }
+    // FOLDED INTO THE SHARED GATE. (2026-09-04) This block used to carry
+    // its own copy of the fav/dog/under thresholds -- a sixth copy of a
+    // rule that already had five. It now calls
+    // signalMeetsHighlightThreshold like every other caller.
+    //
+    // ML boxes show the CURRENT edge: live model vs live market, the two
+    // numbers printed directly above this verdict. Totals keep the
+    // emit-time rounded score, because the client cannot recompute a
+    // totals edge (TOT_SLOPE + clamp band are server-side).
+    const livePp = liveEdgePpML(sig, g);
+    const useLive = livePp != null;
+    const scoreText = (useLive
+      ? livePp.toFixed(1)
+      : (Math.round((sig.edge_pct || 0) * 100 / 0.5) * 0.5).toFixed(1)) + 'PP';
+    const isHighlight = signalMeetsHighlightThreshold(sig, useLive ? livePp : undefined);
     const col = isHighlight ? 'var(--green)' : 'var(--yellow)';
-    return '<span style="color:' + col + ';font-size:9px;font-weight:500">' + scoreText + '</span>';
+    const emitPpTxt = ((sig.edge_pct || 0) * 100).toFixed(2);
+    const tt = useLive
+      ? 'CURRENT edge ' + livePp.toFixed(2) + 'pp: live model vs live market, both shown above.'
+        + ' Emit-time edge was ' + emitPpTxt + 'pp at market '
+        + (sig.market_line != null ? sig.market_line : '?') + ' -- see the chip on the badge.'
+        + ' Green requires the current edge to clear this signal’s floor ('
+        + (sig.market_line < 0 ? 'favourite, 2.0pp' : sig.market_line > 0 ? 'dog, 4.5pp' : 'n/a')
+        + '), compared unrounded.'
+      : 'Emit-time edge ' + emitPpTxt + 'pp, rounded to 0.5pp. No current edge is'
+        + ' computed for totals: TOT_SLOPE and the clamp band live server-side.';
+    return '<span title="' + tt.replace(/"/g, '&quot;') + '" style="color:' + col
+      + ';font-size:9px;font-weight:500">' + scoreText + '</span>';
   };
   // Spread (runline) row — Step 1 ingest from Unabated. Display only;
   // Mike isn't betting these yet. Shows "—" for missing sides rather
@@ -2156,13 +2246,24 @@ function renderGameResult(g){
   // class still drives legacy 2★/3★ tinting; .bet-box-highlight
   // adds the same green tint for qualifying new continuous-edge
   // rows (where vc() returns '' because signal_label is null).
-  const aBoxHl = signalMeetsHighlightThreshold(aEdge) ? ' bet-box-highlight' : '';
+  // ML tint follows the CURRENT edge; the Total tint keeps the emit-time
+  // score for the same reason its verdict does. undefined (not null) is
+  // passed when there is no live figure, so the gate falls back to its
+  // rounded emit-time basis rather than comparing against a null.
+  const aLivePp = liveEdgePpML(aEdge, g);
+  const hLivePp = liveEdgePpML(hEdge, g);
+  const aBoxHl = signalMeetsHighlightThreshold(aEdge, aLivePp == null ? undefined : aLivePp) ? ' bet-box-highlight' : '';
   const tBoxHl = signalMeetsHighlightThreshold(totEdge) ? ' bet-box-highlight' : '';
-  const hBoxHl = signalMeetsHighlightThreshold(hEdge) ? ' bet-box-highlight' : '';
+  const hBoxHl = signalMeetsHighlightThreshold(hEdge, hLivePp == null ? undefined : hLivePp) ? ' bet-box-highlight' : '';
   return'<div class="result-grid">'+
-    '<div class="rbox '+vc(aEdge)+aBoxHl+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(_resolveAwayML(g, sigs))+'</div><div class="rbox-verdict">'+vd(aEdge,'ML','away')+'</div></div>'+
+    // ML boxes print the LIVE market (g.market_*_ml), not the signal's
+    // frozen market_line, so the box's model, market and pp are all from
+    // the same moment. _resolveMkt keeps the freeze everywhere else --
+    // the grid odds strip, the comparison rows, the matchup header and
+    // the Total box below are all unchanged.
+    '<div class="rbox '+vc(aEdge)+aBoxHl+'"><div class="rbox-label">'+g.away_team+' ML</div><div class="rbox-val">'+fmtML(effAwayML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_away_ml)+'</div><div class="rbox-verdict">'+vd(aEdge,'ML','away')+'</div></div>'+
     '<div class="rbox '+vc(totEdge)+tBoxHl+'"><div class="rbox-label">Total</div><div class="rbox-val">'+(effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—')+'</div><div class="rbox-mkt">mkt '+(_resolveTotalMkt(g, sigs)||'—')+'</div><div class="rbox-verdict">'+vd(totEdge,'Total',null)+'</div></div>'+
-    '<div class="rbox '+vc(hEdge)+hBoxHl+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(_resolveHomeML(g, sigs))+'</div><div class="rbox-verdict">'+vd(hEdge,'ML','home')+'</div></div>'+
+    '<div class="rbox '+vc(hEdge)+hBoxHl+'"><div class="rbox-label">'+g.home_team+' ML</div><div class="rbox-val">'+fmtML(effHomeML(g))+'</div><div class="rbox-mkt">mkt '+fmtML(g.market_home_ml)+'</div><div class="rbox-verdict">'+vd(hEdge,'ML','home')+'</div></div>'+
     '</div>'+
     spreadRow +
     (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
