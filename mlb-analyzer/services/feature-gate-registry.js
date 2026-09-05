@@ -564,6 +564,30 @@ function logGateHealth(db, opts) {
   // every morning for something nobody intends to act on today trains the
   // reader to skip the whole check, which is the fielding_frv
   // permanent-CRITICAL lesson. One informational line is the balance.
+  // corpus_size standard, reported in the same 6AM pass that reports gate
+  // windows. Loud on violation, one quiet line otherwise -- a check nobody
+  // ever sees pass is a check nobody trusts when it fails.
+  const cs = checkCorpusSize(r.gates.length ? GATES : GATES);
+  if (!cs.ok) {
+    if (cs.missing.length) {
+      console.warn('[gate-health] corpus_size MISSING on ' + cs.missing.length
+        + ' non-grandfathered row(s): ' + cs.missing.join(', ')
+        + ' — a recorded criterion without an n is not re-runnable.');
+    }
+    if (cs.unexpected.length) {
+      console.warn('[gate-health] corpus_size now present on grandfathered row(s): '
+        + cs.unexpected.join(', ')
+        + ' — prune them from CORPUS_SIZE_GRANDFATHERED so the list keeps its teeth.');
+    }
+    if (cs.bad.length) {
+      console.warn('[gate-health] corpus_size malformed (want a positive number or explicit null): '
+        + cs.bad.join(', '));
+    }
+  } else {
+    console.log('[gate-health] corpus_size OK — ' + (cs.total - cs.grandfathered)
+      + ' row(s) under the standard, ' + cs.grandfathered + ' grandfathered');
+  }
+
   const open = r.gates.filter(g => g.status === STATUS.OPEN_DECISION);
   if (open.length) {
     console.log('[gate-health] ' + open.length + ' open decision(s) on record (not blocking): '
@@ -593,4 +617,65 @@ function logGateHealth(db, opts) {
   return r;
 }
 
-module.exports = { GATES, STATUS, evaluateGates, logGateHealth, PRECONDITIONS };
+// corpus_size IS REQUIRED ON NEW REGISTRY ROWS. (2026-09-05)
+//
+// A recorded criterion without an n is not re-runnable and not falsifiable.
+// The FRV row is the case that forced this: its numbers were recorded on
+// 790 games, the weather-contamination backfill later cut the same window
+// to 439, and nothing on the row said which corpus the figures came from --
+// so "not significant" could not be distinguished from "not significant on
+// a corpus that no longer exists".
+//
+// GRANDFATHERED, not retrofitted. All 26 rows that predate this standard
+// are listed below and exempt. Backfilling an n onto them would mean
+// inventing one, which is worse than an honest gap. The rule binds the
+// NEXT row.
+//
+// BASELINE ARM: the check fails in BOTH directions. A new row without
+// corpus_size fails, and a grandfathered row that GAINS one also fails --
+// so the exemption list gets pruned rather than carried forever. A
+// permanently-accepted failure list is how a real regression hides inside
+// a carried failure count.
+const CORPUS_SIZE_GRANDFATHERED = [
+  'use_opener_logic', 'catcher_framing_enabled', 'park_neutral_inputs_enabled',
+  'signal_venue_aware_enabled', 'kalshi_direct_primary_enabled',
+  'kalshi_direct_totals_enabled', 'signal_edge_cap_enabled',
+  'bullpen_downweight_starters', 'sp_prefer_rotowire', 'totals_selection_edge',
+  'defense_frv_enabled', 'use_hand_conditional_sp_weight',
+  'ui_highlight_tot_overs_enabled', 'signal_edge_hard_cap_pp',
+  'signal_edge_soft_cap_pp', 'catcher_framing_mute', 'defense_frv_mute',
+  'catcher_framing_takes_per_game', 'sp_weight_l', 'bsr_baserunning',
+  'bullpen_w_proj_w_act', 'at_emit_snapshot_columns',
+  'retractable_roof_config_branch', 'bullpen_woba_neutralization',
+  'debug_bullpen_endpoint_divergence', 'bullpen_pool_lastname_fallback',
+];
+
+// corpus_size may be a positive number, or an explicit null WITH the reason
+// carried in the note (a criterion that genuinely has no corpus yet -- a
+// shadow gate still accumulating, say). `undefined` is the failure: it means
+// nobody decided.
+function checkCorpusSize(gates) {
+  const g = gates || GATES;
+  const missing = [], unexpected = [], bad = [];
+  for (const row of g) {
+    const grandfathered = CORPUS_SIZE_GRANDFATHERED.indexOf(row.id) !== -1;
+    const has = Object.prototype.hasOwnProperty.call(row, 'corpus_size');
+    if (!grandfathered && !has) { missing.push(row.id); continue; }
+    if (grandfathered && has) { unexpected.push(row.id); continue; }
+    if (has && row.corpus_size !== null
+        && !(typeof row.corpus_size === 'number' && isFinite(row.corpus_size) && row.corpus_size > 0)) {
+      bad.push(row.id + ' (' + JSON.stringify(row.corpus_size) + ')');
+    }
+  }
+  return {
+    ok: !missing.length && !unexpected.length && !bad.length,
+    missing,      // new row with no corpus_size -- the standard was ignored
+    unexpected,   // grandfathered row that gained one -- prune the list
+    bad,          // present but not a positive number or explicit null
+    grandfathered: CORPUS_SIZE_GRANDFATHERED.length,
+    total: g.length,
+  };
+}
+
+module.exports = { GATES, STATUS, evaluateGates, logGateHealth, PRECONDITIONS,
+  checkCorpusSize, CORPUS_SIZE_GRANDFATHERED };
