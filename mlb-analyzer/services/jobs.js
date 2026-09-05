@@ -4143,6 +4143,26 @@ function _mb(n) { return (n / 1048576).toFixed(1) + 'MB'; }
 // parses it with a regex requiring "heap A -> B (+D)", and the START line
 // does not match that shape, so the analyzer ignores START lines rather
 // than miscounting them as job entries.
+// PEAK SAMPLING. (2026-09-05) The START/END pair reports the delta between
+// two instants. A job that allocates 200MB and frees it before returning
+// shows a small delta and looks harmless -- which is exactly the shape that
+// OOM-kills a container mid-flight while logging nothing alarming.
+//
+// CAVEAT, and it is the same one that sits beside _startMemHeartbeat: an
+// interval sampler only runs when the event loop is free, so a peak reached
+// INSIDE a synchronous region -- JSON.parse of a large payload, gzipSync, a
+// long synchronous loop -- is invisible here. These peaks are LOWER BOUNDS.
+// A quiet peak line does not prove there was no spike; it proves there was
+// no spike the loop was idle enough to observe. To measure a synchronous
+// region, take explicit checkpoints between its steps
+// (scripts/measure-odds-snapshot-cost.js is the template).
+//
+// Emitted as its own [job-peak] line rather than folded into the END line:
+// scripts/analyze-mem-log.js parses END with a regex requiring
+// "heap A -> B (+D)", and [job-peak] matches neither that nor the [mem]
+// heartbeat pattern, so the analyzer ignores it rather than miscounting.
+const _MEM_SAMPLE_MS = 150;
+
 async function _mem(label, fn) {
   const b = process.memoryUsage();
   const t0 = Date.now();
@@ -4151,15 +4171,26 @@ async function _mem(label, fn) {
     + '  rss ' + _mb(b.rss)
     + '  heap ' + _mb(b.heapUsed)
     + '  ext ' + _mb(b.external));
+  let pRss = b.rss, pHeap = b.heapUsed, pExt = b.external, samples = 0;
+  const sampler = setInterval(() => {
+    const m = process.memoryUsage();
+    samples++;
+    if (m.rss > pRss) pRss = m.rss;
+    if (m.heapUsed > pHeap) pHeap = m.heapUsed;
+    if (m.external > pExt) pExt = m.external;
+  }, _MEM_SAMPLE_MS);
+  if (sampler.unref) sampler.unref();
   try {
     return await fn();
   } catch (e) {
     failed = true;
     throw e;
   } finally {
+    clearInterval(sampler);
     const a = process.memoryUsage();
     const dh = (a.heapUsed - b.heapUsed) / 1048576;
     const dr = (a.rss - b.rss) / 1048576;
+    // END LINE FORMAT IS UNCHANGED -- analyze-mem-log.js parses it.
     console.log('[job-mem] ' + label
       + '  heap ' + _mb(b.heapUsed) + ' -> ' + _mb(a.heapUsed)
       + ' (' + (dh >= 0 ? '+' : '') + dh.toFixed(1) + 'MB)'
@@ -4168,7 +4199,65 @@ async function _mem(label, fn) {
       + '  ext ' + _mb(a.external)
       + '  ' + (Date.now() - t0) + 'ms'
       + (failed ? '  FAILED' : ''));
+    console.log('[job-peak] ' + label
+      + '  peak rss ' + _mb(pRss)
+      + '  heap ' + _mb(pHeap)
+      + '  ext ' + _mb(pExt)
+      + '  over base rss ' + _mb(pRss - b.rss)
+      + '  samples ' + samples
+      + (samples === 0 ? '  (NO SAMPLES -- job was wholly synchronous or shorter than '
+          + _MEM_SAMPLE_MS + 'ms; peak is the START reading)' : ''));
   }
+}
+
+// SERIAL JOB QUEUE. (2026-09-05)
+//
+// 8AM PT killed the instance with `lineup 8AM` and `odds 8AM` both STARTed
+// on the same minute from a ~240MB resident baseline and neither ENDing.
+// 3PM and 5PM fire the same pair and survived from ~219-235MB; 7AM, 8PM and
+// 11PM survived. The distinguishing feature of the kill is not which jobs
+// ran, it is that two ran AT ONCE from a baseline that leaves room for one.
+//
+// Boot was serialized for exactly this reason in 2026-09-03 and the cron
+// layer was left concurrent. This closes it: one mutex, FIFO, so peak
+// becomes max(job) instead of sum(jobs) above the shared baseline.
+//
+// DO NOT CALL THIS FROM INSIDE A QUEUED JOB. It is a plain mutex with no
+// re-entrancy detection, so a nested acquire would wait on a lock its own
+// caller holds and deadlock forever. Nothing nests today --
+// runMorningCaptureJob calls runLineupJob/runWeatherJob/runOddsJob
+// DIRECTLY, not through the queue -- and scripts/test-cron-serialization.js
+// asserts that stays true.
+let _jobChain = Promise.resolve();
+let _jobRunning = null;
+let _jobWaiting = 0;
+
+function _queued(label, fn) {
+  const queuedAt = Date.now();
+  _jobWaiting++;
+  const blockedBy = _jobRunning;
+  const p = _jobChain.then(async () => {
+    _jobWaiting--;
+    const waited = Date.now() - queuedAt;
+    // Only log a real wait. Every job goes through the queue, so an
+    // unconditional line would print a 0ms wait for the common case and
+    // train the eye to skip the ones that matter.
+    if (waited >= 250) {
+      console.log('[job-queue] ' + label + ' waited ' + waited + 'ms'
+        + (blockedBy ? ' behind ' + blockedBy : '')
+        + (_jobWaiting ? ' (' + _jobWaiting + ' still queued)' : ''));
+    }
+    _jobRunning = label;
+    try {
+      return await _mem(label, fn);
+    } finally {
+      _jobRunning = null;
+    }
+  });
+  // Keep the chain alive after a failure: without this, one rejected job
+  // would poison the mutex and every later job would be skipped.
+  _jobChain = p.catch(() => {});
+  return p;
 }
 
 // A SCHEDULED JOB'S FAILURE MUST NOT KILL THE PROCESS. (2026-09-04)
@@ -4262,7 +4351,7 @@ function startCronJobs() {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT lineup pull');
       _cronFire(label + ' PT lineup pull',
-        _mem('lineup ' + label, () => runLineupJob(todayStr())));
+        _queued('lineup ' + label, () => runLineupJob(todayStr())));
     }, { timezone: 'America/Los_Angeles' });
   });
   cron.schedule('0 23 * * *', () => {
@@ -4276,14 +4365,14 @@ function startCronJobs() {
     cron.schedule('0 '+h+' * * *', () => {
       console.log('[cron] '+label+' PT odds pull');
       _cronFire(label + ' PT odds pull',
-        _mem('odds ' + label, () => runOddsJob(todayStr())));
+        _queued('odds ' + label, () => runOddsJob(todayStr())));
     }, { timezone: 'America/Los_Angeles' });
   });
 
   // --- Scores: 4AM PT ---
   cron.schedule('0 4 * * *', () => {
     console.log('[cron] 4AM PT score pull');
-    _cronFire('4AM PT score pull', _mem('score', () => runScoreJob(yesterdayStr())));
+    _cronFire('4AM PT score pull', _queued('score', () => runScoreJob(yesterdayStr())));
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 5:30AM PT FG wOBA sync: projections + actuals with retry/backoff ---
@@ -7841,4 +7930,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _mem, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
