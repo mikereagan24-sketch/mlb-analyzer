@@ -2207,10 +2207,23 @@ function renderGameResult(g){
     // numbers printed directly above this verdict. Totals keep the
     // emit-time rounded score, because the client cannot recompute a
     // totals edge (TOT_SLOPE + clamp band are server-side).
+    // TWO DECIMALS ON THE LIVE FIGURE. (2026-09-04) At one decimal a raw
+    // value just under its floor printed AS the floor: mil-nym away came
+    // to 1.9854pp, displayed "2.0PP", and correctly did not green -- which
+    // reads as a broken highlight rather than as a near miss. The compare
+    // stays RAW (see signalMeetsHighlightThreshold); only the rendering
+    // gains a digit, so the printed number can no longer equal a floor it
+    // does not clear.
+    //
+    // The Total box keeps ONE decimal: its score is the 0.5pp-rounded
+    // emit-time value, which has no second decimal to show, and it is
+    // gated on that same rounded number -- so display and gate already
+    // agree there. The header chip also stays at one decimal; it prints
+    // the rounded emit score the badge is built from.
     const livePp = liveEdgePpML(sig, g);
     const useLive = livePp != null;
     const scoreText = (useLive
-      ? livePp.toFixed(1)
+      ? livePp.toFixed(2)
       : (Math.round((sig.edge_pct || 0) * 100 / 0.5) * 0.5).toFixed(1)) + 'PP';
     const isHighlight = signalMeetsHighlightThreshold(sig, useLive ? livePp : undefined);
     const col = isHighlight ? 'var(--green)' : 'var(--yellow)';
