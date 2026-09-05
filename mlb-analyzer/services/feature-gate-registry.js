@@ -269,6 +269,46 @@ const GATES = [
     note: 'Genuinely decided, and the decision is recorded — but the evidence was ROI-based and is therefore '
         + 'selection-contaminated. Worth re-deriving on a calibration target before treating "no edge in overs" as settled.' },
 
+  { id: 'ui_highlight_symmetric_floor', key: 'ui_highlight_ml_fav_min_pp', on_expected: false,
+    criterion: 'Replace fav 2.0 / dog 4.5 with FAV FLOOR 3.5pp and DOG BAND 2.0-4.5pp. '
+             + 'FLIP CRITERION: on a FORWARD window, |mean P(model) - realized| within the 95% '
+             + 'resolution half-width in BOTH admitted cells, n >= 250 per cell. '
+             + 'Re-run: the cell table in the note.',
+    criterion_type: 'calibration', precondition: null,
+    window_end: '2026-10-31', decision: null,
+    corpus_size: 452,
+    // Two settings keys move together here (ui_highlight_ml_fav_min_pp and
+    // ui_highlight_ml_dog_min_pp) plus a dog UPPER bound that has no key at
+    // all today. `key` names the fav one because the registry carries a
+    // single settings key per row; the dog half is specified in the
+    // criterion and must not be read off `key`.
+    note: 'PROPOSAL ONLY — no behaviour change. Nothing in this row alters the shipped gate, '
+        + 'which remains fav 2.0 / dog 4.5 / under 7.0 / overs never, hardcoded in '
+        + 'public/index.html and settings-driven in the four backtest harnesses.\n'
+        + 'FOUNDING MEASUREMENT 2026-09-05. Whole season, contamination-filtered, continuous-edge '
+        + 'rows only (signal_label IS NULL), P(model) from the frozen emit-time model_line, '
+        + 'outcome from final scores. NO ROI USED — ROI over emitted signals measures selection, '
+        + 'not pricing.\n'
+        + '  FAV 2.0-3.5   n=113  err -0.135  +/-0.092  OVERCONF x1.47  <- excluded by the 3.5 floor\n'
+        + '  FAV 3.5pp+    n= 78  err +0.021  +/-0.108  within noise    <- ADMITTED\n'
+        + '  DOG 2.0-4.5   n=124  err -0.021  +/-0.088  within noise    <- ADMITTED\n'
+        + '  DOG 4.5-6.0   n= 45  err -0.174  +/-0.135  OVERCONF x1.29  <- excluded by the band\n'
+        + '  DOG 6.0pp+    n= 92  err -0.118  +/-0.099  OVERCONF x1.19  <- excluded by the band\n'
+        + 'FAV IS A FLOOR: all the favourite overconfidence sits in 2.0-3.5; above 3.5 the error '
+        + 'flips sign and stays inside the noise band, and fav 3.5pp+ has the smallest absolute '
+        + 'calibration error of any fav floor tested (3.0/3.5/4.0/4.5).\n'
+        + 'DOG IS A BAND, NOT A FLOOR: dog 2.0pp+ as a floor is OVERCONF x1.37 (n=261) because it '
+        + 'readmits the 4.5+ tail, and that tail is overconfident across its whole range '
+        + '(4.5-6.0 x1.29, 6.0+ x1.19) rather than in a trimmable corner. Favourites and dogs have '
+        + 'OPPOSITE shapes: favs bad low and fine high, dogs fine low and bad high.\n'
+        + 'CAVEAT MULTIPLICITY: many cuts were inspected (four fav floors, three dog floors, three '
+        + 'upper bounds). This is not a pre-registered single test, which is exactly why the '
+        + 'criterion demands a FORWARD window rather than accepting the retrospective fit.\n'
+        + 'CAVEAT SELECTION: measured on EMITTED signals only. That is the right population for '
+        + '"should this be highlighted", but it is silent about edges below the 1.0pp emit floor.\n'
+        + 'UNDERS ARE NOT IN THIS PROPOSAL and are queued behind the totals run-environment work: '
+        + 'a band proposal for unders will be measured against the corrected model, not this one.' },
+
   // ---- numeric gates ----
   { id: 'signal_edge_hard_cap_pp', key: 'signal_edge_hard_cap_pp', numeric: true,
     criterion: 'Hard suppression threshold. Shipped at 0.08 (schema default 0.25).',
