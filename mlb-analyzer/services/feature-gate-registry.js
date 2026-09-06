@@ -307,7 +307,49 @@ const GATES = [
         + 'CAVEAT SELECTION: measured on EMITTED signals only. That is the right population for '
         + '"should this be highlighted", but it is silent about edges below the 1.0pp emit floor.\n'
         + 'UNDERS ARE NOT IN THIS PROPOSAL and are queued behind the totals run-environment work: '
-        + 'a band proposal for unders will be measured against the corrected model, not this one.' },
+        + 'a band proposal for unders will be measured against the corrected model, not this one. '
+        + 'SUPERSEDED for unders by ui_highlight_under_band below, registered 2026-09-06.' },
+
+  { id: 'ui_highlight_under_band', key: 'ui_highlight_tot_under_min_pp', on_expected: false,
+    criterion: 'Replace the 7.0pp UNDER floor with a BAND, candidate [2.0, 5.0)pp. '
+             + 'FLIP CRITERION: on a FORWARD window, |mean P(model) - realized| within the 95% '
+             + 'resolution half-width in the admitted band, n >= 250 in that band. '
+             + 'Re-run: the cell table in the note.',
+    criterion_type: 'calibration', precondition: null,
+    window_end: '2026-10-31', decision: null,
+    corpus_size: 355,
+    note: 'PROPOSAL ONLY — no behaviour change. The shipped gate remains under >= 7.0pp, '
+        + 'overs never, hardcoded in public/index.html and settings-driven via '
+        + 'ui_highlight_tot_under_min_pp in the four backtest harnesses.\n'
+        + 'MEASURED 2026-09-06 on a copy refreshed from production, scored through 2026-09-04 '
+        + '(1159 clean completed games). Contamination-filtered on both reasons, continuous-edge '
+        + 'rows only, pushes dropped. corpus_size 355 = all under signals in the measurement; the '
+        + 'admitted band holds 157 of them. NO ROI USED.\n'
+        + 'P(model under) = Phi((market_line - model_line)/sigma), sigma = 4.396 runs from the '
+        + 'same corpus. Realized = actual total below the line.\n'
+        + '  under 1.0-2.0    n=112  err -0.015  +/-0.092  within noise\n'
+        + '  under 2.0-5.0    n=157  err -0.015  +/-0.078  within noise    <- ADMITTED\n'
+        + '  under 5.0-7.0    n= 50  err -0.157  +/-0.138  OVERCONF x1.14  <- excluded by the band\n'
+        + '  under 7.0pp+     n= 35  err -0.080  +/-0.165  within noise    <- the CURRENT floor\n'
+        + 'THE CURRENT FLOOR ADMITS 35 SIGNALS IN A SEASON at a +/-0.165 half-width. It is not '
+        + 'mis-calibrated; it is unresolvable. It cannot be shown right or wrong by any amount of '
+        + 'data it will collect, which is the actual case against it.\n'
+        + 'THE 2.0 LOWER BOUND IS NOT CALIBRATION-DERIVED. under 1.0-2.0 is equally within noise '
+        + '(-0.015). The lower bound mirrors the ML proposal shape and the 1.0pp emit floor; if it '
+        + 'is ever justified it will be on a different argument than this table.\n'
+        + 'THIS IS A CALIBRATION CLAIM ABOUT THE ADMITTED BAND, NOT AN EDGE CLAIM. It says the '
+        + 'model’s stated probabilities in [2.0,5.0) match outcomes. It does NOT say those '
+        + 'signals are profitable or that the model beats the line. On the same fresh copy the '
+        + 'totals model has NO demonstrable discrimination over the market: '
+        + 'corr(model-market, actual-market) = +0.0064, 95% CI [-0.089, +0.102], n=424 on '
+        + '2026-08-03..now. A well-calibrated forecast with no edge is exactly what that pair of '
+        + 'facts describes, and highlighting is a display decision, not a betting one.\n'
+        + 'CAVEAT MULTIPLICITY: several cuts were inspected (1-2, 2-5, 5-7, 7+, plus a finer '
+        + '1-3/3-5/5-7/7-9/9+ grid). Not a pre-registered single test — hence the forward window.\n'
+        + 'CAVEAT REACHABILITY: the admitted band accumulated 157 signals across a full season, so '
+        + 'a forward window to 2026-10-31 will NOT reach n=250. The honest outcome is UNRESOLVED '
+        + 'at window end, to be re-registered against a pooled multi-season corpus. Lowering the '
+        + 'bar to make it resolve would defeat the purpose of setting one.' },
 
   // ---- numeric gates ----
   { id: 'signal_edge_hard_cap_pp', key: 'signal_edge_hard_cap_pp', numeric: true,
