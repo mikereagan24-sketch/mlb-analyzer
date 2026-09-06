@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const { q, db } = require('../db/schema');
 const { FRV_MIN_OUTS, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
-const { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds, sliceForSnapshot } = require('./unabated');
+const { fetchUnabatedOdds, fetchUnabatedRaw, fetchUnabatedRawDetailed, parseUnabatedOdds, sliceForSnapshot } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
@@ -13,7 +13,7 @@ const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, foreca
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
 const { calcCLV, clvForSignal } = require('./clv');
-const { writeSnapshot } = require('./snapshot');
+const { writeSnapshot, readSnapshot, findMostRecentSnapshot } = require('./snapshot');
 const { checkMarketMLPairSanity } = require('../utils/market-sanity');
 const {
   parseEtWallClockStringMin,
@@ -5126,10 +5126,47 @@ async function runOddsJob(dateStr, opts) {
       // second full odds pass on top of this frame.
       //
       // Re-measure: node scripts/measure-odds-snapshot-cost.js
-      let unabatedRawJson = await fetchUnabatedRaw();
-      const unabatedMlb = sliceForSnapshot(unabatedRawJson);
-      unabatedRawJson = null;
-      writeSnapshot('odds', dateStr, unabatedMlb);
+      // STREAMED. fetchUnabatedRawDetailed returns the MLB slice only -- the
+      // other 116 leagues are discarded as they pass through the parser and
+      // are never materialised. sliceForSnapshot is idempotent on that shape
+      // and is kept so the snapshot contract stays stated in one place.
+      const ub = await fetchUnabatedRawDetailed();
+      let unabatedMlb = sliceForSnapshot(ub.data);
+
+      // ZERO-RESULT GUARD. (2026-09-06)
+      //
+      // A streaming extractor can succeed structurally and still yield
+      // nothing -- an upstream key rename, a truncated body, a silently
+      // changed league id. The old full-parse code could not fail this way
+      // for a *subset* reason, so this is a NEW failure mode introduced by
+      // this change and it gets its own guard rather than relying on the
+      // "0 games" throw below.
+      //
+      // The condition is deliberately joint: zero MLB events is normal on a
+      // dark date. Zero events WHILE statsapi says games are scheduled is
+      // not, and that is the only case that fires.
+      if (ub.events === 0 && scheduleRows.length > 0) {
+        console.error('[odds] ZERO MLB EVENTS after consuming '
+          + ub.bytes + ' bytes (gzipped=' + ub.gzipped + ') while '
+          + scheduleRows.length + ' game(s) are scheduled for ' + dateStr
+          + '. NOT snapshotting and NOT pricing from this response --'
+          + ' a snapshot of an empty feed would poison replay, and pricing'
+          + ' from it would blank every market line on the slate.');
+        const fb = findMostRecentSnapshot('odds', dateStr);
+        if (fb) {
+          console.error('[odds] falling back to the previous odds snapshot: '
+            + fb.date + '/' + fb.filename + ' captured ' + fb.captured_at
+            + '. Lines from this pass are STALE by construction; the next'
+            + ' successful pass overwrites them.');
+          unabatedMlb = sliceForSnapshot(readSnapshot(fb.date, fb.filename));
+        } else {
+          throw new Error('Unabated returned 0 MLB events for ' + dateStr
+            + ' (' + ub.bytes + ' bytes consumed) and no snapshot exists to'
+            + ' fall back to');
+        }
+      } else {
+        writeSnapshot('odds', dateStr, unabatedMlb);
+      }
       unabatedRows = parseUnabatedOdds(unabatedMlb, dateStr);
       console.log('[odds] Unabated returned '+unabatedRows.length+' games');
       if (!unabatedRows.length) throw new Error('Unabated returned 0 games');
