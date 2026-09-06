@@ -4789,10 +4789,26 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       reasons.push('single-source, no cross-check available');
     } else {
       const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
+      // CROSS-CHECK BOOK: direct Polymarket first, xcheck as fallback.
+      // (2026-09-06)
+      //
+      // xcheck_*_ml comes from the Unabated feed and loses its writer when
+      // that fetch is removed. It was already Polymarket on 322 of 332
+      // Kalshi-primary rows (97.0%) over the 30 days to 2026-09-06, so
+      // preferring the DIRECT Poly quote is the same book by a surviving
+      // source rather than a different comparison.
+      //
+      // The fallback stays while Unabated still runs: on a pass where the
+      // Poly fetch failed, xcheck is still a real second opinion and
+      // dropping to no check at all would be worse. It becomes dead code
+      // when the fetch is deleted in PR 3, at which point the guard simply
+      // returns null on rows Poly did not quote.
+      const _xAway = o.poly_away_ml != null ? o.poly_away_ml : o.xcheck_away_ml;
+      const _xHome = o.poly_home_ml != null ? o.poly_home_ml : o.xcheck_home_ml;
+      const _xSrc  = o.poly_away_ml != null ? 'polymarket' : o.xcheck_ml_source;
       const divergenceReason = checkBookDivergence(
         o.market_away_ml, o.market_home_ml,
-        o.xcheck_away_ml, o.xcheck_home_ml,
-        o.xcheck_ml_source
+        _xAway, _xHome, _xSrc
       );
       if (sanityReason) reasons.push(sanityReason);
       if (divergenceReason) reasons.push(divergenceReason);
@@ -5470,15 +5486,35 @@ async function runOddsJob(dateStr, opts) {
             skippedLocked++;
             continue;
           }
+          // POLY'S PRICE IS RECORDED EVEN WHEN KALSHI WINS THE SLOT.
+          // (2026-09-06)
+          //
+          // checkBookDivergence needs a second opinion on rows where
+          // Kalshi IS primary -- which is exactly the rows this block used
+          // to skip before computing anything. Its current second opinion
+          // is xcheck_*_ml, which arrives via the Unabated feed and dies
+          // with it. Measured over the 30 days to 2026-09-06,
+          // xcheck_ml_source was 'polymarket' on 322 of 332 Kalshi-primary
+          // rows (97.0%), so this is the same book by a source that
+          // survives -- not a new comparison.
+          //
+          // Computed BEFORE the skip and stored on the row as poly_*_ml.
+          // These are in-memory only; nothing persists them, and
+          // processOddsArray prefers them over xcheck when present.
+          const awayTopPrice = p.away && p.away.top_ask && p.away.top_ask.price;
+          const homeTopPrice = p.home && p.home.top_ask && p.home.top_ask.price;
+          const awayMl = polyFeeAdjustAmerican(awayTopPrice);
+          const homeMl = polyFeeAdjustAmerican(homeTopPrice);
+          if (awayMl != null && homeMl != null) {
+            o.poly_away_ml = awayMl;
+            o.poly_home_ml = homeMl;
+          }
+
           // Kalshi wrote first — only fill when it left the field NULL.
           if (o.market_away_ml != null || o.market_home_ml != null) {
             skippedHaveKalshi++;
             continue;
           }
-          const awayTopPrice = p.away && p.away.top_ask && p.away.top_ask.price;
-          const homeTopPrice = p.home && p.home.top_ask && p.home.top_ask.price;
-          const awayMl = polyFeeAdjustAmerican(awayTopPrice);
-          const homeMl = polyFeeAdjustAmerican(homeTopPrice);
           if (awayMl == null || homeMl == null) {
             console.warn('[odds] Poly-direct: ' + p.game_id
               + ' top-of-book incomplete (away=' + awayTopPrice
