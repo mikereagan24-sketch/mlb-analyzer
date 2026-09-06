@@ -484,11 +484,40 @@ app.listen(PORT, () => {
 
         await step('pitcher-usage-backfill', () => runPitcherUsageBackfill());
 
-        // Tomorrow-slate prefetch last -- it is the most deferrable, since
-        // the 8PM and 11PM PT crons cover the same ground.
+        // TOMORROW-SLATE PREFETCH IS OFF BY DEFAULT. (2026-09-06)
+        //
+        // Production [job-peak] says this step peaks 387-404MB on EVERY
+        // deploy, on a 512MB instance. It is the largest single allocation
+        // the process makes, and it runs on a code path whose only job is
+        // to warm data that two crons already fetch.
+        //
+        // WHAT IS LOST, stated because this is a capability being turned
+        // off: after a restart, "tomorrow" in the UI stays empty until the
+        // 8PM PT cron, instead of filling ~30s after boot. Nothing on
+        // today's slate, nothing on pricing, nothing on signals -- the
+        // today-path crons (lineups 8A + hourly 12-6P + 11P, odds
+        // 8A/11A/3P/5P) are untouched. The 8PM PT tomorrow-slate prefetch
+        // and the 11PM PT refresh run the SAME three calls in the same
+        // order, so this is removing a duplicate, not a source.
+        //
+        // WHY A GATE RATHER THAN A DELETION: a deploy at 9AM PT leaves
+        // tomorrow cold for eleven hours. That is a real cost on days when
+        // the operator wants tomorrow warm immediately, and the env var
+        // buys it back for one boot without a code change.
+        //
+        // Set BOOT_PREFETCH=1 in the Render dashboard to re-enable. It is
+        // deliberately NOT in render.yaml -- committing it there with a
+        // value is how a default-off flag quietly becomes default-on.
+        const BOOT_PREFETCH = process.env.BOOT_PREFETCH === '1';
         const d = new Date();
         d.setDate(d.getDate() + 1);
         const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+        if (!BOOT_PREFETCH) {
+          console.log('[startup-prefetch] SKIPPED for ' + dateStr
+            + ' (BOOT_PREFETCH not set). Peaks 387-404MB on a 512MB instance;'
+            + ' the 8PM and 11PM PT crons cover the same ground.'
+            + ' Set BOOT_PREFETCH=1 to re-enable.');
+        } else {
         console.log('[startup-prefetch] tomorrow-slate ' + dateStr);
         await step('startup-prefetch', async () => {
           // skipChainedMorningCapture: this block already runs weather and
@@ -503,6 +532,7 @@ app.listen(PORT, () => {
             + ', weather updated ' + ((weatherR && weatherR.updated) || 0)
             + ', lineups ' + ((lineupR && lineupR.gamesUpdated) || 0));
         });
+        }
 
         console.log('[boot-chain] deferred boot work complete');
       }, 30000);
