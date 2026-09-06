@@ -5692,6 +5692,21 @@ async function runOddsJob(dateStr, opts) {
     //   - LOUD ON EMPTY: Kalshi returned data but matched zero oddsRaw
     //     game_ids → WARN.
     //   - Whole block try/catch'd: failure must never break the odds job.
+    // KALSHI LINE, CARRIED FORWARD FOR THE POLY RUNG ANCHOR. (2026-09-06)
+    //
+    // The Poly totals block ~200 lines down anchors its rung pick on a
+    // reference line. That reference is being moved off unabated_total,
+    // which loses its writer when the Unabated fetch is removed. Kalshi's
+    // own line is the replacement: over the last 30 days market_total
+    // equalled unabated_total on 422 of 422 rows, so anchoring to Kalshi
+    // reaches the same line by a source that survives.
+    //
+    // Declared out here because kalshiTotals is scoped inside the
+    // KALSHI_DIRECT_TOTALS_ENABLED try block and the Poly block is a
+    // sibling. Populated even for games Kalshi does not end up PRICING --
+    // the Poly path only runs where Kalshi left market_total NULL, so a
+    // line without a priced total is exactly the case that needs it.
+    const kalshiLineByGid = new Map();
     if (settings.KALSHI_DIRECT_TOTALS_ENABLED) {
       try {
         const kalshiTotals = await getKalshiMlbTotals(dateStr);
@@ -5739,6 +5754,12 @@ async function runOddsJob(dateStr, opts) {
           for (const k of kalshiTotals) {
             const gameId = k.game_id || makeGameId(k.away_team, k.home_team);
             const o = oddsById.get(gameId);
+
+            // Carry Kalshi's line to the Poly rung anchor. Recorded here,
+            // before any override/skip decision, so a game Kalshi declines
+            // to PRICE still contributes its LINE -- which is the only case
+            // the Poly block ever sees.
+            if (k.line != null) kalshiLineByGid.set(gameId, k.line);
 
             // === SNAPSHOT rung selection (independent observation) ===
             // Prefer the rung matching unabated_total (exact, then nearest
@@ -5895,7 +5916,8 @@ async function runOddsJob(dateStr, opts) {
         const oddsById = new Map();
         for (const o of oddsRaw) oddsById.set(o.game_id, o);
         let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, skippedNoLadder = 0, skippedFeeFail = 0;
-        const anchorCounts = { unabated_exact: 0, unabated_nearest: 0, liquidity_fallback: 0 };
+        const anchorCounts = { kalshi_exact: 0, kalshi_nearest: 0, liquidity_fallback: 0 };
+        let abAgree = 0, abDisagree = 0;
         for (const p of polyRows) {
           if (!p.game_id) continue;
           const o = oddsById.get(p.game_id);
@@ -5915,20 +5937,44 @@ async function runOddsJob(dateStr, opts) {
             skippedNoLadder++;
             continue;
           }
-          // Rung-pick cascade.
-          let picked = null, anchorTier = null;
-          if (o.unabated_total != null) {
-            picked = ladder.find(r => Math.abs(r.strike - o.unabated_total) < 0.001);
-            if (picked) anchorTier = 'unabated_exact';
-            if (!picked) {
-              let best = null, bestDist = Infinity;
-              for (const r of ladder) {
-                const d = Math.abs(r.strike - o.unabated_total);
-                if (d < bestDist) { best = r; bestDist = d; }
-              }
-              if (best && bestDist <= 0.5) { picked = best; anchorTier = 'unabated_nearest'; }
+          // RUNG-PICK CASCADE, ANCHOR MOVED TO KALSHI. (2026-09-06)
+          //
+          // Was: anchor on o.unabated_total. That column loses its writer
+          // when the Unabated fetch is removed, so the anchor moves to
+          // Kalshi's own line for the same game -- the same line by a
+          // source that survives. Measured over the 30 days to 2026-09-06:
+          // market_total == unabated_total on 422 of 422 rows, and
+          // unabated_total was NULL on 0 of them, so the old fallback was
+          // never exercised in production and the two anchors should agree
+          // essentially always.
+          //
+          // "Should" is why both are computed. The old anchor is still
+          // available while the Unabated fetch runs, so every row logs
+          // OLD vs NEW and whether they picked the same strike. That is
+          // the evidence for the removal PR; without it the switch would
+          // be argued from a retrospective count rather than observed on
+          // live slates.
+          //
+          // Only the NEW anchor prices. The old one is observation.
+          const pickFrom = (anchorLine, exactTier, nearTier) => {
+            if (anchorLine == null) return { rung: null, tier: null };
+            const exact = ladder.find(r => Math.abs(r.strike - anchorLine) < 0.001);
+            if (exact) return { rung: exact, tier: exactTier };
+            let best = null, bestDist = Infinity;
+            for (const r of ladder) {
+              const d = Math.abs(r.strike - anchorLine);
+              if (d < bestDist) { best = r; bestDist = d; }
             }
-          }
+            if (best && bestDist <= 0.5) return { rung: best, tier: nearTier };
+            return { rung: null, tier: null };
+          };
+
+          const kalshiLine = kalshiLineByGid.has(p.game_id)
+            ? kalshiLineByGid.get(p.game_id) : null;
+          const nw = pickFrom(kalshiLine, 'kalshi_exact', 'kalshi_nearest');
+          const old = pickFrom(o.unabated_total, 'unabated_exact', 'unabated_nearest');
+
+          let picked = nw.rung, anchorTier = nw.tier;
           if (!picked) {
             let best = null, bestLiq = -1;
             for (const r of ladder) {
@@ -5942,6 +5988,24 @@ async function runOddsJob(dateStr, opts) {
             skippedNoLadder++;
             continue;
           }
+
+          // OLD vs NEW, per row. Greppable as [poly-anchor-ab]. `agree` is
+          // on the STRIKE, not the tier: kalshi_exact and unabated_nearest
+          // landing on the same rung is a match, because the rung is what
+          // gets priced. `old=none` means the old anchor would have fallen
+          // through to liquidity -- which, given unabated_total was never
+          // NULL in 30 days, should itself be rare and is worth seeing.
+          const oldStrike = old.rung ? old.rung.strike : null;
+          const agree = oldStrike != null && Math.abs(oldStrike - picked.strike) < 0.001;
+          if (oldStrike == null || !agree) abDisagree++;
+          else abAgree++;
+          console.log('[poly-anchor-ab] ' + p.game_id
+            + '  new=' + anchorTier + ':' + picked.strike
+            + '  old=' + (old.tier || 'none') + ':' + (oldStrike == null ? '-' : oldStrike)
+            + '  kalshi_line=' + (kalshiLine == null ? '-' : kalshiLine)
+            + '  unabated_total=' + (o.unabated_total == null ? '-' : o.unabated_total)
+            + '  agree=' + (agree ? 'yes' : 'NO'));
+
           const overAskC  = parseFloat(picked.over_price_str);
           const underAskC = parseFloat(picked.under_price_str);
           const overMl  = polyFeeAdjustAmerican(overAskC);
@@ -5963,9 +6027,10 @@ async function runOddsJob(dateStr, opts) {
             + (o.unabated_total != null ? ' (unabated_total=' + o.unabated_total + ')' : ''));
         }
         console.log('[odds] Poly-direct totals: ' + wrote + ' game(s) written'
-          + ' [anchors: unabated_exact=' + (anchorCounts.unabated_exact || 0)
-          + ', unabated_nearest=' + (anchorCounts.unabated_nearest || 0)
+          + ' [anchors: kalshi_exact=' + (anchorCounts.kalshi_exact || 0)
+          + ', kalshi_nearest=' + (anchorCounts.kalshi_nearest || 0)
           + ', liquidity_fallback=' + (anchorCounts.liquidity_fallback || 0) + ']'
+          + ' [anchor A/B vs unabated: agree=' + abAgree + ', differ=' + abDisagree + ']'
           + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
           + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
           + (skippedNoLadder ? ', ' + skippedNoLadder + ' no ladder/rung (skipped)' : '')
