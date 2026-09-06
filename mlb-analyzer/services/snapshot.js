@@ -104,4 +104,31 @@ function findLatestSnapshot(date, jobType) {
   return listSnapshots(date).find(s => s.jobtype === jobType) || null;
 }
 
-module.exports = { writeSnapshot, listSnapshots, readSnapshot, findLatestSnapshot };
+// Most recent snapshot ON OR BEFORE a date, walking date directories
+// backwards. (2026-09-06) findLatestSnapshot only looks inside one date, so
+// it cannot answer "what did we last successfully capture" when today's
+// fetch came back empty -- which is exactly what the odds zero-result guard
+// needs.
+//
+// Returns { date, filename, captured_at } or null. Bounded to maxBackDays so
+// a permanently-broken upstream degrades to "no fallback" rather than
+// silently pricing off a week-old feed; the caller logs which it got.
+function findMostRecentSnapshot(jobType, onOrBeforeDate, maxBackDays) {
+  const limit = maxBackDays == null ? 3 : maxBackDays;
+  if (!fs.existsSync(SNAPSHOT_ROOT)) return null;
+  const dates = fs.readdirSync(SNAPSHOT_ROOT)
+    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d) && d <= onOrBeforeDate)
+    .sort((a, b) => b.localeCompare(a));
+  const cutoff = new Date(onOrBeforeDate + 'T00:00:00Z');
+  cutoff.setUTCDate(cutoff.getUTCDate() - limit);
+  const floor = cutoff.toISOString().slice(0, 10);
+  for (const d of dates) {
+    if (d < floor) break;
+    const hit = listSnapshots(d).find(s => s.jobtype === jobType);
+    if (hit) return { date: d, filename: hit.filename, captured_at: hit.captured_at };
+  }
+  return null;
+}
+
+module.exports = { writeSnapshot, listSnapshots, readSnapshot, findLatestSnapshot,
+  findMostRecentSnapshot };

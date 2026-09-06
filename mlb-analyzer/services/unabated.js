@@ -249,11 +249,107 @@ const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CI
 // system (services/snapshot.js, /api/replay/odds) can save the raw upstream
 // JSON and re-run the parse against it without re-hitting Unabated. Original
 // fetchUnabatedOdds(dateStr) preserved as a thin wrapper for back-compat.
-async function fetchUnabatedRaw() {
+// STREAMING EXTRACTION. (2026-09-06)
+//
+// resp.json() held FOUR copies of the payload at once -- compressed chunks,
+// decompressed Buffer, the string, and the full 117-league object graph --
+// for a feed that was 88.3MB uncompressed on 2026-09-04 and growing
+// (40.45MB on 08-11, 47.76MB on 08-22). MLB is 5.5% of it.
+//
+// Measured on that snapshot, from a 213MB base:
+//   resp.json()  peak rss 491.7MB  heap 161.9MB  ext 364.8MB  +278.5MB  1.25s
+//   streaming    peak rss 286.9MB  heap  35.2MB  ext 188.7MB   +42.4MB  ~19s
+// Re-run: node scripts/measure-unabated-stream.js
+//
+// The trade is explicit: ~18s of extra wall time for ~236MB of peak. It is
+// worth it on a 512MB instance where odds runs were peaking 353-418MB from
+// a 240-270MB base and 5PM PT was OOM-killed outright. None of the extra
+// time blocks the event loop, and it removes the 2.7s gzipSync stall the
+// old snapshot write carried.
+//
+// REQUIRE PATHS ARE 3.x, AND THE 1.x DOCS ARE WRONG. stream-json 3.6.0
+// ships an exports map where subpaths need the .js suffix and the
+// assembler is a named export:
+//     3.x  require('stream-json/filters/filter.js')    -> { filter }
+//          require('stream-json/assembler.js')         -> { Assembler }
+//     1.x  require('stream-json/filters/Filter')       <- MODULE_NOT_FOUND
+//          Asm.connectTo(...)                          <- not a function
+// Every tutorial online is 1.x. Both wrong forms throw at require/call
+// time rather than degrading, so a mistake here is loud, not silent.
+const { chain } = require('stream-chain');
+const { parser } = require('stream-json');
+const { filter } = require('stream-json/filters/filter.js');
+const { Assembler } = require('stream-json/assembler.js');
+const zlib = require('zlib');
+const { Readable } = require('stream');
+
+// SINGLE PASS, COMBINED FILTER. pick's filter receives the token stack;
+// returning true for both subtrees keeps them and discards the other 116
+// leagues as they stream past. A two-pass version (one subtree each) also
+// works and was what the original measurement used, but it reads the whole
+// 88MB twice for no benefit.
+//
+// GZIP IS AUTO-DETECTED rather than assumed. fetch() decompresses
+// Content-Encoding transparently, so the HTTP path yields plain JSON bytes
+// and must NOT be piped through gunzip; the on-disk snapshots the test and
+// the fallback read ARE gzipped and must be. Sniffing the two-byte magic
+// number handles both and cannot double-decompress.
+function streamMlbSlice(readable) {
+  return new Promise((resolve, reject) => {
+    let bytes = 0, sniffed = false, gz = false;
+    const src = new Readable({ read() {} });
+    readable.on('data', (c) => {
+      bytes += c.length;
+      if (!sniffed) { sniffed = true; gz = c.length > 1 && c[0] === 0x1f && c[1] === 0x8b; start(); }
+      src.push(c);
+    });
+    readable.on('end', () => { if (!sniffed) { sniffed = true; start(); } src.push(null); });
+    readable.on('error', reject);
+
+    let started = false;
+    function start() {
+      if (started) return;
+      started = true;
+      const stages = [src];
+      if (gz) stages.push(zlib.createGunzip());
+      stages.push(parser({ jsonStreaming: false }));
+      stages.push(filter({ filter: (stack) => {
+        if (!stack.length) return false;
+        if (stack[0] === 'teams') return true;
+        return stack[0] === 'gameOddsEvents' && (stack.length < 2 || stack[1] === MLB_KEY);
+      } }));
+      const pipeline = chain(stages);
+      const asm = Assembler.connectTo(pipeline);
+      pipeline.on('error', reject);
+      pipeline.on('end', () => {
+        const got = asm.current || {};
+        const events = (got.gameOddsEvents && got.gameOddsEvents[MLB_KEY]) || [];
+        resolve({
+          data: { teams: got.teams || {}, gameOddsEvents: { [MLB_KEY]: events } },
+          bytes,
+          events: events.length,
+          gzipped: gz,
+        });
+      });
+    }
+  });
+}
+
+// Returns the MLB SLICE, not the full feed. Callers that used to receive
+// every league now receive {teams, gameOddsEvents:{[MLB_KEY]:...}} --
+// which is exactly the two paths parseUnabatedOdds reads, and exactly what
+// writeSnapshot has persisted since #355. sliceForSnapshot is idempotent on
+// this shape, so the existing call site stays correct.
+async function fetchUnabatedRawDetailed() {
   const cacheBust = '?v='+Date.now();
   const resp = await fetch(UB_URL+cacheBust, {headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0','Cache-Control':'no-cache','Pragma':'no-cache'}});
   if (!resp.ok) throw new Error('Unabated HTTP '+resp.status);
-  return await resp.json();
+  if (!resp.body) throw new Error('Unabated returned no body stream');
+  return streamMlbSlice(Readable.fromWeb(resp.body));
+}
+
+async function fetchUnabatedRaw() {
+  return (await fetchUnabatedRawDetailed()).data;
 }
 
 async function fetchUnabatedOdds(dateStr) {
@@ -727,4 +823,4 @@ function sliceForSnapshot(raw) {
   };
 }
 
-module.exports = { fetchUnabatedOdds, fetchUnabatedRaw, parseUnabatedOdds, sliceForSnapshot, MLB_KEY };
+module.exports = { fetchUnabatedOdds, fetchUnabatedRaw, fetchUnabatedRawDetailed, streamMlbSlice, parseUnabatedOdds, sliceForSnapshot, MLB_KEY };

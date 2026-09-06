@@ -34,8 +34,16 @@ const ok = (name, cond, detail) => {
 
 console.log('=== unabated snapshot slice ===');
 
+// LARGEST, NOT NEWEST. (2026-09-06) This used to take the newest snapshot
+// and assert it was a full 117-league feed. That assertion was only true
+// while pre-#355 captures were still the newest on disk -- every snapshot
+// written since #355 is the MLB slice by design, so the check was going to
+// fail on the next production odds run no matter what. Picking the largest
+// finds a full-feed capture if one is still on disk, which is the case this
+// test actually needs: the back-compat path where the reader opens a
+// pre-narrowing snapshot.
 const root = path.join(R, 'data', 'snapshots');
-let file = null, newest = 0;
+let file = null, biggest = -1;
 if (fs.existsSync(root)) {
   for (const d of fs.readdirSync(root)) {
     const dir = path.join(root, d);
@@ -43,8 +51,8 @@ if (fs.existsSync(root)) {
     for (const f of fs.readdirSync(dir)) {
       if (!f.startsWith('odds')) continue;
       const fp = path.join(dir, f);
-      const t = fs.statSync(fp).mtimeMs;
-      if (t > newest) { newest = t; file = fp; }
+      const sz = fs.statSync(fp).size;
+      if (sz > biggest) { biggest = sz; file = fp; }
     }
   }
 }
@@ -61,9 +69,18 @@ console.log('  fixture: ' + path.relative(R, file));
 
 const events = raw.gameOddsEvents || {};
 const keys = Object.keys(events);
+// If no full-feed capture survives on disk, that is an environment fact --
+// Render drops data/snapshots on restart and every new capture is sliced.
+// Report it as a SKIP rather than a failure, so the check does not go
+// permanently red for a reason nobody can act on.
 const isFullFeed = keys.length > 1;
-ok('fixture is a pre-existing FULL feed (the back-compat case)', isFullFeed,
-   keys.length + ' league keys');
+if (isFullFeed) {
+  ok('fixture is a pre-existing FULL feed (the back-compat case)', true,
+     keys.length + ' league keys');
+} else {
+  console.log('  SKIP  no full-feed capture on disk (' + keys.length + ' league key);'
+    + ' the back-compat assertion needs a pre-#355 snapshot');
+}
 
 // 1. identical parse output
 const fullParsed = parseUnabatedOdds(raw, dateFromPath);
