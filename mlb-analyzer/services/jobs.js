@@ -4844,19 +4844,87 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
     } else if (haveTot && !haveXcheckTot) {
       reasons.push('single-source total, no cross-check available');
     } else if (haveTot && haveXcheckTot) {
-      // Project xcheck onto primary's line; flag when projected Δp > 0.08.
+      // NULL-ARITHMETIC BUG, FIXED 2026-09-06.
+      //
+      // haveTot is computed from _effTotalPost, which falls back to the
+      // PRESERVED DB value when this pass returned no primary total. The
+      // Δp arithmetic and the flag text then used o.market_total /
+      // o.over_price / o.under_price -- THIS pass's values, which are null
+      // in exactly that case.
+      //
+      // impP(null) is not NaN. JavaScript coerces null to 0, so
+      // 100/(null+100) === 1. Δp was therefore computed against a
+      // probability of 1.0, always exceeded the 0.08 bar, and always
+      // flagged. Every stored Δp clustered at 1.372-1.487 for this reason.
+      //
+      // Measured over the 30 days to 2026-09-06: 305 stored "totals
+      // divergence" flags, 305 of them of the form primary=null@null/null,
+      // 0 genuine. Replaying the rule on final stored values across 422
+      // rows that hold BOTH a primary and an xcheck total: 0 fires. The
+      // flag was ~100% noise.
+      //
+      // The fix is to use the same effective values the gate used. Genuine
+      // fires DO exist -- one was observed on the SF@NYM card on 2026-09-04
+      // (kalshi=7.5@-132/-489 vs fanduel=8@-106/-114, Δp=0.358) -- but the
+      // stored column is last-write-wins, so a later spurious pass
+      // overwrote it. That is why the rate is logged (2) rather than read
+      // back off the column.
       const RUNS_TO_PROB = 0.12;
       const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
-      const lineDelta = o.market_total - o.xcheck_total;
-      const dOver  = Math.abs(impP(o.over_price)  - (impP(o.xcheck_over_price)  - lineDelta * RUNS_TO_PROB));
-      const dUnder = Math.abs(impP(o.under_price) - (impP(o.xcheck_under_price) + lineDelta * RUNS_TO_PROB));
-      const d = Math.max(dOver, dUnder);
-      if (d > 0.08) {
-        if (o.market_total !== o.xcheck_total) {
-          reasons.push('totals divergence: ' + (o.total_source||'primary') + '=' + o.market_total + '@' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_total + '@' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
-        } else {
-          reasons.push('totals juice divergence: ' + (o.total_source||'primary') + '=' + o.over_price + '/' + o.under_price + ', ' + (o.xcheck_total_source||'xcheck') + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price + ' (Δp=' + d.toFixed(3) + ')');
-        }
+      const _passIso = nowPtIso();
+
+      // Shared rule so both arms are provably the same comparison.
+      const divergence = (pTot, pOver, pUnder, bTot, bOver, bUnder) => {
+        if (pTot == null || pOver == null || pUnder == null) return null;
+        if (bTot == null || bOver == null || bUnder == null) return null;
+        const ld = pTot - bTot;
+        const dO = Math.abs(impP(pOver)  - (impP(bOver)  - ld * RUNS_TO_PROB));
+        const dU = Math.abs(impP(pUnder) - (impP(bUnder) + ld * RUNS_TO_PROB));
+        return { d: Math.max(dO, dU), sameLine: pTot === bTot };
+      };
+
+      // ARM A -- the flagging arm. Primary vs the xcheck book, on the
+      // EFFECTIVE values, matching the gate that let us in here.
+      const a = divergence(_effTotalPost, _effOverPost, _effUnderPost,
+                           o.xcheck_total, o.xcheck_over_price, o.xcheck_under_price);
+      if (a && a.d > 0.08) {
+        const pSrc = o.total_source || 'primary';
+        const bSrc = o.xcheck_total_source || 'xcheck';
+        const pTxt = _effTotalPost + '@' + _effOverPost + '/' + _effUnderPost;
+        const bTxt = o.xcheck_total + '@' + o.xcheck_over_price + '/' + o.xcheck_under_price;
+        reasons.push(a.sameLine
+          ? 'totals juice divergence: ' + pSrc + '=' + _effOverPost + '/' + _effUnderPost
+            + ', ' + bSrc + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price
+            + ' (Δp=' + a.d.toFixed(3) + ')'
+          : 'totals divergence: ' + pSrc + '=' + pTxt + ', ' + bSrc + '=' + bTxt
+            + ' (Δp=' + a.d.toFixed(3) + ')');
+        // THE STORED COLUMN KEEPS LAST STATE; THIS LOG KEEPS THE RATE.
+        console.log('[tot-divergence] arm=xcheck  ' + dateStr + '/' + o.game_id
+          + '  pass=' + _passIso
+          + '  primary=' + pSrc + ':' + pTxt
+          + '  book=' + bSrc + ':' + bTxt
+          + '  dp=' + a.d.toFixed(3)
+          + '  kind=' + (a.sameLine ? 'juice' : 'line'));
+      }
+
+      // ARM B -- observation only, no flag written. Kalshi total vs the
+      // direct Polymarket total, same rule, tagged separately. Poly is a
+      // prediction market and the xcheck is a sportsbook, so this is a
+      // DIFFERENT comparison, not a channel swap -- which is why it does
+      // not write a reason. When the Unabated fetch goes, arm A loses its
+      // book and this becomes the only comparison available; the decision
+      // to keep or drop the flag is made from these two rates.
+      const b = divergence(_effTotalPost, _effOverPost, _effUnderPost,
+                           o.poly_total, o.poly_over_price, o.poly_under_price);
+      if (b && b.d > 0.08) {
+        console.log('[tot-divergence] arm=poly    ' + dateStr + '/' + o.game_id
+          + '  pass=' + _passIso
+          + '  primary=' + (o.total_source || 'primary') + ':'
+          + _effTotalPost + '@' + _effOverPost + '/' + _effUnderPost
+          + '  book=polymarket:' + o.poly_total + '@' + o.poly_over_price + '/' + o.poly_under_price
+          + '  dp=' + b.d.toFixed(3)
+          + '  kind=' + (b.sameLine ? 'juice' : 'line')
+          + '  NOFLAG');
       }
     }
     const oddsReason = reasons.length ? reasons.join(' | ') : null;
@@ -5927,11 +5995,25 @@ async function runOddsJob(dateStr, opts) {
             skippedLocked++;
             continue;
           }
-          // Kalshi wrote first — only fill when it left market_total NULL.
-          if (o.market_total != null) {
-            skippedHaveKalshi++;
-            continue;
-          }
+          // POLY'S TOTAL IS RECORDED EVEN WHEN KALSHI WINS THE SLOT.
+          // (2026-09-06)
+          //
+          // The totals divergence check needs a second opinion on rows
+          // where Kalshi IS primary -- which is exactly the rows this block
+          // skipped before computing anything. Its current second opinion
+          // is xcheck_total, a sportsbook (fanduel 257 / betmgm 165 /
+          // bet365 1 over the 30 days to 2026-09-06) delivered by the
+          // Unabated feed, which dies with it.
+          //
+          // Unlike the ML case, this is NOT the same book: Poly is a
+          // prediction market, the current xcheck is a sportsbook. So the
+          // Poly arm is computed and LOGGED but writes no flag -- the
+          // decision to keep, drop, or switch the comparison is made from
+          // the logged rates once both arms have run on live slates.
+          //
+          // The ladder and the rung cascade move ABOVE the Kalshi skip so
+          // poly_total is populated on every quoted game. In-memory only;
+          // nothing persists poly_*.
           const ladder = Array.isArray(p.totals_ladder) ? p.totals_ladder : [];
           if (ladder.length === 0) {
             skippedNoLadder++;
@@ -6014,6 +6096,19 @@ async function runOddsJob(dateStr, opts) {
             skippedFeeFail++;
             continue;
           }
+
+          // Poly's view, recorded for the divergence comparison whether or
+          // not Poly ends up owning market_total.
+          o.poly_total       = picked.strike;
+          o.poly_over_price  = overMl;
+          o.poly_under_price = underMl;
+
+          // Kalshi wrote first — only fill market_total when it left it NULL.
+          if (o.market_total != null) {
+            skippedHaveKalshi++;
+            continue;
+          }
+
           o.market_total = picked.strike;
           o.over_price   = overMl;
           o.under_price  = underMl;
