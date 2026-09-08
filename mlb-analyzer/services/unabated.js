@@ -267,19 +267,32 @@ const ABBR_MAP = {ARI:'ari',ATL:'atl',BAL:'bal',BOS:'bos',CHC:'chc',CWS:'cws',CI
 // time blocks the event loop, and it removes the 2.7s gzipSync stall the
 // old snapshot write carried.
 //
-// REQUIRE PATHS ARE 3.x, AND THE 1.x DOCS ARE WRONG. stream-json 3.6.0
-// ships an exports map where subpaths need the .js suffix and the
-// assembler is a named export:
-//     3.x  require('stream-json/filters/filter.js')    -> { filter }
-//          require('stream-json/assembler.js')         -> { Assembler }
-//     1.x  require('stream-json/filters/Filter')       <- MODULE_NOT_FOUND
-//          Asm.connectTo(...)                          <- not a function
-// Every tutorial online is 1.x. Both wrong forms throw at require/call
-// time rather than degrading, so a mistake here is loud, not silent.
+// PINNED TO THE CommonJS LINES. stream-json 1.x / stream-chain 2.x.
+// (corrected 2026-09-08 — see below)
+//
+// The 3.x/4.x lines are "type": "module", pure ESM, and stream-chain 4.x
+// declares engines >= 22. Requiring ESM from CommonJS only works on Node
+// 20.19+. Render pins Node 20.11.0 via .node-version, so #364 built fine
+// and then died at startup on ERR_REQUIRE_ESM -- four deploys in a row,
+// production stuck on #363.
+//
+// It passed local verification because the local Node 20 is 20.20.2, which
+// is past the 20.19 cutoff. The require ran here and could not run there.
+// Testing a require against a Node that is merely the same MAJOR as the
+// deploy target is not a test; see scripts/preflight-deps.js, which compares
+// each dependency's engines against .node-version rather than against
+// whatever happens to be installed.
+//
+// AND THE COMMENT THIS REPLACES WAS WRONG. It claimed "the 1.x docs are
+// wrong". They are not -- they document the CommonJS line, which is the
+// one this project needs. What was actually happening is that 3.x renamed
+// the subpaths. Correct forms for the pinned versions:
+//     1.x  require('stream-json/filters/Filter')  -> { filter } (also the fn)
+//          require('stream-json/Assembler')       -> the class, .connectTo static
 const { chain } = require('stream-chain');
 const { parser } = require('stream-json');
-const { filter } = require('stream-json/filters/filter.js');
-const { Assembler } = require('stream-json/assembler.js');
+const { filter } = require('stream-json/filters/Filter');
+const Assembler = require('stream-json/Assembler');
 const zlib = require('zlib');
 const { Readable } = require('stream');
 

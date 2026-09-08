@@ -1,6 +1,31 @@
 // @deployed 2026-04-17T16:23:52.313Z
 'use strict';
 // BUILD_TS: 2026-04-11T17:15:25.624Z
+// DEPENDENCY PRE-FLIGHT, FIRST THING. (2026-09-08)
+//
+// #364 built cleanly on Render and then died at startup four times in a
+// row with a bare "Exited with status 1" -- stream-json 3.6.0 and
+// stream-chain 4.2.5 are ESM, and requiring ESM from CommonJS needs Node
+// >= 20.19 while .node-version pins 20.11.0. A top-level require that
+// throws kills the process before any of our logging runs, so the deploy
+// log named nothing.
+//
+// This runs before the app's own requires and reports every offending
+// module by name, with the reason, then rethrows. The deploy still fails --
+// it should -- but it fails with an explanation instead of an exit code.
+//
+// It is deliberately the first executable statement in the file. Anything
+// above it would be the thing that crashes without a message.
+try {
+  require('./utils/dep-check').assertDepsOk();
+} catch (e) {
+  console.error('[boot] dependency pre-flight FAILED — refusing to start.');
+  console.error('[boot] ' + (e && e.message));
+  console.error('[boot] Run `node scripts/preflight-deps.js` locally; it checks'
+    + ' against .node-version, not against your installed Node.');
+  throw e;
+}
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
