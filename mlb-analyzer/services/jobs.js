@@ -6021,7 +6021,7 @@ async function runOddsJob(dateStr, opts) {
         for (const o of oddsRaw) oddsById.set(o.game_id, o);
         let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, skippedNoLadder = 0, skippedFeeFail = 0;
         const anchorCounts = { kalshi_exact: 0, kalshi_nearest: 0, liquidity_fallback: 0 };
-        let abAgree = 0, abDisagree = 0;
+        let abAgree = 0, abDisagree = 0, noAnchorPriced = 0;
         for (const p of polyRows) {
           if (!p.game_id) continue;
           const o = oddsById.get(p.game_id);
@@ -6087,8 +6087,36 @@ async function runOddsJob(dateStr, opts) {
             return { rung: null, tier: null };
           };
 
-          const kalshiLine = kalshiLineByGid.has(p.game_id)
+          // ANCHOR SOURCE CASCADE. (2026-09-08)
+          //
+          // #365 read the Kalshi line ONLY from this pass's fetch. On the
+          // 2026-09-08 3PM PT pass getKalshiMlbTotals returned zero rows,
+          // so kalshiLineByGid was never populated -- the map is filled
+          // inside the `else` branch of `if (!kalshiTotals.length)` -- and
+          // every row logged kalshi_line=- and fell to liquidity_fallback.
+          // Two of fifteen then disagreed with the old unabated anchor
+          // (cle-bal and tex-sea, 7.5 vs 8.5).
+          //
+          // That is a real defect, not a data quirk: an anchor that exists
+          // only when the same pass's Kalshi fetch succeeds is not a
+          // replacement for unabated_total, which was never NULL in 30
+          // days. PR 3 would have shipped a regression on any pass where
+          // Kalshi came back empty.
+          //
+          // So the anchor now falls back to the PERSISTED Kalshi line for
+          // the same game -- market_total from an earlier pass today, where
+          // total_source says Kalshi wrote it. Same book, same slate, same
+          // line; only the pass differs. It also covers the case where
+          // KALSHI_DIRECT_TOTALS_ENABLED is off entirely, which the
+          // same-pass map cannot.
+          let kalshiLine = kalshiLineByGid.has(p.game_id)
             ? kalshiLineByGid.get(p.game_id) : null;
+          let kalshiLineSrc = kalshiLine != null ? 'pass' : null;
+          if (kalshiLine == null && existing
+              && existing.total_source === 'kalshi' && existing.market_total != null) {
+            kalshiLine = existing.market_total;
+            kalshiLineSrc = 'persisted';
+          }
           const nw = pickFrom(kalshiLine, 'kalshi_exact', 'kalshi_nearest');
           const old = pickFrom(o.unabated_total, 'unabated_exact', 'unabated_nearest');
 
@@ -6113,16 +6141,42 @@ async function runOddsJob(dateStr, opts) {
           // gets priced. `old=none` means the old anchor would have fallen
           // through to liquidity -- which, given unabated_total was never
           // NULL in 30 days, should itself be rare and is worth seeing.
+          // priced= ANSWERS "why did the A/B log for every game". #367
+          // moved the Kalshi-primary skip BELOW this log so poly_total
+          // could be recorded for the divergence comparison on every game
+          // Poly quotes. That was deliberate for poly_total and an
+          // accident for this line, which now runs on rows Poly never
+          // prices. Rather than move the log back and lose the comparison,
+          // each row says whether Poly actually owns the total.
+          //
+          // Only priced=yes rows can mis-price. A disagreement on a
+          // priced=no row is informational.
           const oldStrike = old.rung ? old.rung.strike : null;
           const agree = oldStrike != null && Math.abs(oldStrike - picked.strike) < 0.001;
+          const willPrice = o.market_total == null;
           if (oldStrike == null || !agree) abDisagree++;
           else abAgree++;
           console.log('[poly-anchor-ab] ' + p.game_id
             + '  new=' + anchorTier + ':' + picked.strike
             + '  old=' + (old.tier || 'none') + ':' + (oldStrike == null ? '-' : oldStrike)
             + '  kalshi_line=' + (kalshiLine == null ? '-' : kalshiLine)
+            + '(' + (kalshiLineSrc || 'none') + ')'
             + '  unabated_total=' + (o.unabated_total == null ? '-' : o.unabated_total)
+            + '  priced=' + (willPrice ? 'yes' : 'no')
             + '  agree=' + (agree ? 'yes' : 'NO'));
+
+          // NO ANCHOR ON A ROW WE ARE ABOUT TO PRICE is the condition that
+          // made 2026-09-08 look fine in aggregate while two rows moved.
+          // It must not be silent: liquidity is a last resort, not a
+          // reference, and PR 3 removes the only alternative reference.
+          if (willPrice && anchorTier === 'liquidity_fallback') {
+            noAnchorPriced++;
+            console.warn('[poly-anchor] NO KALSHI ANCHOR for ' + p.game_id
+              + ' — pricing from the highest-liquidity rung (' + picked.strike + ').'
+              + ' Kalshi returned no line this pass and none is persisted for the'
+              + ' date. This is the case that silently moved cle-bal and tex-sea'
+              + ' on 2026-09-08.');
+          }
 
           const overAskC  = parseFloat(picked.over_price_str);
           const underAskC = parseFloat(picked.under_price_str);
@@ -6162,6 +6216,7 @@ async function runOddsJob(dateStr, opts) {
           + ', kalshi_nearest=' + (anchorCounts.kalshi_nearest || 0)
           + ', liquidity_fallback=' + (anchorCounts.liquidity_fallback || 0) + ']'
           + ' [anchor A/B vs unabated: agree=' + abAgree + ', differ=' + abDisagree + ']'
+          + (noAnchorPriced ? ' *** ' + noAnchorPriced + ' PRICED WITH NO KALSHI ANCHOR ***' : '')
           + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
           + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
           + (skippedNoLadder ? ', ' + skippedNoLadder + ' no ladder/rung (skipped)' : '')
