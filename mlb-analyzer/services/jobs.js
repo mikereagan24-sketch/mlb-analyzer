@@ -6021,7 +6021,7 @@ async function runOddsJob(dateStr, opts) {
         for (const o of oddsRaw) oddsById.set(o.game_id, o);
         let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, skippedNoLadder = 0, skippedFeeFail = 0;
         const anchorCounts = { kalshi_exact: 0, kalshi_nearest: 0, liquidity_fallback: 0 };
-        let abAgree = 0, abDisagree = 0, noAnchorPriced = 0;
+        let abAgree = 0, abDisagree = 0, noAnchorPriced = 0, noTotalAnySource = 0;
         for (const p of polyRows) {
           if (!p.game_id) continue;
           const o = oddsById.get(p.game_id);
@@ -6211,12 +6211,49 @@ async function runOddsJob(dateStr, opts) {
             + ' over/under=' + overMl + '/' + underMl
             + (o.unabated_total != null ? ' (unabated_total=' + o.unabated_total + ')' : ''));
         }
+
+        // FULL SLATE ACCOUNTING FOR THE A/B. (2026-09-09)
+        //
+        // The A/B line lives inside this loop, which iterates polyRows --
+        // games POLY QUOTED. On the 2026-09-08 3PM slate that produced 10
+        // lines against 13 games in oddsRaw, and the 3 missing ones were
+        // read as "the rows where the anchor decides a price". They are
+        // not: a game Poly never quoted is a game Poly never prices.
+        //
+        // But that had to be INFERRED from two log lines that do not
+        // mention each other, which is the actual defect. Every game in
+        // oddsRaw now appears exactly once, either as a [poly-anchor-ab]
+        // line above or as a [poly-anchor-none] line here with the reason
+        // it produced none. 13 games in, 13 lines out.
+        const quoted = new Set(polyRows.map(p => p.game_id).filter(Boolean));
+        for (const o of oddsRaw) {
+          if (quoted.has(o.game_id)) continue;
+          const ex = q.getGameById.get(dateStr, o.game_id);
+          const why = (ex && ex.odds_locked_at) ? 'locked'
+            : (o.market_total != null ? 'kalshi priced it; Poly did not quote'
+                                      : 'NO TOTAL FROM ANY SOURCE');
+          console.log('[poly-anchor-none] ' + o.game_id
+            + '  no Poly quote  priced=' + (o.market_total != null ? 'yes' : 'no')
+            + '  total_source=' + (o.total_source || '-')
+            + '  market_total=' + (o.market_total == null ? '-' : o.market_total)
+            + '  reason=' + why);
+          if (o.market_total == null) noTotalAnySource++;
+        }
+        if (noTotalAnySource) {
+          console.warn('[poly-anchor] ' + noTotalAnySource + ' game(s) on ' + dateStr
+            + ' have NO total from Kalshi or Poly. Totals signals are suppressed'
+            + ' for them regardless of the anchor, and removing the Unabated'
+            + ' fetch does not change that -- total_source has only ever been'
+            + ' kalshi or polymarket.');
+        }
+
         console.log('[odds] Poly-direct totals: ' + wrote + ' game(s) written'
           + ' [anchors: kalshi_exact=' + (anchorCounts.kalshi_exact || 0)
           + ', kalshi_nearest=' + (anchorCounts.kalshi_nearest || 0)
           + ', liquidity_fallback=' + (anchorCounts.liquidity_fallback || 0) + ']'
           + ' [anchor A/B vs unabated: agree=' + abAgree + ', differ=' + abDisagree + ']'
           + (noAnchorPriced ? ' *** ' + noAnchorPriced + ' PRICED WITH NO KALSHI ANCHOR ***' : '')
+          + ' [slate: ' + oddsRaw.length + ' games, ' + (abAgree+abDisagree) + ' A/B lines, ' + noTotalAnySource + ' with no total]'
           + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
           + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
           + (skippedNoLadder ? ', ' + skippedNoLadder + ' no ladder/rung (skipped)' : '')

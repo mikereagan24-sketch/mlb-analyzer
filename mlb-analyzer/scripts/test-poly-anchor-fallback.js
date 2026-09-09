@@ -136,6 +136,24 @@ ok('most Poly-priced rows sit on dates where Kalshi priced other games',
    polyOnDatesKalshiAlsoPriced.length + ' of ' + poly.length
      + ' — Kalshi was reachable on those dates, so a persisted line is plausible');
 
+// ---- full-slate accounting (2026-09-09) -----------------------------
+// The A/B line lives inside the polyRows loop, so a game Poly never quoted
+// produced no line at all -- 10 lines against 13 games on the 2026-09-08
+// slate, and the 3 silent ones were read as the rows where the anchor
+// decides a price. Every oddsRaw game must now appear exactly once.
+ok('games Poly did not quote emit a [poly-anchor-none] line',
+   src.indexOf("'[poly-anchor-none] '") !== -1);
+ok('that line states whether the game was priced anyway',
+   src.indexOf("priced=' + (o.market_total != null ? 'yes' : 'no')") !== -1);
+ok('it distinguishes locked / kalshi-priced / no-total-at-all',
+   src.indexOf("'locked'") !== -1 && src.indexOf('NO TOTAL FROM ANY SOURCE') !== -1);
+ok('a game with no total from any source warns',
+   src.indexOf('have NO total from Kalshi or Poly') !== -1);
+ok('the summary reconciles slate size against A/B line count',
+   src.indexOf("' [slate: ' + oddsRaw.length") !== -1);
+ok('the no-quote scan skips games Poly DID quote (no double-count)',
+   src.indexOf('if (quoted.has(o.game_id)) continue;') !== -1);
+
 console.log('');
 console.log(failures ? 'FAILED (' + failures + ')' : 'OK');
 process.exit(failures ? 1 : 0);
