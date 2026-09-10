@@ -351,6 +351,49 @@ const GATES = [
         + 'at window end, to be re-registered against a pooled multi-season corpus. Lowering the '
         + 'bar to make it resolve would defeat the purpose of setting one.' },
 
+  { id: 'spread_cells_market_total_axis', key: null, on_expected: true,
+    criterion: 'ADOPTED 2026-09-10, not trialled. The empirical-spread cell total axis is '
+             + 'the MARKET total (Low <8.25 / Average 8.25-8.75 / High >=8.75), frozen in '
+             + 'game_log.market_total_at_emit; win-prob tiers stay on the model. '
+             + 'FORWARD CRITERION: on games bucketed with a FROZEN axis value (not the '
+             + 'market_total fallback), the Average-vs-pooled-Low+High cover-rate split must '
+             + 'still exclude zero in the Balanced tier, at n >= 250 in Balanced/Average. '
+             + 'Re-run: node scripts/test-spread-cell-axis.js for the partition, and the '
+             + 'deciding-test block in the 2026-09-10 analysis for the split.',
+    criterion_type: 'calibration', precondition: null,
+    window_end: '2026-11-15', decision: {
+      date: '2026-09-10', outcome: 'adopted_on_stability',
+      ref: 'services/empirical-spread-edge.js TOTAL_LOW_MAX comment' },
+    corpus_size: 1158,
+    note: 'THE SPLITS DID NOT CARRY THIS DECISION; THE STABILITY ARGUMENT DID. The deciding '
+        + 'test returned 2 significant results of 12 tested -- Balanced/home +11.1pp '
+        + '[+1.6, +20.5] and Underdog-home/away -12.4pp [-22.1, -2.7] -- and at 12 tests '
+        + 'roughly 0.6 false positives are expected at 95%. That is SUGGESTIVE, not '
+        + 'established, and the forward criterion exists because of it.\n'
+        + 'WHAT DID CARRY IT: the old axis keyed on model_total, a model output, and the same '
+        + 'quantity whose discrimination collapsed on 2026-08-03 (corr(model-market, '
+        + 'actual-market) +0.21 -> +0.02 [-0.089, +0.102]). A cell definition that moves when '
+        + 'the model moves cannot be a stable frame for measuring the model. The market cuts '
+        + 'fall BETWEEN posted rungs: 0.0% of 1,158 graded games sit on 8.25 or 8.75, against '
+        + '41.4% within a rung of the old continuous 8.5 cut.\n'
+        + 'CANDIDATE B REJECTED (market win-prob as well as market total): agrees with the '
+        + 'model tier on only 58.0% of games, moves 68.7% of them against A 48.5%, and its '
+        + '0.500 cut is far less stable -- 18.0% of games within +/-2pp against the model 7.1%.\n'
+        + 'COST, PAID KNOWINGLY: 6 cells -> 9, median cell n 207 -> 134, and 6 of 9 cells '
+        + 'under 150. The display floor moved 50 -> 150 in the same change, so 3 of 9 cells '
+        + 'surface a play today where 6 of 6 did before. Sub-floor cells still compute and '
+        + 'persist; they are hidden, not deleted.\n'
+        + 'CORPUS 1158 = graded, clean-weather, with both a market total and a market ML pair, '
+        + 'to 2026-09-04. Every historical row currently buckets on the market_total FALLBACK, '
+        + 'not on a frozen value -- market_total_at_emit only starts filling from this deploy, '
+        + 'and the backfill is impossible. buildCellIndex returns usedFallback so the share is '
+        + 'reportable rather than assumed.\n'
+        + 'RE-BASELINE: empirical_spread_signals.cell_label rows written before 2026-09-10 '
+        + 'carry the old six-label taxonomy ("Low total"/"High total"). Labels were renamed '
+        + 'deliberately so the two cannot be pooled by accident. Nothing groups or filters on '
+        + 'that column today (checked across services/, routes/, scripts/); anything that '
+        + 'starts to must split on the cutover date.' },
+
   // ---- numeric gates ----
   { id: 'signal_edge_hard_cap_pp', key: 'signal_edge_hard_cap_pp', numeric: true,
     criterion: 'Hard suppression threshold. Shipped at 0.08 (schema default 0.25).',

@@ -945,7 +945,12 @@ function _lineupSensitivity(g) {
 // cell needs enough sample to be credible, AND the top edge needs
 // to be meaningfully above zero. Tunable here so future analysis
 // can adjust without code surgery downstream.
-const EMP_SPREAD_MIN_SAMPLE   = 50;
+// RAISED 50 -> 150 on 2026-09-10, with the 9-cell market-total axis.
+// The axis change cut median cell n from 207 to 134, and at n=150 the
+// 95% half-width on a cover rate is about 8pp — still wide, but a cell
+// below it cannot be judged at all. Sub-floor cells still COMPUTE and
+// persist; they just do not surface a play on the card.
+const EMP_SPREAD_MIN_SAMPLE   = 150;
 const EMP_SPREAD_MIN_EDGE_PP  = 3.0;
 const EMP_SPREAD_TOP_N        = 3;
 
