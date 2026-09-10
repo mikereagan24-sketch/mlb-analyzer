@@ -5,14 +5,19 @@
 // runOddsJob signal-generation block that writes into
 // empirical_spread_signals / empirical_spread_outcomes).
 //
-// All math here is pure and READ-ONLY against the DB — no INSERTs,
-// no UPDATEs. The caller owns durability.
+// Math here is pure and read-only against the DB, with ONE exception
+// added 2026-09-10: generateEmpiricalSpreadSignals stamps
+// game_log.market_total_at_emit write-once, at the moment the axis is
+// first used for a game. See the comment at freezeAxis for why it lives
+// here and not in the caller. Everything else is still read-only and the
+// caller still owns durability.
 //
 // ⚠ DIRECTIONAL ⚠
 //   Empirical sample is the in-season game_log corpus split across
-//   6 cells. Individual cells will be sparse early in the season.
+//   9 cells (was 6 before the 2026-09-10 axis change). Cells are
+//   correspondingly sparser — 6 of 9 sat under n=150 at the cutover.
 //   Threshold filters live at the consumer (jobs.js, the CLI's
-//   --min-sample, the slate API's display gate).
+//   --min-sample, the slate API's display gate, now 150).
 
 // ------------------------------------------------------------ tunables
 // Win-prob bucket boundaries (no-vig home win prob). Cells:
@@ -22,22 +27,58 @@
 //
 // STABILITY NOTE (2026-08-11 audit —
 //   docs/spread-edge-cell-stability-2026-08-11.md):
-// Both `Strong fav / Low total` and `Strong fav / High total` are the
-// least stable of the six cells. ~22% of graded games sit within ±2pp
-// of the 0.575 wp cut, and 82% of measured cell migration on nightly
-// re-runs happens across that specific boundary. Their per-cell
+// The `Strong fav` cells are the least stable. ~22% of graded games sit
+// within ±2pp of the 0.575 wp cut, and 82% of measured cell migration on
+// nightly re-runs happens across that specific boundary. Their per-cell
 // empirical cover rates should be read with more skepticism than the
 // deeper cells; a parameter tune can migrate ~10% of the sample there
 // in a single recompute. PR #232's model_home_ml_at_emit /
 // model_away_ml_at_emit pin this prospectively for signal-emitting
 // games; historical drift is what it is.
+//
+// THIS AXIS WAS DELIBERATELY LEFT ON THE MODEL, 2026-09-10. A market
+// no-vig win prob was tested as candidate B and rejected: it agrees with
+// the model tier on only 58.0% of graded games (so it is a different
+// partition, not a sharper one), it moved 68.7% of games versus A's
+// 48.5%, and its 0.500 cut is far LESS stable — 18.0% of games within
+// ±2pp of it against the model's 7.1%. It was better at the 0.575 cut
+// (19.0% vs 22.1%) and that was not enough.
 const WP_BALANCED_LOW = 0.500;
 const WP_HIGH         = 0.575;
 
-// Total bucket boundary (model_total). Below = Low, at/above = High.
-// ~21% of graded games sit within ±0.25 runs of 8.5; drift across this
-// axis is real but smaller (8 of 45 measured flips) than wp drift.
-const TOTAL_THRESHOLD = 8.5;
+// Total bucket boundaries. THE TOTAL AXIS IS THE MARKET TOTAL, NOT THE
+// MODEL TOTAL. (2026-09-10)
+//
+//   < TOTAL_LOW_MAX            = Low
+//   [TOTAL_LOW_MAX, TOTAL_HIGH_MIN) = Average
+//   >= TOTAL_HIGH_MIN          = High
+//
+// WHY THE AXIS MOVED. It keyed on model_total, a model output — the same
+// quantity whose calibration collapsed on 2026-08-03 (corr(model-market,
+// actual-market) +0.21 -> +0.02). A cell definition that moves when the
+// model moves cannot be a stable frame for measuring the model.
+//
+// WHY THESE CUTS. They fall BETWEEN posted rungs, so nothing sits on a
+// boundary. Measured on 1,158 graded rows to 2026-09-04:
+//   Low     n=434   6.5(34) 7(3) 7.5(384) 8(13)
+//   Average n=480   8.5(480)          <- one rung, 41% of the corpus
+//   High    n=244   9(12) 9.5(187) 10.5(35) 11.5(9) 12.5(1)
+// 0.0% of games sit exactly on 8.25 or 8.75, against 41.4% within a rung
+// of the old continuous 8.5 cut. A game migrates only when the book moves
+// the line a whole rung — not when a parameter is tuned.
+//
+// EVIDENCE, STATED HONESTLY. The deciding test (Average vs pooled
+// Low+High within each wp tier) returned 2 significant splits of 12 tested
+// — Balanced/home +11.1pp [+1.6, +20.5] and Underdog-home/away -12.4pp
+// [-22.1, -2.7]. At 12 tests ~0.6 false positives are expected at 95%, so
+// this is SUGGESTIVE, not established. The registry row
+// spread_cells_market_total_axis carries a forward criterion; the
+// stability argument above is what carried the decision, not the splits.
+//
+// COST: median cell n falls 207 -> 134 and 6 of 9 cells sit under 150,
+// which is why the display floor moved to 150 in the same change.
+const TOTAL_LOW_MAX  = 8.25;
+const TOTAL_HIGH_MIN = 8.75;
 
 // Spread lines surfaced per side. Kalshi publishes 1.5..9.5 in 1-run
 // steps; the near-the-money rungs are the only ones with sensible
@@ -46,13 +87,22 @@ const SHOW_LINES = [1.5, 2.5, 3.5];
 
 // Stable cell ordering, used by callers that need a predictable
 // summary printout.
+// NINE CELLS AS OF 2026-09-10, was six. Labels changed too: the band is
+// now "Low"/"Average"/"High" rather than "Low total"/"High total", so a
+// label from before the cutover is never mistaken for one after it.
+// empirical_spread_signals.cell_label rows written before that date carry
+// the old six-label taxonomy; nothing groups or filters on the column
+// (checked), but anything that starts to must not pool the two.
 const ALL_CELLS = [
-  'Underdog home / Low total',
-  'Underdog home / High total',
-  'Balanced / Low total',
-  'Balanced / High total',
-  'Strong fav / Low total',
-  'Strong fav / High total',
+  'Underdog home / Low',
+  'Underdog home / Average',
+  'Underdog home / High',
+  'Balanced / Low',
+  'Balanced / Average',
+  'Balanced / High',
+  'Strong fav / Low',
+  'Strong fav / Average',
+  'Strong fav / High',
 ];
 
 // ------------------------------------------------------------ math
@@ -171,12 +221,20 @@ function gradeEmpiricalSpreadOutcomesForGame(db, q, gameRow, gradedAt) {
 }
 
 // Cell key. Human-readable so logs and the slate UI can show it as-is.
-function cellKey(homeWinProb, modelTotal) {
+// SECOND ARGUMENT IS THE MARKET TOTAL, NOT THE MODEL TOTAL. (2026-09-10)
+// The parameter is named marketTotal so a caller passing model_total is
+// visible at the call site rather than silently producing a plausible
+// wrong cell. Returns null when no total is available -- the caller must
+// decide, because a game with no market total has no cell and must not be
+// quietly bucketed.
+function cellKey(homeWinProb, marketTotal) {
+  if (homeWinProb == null || !Number.isFinite(marketTotal)) return null;
   let wp;
   if (homeWinProb < WP_BALANCED_LOW) wp = 'Underdog home';
   else if (homeWinProb < WP_HIGH)    wp = 'Balanced';
   else                                wp = 'Strong fav';
-  const tot = modelTotal < TOTAL_THRESHOLD ? 'Low total' : 'High total';
+  const tot = marketTotal < TOTAL_LOW_MAX ? 'Low'
+            : (marketTotal < TOTAL_HIGH_MIN ? 'Average' : 'High');
   return wp + ' / ' + tot;
 }
 
@@ -195,25 +253,37 @@ function buildCellIndex(db) {
   // WRONG cell (its biased model_total sends it to a different
   // bucket than a clean-weather twin would). Excluding contaminated
   // rows keeps the empirical margin distribution clean.
+  // market_total_at_emit is the frozen axis, added 2026-09-10. Rows graded
+  // before it existed have NULL and fall back to market_total, which is
+  // the final stored value -- frozen for the ~92% of rows carrying
+  // odds_locked_at, last-pass for the rest. That fallback is a one-way
+  // historical concession: it cannot be reconstructed, and it shrinks as a
+  // share of the corpus every day. usedFallback is returned so callers can
+  // report it rather than treat the whole index as equally frozen.
   const rows = db.prepare(
-      "SELECT model_home_ml, model_away_ml, model_total, home_score, away_score "
+      "SELECT model_home_ml, model_away_ml, "
+    + "       market_total_at_emit, market_total, "
+    + "       home_score, away_score "
     + "FROM game_log "
     + "WHERE home_score IS NOT NULL AND away_score IS NOT NULL "
     + "  AND model_home_ml IS NOT NULL AND model_away_ml IS NOT NULL "
-    + "  AND model_total IS NOT NULL "
+    + "  AND COALESCE(market_total_at_emit, market_total) IS NOT NULL "
     + "  AND weather_contamination_reason IS NULL"
   ).all();
   const cells = new Map();
   for (const c of ALL_CELLS) cells.set(c, []);
-  let skipped = 0;
+  let skipped = 0, usedFallback = 0;
   for (const r of rows) {
     const wp = noVigHomeProb(r.model_home_ml, r.model_away_ml);
-    if (wp == null) { skipped++; continue; }
-    if (!Number.isFinite(r.model_total)) { skipped++; continue; }
-    const margin = r.home_score - r.away_score;
-    cells.get(cellKey(wp, r.model_total)).push(margin);
+    const tot = r.market_total_at_emit != null ? r.market_total_at_emit : r.market_total;
+    if (r.market_total_at_emit == null) usedFallback++;
+    const key = cellKey(wp, tot);
+    // cellKey returns null rather than guessing. A row with no usable wp
+    // or total is skipped, not bucketed.
+    if (key == null) { skipped++; continue; }
+    cells.get(key).push(r.home_score - r.away_score);
   }
-  return { cells, totalGraded: rows.length, skipped };
+  return { cells, totalGraded: rows.length, skipped, usedFallback };
 }
 
 // Tail-hit floor below which a prediction is flagged low_sample.
@@ -310,8 +380,14 @@ function computeGameEdges(game, spreadRows, cellIndex) {
   if (!game) return null;
   const wp = noVigHomeProb(game.model_home_ml, game.model_away_ml);
   if (wp == null) return null;
-  if (!Number.isFinite(game.model_total)) return null;
-  const label = cellKey(wp, game.model_total);
+  // AXIS TOTAL, 2026-09-10: market, frozen where we have it. model_total
+  // is still returned below for display and for the totals-edge work, but
+  // it no longer decides the cell.
+  const axisTotal = game.market_total_at_emit != null
+    ? game.market_total_at_emit : game.market_total;
+  if (!Number.isFinite(axisTotal)) return null;
+  const label = cellKey(wp, axisTotal);
+  if (label == null) return null;
   const margins = (cellIndex.cells.get(label)) || [];
   const n = margins.length;
 
@@ -421,6 +497,11 @@ function computeGameEdges(game, spreadRows, cellIndex) {
   return {
     home_win_prob: wp,
     model_total: game.model_total,
+    // The value that actually chose the cell, and where it came from.
+    // Without these a reader cannot tell whether a row was bucketed on a
+    // frozen axis or on the live fallback.
+    axis_total: axisTotal,
+    axis_total_frozen: game.market_total_at_emit != null,
     cell_label: label,
     cell_sample_size: n,
     predictions,
@@ -451,11 +532,19 @@ function generateEmpiricalSpreadSignals(db, date) {
   // model actually produced.
   const games = db.prepare(
       "SELECT g.game_date, g.game_id, g.away_team, g.home_team, "
-    + "       g.model_home_ml, g.model_away_ml, g.model_total "
+    + "       g.model_home_ml, g.model_away_ml, g.model_total, "
+    + "       g.market_total_at_emit, g.market_total "
     + "FROM game_log g "
     + "WHERE g.game_date = ? "
     + "  AND g.model_home_ml IS NOT NULL AND g.model_away_ml IS NOT NULL "
+    // model_total is still required: it is not the axis any more, but the
+    // rest of the row (display, totals work) depends on it and a game
+    // without one has not been priced.
     + "  AND g.model_total IS NOT NULL "
+    // The AXIS now needs a market total. A game Kalshi and Poly both left
+    // unpriced has no cell, and emitting spread signals for it would mean
+    // bucketing on nothing.
+    + "  AND COALESCE(g.market_total_at_emit, g.market_total) IS NOT NULL "
     + "  AND EXISTS (SELECT 1 FROM kalshi_spread_markets k "
     + "              WHERE k.game_date = g.game_date AND k.game_id = g.game_id) "
     + "ORDER BY g.game_id"
@@ -470,12 +559,38 @@ function generateEmpiricalSpreadSignals(db, date) {
     + "ORDER BY spread_team, spread_line"
   );
 
+  // FREEZE THE AXIS, WRITE-ONCE. (2026-09-10)
+  //
+  // This module is otherwise pure and read-only, and that is deliberate --
+  // the header says so. This is the single exception, and it is here
+  // rather than in the caller because this is the moment the axis is first
+  // USED for a game: the cell computed now is the cell the bet is placed
+  // against, so that is the value that must not move afterwards.
+  //
+  // WHERE market_total_at_emit IS NULL makes it write-once. A later pass
+  // seeing a moved line leaves the stamp alone, which is the whole point --
+  // a bucket that can change after the bet is placed is the mixed-moments
+  // problem the badge fix dealt with in September.
+  const freezeAxis = db.prepare(
+    "UPDATE game_log SET market_total_at_emit = ? "
+    + "WHERE game_date = ? AND game_id = ? AND market_total_at_emit IS NULL");
+
   const out = [];
+  let froze = 0;
   for (const g of games) {
     const spreads = getSpreads.all(g.game_date, g.game_id);
     if (!spreads.length) continue;
     const edges = computeGameEdges(g, spreads, cellIndex);
     if (!edges || !edges.predictions.length) continue;
+    if (g.market_total_at_emit == null && g.market_total != null) {
+      try {
+        const r = freezeAxis.run(g.market_total, g.game_date, g.game_id);
+        if (r.changes) froze++;
+      } catch (e) {
+        console.warn('[spread-cells] could not freeze market_total_at_emit for '
+          + g.game_id + ': ' + (e && e.message));
+      }
+    }
     out.push({
       game_date: g.game_date,
       game_id: g.game_id,
@@ -484,7 +599,8 @@ function generateEmpiricalSpreadSignals(db, date) {
       ...edges,
     });
   }
-  return { signals: out, cellIndex };
+  if (froze) console.log('[spread-cells] froze market_total_at_emit on ' + froze + ' game(s)');
+  return { signals: out, cellIndex, froze };
 }
 
 // ------------------------------------------------------------ persistence
@@ -622,7 +738,8 @@ module.exports = {
   // of truth without duplicating the bucket boundaries.
   WP_BALANCED_LOW,
   WP_HIGH,
-  TOTAL_THRESHOLD,
+  TOTAL_LOW_MAX,
+  TOTAL_HIGH_MIN,
   SHOW_LINES,
   ALL_CELLS,
   SUPPRESS_TAIL_HIT_FLOOR,

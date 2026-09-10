@@ -1078,6 +1078,13 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch
 // dedicated columns for reference-only UI display. The pre-existing
 // xcheck_* columns keep holding Unabated's SECOND sportsbook (unchanged),
 // so the totals-divergence flag semantics stay intact.
+// market_total_at_emit (2026-09-10) — the market total FROZEN at the
+// moment the empirical-spread cell was first computed for the game.
+// The spread-cell total axis reads this; market_total is only a
+// fallback for rows graded before the column existed. Write-once in
+// services/empirical-spread-edge.js — a bucket that can change after
+// the bet is placed is the mixed-moments problem.
+try { db.exec("ALTER TABLE game_log ADD COLUMN market_total_at_emit REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_away_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_home_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_ml_source TEXT"); } catch(e) {}
