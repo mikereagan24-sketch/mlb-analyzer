@@ -2712,8 +2712,29 @@ async function runLineupJob(dateStr) {
             const nowPT=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));
             const minsToGame=gameMinsPT-(nowPT.getHours()*60+nowPT.getMinutes());
             if(minsToGame<=10&&minsToGame>=-240){
-              db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
-              console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)');
+              // FREEZE THE SPREAD-CELL AXIS HERE, atomically with the
+              // lock. (2026-09-11)
+              //
+              // market_total_at_emit is set in the SAME statement that
+              // sets odds_locked_at, guarded by the same
+              // `odds_locked_at IS NULL`. That is deliberate: two
+              // statements could interleave with an odds pass and leave
+              // a row locked-but-unstamped or stamped-but-unlocked, and
+              // "the axis froze at lock" has to be true of the row, not
+              // just of the intention. Before this, the stamp landed at
+              // FIRST COMPUTATION (~04:01), and the cell moves between
+              // that build and first pitch on 28.3% of games.
+              //
+              // market_total may legitimately be NULL here (Kalshi and
+              // Poly both silent), leaving the axis unstamped. Such a
+              // row falls back to market_total exactly as historical
+              // rows do, and is counted below rather than passed over.
+              db.prepare("UPDATE game_log SET odds_locked_at=datetime('now'), market_total_at_emit=market_total WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
+              const _lk = q.getGameById.get(dateStr, gameId);
+              console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)'
+                + '  spread-cell axis=' + (_lk && _lk.market_total_at_emit != null
+                    ? 'FROZEN@' + _lk.market_total_at_emit
+                    : 'UNSTAMPED (no market total at lock — cell stays on the fallback)'));
               // Auto-set closing lines on any ML signals for this game.
               //
               // ---- CLV CAVEAT ----
@@ -4958,8 +4979,13 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       continue;
     }
     if (existing && gameHasStarted(existing, dateStr)) {
-      db.prepare("UPDATE game_log SET odds_locked_at=datetime('now') WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
-      console.log('[odds] Skipping started game: '+o.game_id);
+      // Second lock site — the catch-up path for a game that started
+      // without the T-10 lock firing. Freezes the spread-cell axis in
+      // the same UPDATE for the same reason as the T-10 site above; a
+      // lock that skipped the stamp would leave the cell live after
+      // first pitch, which is the defect in the other direction.
+      db.prepare("UPDATE game_log SET odds_locked_at=datetime('now'), market_total_at_emit=market_total WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
+      console.log('[odds] Skipping started game: '+o.game_id+' (locked, spread-cell axis frozen)');
       // ML filter removed 2026-08-23 -- totals were never captured. `o` carries
       // market_total / over_price / under_price alongside the ML fields.
       const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, o.game_id);

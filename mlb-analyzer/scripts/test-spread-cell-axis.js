@@ -65,9 +65,22 @@ const cols = db.prepare('PRAGMA table_info(game_log)').all().map(c => c.name);
 ok('game_log.market_total_at_emit exists', cols.indexOf('market_total_at_emit') !== -1);
 
 const eng = fs.readFileSync(path.join(R, 'services/empirical-spread-edge.js'), 'utf8');
-ok('the freeze is WRITE-ONCE',
-   eng.indexOf('AND market_total_at_emit IS NULL') !== -1,
+// The freeze MOVED on 2026-09-11, from the engine (write-once at first
+// computation) to the lock sites in services/jobs.js (at lock, atomic
+// with odds_locked_at). This assertion moved with it rather than being
+// deleted -- the property it defends is unchanged: once the axis is
+// stamped, nothing rewrites it. What changed is WHEN it gets stamped.
+// scripts/test-spread-cell-live-axis.js owns the timing rule.
+const jobsSrc = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');
+const lockStmts = jobsSrc.match(/UPDATE game_log SET odds_locked_at=datetime\('now'\)[^"]*/g) || [];
+ok('the freeze is WRITE-ONCE, at the lock sites',
+   lockStmts.length === 2
+   && lockStmts.every(s => /market_total_at_emit=market_total/.test(s)
+                        && /odds_locked_at IS NULL/.test(s)),
    'a later pass with a moved line must not overwrite it');
+ok('and the engine no longer stamps it',
+   eng.indexOf('UPDATE game_log SET market_total_at_emit') === -1,
+   'the engine is read-only again');
 ok('the axis prefers the frozen column over the live one',
    eng.indexOf('game.market_total_at_emit != null') !== -1
    && eng.indexOf('? game.market_total_at_emit : game.market_total') !== -1);

@@ -1078,13 +1078,57 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch
 // dedicated columns for reference-only UI display. The pre-existing
 // xcheck_* columns keep holding Unabated's SECOND sportsbook (unchanged),
 // so the totals-divergence flag semantics stay intact.
-// market_total_at_emit (2026-09-10) — the market total FROZEN at the
-// moment the empirical-spread cell was first computed for the game.
-// The spread-cell total axis reads this; market_total is only a
-// fallback for rows graded before the column existed. Write-once in
-// services/empirical-spread-edge.js — a bucket that can change after
-// the bet is placed is the mixed-moments problem.
+// market_total_at_emit (2026-09-10) — the market total FROZEN AT LOCK.
+//
+// REVISED 2026-09-11. It originally froze at the moment the cell was
+// first COMPUTED, which was wrong in the direction that matters: the
+// first computation is the 04:01-ish build, and a game's cell changes
+// between that build and first pitch 28.3% of the time (104 of 367
+// games over 30 days). Freezing at first computation pinned the card to
+// a partition the market had already left.
+//
+// The stamp now happens in the SAME UPDATE that sets odds_locked_at
+// (services/jobs.js, both lock sites), so it is atomic with the lock and
+// cannot drift from it. Before lock the column is NULL and the cell is
+// LIVE — it follows the current market total, re-derived every odds
+// pass. At lock it freezes, and the graded outcome lands in that cell.
+// Same live-vs-frozen split the ML box uses.
 try { db.exec("ALTER TABLE game_log ADD COLUMN market_total_at_emit REAL"); } catch(e) {}
+
+// Spread-signal provenance (2026-09-11). A persisted signal row now
+// records WHICH total put the game in its cell, whether that total was
+// still live or already locked, and which partition definition produced
+// the label. Without these the card can show a cell but not say what it
+// is a cell OF, and a partition change silently re-means every old row.
+try { db.exec("ALTER TABLE empirical_spread_signals ADD COLUMN axis_total REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE empirical_spread_signals ADD COLUMN axis_frozen INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE empirical_spread_signals ADD COLUMN partition_version TEXT"); } catch(e) {}
+
+// ONE-TIME CLEANUP (2026-09-11), paired with moving the stamp to lock.
+// PR #371 stamped market_total_at_emit at first computation, so a row
+// could carry a frozen axis while still unlocked and hours from first
+// pitch. Under the lock-time rule an unlocked row must be NULL, so any
+// pre-lock stamp is cleared. This is safe by construction: it only
+// touches rows where odds_locked_at IS NULL, which post-lock
+// immutability does not cover, and where the new design says the value
+// should not exist. It is left running on every boot rather than gated
+// to one shot ON PURPOSE -- pre-lock-stamped is an invariant violation,
+// not a migration state, and the count is logged so a recurrence is
+// visible instead of silently repaired.
+try {
+  const _preLockStamped = db.prepare(
+    "UPDATE game_log SET market_total_at_emit = NULL "
+    + "WHERE market_total_at_emit IS NOT NULL AND odds_locked_at IS NULL").run();
+  if (_preLockStamped.changes) {
+    console.warn('[spread-cells] cleared market_total_at_emit on '
+      + _preLockStamped.changes + ' UNLOCKED row(s) — the axis is only'
+      + ' frozen at lock. Expected once, after the 2026-09-11 deploy;'
+      + ' a non-zero count on any later boot means something is stamping early.');
+  }
+} catch (e) {
+  console.warn('[spread-cells] pre-lock stamp cleanup failed: ' + (e && e.message));
+}
+
 try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_away_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_home_ml INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN unabated_ml_source TEXT"); } catch(e) {}
@@ -3535,8 +3579,9 @@ q.upsertEmpiricalSpreadSignal = db.prepare(
   + "(game_date, game_id, generated_at, capture_track, "
   + " model_total, model_no_vig_home_prob, "
   + " cell_label, cell_sample_size, predictions_json, top_edge_team, "
-  + " top_edge_line, top_edge_yes_ask_ml, top_edge_pp) "
-  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+  + " top_edge_line, top_edge_yes_ask_ml, top_edge_pp, "
+  + " axis_total, axis_frozen, partition_version) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 );
 q.upsertEmpiricalSpreadOutcome = db.prepare(
     "INSERT OR REPLACE INTO empirical_spread_outcomes "
