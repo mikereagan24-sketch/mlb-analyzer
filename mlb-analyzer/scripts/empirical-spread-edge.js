@@ -99,9 +99,14 @@ function main() {
   const { signals, cellIndex } = eng.generateEmpiricalSpreadSignals(db, date);
 
   console.log('EMPIRICAL SPREAD EDGE ANALYSIS — ' + date);
+  // Cell count comes from the engine. It was hardcoded to 6 and went
+  // stale the moment the 2026-09-10 axis change made it 9 -- the report
+  // printed nine cells under a banner claiming six.
   console.log('⚠ DIRECTIONAL ONLY — empirical sample is '
-    + cellIndex.totalGraded + ' graded games across 6 cells ⚠');
-  console.log('Min sample threshold: ' + args.minSample + ' (cells below are marked [LOW SAMPLE])');
+    + cellIndex.totalGraded + ' graded games across ' + eng.ALL_CELLS.length + ' cells ⚠');
+  console.log('Min sample threshold: ' + args.minSample
+    + ' (cells below are marked [LOW SAMPLE]). This is the CLI\'s own --min-sample,'
+    + ' NOT the slate card\'s display floor (routes/api.js EMP_SPREAD_MIN_SAMPLE, 150).');
   console.log('');
 
   const allOpps = [];

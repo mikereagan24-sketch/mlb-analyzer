@@ -14,8 +14,10 @@
 //
 // ⚠ DIRECTIONAL ⚠
 //   Empirical sample is the in-season game_log corpus split across
-//   9 cells (was 6 before the 2026-09-10 axis change). Cells are
-//   correspondingly sparser — 6 of 9 sat under n=150 at the cutover.
+//   9 cells (was 6 before the 2026-09-10 axis change). Cells went
+//   sparser at the cutover — 6 of 9 under n=150 — and then recovered
+//   the same day when the weather-contamination filter came off
+//   buildCellIndex: 1158 -> 1938 rows, 7 of 9 over 150, 3 over 250.
 //   Threshold filters live at the consumer (jobs.js, the CLI's
 //   --min-sample, the slate API's display gate, now 150).
 
@@ -247,12 +249,46 @@ function cellKey(homeWinProb, marketTotal) {
 // report / job pass — it's a few-hundred-row table scan and small
 // arithmetic, but it's silly to repeat per-game.
 function buildCellIndex(db) {
-  // Contamination filter (2026-08-06): the cell index keys on
-  // (win_prob, model_total). model_total was computed at emit time
-  // using the row's stored weather; a contaminated row lands in the
-  // WRONG cell (its biased model_total sends it to a different
-  // bucket than a clean-weather twin would). Excluding contaminated
-  // rows keeps the empirical margin distribution clean.
+  // NO WEATHER-CONTAMINATION FILTER HERE. (2026-09-10, was added
+  // 2026-08-06 and removed the same day the axis moved.)
+  //
+  // The old filter was correct for the old axis. It read: the cell index
+  // keys on (win_prob, model_total), model_total was computed at emit
+  // time from the row's stored weather, so a contaminated row lands in
+  // the WRONG cell. That reasoning died with the axis change above —
+  // the index now keys on (model win prob x MARKET-OBSERVED total), and
+  // weather reaches neither coordinate.
+  //
+  // Weather enters services/model.js at exactly one place, and it is
+  // downstream of the moneyline:
+  //     const windFactor = game.wind_factor || 0;       // ~1386
+  //     const tempRunAdj = game.temp_run_adj || 0;
+  //     const windRunAdj = windFactor * WIND_SCALE;
+  //     const estTot = Math.max(0, aRuns + hRuns + windRunAdj + tempRunAdj);
+  // aML/hML are already final by then. Those are the only weather
+  // references in the file. So weather is a TOTALS-side input, and the
+  // market total is not a model output at all.
+  //
+  // MEASURED, not reasoned: all 780 tagged rows re-priced twice through
+  // buildGame/runModel changing only the weather fields — stored weather
+  // vs weather ZEROED OUT, a far larger swing than any of the tagged
+  // defects produced. 0 of 780 changed model moneyline, 0 of 780 changed
+  // win-prob tier, in either direction, across every reason code. 492
+  // rows moved their model TOTAL (mean 0.413 runs, max 1.98), so the
+  // perturbation was real and the model did respond to it. See
+  // scripts/test-spread-cell-weather-admission.js.
+  //
+  // THE TAG STAYS LOAD-BEARING wherever model_total or the weather
+  // columns are read — services/temp-backtest.js, frv-backtest.js,
+  // runmult-totals-backtest.js, parameter-sweep.js and friends keep it.
+  // This is a claim about ONE index's two axes, not about the tag.
+  //
+  // Excluding these rows was not neutral. The tag is a park filter (16
+  // home parks vs 30) whose games carry mean market home win prob 0.5178
+  // against 0.5348 and mean market total 8.68 against 8.35. Dropping it
+  // makes each cell's population more representative of the league, not
+  // less.
+  //
   // market_total_at_emit is the frozen axis, added 2026-09-10. Rows graded
   // before it existed have NULL and fall back to market_total, which is
   // the final stored value -- frozen for the ~92% of rows carrying
@@ -267,8 +303,7 @@ function buildCellIndex(db) {
     + "FROM game_log "
     + "WHERE home_score IS NOT NULL AND away_score IS NOT NULL "
     + "  AND model_home_ml IS NOT NULL AND model_away_ml IS NOT NULL "
-    + "  AND COALESCE(market_total_at_emit, market_total) IS NOT NULL "
-    + "  AND weather_contamination_reason IS NULL"
+    + "  AND COALESCE(market_total_at_emit, market_total) IS NOT NULL"
   ).all();
   const cells = new Map();
   for (const c of ALL_CELLS) cells.set(c, []);
