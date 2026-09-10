@@ -194,6 +194,18 @@ function fetchGradedRows(db, fromDate, toDate) {
       -- capture; contaminated weather biased the model's spread
       -- edge at emit time, so the resulting signal decisions and
       -- the ROI attributed to them are weather-biased.
+      --
+      -- KEPT DELIBERATELY, 2026-09-10, when the same filter came OFF
+      -- buildCellIndex in services/empirical-spread-edge.js. Different
+      -- question, different answer. That index buckets GAMES by
+      -- (model win prob x market total), neither of which weather
+      -- touches. This query reads EMITTED SIGNALS, and every tagged
+      -- row predates 2026-07-30 — so its signal was emitted against
+      -- the OLD six-cell model_total partition, under labels
+      -- ("Low total"/"High total") that no longer exist. Admitting
+      -- them here would pool two different partitions into one ROI
+      -- number, which is a taxonomy bug, not a weather question.
+      -- Revisit only if these rows are re-scored on the current cells.
       AND g.weather_contamination_reason IS NULL
     ORDER BY e.game_date, e.game_id, e.pair_id, e.capture_track,
              e.side, e.generated_at DESC
@@ -583,6 +595,13 @@ function fetchMarketRows(db, fromDate, toDate) {
       -- inputs and would skew the reported ROI. The g.* JOIN above
       -- carries the tag; excluding IS NOT NULL rows keeps only
       -- trusted-weather signals in the calibration window.
+      --
+      -- KEPT DELIBERATELY, 2026-09-10 — same reasoning as the pair
+      -- query above. buildCellIndex dropped this filter because its
+      -- two axes are weather-independent; this one reads emitted
+      -- signals, all of which predate the partition change, so
+      -- admitting them would mix the old six-cell taxonomy into a
+      -- nine-cell ROI readout.
       AND g.weather_contamination_reason IS NULL
     ORDER BY e.game_date, e.game_id, e.market_type, e.capture_track,
              e.generated_at DESC
