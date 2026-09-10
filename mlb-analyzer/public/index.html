@@ -1758,6 +1758,21 @@ function renderGameGrid(games,date){
           return '<div class="emp-spread-pair">'+g.map(pickRow).join('')+'</div>';
         }).join('');
         var cell=es.cell_label?(' '+es.cell_label+' (n='+es.cell_sample_size+')'):'';
+        // Which total put the game in that cell, and whether it can still
+        // move. Pre-lock the cell is LIVE — a rung move re-buckets the
+        // game and re-prices these plays. At lock it freezes. Showing the
+        // bucket without saying which it is was the same mixed-moments
+        // defect the badge had: a label from one moment beside prices
+        // from another.
+        var _axis = '';
+        if (es.axis_total != null) {
+          _axis = ' · tot ' + es.axis_total
+            + (es.axis_frozen ? ' locked' : ' live');
+        }
+        // A game locked before 2026-09-11 is frozen by the lock but has
+        // no stamp, so it shows "locked" with no stamped value to name.
+        // Do not let that read as live.
+        else if (es.axis_frozen) { _axis = ' · tot locked'; }
         // The pp figures here are ALSO from a past moment -- the engine
         // stamps generated_at on each odds pass. The API has always sent it
         // and the card never showed it, which is the same defect the signal
@@ -1771,7 +1786,7 @@ function renderGameGrid(games,date){
               return " as of " + p(d.getHours()) + ":" + p(d.getMinutes());
             })()
           : "";
-        return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+_gen+'</span></div>'+rows+'</div>';
+        return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+_axis+_gen+'</span></div>'+rows+'</div>';
       })() : '')+
       '<div class="gresult '+(!g.is_postponed&&g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
       (!g.is_postponed&&g.model_away_ml?renderGameResult(g):'')+

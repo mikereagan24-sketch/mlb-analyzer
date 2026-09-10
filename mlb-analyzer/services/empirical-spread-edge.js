@@ -5,12 +5,12 @@
 // runOddsJob signal-generation block that writes into
 // empirical_spread_signals / empirical_spread_outcomes).
 //
-// Math here is pure and read-only against the DB, with ONE exception
-// added 2026-09-10: generateEmpiricalSpreadSignals stamps
-// game_log.market_total_at_emit write-once, at the moment the axis is
-// first used for a game. See the comment at freezeAxis for why it lives
-// here and not in the caller. Everything else is still read-only and the
-// caller still owns durability.
+// Math here is pure and read-only against the DB. It briefly was not:
+// 2026-09-10 put a market_total_at_emit write inside
+// generateEmpiricalSpreadSignals. That write moved to the lock sites in
+// services/jobs.js on 2026-09-11 (the axis freezes at lock, not at first
+// computation), and this module is read-only again. Keep it that way --
+// the caller owns durability.
 //
 // ⚠ DIRECTIONAL ⚠
 //   Empirical sample is the in-season game_log corpus split across
@@ -86,6 +86,35 @@ const TOTAL_HIGH_MIN = 8.75;
 // steps; the near-the-money rungs are the only ones with sensible
 // liquidity AND non-trivial empirical sample.
 const SHOW_LINES = [1.5, 2.5, 3.5];
+
+// PARTITION VERSION. (2026-09-11)
+//
+// Bump this whenever the CELL DEFINITION changes -- the win-prob cuts,
+// the total-band cuts, which quantity each axis reads, or the label set.
+// Do NOT bump for changes to the display floor, the edge threshold, or
+// anything else downstream: those do not re-mean a stored cell_label.
+//
+// WHY IT EXISTS. empirical_spread_signals rows persist their cell_label.
+// #371 renamed every label AND moved an axis in one deploy, which meant
+// every row written before it silently described a different partition
+// than rows written after -- same column, two taxonomies, nothing in the
+// data marking the seam. The labels were renamed precisely so the two
+// could not be pooled by accident, but that only works if a human is
+// reading them. Rows now carry partition_version, and boot compares this
+// constant against the last value seen (app_settings) so a deploy that
+// changes the partition announces itself instead of leaving stale labels.
+//
+// History:
+//   v1  <= 2026-09-09  6 cells, model win prob x MODEL total, "Low total"
+//                      / "High total" labels
+//   v2     2026-09-10  9 cells, model win prob x MARKET total (8.25/8.75),
+//                      "Low"/"Average"/"High" labels  [#371]
+//   v3     2026-09-11  same cuts, but the axis is LIVE until lock rather
+//                      than frozen at first computation. A v2 row and a
+//                      v3 row with the same label can describe different
+//                      moments, so this is a partition change.
+const PARTITION_VERSION = 'v3-market-total-live-until-lock';
+const PARTITION_VERSION_KEY = 'spread_cells_partition_version';
 
 // Stable cell ordering, used by callers that need a predictable
 // summary printout.
@@ -536,7 +565,18 @@ function computeGameEdges(game, spreadRows, cellIndex) {
     // Without these a reader cannot tell whether a row was bucketed on a
     // frozen axis or on the live fallback.
     axis_total: axisTotal,
-    axis_total_frozen: game.market_total_at_emit != null,
+    // FROZEN means "this cell can no longer move", and there are two
+    // ways for that to be true. The stamp is one. The LOCK is the other:
+    // a locked row's market_total stops being updated (runOddsJob's
+    // locked branch refreshes source labels only, prices frozen), so its
+    // axis is fixed whether or not a stamp exists. Every row locked
+    // before 2026-09-11 is in exactly that state -- locked, unstamped,
+    // and not going anywhere. Reporting those as "live" would put a
+    // moving-cell badge on a game that finished last week.
+    axis_total_frozen: game.market_total_at_emit != null
+      || game.odds_locked_at != null,
+    axis_total_source: game.market_total_at_emit != null ? 'stamped_at_lock'
+      : (game.odds_locked_at != null ? 'locked_unstamped' : 'live'),
     cell_label: label,
     cell_sample_size: n,
     predictions,
@@ -568,7 +608,7 @@ function generateEmpiricalSpreadSignals(db, date) {
   const games = db.prepare(
       "SELECT g.game_date, g.game_id, g.away_team, g.home_team, "
     + "       g.model_home_ml, g.model_away_ml, g.model_total, "
-    + "       g.market_total_at_emit, g.market_total "
+    + "       g.market_total_at_emit, g.market_total, g.odds_locked_at "
     + "FROM game_log g "
     + "WHERE g.game_date = ? "
     + "  AND g.model_home_ml IS NOT NULL AND g.model_away_ml IS NOT NULL "
@@ -594,38 +634,30 @@ function generateEmpiricalSpreadSignals(db, date) {
     + "ORDER BY spread_team, spread_line"
   );
 
-  // FREEZE THE AXIS, WRITE-ONCE. (2026-09-10)
+  // NO AXIS WRITE HERE. (2026-09-11 — there was one, 2026-09-10 to
+  // 2026-09-11.)
   //
-  // This module is otherwise pure and read-only, and that is deliberate --
-  // the header says so. This is the single exception, and it is here
-  // rather than in the caller because this is the moment the axis is first
-  // USED for a game: the cell computed now is the cell the bet is placed
-  // against, so that is the value that must not move afterwards.
+  // The axis freezes at LOCK, in the same UPDATE that sets
+  // odds_locked_at (services/jobs.js, both lock sites), so the freeze is
+  // atomic with the lock and cannot drift from it. Freezing at first
+  // computation instead pinned the cell to the ~04:01 build: measured
+  // over the 30 days to 2026-09-10, a game's cell changes between that
+  // build and first pitch on 104 of 367 games (28.3%) -- 15.3% because
+  // the market total crossed a band edge, 10.6% because the model
+  // win-prob tier moved once lineups confirmed, 2.5% both. Every one of
+  // those was a card showing a cell the market had already left.
   //
-  // WHERE market_total_at_emit IS NULL makes it write-once. A later pass
-  // seeing a moved line leaves the stamp alone, which is the whole point --
-  // a bucket that can change after the bet is placed is the mixed-moments
-  // problem the badge fix dealt with in September.
-  const freezeAxis = db.prepare(
-    "UPDATE game_log SET market_total_at_emit = ? "
-    + "WHERE game_date = ? AND game_id = ? AND market_total_at_emit IS NULL");
-
+  // Pre-lock, market_total_at_emit is NULL and computeGameEdges falls
+  // through to the live market_total, so the cell re-derives every pass.
+  // That is the intended behaviour, not a fallback.
   const out = [];
-  let froze = 0;
+  let live = 0, frozen = 0;
   for (const g of games) {
     const spreads = getSpreads.all(g.game_date, g.game_id);
     if (!spreads.length) continue;
     const edges = computeGameEdges(g, spreads, cellIndex);
     if (!edges || !edges.predictions.length) continue;
-    if (g.market_total_at_emit == null && g.market_total != null) {
-      try {
-        const r = freezeAxis.run(g.market_total, g.game_date, g.game_id);
-        if (r.changes) froze++;
-      } catch (e) {
-        console.warn('[spread-cells] could not freeze market_total_at_emit for '
-          + g.game_id + ': ' + (e && e.message));
-      }
-    }
+    if (edges.axis_total_frozen) frozen++; else live++;
     out.push({
       game_date: g.game_date,
       game_id: g.game_id,
@@ -634,8 +666,68 @@ function generateEmpiricalSpreadSignals(db, date) {
       ...edges,
     });
   }
-  if (froze) console.log('[spread-cells] froze market_total_at_emit on ' + froze + ' game(s)');
-  return { signals: out, cellIndex, froze };
+  if (out.length) {
+    console.log('[spread-cells] ' + date + ': ' + out.length + ' game(s) — '
+      + live + ' on a LIVE axis (unlocked, cell follows the market), '
+      + frozen + ' FROZEN at lock');
+  }
+  return { signals: out, cellIndex, live, frozen, partition_version: PARTITION_VERSION };
+}
+
+// ------------------------------------------------------------ partition version
+// Compare the compiled-in PARTITION_VERSION against the last value this
+// database saw, and record the new one. Called at boot (server.js) so a
+// deploy that changes the cell definition cannot quietly leave rows
+// labelled under the old one.
+//
+// Returns { changed, from, to, staleRows } and does NOT throw -- a boot
+// must not die because a bookkeeping row is unreadable. staleRows counts
+// persisted signal rows for TODAY carrying a different version, which is
+// the set the card could otherwise render under the wrong partition; the
+// nightly rebuild replaces them on the next odds pass, and this makes the
+// window visible rather than silent.
+//
+// The cover-rate index itself needs no invalidation on version change --
+// buildCellIndex is recomputed from game_log on every call and holds no
+// cache. That is a property worth stating, because the obvious reading of
+// "rebuild the index on a version change" is that something is cached and
+// must be busted. Nothing is. What goes stale is the PERSISTED LABELS.
+function checkPartitionVersion(db, opts) {
+  const today = (opts && opts.today) || null;
+  const out = { changed: false, from: null, to: PARTITION_VERSION, staleRows: 0 };
+  try {
+    const row = db.prepare("SELECT value FROM app_settings WHERE key = ?")
+      .get(PARTITION_VERSION_KEY);
+    out.from = row ? row.value : null;
+    out.changed = out.from !== PARTITION_VERSION;
+
+    if (out.changed && today) {
+      try {
+        out.staleRows = db.prepare(
+          "SELECT COUNT(*) n FROM empirical_spread_signals "
+          + "WHERE game_date >= ? AND COALESCE(partition_version, '<pre-v3>') != ?")
+          .get(today, PARTITION_VERSION).n;
+      } catch (e) { /* column may not exist yet on a very old copy */ }
+    }
+
+    if (out.changed) {
+      console.warn('[spread-cells] PARTITION CHANGED: '
+        + (out.from === null ? '(none recorded)' : out.from) + ' -> ' + PARTITION_VERSION
+        + '. Persisted cell_label rows written under the old definition describe a'
+        + ' DIFFERENT partition and must not be pooled with new ones.'
+        + (out.staleRows ? ' ' + out.staleRows + ' row(s) for today still carry the old'
+            + ' version; the next odds pass rewrites them.' : ''));
+      db.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        + "ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run(PARTITION_VERSION_KEY, PARTITION_VERSION);
+    } else {
+      console.log('[spread-cells] partition version ' + PARTITION_VERSION + ' (unchanged)');
+    }
+  } catch (e) {
+    console.warn('[spread-cells] partition version check failed (non-fatal): '
+      + (e && e.message));
+  }
+  return out;
 }
 
 // ------------------------------------------------------------ persistence
@@ -672,6 +764,13 @@ function persistEmpiricalSpreadSignals(db, q, signals, captureTrack, generatedAt
         top ? top.spread_line : null,
         top ? top.kalshi_yes_ask_ml : null,
         top ? top.edge_pp : null,
+        // Provenance: WHICH total put this game in this cell, whether it
+        // was still live at that moment, and under which partition the
+        // label was computed. A cell_label without these is a bucket name
+        // with nothing behind it.
+        sig.axis_total != null ? sig.axis_total : null,
+        sig.axis_total_frozen ? 1 : 0,
+        PARTITION_VERSION,
       );
       for (const p of sig.predictions) {
         if (p.price_ml == null) continue;
@@ -778,6 +877,9 @@ module.exports = {
   SHOW_LINES,
   ALL_CELLS,
   SUPPRESS_TAIL_HIT_FLOOR,
+  PARTITION_VERSION,
+  PARTITION_VERSION_KEY,
+  checkPartitionVersion,
   // Math
   americanToProb,
   americanProfit,

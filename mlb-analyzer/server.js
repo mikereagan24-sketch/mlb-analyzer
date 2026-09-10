@@ -119,6 +119,26 @@ try {
     e && (e.stack || e.message));
 }
 
+// Spread-cell partition version check. (2026-09-11)
+//
+// The cover-rate index itself is rebuilt from game_log on every call and
+// caches nothing, so it cannot go stale. What CAN go stale is the
+// cell_label persisted on empirical_spread_signals rows: #371 renamed
+// every label and moved an axis in one deploy, and nothing in the data
+// marked the seam. This compares the compiled-in PARTITION_VERSION
+// against the last one this database saw and says so, loudly, on the
+// boot that changes it.
+//
+// Non-fatal by construction -- checkPartitionVersion swallows its own
+// errors. A bookkeeping row must never be able to stop the app serving.
+try {
+  const _spreadEng = require('./services/empirical-spread-edge');
+  const _todayPt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  _spreadEng.checkPartitionVersion(db, { today: _todayPt });
+} catch (e) {
+  console.warn('[spread-cells] partition version check skipped: ' + (e && e.message));
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 

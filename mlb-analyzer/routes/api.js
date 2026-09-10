@@ -1005,6 +1005,16 @@ router.get('/games/:date', (req, res) => {
           cell_label: r.cell_label,
           cell_sample_size: r.cell_sample_size,
           generated_at: r.generated_at,
+          // Which total put the game in this cell, and whether that
+          // total is still moving. Pre-lock the cell is LIVE: it
+          // re-derives from the current market total every odds pass, so
+          // a rung move re-buckets the game and re-prices the runline
+          // plays. At lock it freezes. Sending the label without this
+          // distinction is what made a 04:01 bucket look like a
+          // standing fact -- and it moves on 28.3% of games.
+          axis_total: r.axis_total != null ? r.axis_total : null,
+          axis_frozen: r.axis_frozen === 1,
+          partition_version: r.partition_version || null,
           top_picks: eligible.slice(0, EMP_SPREAD_TOP_N).map(p => ({
             spread_team:        p.spread_team,
             spread_line:        p.spread_line,
