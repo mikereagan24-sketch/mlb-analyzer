@@ -954,6 +954,40 @@ const EMP_SPREAD_MIN_SAMPLE   = 150;
 const EMP_SPREAD_MIN_EDGE_PP  = 3.0;
 const EMP_SPREAD_TOP_N        = 3;
 
+// SPREAD-EDGE pp DISPLAY IS OFF. (2026-09-11)
+//
+// The engine's cover probability is worse-calibrated than the price it
+// is quoted against, so the pp figures derived from it are not a
+// recommendation and stop being shown as one. Measured walk-forward on
+// 14,004 distinct plays (2026-06-04..09-04), one row per
+// (date, game, team, line, side), cell index built only from games
+// strictly before each date:
+//
+//   n-weighted mean |bin error|   engine 5.84pp   market 4.03pp
+//   AUC (test window)             engine 0.7477   market 0.7560
+//   out-of-sample optimal weight on the engine in w*emp + (1-w)*imp:
+//     w = 0.00 fitted pre-08-01, 0.04 fitted directly on the test half
+//     (the unachievable ceiling). Brier is monotone increasing in w.
+//
+//   A play the card labelled 85% won 74% of the time, and that holds on
+//   the test window alone (stated 85.6 -> realized 71.3, +-3.5, n=652).
+//
+// Supporting, not deciding: displayed plays returned -3.91/100 while the
+// 0-3pp band the floor was hiding returned -2.50.
+//
+// WHAT STAYS. Signals still compute and persist -- empirical_spread_signals
+// keeps writing every pass, so the forward record continues and the
+// re-enable criterion has data to be judged on. The card keeps the cell
+// label, the cell n, the live/locked axis badge and the posted runline
+// prices. What goes is the pp figures and the pick framing.
+//
+// This is a code constant, not a settings-schema key, deliberately: a
+// schema key would need a UI control in the same PR (the UI-parity rule)
+// and this is not a knob anyone should flip from the settings card. Turn
+// it back on by editing this line, and only against the criterion in
+// services/feature-gate-registry.js -> spread_edge_display_enabled.
+const SPREAD_EDGE_DISPLAY_ENABLED = false;
+
 router.get('/games/:date', (req, res) => {
   try {
     const { date } = req.params;
@@ -991,16 +1025,34 @@ router.get('/games/:date', (req, res) => {
         // game-wide; this filter strips individual deep-tail picks
         // (e.g. opp +3.5 at no_ask -966 where the underlying tail has
         // < SUPPRESS_TAIL_HIT_FLOOR hits in the cell).
-        const eligible = (preds || []).filter(p =>
-          !p.low_sample
-          && p.edge_pp != null
-          && p.edge_pp >= EMP_SPREAD_MIN_EDGE_PP
-        );
+        //
+        // WITH THE pp DISPLAY OFF, this gate does not run. It selected
+        // which plays to RECOMMEND, and nothing is recommended now. The
+        // block instead lists the posted runline prices for the standard
+        // rungs, unranked -- a price table, not a pick list. The
+        // low_sample flag still filters, because a line resting on a
+        // handful of cell games is one we should not draw attention to
+        // at all, with or without a number beside it.
+        const eligible = SPREAD_EDGE_DISPLAY_ENABLED
+          ? (preds || []).filter(p =>
+              !p.low_sample
+              && p.edge_pp != null
+              && p.edge_pp >= EMP_SPREAD_MIN_EDGE_PP)
+          : (preds || []).filter(p => !p.low_sample);
         if (!eligible.length) continue;
-        // Sort desc by edge_pp. computeGameEdges already does this
-        // before serializing; re-sort defensively across the JSON
-        // boundary.
-        eligible.sort((a, b) => (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
+        if (SPREAD_EDGE_DISPLAY_ENABLED) {
+          // Sort desc by edge_pp. computeGameEdges already does this
+          // before serializing; re-sort defensively across the JSON
+          // boundary.
+          eligible.sort((a, b) => (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
+        } else {
+          // Stable, neutral order: by rung then team. Ordering by edge
+          // would rank them, and a ranked list IS a recommendation even
+          // with the numbers stripped off it.
+          eligible.sort((a, b) => (a.spread_line - b.spread_line)
+            || String(a.spread_team).localeCompare(String(b.spread_team))
+            || String(a.side).localeCompare(String(b.side)));
+        }
         empByGame[r.game_id] = {
           cell_label: r.cell_label,
           cell_sample_size: r.cell_sample_size,
@@ -1015,30 +1067,48 @@ router.get('/games/:date', (req, res) => {
           axis_total: r.axis_total != null ? r.axis_total : null,
           axis_frozen: r.axis_frozen === 1,
           partition_version: r.partition_version || null,
-          top_picks: eligible.slice(0, EMP_SPREAD_TOP_N).map(p => ({
-            spread_team:        p.spread_team,
-            spread_line:        p.spread_line,
-            // Side label drives the UI +/- prefix.
-            side:               p.side || 'lay',
-            // pair_id groups lay + take of the same market for UI.
-            pair_id:            p.pair_id || null,
-            // Side's actual price (lay→yes_ask_ml, take→no_ask_ml).
-            // price_ml is the new engine output; fall back to
-            // kalshi_yes_ask_ml for back-compat with pre-take
-            // signal rows still in the DB.
-            yes_ask_ml:         (p.price_ml != null ? p.price_ml : p.kalshi_yes_ask_ml),
-            edge_pp:            p.edge_pp,
-            empirical_pct:      p.empirical_pct,
-            kalshi_implied_pct: p.implied_pct,
-            // Per-line tail hit count — how many games in the parent
-            // cell actually fell in THIS side's tail (margin > L for lay,
-            // < -L for take). Displayed next to the pp figure so the UI
-            // reveals when a specific line rests on a small tail inside
-            // an otherwise-large cell. Passes the SUPPRESS_TAIL_HIT_FLOOR
-            // (=15) gate via the low_sample filter above; still shown so
-            // the reader can distinguish n=17 from n=90.
-            tail_hit:           p.tail_hit != null ? p.tail_hit : null,
-          })),
+          // Tells the client which shape it is looking at, so a cached
+          // bundle or an older page cannot render a price table as
+          // though it were a pick list.
+          edge_display: SPREAD_EDGE_DISPLAY_ENABLED,
+          top_picks: (SPREAD_EDGE_DISPLAY_ENABLED
+            ? eligible.slice(0, EMP_SPREAD_TOP_N)
+            : eligible
+          ).map(p => {
+            const row = {
+              spread_team:        p.spread_team,
+              spread_line:        p.spread_line,
+              // Side label drives the UI +/- prefix.
+              side:               p.side || 'lay',
+              // pair_id groups lay + take of the same market for UI.
+              pair_id:            p.pair_id || null,
+              // Side's actual price (lay→yes_ask_ml, take→no_ask_ml).
+              // price_ml is the new engine output; fall back to
+              // kalshi_yes_ask_ml for back-compat with pre-take
+              // signal rows still in the DB.
+              yes_ask_ml:         (p.price_ml != null ? p.price_ml : p.kalshi_yes_ask_ml),
+            };
+            // The pp figures are OMITTED, not zeroed or nulled, while the
+            // display gate is off. A null edge_pp still travels the wire
+            // and still tempts a consumer into `edge_pp || 0`; an absent
+            // key makes the intent unambiguous at every downstream reader.
+            if (SPREAD_EDGE_DISPLAY_ENABLED) {
+              row.edge_pp            = p.edge_pp;
+              row.empirical_pct      = p.empirical_pct;
+              row.kalshi_implied_pct = p.implied_pct;
+              // Per-line tail hit count — how many games in the parent
+              // cell actually fell in THIS side's tail (margin > L for
+              // lay, < -L for take). Displayed next to the pp figure so
+              // the UI reveals when a specific line rests on a small tail
+              // inside an otherwise-large cell. Passes the
+              // SUPPRESS_TAIL_HIT_FLOOR (=15) gate via the low_sample
+              // filter above; still shown so the reader can distinguish
+              // n=17 from n=90. It only means something beside an
+              // empirical_pct, so it travels with them.
+              row.tail_hit = p.tail_hit != null ? p.tail_hit : null;
+            }
+            return row;
+          }),
         };
       }
     } catch (e) {

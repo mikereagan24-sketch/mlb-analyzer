@@ -99,6 +99,17 @@ function main() {
   const { signals, cellIndex } = eng.generateEmpiricalSpreadSignals(db, date);
 
   console.log('EMPIRICAL SPREAD EDGE ANALYSIS — ' + date);
+  // This is an ANALYST tool, so it keeps printing the pp figures the card
+  // stopped showing on 2026-09-11 -- measuring a broken number requires
+  // being able to see it. It does not get to print them unlabelled.
+  console.log('');
+  console.log('  !! THESE EDGES ARE NOT SHOWN ON THE CARD AND ARE NOT A RECOMMENDATION.');
+  console.log('     The cell cover probability is worse calibrated than the price it is');
+  console.log('     quoted against: mean |bin error| 5.84pp vs the market 4.03pp, AUC');
+  console.log('     0.7477 vs 0.7560, and the out-of-sample optimal weight on the');
+  console.log('     empirical side is 0.00. A line labelled 85% won 74% of the time.');
+  console.log('     See the gate spread_edge_display_enabled. Numbers below are for');
+  console.log('     measurement only.');
   // Cell count comes from the engine. It was hardcoded to 6 and went
   // stale the moment the 2026-09-10 axis change made it 9 -- the report
   // printed nine cells under a banner claiming six.

@@ -195,6 +195,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .emp-spread-pick-bet{color:var(--text);font-weight:500}
 .emp-spread-pick-edge{color:#a855f7;font-weight:600;font-variant-numeric:tabular-nums}
 .emp-spread-pick-n{color:var(--text3);font-weight:400;font-size:10px;margin-left:4px;font-variant-numeric:tabular-nums}
+/* Edge display off (2026-09-11). A price-only row must not carry the
+   accent styling the pick rows use -- the purple read as "actionable",
+   which is exactly the claim the block has stopped making. */
+.emp-spread-price-only .emp-spread-pick-bet{color:var(--text3);font-weight:400}
+.emp-spread-quiet{color:var(--text3);font-size:10px;line-height:1.35;margin:3px 0 5px;opacity:.85}
 /* Paired market: both lay and take cleared the API gate. The dotted
    border-left visually groups the two legs of the same line as one
    market. */
@@ -1737,18 +1742,29 @@ function renderGameGrid(games,date){
           if(groupIdx[key]==null){ groupIdx[key]=groups.length; groups.push([]); }
           groups[groupIdx[key]].push(p);
         });
+        // EDGE DISPLAY OFF (2026-09-11). The server sends edge_display
+        // and OMITS the pp keys entirely when it is false, so this is a
+        // belt-and-braces read: even a stale cached bundle carrying the
+        // old keys renders as a price table, because the flag decides,
+        // not the presence of a number.
+        var showEdge = (es.edge_display === true);
         function pickRow(p){
           var ask=(p.yes_ask_ml!=null && p.yes_ask_ml>0?'+':'')+(p.yes_ask_ml==null?'n/a':p.yes_ask_ml);
+          // take = '+L' (opp +runline), lay = '-L' (favorite lays).
+          var sign=(p.side==='take')?'+':'-';
+          var bet=p.spread_team+' '+sign+(p.spread_line==null?'?':p.spread_line.toFixed(1))+' '+ask;
+          var sideCls=(p.side==='take')?' emp-spread-pick-take':'';
+          if(!showEdge){
+            // Price only. No pp, no tail n, no ranking — the row states
+            // what Kalshi is asking and nothing more.
+            return '<div class="emp-spread-pick'+sideCls+' emp-spread-price-only"><span class="emp-spread-pick-bet">'+bet+'</span></div>';
+          }
           var edge=(p.edge_pp>=0?'+':'')+(p.edge_pp==null?'n/a':p.edge_pp.toFixed(1))+'pp';
           // Per-line tail hit count. SUPPRESS_TAIL_HIT_FLOOR is 15 in
           // the engine, so a line inside an n=165 cell can rest on 20
           // games; the header cell n alone doesn't reveal that. Shown
           // in parens after the pp figure.
           var nStr=(p.tail_hit!=null)?(' <span class="emp-spread-pick-n">n='+p.tail_hit+'</span>'):'';
-          // take = '+L' (opp +runline), lay = '-L' (favorite lays).
-          var sign=(p.side==='take')?'+':'-';
-          var bet=p.spread_team+' '+sign+(p.spread_line==null?'?':p.spread_line.toFixed(1))+' '+ask;
-          var sideCls=(p.side==='take')?' emp-spread-pick-take':'';
           return '<div class="emp-spread-pick'+sideCls+'"><span class="emp-spread-pick-bet">'+bet+'</span><span class="emp-spread-pick-edge">'+edge+nStr+'</span></div>';
         }
         var rows=groups.map(function(g){
@@ -1786,7 +1802,15 @@ function renderGameGrid(games,date){
               return " as of " + p(d.getHours()) + ":" + p(d.getMinutes());
             })()
           : "";
-        return '<div class="emp-spread"><div><span class="emp-spread-title">Spread Edge</span><span class="emp-spread-cell">'+cell+_axis+_gen+'</span></div>'+rows+'</div>';
+        // Title changes with the mode. Leaving it as "Spread Edge" over
+        // a price table would keep promising an edge the block no longer
+        // claims to have.
+        var _title = showEdge ? 'Spread Edge' : 'Runline';
+        var _note = showEdge ? ''
+          : '<div class="emp-spread-quiet">Edge figures off — the cell'
+            + ' probability is worse calibrated than the price. Cell and'
+            + ' posted prices only.</div>';
+        return '<div class="emp-spread"><div><span class="emp-spread-title">'+_title+'</span><span class="emp-spread-cell">'+cell+_axis+_gen+'</span></div>'+_note+rows+'</div>';
       })() : '')+
       '<div class="gresult '+(!g.is_postponed&&g.model_away_ml?'show':'')+'" id="gr-'+g.game_id+'">'+
       (!g.is_postponed&&g.model_away_ml?renderGameResult(g):'')+
