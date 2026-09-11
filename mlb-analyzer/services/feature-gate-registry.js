@@ -628,12 +628,45 @@ const GATES = [
   // ---- non-settings gates ----
   { id: 'bsr_baserunning', key: null,
     criterion: 'RE-SPEC 2026-08-23: calibration (log loss over all games) PRIMARY, accuracy (margin MAE) second, '
-             + 'CLV demoted to context and split by same-side vs churn. Was: accuracy + CLV with CLV weighted heaviest.',
-    criterion_type: 'calibration', window_end: '2026-09-14', decision: null,
+             + 'CLV demoted to context and split by same-side vs churn. Was: accuracy + CLV with CLV weighted heaviest.\n'
+             + 'CLV PRONG RE-SPECIFIED 2026-09-12. It now reads FORWARD-HONEST CLV over ALL EMITTED SIGNALS against '
+             + 'their captured closing lines (bet_signals.closing_line / clv), with-vs-without BsR, MARGINAL ROWS '
+             + 'ONLY -- the signals whose side or price actually differs between the two configs. It no longer reads '
+             + 'LOGGED BETS (bet_line IS NOT NULL). Rationale in the note: the logged-bet population is an order of '
+             + 'magnitude smaller and almost entirely same-side, so the prong could not resolve at any n this season '
+             + 'could reach. Emitted signals with a closing line number 1,812 in the forward window against 191 '
+             + 'logged bets.\n'
+             + 'PRECONDITIONS ARE MET as of 2026-09-12: 88 snapshot days (bar 60) and 1,110 graded games since the '
+             + 'first snapshot (bar 500). Sample is no longer what blocks this gate and has not been for weeks.',
+    criterion_type: 'calibration', window_end: '2026-09-28', decision: null,
     precondition: 'bsr_snapshots_60d',
-    note: 'Gate window 2026-08-13..2026-09-14. CLV prong is selection-contaminated — 330 of 348 bets are the same '
-        + 'side in both configs and contribute exactly zero, so the delta is 41 marginal bets. And the gate weights '
-        + 'CLV HEAVIEST. See docs/bsr-gate-status-2026-08-23.md.' },
+    corpus_size: 1100,
+    note: 'Gate window opened 2026-08-13. WINDOW_END MOVED 2026-09-14 -> 2026-09-28 so the call lands after the '
+        + 'regular season ends (~2026-09-27) rather than two weeks before it, on a re-specified CLV prong that had '
+        + 'not yet been measured when the old date was set.\n'
+        + 'WHY THE CLV PRONG CHANGED. Measured 2026-08-23: 330 of 348 logged bets were the SAME SIDE in both '
+        + 'configs and contribute exactly zero to a with-vs-without delta, leaving ~41 marginal bets to carry a '
+        + 'prong the original gate weighted HEAVIEST. Logged bets accumulate at roughly 2.2/day, so the marginal '
+        + 'subset grows by about 0.25/day: the season cannot deliver a resolvable n, and neither can next season '
+        + 'at that rate. This is not a sample-size problem that waiting fixes -- it is the wrong population. '
+        + 'Emitted signals are the right one: every signal the model produced, priced against the closing line '
+        + 'captured for it at lock, whether or not anyone struck the bet. In the forward window that is 1,812 rows '
+        + 'with a closing line against 191 logged bets, and the marginal subset scales with it.\n'
+        + 'MARGINAL ROWS ONLY is load-bearing and is the same selection trap in a new place: pooling same-side rows '
+        + 'into the delta does not average the effect down, it divides it by the share of rows that cannot move. A '
+        + 'with-vs-without number computed over all rows is mostly measuring how many bets the two configs agree '
+        + 'on, which is not the question.\n'
+        + 'FORWARD WINDOW as of 2026-09-12: 2026-06-16 .. 2026-09-10, 87 days, 1,100 graded games with lineups, '
+        + '1,884 emitted signals. Snapshot cadence 87 of 88 days on all three BsR tables; the single gap is '
+        + '2026-09-03, a whole-chain miss (all five daily-snapshot tables and the 5:30 PT fg-woba job, on a day '
+        + 'with 726 cron rows and no restart signature). It was found a week late by diffing snapshot dates '
+        + 'against a calendar, because none of those jobs wrote a cron_log row. They do now -- see '
+        + 'scripts/test-snapshot-chain-cron-log.js. The 2026-09-08..09-11 boot-loop and failed-deploy days cost '
+        + 'ZERO snapshots; all five tables are present on every one of them.\n'
+        + 'corpus_size 1100 = graded games with both lineups inside the forward window, which is the accuracy '
+        + 'prong s population. The CLV prong s population is the 1,812 signals carrying a closing line, and its '
+        + 'resolvable subset is the marginal rows within that.\n'
+        + 'See docs/bsr-gate-status-2026-08-23.md for the original measurement.' },
 
   { id: 'bullpen_w_proj_w_act', key: 'bullpen_w_proj', numeric: true,
     criterion: 'Phase-3-blocked pending per-date wOBA snapshots.',
@@ -959,7 +992,11 @@ const CORPUS_SIZE_GRANDFATHERED = [
   'defense_frv_enabled', 'use_hand_conditional_sp_weight',
   'ui_highlight_tot_overs_enabled', 'signal_edge_hard_cap_pp',
   'signal_edge_soft_cap_pp', 'catcher_framing_mute', 'defense_frv_mute',
-  'catcher_framing_takes_per_game', 'sp_weight_l', 'bsr_baserunning',
+  // bsr_baserunning PRUNED 2026-09-12: it now carries corpus_size 1100.
+  // The gate-health baseline arm flagged it the moment the field landed,
+  // which is the arm working -- an accepted-failure list that never
+  // shrinks stops being a list of exceptions and becomes the norm.
+  'catcher_framing_takes_per_game', 'sp_weight_l',
   'bullpen_w_proj_w_act', 'at_emit_snapshot_columns',
   'retractable_roof_config_branch', 'bullpen_woba_neutralization',
   'debug_bullpen_endpoint_divergence', 'bullpen_pool_lastname_fallback',
