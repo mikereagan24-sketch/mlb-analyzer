@@ -1,27 +1,31 @@
 #!/usr/bin/env node
 /**
- * The BsR gate's CLV prong reads emitted signals, not logged bets.
- * (2026-09-12)
+ * The BsR gate's CLV prong reads MARGINAL rows only. (2026-09-12)
  *
- * WHAT WAS WRONG. The prong measured with-vs-without BsR over LOGGED
- * bets. Measured 2026-08-23: 330 of 348 logged bets were the SAME SIDE
- * in both configs and contribute exactly zero to the delta, leaving ~41
- * marginal bets to carry a prong the original gate weighted HEAVIEST.
+ * WHAT WAS WRONG. The prong pooled every bet the harness signaled.
+ * Measured 2026-08-23: 330 of 348 were the SAME SIDE in both configs.
+ * CLV per bet is f(morning price, close price) and does not depend on
+ * the model, so those 330 have a with-vs-without delta of exactly zero
+ * and only the ~18 disagreeing rows can move the number -- while the
+ * original gate weighted this prong HEAVIEST.
  *
- * WHY WAITING COULD NOT FIX IT. Logged bets arrive at roughly 2.2/day,
- * so the marginal subset grows by about a quarter of a bet per day.
- * Neither this season nor the next reaches a resolvable n. It is the
- * wrong population, not a small one.
+ * A CORRECTION THIS FILE EXISTS TO CARRY. An earlier draft of the
+ * registry row described the fix as "read emitted signals instead of
+ * logged bets". That was wrong. The harness
+ * (services/baserunning-backtest.js) re-derives the signaled side under
+ * each config over EVERY scored game; it never read
+ * bet_signals.bet_line. The population was always right. What was wrong
+ * was POOLING it, and the row now says so rather than quietly swapping
+ * the story.
  *
- * THE FIX. Read every EMITTED signal against the closing line captured
- * for it at lock -- 1,812 rows in the forward window against 191 logged
- * bets -- and restrict the delta to MARGINAL rows, the ones whose side
- * or price actually differs between configs.
+ * THE ACTUAL FIX. Restrict the delta to rows where the two configs
+ * disagree -- without_only + with_only + side_flipped from
+ * clv.bet_set_diff -- because pooling same-side rows does not average an
+ * effect down, it divides it by the share of rows that cannot move.
  *
- * This is a SPECIFICATION GUARD. It fails if the prong drifts back to
- * logged bets, or if "marginal rows only" is dropped, because pooling
- * same-side rows does not average an effect down -- it divides it by
- * the share of rows that cannot move.
+ * This is a SPECIFICATION GUARD and a DATA GUARD: it fails if the
+ * marginal-only clause is dropped, and it re-measures every count the
+ * row asserts against the live database.
  *
  * Run: node scripts/test-bsr-gate-respec.js
  */
@@ -44,25 +48,24 @@ if (!gate) { console.log('\nFAILED (1)'); process.exit(1); }
 const c = flat(gate.criterion), note = flat(gate.note);
 
 // ---- the prong's population --------------------------------------------
-ok('CLV reads ALL EMITTED SIGNALS against captured closing lines',
-   /FORWARD-HONEST CLV over ALL EMITTED SIGNALS against their captured closing lines/.test(c));
-ok('it names the columns, not just the idea',
-   /bet_signals\.closing_line \/ clv/.test(c));
-ok('it explicitly STOPS reading logged bets',
-   /no longer reads LOGGED BETS \(bet_line IS NOT NULL\)/.test(c));
-ok('MARGINAL ROWS ONLY is in the criterion, not only the note',
-   /MARGINAL ROWS ONLY/.test(c) && /side or price actually differs/.test(c));
+ok('CLV is restricted to MARGINAL rows',
+   /MARGINAL ROWS ONLY/.test(c) && /where the two configs DISAGREE/.test(c));
+ok('it names the source field, not just the idea',
+   /clv\.bet_set_diff/.test(c));
+ok('same-side exclusion is justified by the verified identity',
+   /0 of 378 differ/.test(c));
+ok('the 348 are named as HARNESS-SIGNALED, not logged bets',
+   /330 of 348 HARNESS-SIGNALED bets/.test(note) && /NOT rows with bet_signals.bet_line set/.test(note));
 ok('the note says why marginal-only is load-bearing',
    /does not average the effect down, it divides it by the share of rows that cannot move/.test(note));
 
 // ---- the numbers that forced the change --------------------------------
-ok('the 330-of-348 finding is recorded',
-   /330 of 348 logged bets were the SAME SIDE/.test(note) && /~41 marginal bets/.test(note));
-ok('and that it is unresolvable at any reachable n',
-   /cannot deliver a resolvable n/.test(note)
-   && /wrong population/.test(note));
-ok('the two populations are quantified side by side',
-   /1,812 rows with a closing line against 191 logged bets/.test(note));
+ok('the earlier mischaracterisation is recorded, not quietly fixed',
+   /an earlier draft of this row said so wrongly/.test(note));
+ok('the real defect is named as POOLING, not the population',
+   /The population was always right; what was wrong was POOLING it/.test(note));
+ok('the pooled-vs-marginal dilution is quantified',
+   /87 disagreeing rows diluted through 378 identical ones/.test(note));
 
 // ---- preconditions met, window moved -----------------------------------
 ok('preconditions are recorded as MET with their numbers',
@@ -76,7 +79,7 @@ ok('corpus_size is recorded', typeof gate.corpus_size === 'number' && gate.corpu
    String(gate.corpus_size));
 ok('and the row says which prong that corpus belongs to',
    /corpus_size 1100 = graded games with both lineups/.test(note)
-   && /CLV prong s population is the 1,812/.test(note));
+   && /87 of 425 on that run/.test(note));
 
 // ---- the snapshot-cadence record ---------------------------------------
 ok('the single 2026-09-03 gap is recorded, with its character',
@@ -101,16 +104,16 @@ console.log('  live: snapshot days ' + snapDays + ', graded since first snapshot
   + ', signals ' + sig.n + ' (closing_line ' + sig.cl + ', logged ' + sig.lg + ')');
 ok('snapshot-days precondition genuinely met', snapDays >= 60, snapDays + ' >= 60');
 ok('forward-games precondition genuinely met', since >= 500, since + ' >= 500');
-ok('emitted-with-closing-line dwarfs logged bets', sig.cl > 5 * sig.lg,
-   sig.cl + ' vs ' + sig.lg + ' — the reason the population changed');
+ok('closing-line coverage is broad (context, not the prong population)',
+   sig.cl > 5 * sig.lg, sig.cl + ' with a closing line vs ' + sig.lg + ' logged');
 ok('the closing-line capture rate is high enough to build a prong on',
    sig.n > 0 && sig.cl / sig.n > 0.9,
    (100 * sig.cl / sig.n).toFixed(1) + '% of emitted signals carry a closing line');
 
 // ---- selftest ----------------------------------------------------------
-ok('SELFTEST: the logged-bets check goes red if the prong drifts back',
-   /no longer reads LOGGED BETS/.test(c)
-   && !/no longer reads LOGGED BETS/.test(c.replace(/no longer reads LOGGED BETS[^.]*\./, '')));
+ok('SELFTEST: the same-side-exclusion check goes red if dropped',
+   /where the two configs DISAGREE/.test(c)
+   && !/where the two configs DISAGREE/.test(c.replace('where the two configs DISAGREE', '')));
 ok('SELFTEST: the marginal-only check goes red if the clause is dropped',
    /MARGINAL ROWS ONLY/.test(c) && !/MARGINAL ROWS ONLY/.test(c.replace(/MARGINAL ROWS ONLY/, '')));
 
