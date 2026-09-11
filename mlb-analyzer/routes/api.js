@@ -1014,7 +1014,33 @@ router.get('/games/:date', (req, res) => {
     // so the per-game loop is O(1) per game.
     const empByGame = {};
     try {
-      const empRows = q.getLatestEmpiricalSpreadSignalsByDate.all(date);
+      // BLOCK HIDDEN ENTIRELY WHILE THE GATE IS OFF. (2026-09-12)
+      //
+      // #374 kept the block and stripped the pp figures, leaving the
+      // cell label, n, axis badge and a posted-price table. That was the
+      // wrong call: a runline block on the card is a runline
+      // recommendation whatever it contains, and the price table said
+      // nothing the "Spread: AWAY -1.5 (-140) / HOME +1.5 (+120)" line
+      // under the ML boxes does not already say. It also doubled the
+      // block's height on 225 cards to carry no claim.
+      //
+      // Nothing about runlines renders while the gate is off. That line
+      // under the ML boxes is NOT this block -- it is built separately
+      // from game_log.market_*_spread and is a market-line reference,
+      // not a play. It stays.
+      //
+      // The key is OMITTED from the response, not sent empty. A consumer
+      // cannot render what it never receives, and an empty object still
+      // invites `empirical_spreads.cell_label` somewhere downstream.
+      //
+      // Signals, cells and the live/locked axis keep computing and
+      // persisting on every odds pass -- see services/empirical-spread-
+      // edge.js, untouched by this PR -- so the forward record the
+      // re-enable criterion is judged on continues to accumulate while
+      // the card says nothing.
+      const empRows = SPREAD_EDGE_DISPLAY_ENABLED
+        ? q.getLatestEmpiricalSpreadSignalsByDate.all(date)
+        : [];
       for (const r of empRows) {
         const preds = tryParse(r.predictions_json) || [];
         // Display gate — only attach when BOTH thresholds clear.
@@ -1026,33 +1052,20 @@ router.get('/games/:date', (req, res) => {
         // (e.g. opp +3.5 at no_ask -966 where the underlying tail has
         // < SUPPRESS_TAIL_HIT_FLOOR hits in the cell).
         //
-        // WITH THE pp DISPLAY OFF, this gate does not run. It selected
-        // which plays to RECOMMEND, and nothing is recommended now. The
-        // block instead lists the posted runline prices for the standard
-        // rungs, unranked -- a price table, not a pick list. The
-        // low_sample flag still filters, because a line resting on a
-        // handful of cell games is one we should not draw attention to
-        // at all, with or without a number beside it.
-        const eligible = SPREAD_EDGE_DISPLAY_ENABLED
-          ? (preds || []).filter(p =>
-              !p.low_sample
-              && p.edge_pp != null
-              && p.edge_pp >= EMP_SPREAD_MIN_EDGE_PP)
-          : (preds || []).filter(p => !p.low_sample);
+        // Only ever reached when the gate is ON, so there is one path
+        // again. #374's price-only branch is gone rather than left
+        // unreachable -- the block is now hidden or complete, and a
+        // third mode nothing can produce is a trap for the next reader.
+        const eligible = (preds || []).filter(p =>
+          !p.low_sample
+          && p.edge_pp != null
+          && p.edge_pp >= EMP_SPREAD_MIN_EDGE_PP
+        );
         if (!eligible.length) continue;
-        if (SPREAD_EDGE_DISPLAY_ENABLED) {
-          // Sort desc by edge_pp. computeGameEdges already does this
-          // before serializing; re-sort defensively across the JSON
-          // boundary.
-          eligible.sort((a, b) => (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
-        } else {
-          // Stable, neutral order: by rung then team. Ordering by edge
-          // would rank them, and a ranked list IS a recommendation even
-          // with the numbers stripped off it.
-          eligible.sort((a, b) => (a.spread_line - b.spread_line)
-            || String(a.spread_team).localeCompare(String(b.spread_team))
-            || String(a.side).localeCompare(String(b.side)));
-        }
+        // Sort desc by edge_pp. computeGameEdges already does this
+        // before serializing; re-sort defensively across the JSON
+        // boundary.
+        eligible.sort((a, b) => (b.edge_pp || -Infinity) - (a.edge_pp || -Infinity));
         empByGame[r.game_id] = {
           cell_label: r.cell_label,
           cell_sample_size: r.cell_sample_size,
@@ -1067,14 +1080,13 @@ router.get('/games/:date', (req, res) => {
           axis_total: r.axis_total != null ? r.axis_total : null,
           axis_frozen: r.axis_frozen === 1,
           partition_version: r.partition_version || null,
-          // Tells the client which shape it is looking at, so a cached
-          // bundle or an older page cannot render a price table as
-          // though it were a pick list.
+          // Always true when this object exists at all -- the block is
+          // only built when the gate is on. Kept, not dropped, so the
+          // client can fail CLOSED: it renders nothing unless the server
+          // said so in as many words, rather than inferring permission
+          // from the presence of a number.
           edge_display: SPREAD_EDGE_DISPLAY_ENABLED,
-          top_picks: (SPREAD_EDGE_DISPLAY_ENABLED
-            ? eligible.slice(0, EMP_SPREAD_TOP_N)
-            : eligible
-          ).map(p => {
+          top_picks: eligible.slice(0, EMP_SPREAD_TOP_N).map(p => {
             const row = {
               spread_team:        p.spread_team,
               spread_line:        p.spread_line,
