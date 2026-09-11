@@ -4350,6 +4350,69 @@ function _startMemHeartbeat() {
   return t;
 }
 
+// ---------------------------------------------------------------------
+// _snapshotStep — run one job of the 6AM PT daily-snapshot chain and
+// RECORD THAT IT RAN. (2026-09-12)
+//
+// WHY. The five snapshot jobs (FRV, catcher framing, team BsR, player
+// BsR, player BsR trailing) each sat in a bare try/catch that only
+// console.error'd. None wrote a cron_log row, and there was no
+// `job_type` for any of them, so a missed day left NO RECORD AT ALL --
+// the only evidence was an absent snapshot_date, which you have to go
+// looking for to find.
+//
+// FOUNDING INSTANCE, 2026-09-03. All five snapshot tables are missing
+// that date, and so is the 5:30 PT fg-woba job. It was not an OOM
+// restart: 726 cron rows ran that day and there is no gap of 15 minutes
+// or more anywhere in the 11:30-14:30 UTC stretch that brackets the 5:30
+// and 6:00 PT slots -- the odds/lineups/weather loop ran straight
+// through the window the snapshot chain should have fired in. The box
+// was up; this chain specifically did not run or failed before writing.
+// We found it a week later by diffing snapshot dates against a calendar
+// while measuring something else. That is the ARI-roof-scraper shape
+// the gate registry exists to prevent, and it applied to the inputs of a
+// gated feature whose whole evaluation depends on an unbroken daily
+// cadence.
+//
+// SEMANTICS. status 'success' or 'error', matching the existing
+// lineups/scores/odds convention so `status != 'success'` keeps working
+// as the health filter. games_updated carries the job's own `applied`
+// count where it reports one. NEVER THROWS -- the callers' catch blocks
+// stay as they are, and the chain stays non-fatal end to end. A logging
+// failure must not be able to break the thing it is logging, so the
+// write is itself wrapped.
+//
+// A job that returns {success:false} is logged as an ERROR even though
+// it did not throw. Several of these return a soft failure object when
+// the FanGraphs session cookie is missing, and a soft failure that
+// writes no snapshot row is exactly the case this exists to catch.
+async function _snapshotStep(jobType, fn) {
+  const t0 = Date.now();
+  let res, thrown = null;
+  try {
+    res = await fn();
+  } catch (e) {
+    thrown = e;
+  }
+  try {
+    const okRun = !thrown && !(res && res.success === false);
+    const applied = (res && typeof res.applied === 'number') ? res.applied : 0;
+    let msg;
+    if (thrown) msg = 'threw: ' + (thrown && thrown.message ? thrown.message : String(thrown));
+    else if (res && res.success === false) msg = 'returned success:false: ' + (res.error || '(no error given)');
+    else msg = 'applied ' + applied
+      + (res && res.non_null_bsr_count != null ? ', non_null_bsr ' + res.non_null_bsr_count : '')
+      + (res && res.verified_count != null ? ', verified ' + res.verified_count : '')
+      + ' in ' + (Date.now() - t0) + 'ms';
+    q.logCron.run(jobType, todayStr(), okRun ? 'success' : 'error', msg, applied);
+  } catch (logErr) {
+    console.warn('[' + jobType + '] cron_log write failed (non-fatal): '
+      + (logErr && logErr.message));
+  }
+  if (thrown) throw thrown;      // preserve the caller's existing catch
+  return res;
+}
+
 function startCronJobs() {
   _startMemHeartbeat();
   // All schedules below run in America/Los_Angeles. The cron hour is the
@@ -4479,7 +4542,7 @@ function startCronJobs() {
     // Refresh the trailing-3yr Fielding Run Value after rosters (daily is
     // ample — it's a multi-season aggregate that barely moves day to day).
     // Non-fatal: a Savant hiccup must not abort the morning chain.
-    try { await runFieldingFrvJob(); }
+    try { await _snapshotStep('fielding-frv', runFieldingFrvJob); }
     catch(e) { console.error('[cron-frv] failed:', e && e.message); }
     // Catcher framing (Savant leaderboard). SCHEDULED 2026-08-24 -- it never
     // was. The table was populated by hand and the last write was
@@ -4495,17 +4558,17 @@ function startCronJobs() {
     // hiccup must not abort the morning. The freshness check at the top of
     // this block is what now reports a run of failures, so a silent stall
     // cannot repeat.
-    try { await runCatcherFramingJob(); }
+    try { await _snapshotStep('catcher-framing', runCatcherFramingJob); }
     catch(e) { console.error('[cron-framing] failed:', e && e.message); }
     // Team baserunning (FG team-aggregated BsR). Daily snapshot for
     // forward-honest backtests; the live table is also used as the
     // current-state hindsight reference. Non-fatal: an FG hiccup must
     // not abort the morning chain.
-    try { await runBaserunningJob(); }
+    try { await _snapshotStep('team-baserunning', runBaserunningJob); }
     catch(e) { console.error('[cron-baserunning] failed:', e && e.message); }
-    try { await runPlayerBaserunningJob(); }
+    try { await _snapshotStep('player-baserunning', runPlayerBaserunningJob); }
     catch(e) { console.error('[cron-player-baserunning] failed:', e && e.message); }
-    try { await runPlayerBaserunningTrailingJob(); }
+    try { await _snapshotStep('player-baserunning-trailing', runPlayerBaserunningTrailingJob); }
     catch(e) { console.error('[cron-player-baserunning-trailing] failed:', e && e.message); }
   }, { timezone: 'America/Los_Angeles' });
 
