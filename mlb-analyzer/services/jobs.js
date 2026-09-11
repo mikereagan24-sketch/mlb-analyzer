@@ -5764,6 +5764,40 @@ async function runOddsJob(dateStr, opts) {
       console.warn('[empirical-spreads] generation failed (non-fatal): ' + e.message);
     }
 
+    // CANDIDATE runline predictions — margin_model_B. (2026-09-12)
+    //
+    // Deliberately a SEPARATE try block from the empirical-spread block
+    // above, not folded into it. These are different things: that one
+    // feeds a display path (currently gated off), this one feeds nothing
+    // and exists only so a candidate can be judged at season end against
+    // predictions that were recorded before the games happened. Sharing
+    // a try would let a failure in either silently take out the other,
+    // and the forward record is the one thing here that cannot be
+    // reconstructed after the fact.
+    //
+    // Writes spread_candidate_predictions ONLY. Touches no signal table,
+    // no model output, and nothing the card reads. Coefficients are
+    // frozen at the pre-2026-08-01 fit inside the module and must not be
+    // refitted -- see the header there for why.
+    try {
+      const candidateModel = require('./spread-candidate-margin-model');
+      const cand = candidateModel.generateCandidatePredictions(db, dateStr);
+      if (cand.rows.length) {
+        const generatedAt = nowPtIso();
+        const w = candidateModel.persistCandidatePredictions(db, cand.rows, generatedAt);
+        console.log('[spread-candidate] ' + cand.candidate + ': ' + w.written
+          + ' prediction(s) at ' + generatedAt
+          + (cand.skippedNoEta ? '  (' + cand.skippedNoEta
+              + ' game(s) skipped: no market ML pair or total)' : ''));
+      } else {
+        console.log('[spread-candidate] ' + cand.candidate
+          + ': no priced runlines for ' + dateStr
+          + (cand.skippedNoEta ? ' (' + cand.skippedNoEta + ' game(s) lacked inputs)' : ''));
+      }
+    } catch (e) {
+      console.warn('[spread-candidate] generation failed (non-fatal): ' + e.message);
+    }
+
     // ML + totals gametime market capture (feat/morning-capture-ml-totals).
     // Parallel to the spread gametime generation above. Each odds-job
     // pass writes a fresh per-market snapshot using INSERT OR REPLACE

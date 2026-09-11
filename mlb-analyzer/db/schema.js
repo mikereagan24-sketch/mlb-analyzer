@@ -747,6 +747,42 @@ db.exec(`
   -- generated_at values are NOT rewritten (PK component); existing
   -- UTC graded_at values are left as-is. ROI window readout must
   -- interpret rows with game_date <= 2026-06-08 as UTC.
+  -- CANDIDATE runline predictions, recorded forward. (2026-09-12)
+  --
+  -- NOT a display path and NOT a signal table. One row per
+  -- (game, spread_team, spread_line, side, candidate) per odds pass,
+  -- written by services/spread-candidate-margin-model.js so a candidate
+  -- can be judged at season end against predictions that existed BEFORE
+  -- the games did. The display gate (spread_edge_display_enabled) is
+  -- untouched by anything here.
+  --
+  -- NO OUTCOME COLUMN, deliberately. The realized result is a property
+  -- of the final margin and is derivable by joining game_log at
+  -- evaluation time. A graded copy here would be a second source of
+  -- truth for something already recorded.
+  --
+  -- candidate is part of the PK so a later refit lands as a NEW id
+  -- beside this one rather than overwriting it -- the comparison
+  -- between two frozen fits is the entire point.
+  CREATE TABLE IF NOT EXISTS spread_candidate_predictions (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    spread_team TEXT NOT NULL,
+    spread_line REAL NOT NULL,
+    side TEXT NOT NULL,                  -- 'lay' | 'take'
+    candidate TEXT NOT NULL,             -- e.g. 'margin_model_B'
+    generated_at TEXT NOT NULL,
+    prob_pct REAL,                       -- candidate's P(cover), pp
+    implied_pct REAL,                    -- posted ask, pp
+    edge_pp REAL,                        -- prob_pct - implied_pct
+    price_ml INTEGER,                    -- the ask you would transact at
+    input_market_home_wp REAL,           -- inputs stored so a row can be
+    input_market_total REAL,             -- re-derived after market_* moves
+    PRIMARY KEY (game_date, game_id, spread_team, spread_line, side, candidate, generated_at)
+  );
+  CREATE INDEX IF NOT EXISTS idx_spread_cand_date
+    ON spread_candidate_predictions (game_date, candidate);
+
   CREATE TABLE IF NOT EXISTS empirical_spread_outcomes (
     game_date TEXT NOT NULL,
     game_id TEXT NOT NULL,
