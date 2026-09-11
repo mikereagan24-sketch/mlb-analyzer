@@ -76,34 +76,58 @@ ok('a serialized row carries NO pp keys at all',
 ok('it still carries the posted price and the rung',
    row.yes_ask_ml === -120 && row.spread_line === 1.5 && row.spread_team === 'LAD');
 
-// ---- 3. not a ranked list --------------------------------------------
-ok('rows are ordered by rung then team, not by edge',
-   api.indexOf('(a.spread_line - b.spread_line)') !== -1
-   && /Ordering by edge\s*\n\s*\/\/ would rank them/.test(api),
-   'a ranked list is a recommendation with the numbers removed');
-ok('the top-3 cap only applies when edges are shown',
-   /SPREAD_EDGE_DISPLAY_ENABLED\s*\n\s*\? eligible\.slice\(0, EMP_SPREAD_TOP_N\)/.test(api),
-   'a "top 3" of nothing is still a ranking');
-ok('the low_sample filter still runs in both modes',
-   /: \(preds \|\| \[\]\)\.filter\(p => !p\.low_sample\)/.test(api));
+// ---- 3. the whole block is hidden, not stripped ----------------------
+// AMENDED 2026-09-12. #374 kept the block and removed the pp figures,
+// leaving a cell label and a posted-price table. That was the wrong
+// call: a runline block on the card is a runline recommendation whatever
+// it contains, and the price table duplicated the market-line row that
+// already sits under the ML boxes. Nothing about runlines renders now.
+ok('the API does not even QUERY signal rows while the gate is off',
+   /const empRows = SPREAD_EDGE_DISPLAY_ENABLED\s*\n\s*\? q\.getLatestEmpiricalSpreadSignalsByDate\.all\(date\)\s*\n\s*: \[\];/.test(api),
+   'empByGame stays empty, so the key is omitted from the response');
+ok('the omission is explained', /BLOCK HIDDEN ENTIRELY WHILE THE GATE IS OFF/.test(api));
 
-// ---- 4. the card ------------------------------------------------------
-ok('the card gates on the server flag, not on the presence of a number',
-   html.indexOf('var showEdge = (es.edge_display === true);') !== -1,
-   'a stale cached bundle must not re-enable it');
-ok('price-only rows render without a pp figure',
-   html.indexOf('emp-spread-price-only') !== -1
-   && /if\(!showEdge\)\{[\s\S]{0,400}?emp-spread-price-only/.test(html));
-ok('price-only rows drop the actionable accent colour',
-   html.indexOf('.emp-spread-price-only .emp-spread-pick-bet{color:var(--text3)') !== -1);
-ok('the block is no longer titled "Spread Edge" while quiet',
-   html.indexOf("var _title = showEdge ? 'Spread Edge' : 'Runline';") !== -1);
-ok('the card says why it is quiet',
-   html.indexOf('emp-spread-quiet') !== -1
-   && html.indexOf('worse calibrated than the price') !== -1);
-ok('the cell label, n and axis badge SURVIVE',
-   html.indexOf("es.cell_label?(' '+es.cell_label+' (n='+es.cell_sample_size+')')") !== -1
-   && html.indexOf("es.axis_frozen ? ' locked' : ' live'") !== -1);
+// Simulate the route's own branch: with the flag off, no game gets a key.
+const simulate = (enabled, rows) => {
+  const out = {};
+  for (const r of (enabled ? rows : [])) out[r.game_id] = { cell_label: r.cell_label };
+  return out;
+};
+const fakeRows = [{ game_id: 'aaa-bbb', cell_label: 'Balanced / Low' }];
+ok('with the gate OFF no game carries empirical_spreads',
+   Object.keys(simulate(false, fakeRows)).length === 0);
+ok('with the gate ON the block comes back',
+   Object.keys(simulate(true, fakeRows)).length === 1,
+   'hidden or complete — there is no third mode');
+
+// The price-only mode must be GONE, not merely unreachable. Dead markup
+// for a state nothing can produce is a trap for the next reader.
+ok('the price-only row markup is gone', html.indexOf('emp-spread-price-only') === -1);
+ok('the "edges off" note is gone', html.indexOf('emp-spread-quiet') === -1);
+ok('the conditional title is gone',
+   html.indexOf("showEdge ? 'Spread Edge' : 'Runline'") === -1);
+ok('api.js has ONE serialization path again',
+   api.indexOf('(a.spread_line - b.spread_line)') === -1
+   && !/SPREAD_EDGE_DISPLAY_ENABLED\s*\n\s*\? eligible\.slice/.test(api),
+   'the neutral-order and uncapped branches went with the mode');
+
+// ---- 4. the card fails closed ----------------------------------------
+ok('the card renders the block ONLY on an explicit edge_display === true',
+   /g\.empirical_spreads\.edge_display === true/.test(html),
+   'a stale cached bundle must not resurrect it');
+ok('the server still states the flag in the payload',
+   api.indexOf('edge_display: SPREAD_EDGE_DISPLAY_ENABLED') !== -1,
+   'so the client never infers permission from a number being present');
+
+// THE MARKET-LINE ROW IS NOT THIS BLOCK and must survive. It is built
+// from game_log.market_*_spread in a different function and is a
+// reference, not a play.
+ok('the "Spread: AWAY -1.5 / HOME +1.5" reference row survives',
+   /'Spread: ' \+ g\.away_team/.test(html)
+   && html.indexOf('const spreadRow =') !== -1);
+ok('and it does not read empirical_spreads',
+   !/spreadRow[\s\S]{0,400}empirical_spreads/.test(html),
+   'independent path — unaffected by the gate');
 
 // ---- 5. the write path is untouched ----------------------------------
 ok('the engine still computes edge_pp',
