@@ -800,61 +800,15 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // built / lineup not posted) → clean no-op.
   let awayFieldingRunsPerGame = null, homeFieldingRunsPerGame = null;
   try {
-    if (q.getFieldingFrvById && q.getPositionPlayers) {
-      const FIELD_POS = new Set(['1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF']);
-      const defEnabled = !!(settings && settings.DEFENSE_FRV_ENABLED);
-      const oppsPerGame = (settings && settings.DEFENSE_FRV_OPPS_PER_GAME != null)
-        ? Number(settings.DEFENSE_FRV_OPPS_PER_GAME) : 25;
-      const teamFielding = (team, lu) => {
-        const arr = tryParse(lu) || [];
-        if (!arr.length) return null;                 // no lineup → silent no-op
-        let sum = 0, resolved = 0, fielders = 0;
-        for (const p of arr) {
-          const pos = (p.pos || '').toUpperCase();
-          if (!FIELD_POS.has(pos)) continue;          // skip C, DH, P
-          fielders++;
-          const mlbId = resolveCatcherMlbId(team, p.name); // same name→id resolver
-          if (!mlbId) {
-            if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
-              + ': fielder "' + p.name + '" (' + pos + ') did not resolve to mlb_id');
-            continue;
-          }
-          const row = q.getFieldingFrvById.get(mlbId);
-          if (!row || !row.outs_total || row.outs_total <= 0) {
-            if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
-              + ': fielder "' + p.name + '" (id ' + mlbId + ') no FRV row — no defensive value');
-            continue;
-          }
-          // THE PRODUCER'S FLOOR, APPLIED BY THE CONSUMER. (2026-08-27)
-          //
-          // `outs_total > 0` above was ~100x looser than the ingest that
-          // fills this table (minInnings=200 => 600 outs), so the only rows
-          // it ever admitted below the floor were leftovers the current
-          // fetch could not produce. Their rate is a handful of outs
-          // extrapolated to OPPS_PER_GAME: Joc Pederson at 18 outs scored
-          // -0.697 runs/game, against a max of 0.21 across every legitimate
-          // row.
-          //
-          // FRV_MIN_OUTS is imported, never restated. A second literal 600
-          // is how this recurs.
-          if (row.outs_total < FRV_MIN_OUTS) {
-            if (defEnabled) console.warn('[defense] ' + gameRow.game_id + ' ' + team
-              + ': fielder "' + p.name + '" (id ' + mlbId + ') FRV sample '
-              + row.outs_total + ' outs is below the ingest floor of ' + FRV_MIN_OUTS
-              + ' — skipped, not extrapolated');
-            continue;
-          }
-          sum += (row.total_runs / row.outs_total) * oppsPerGame;
-          resolved++;
-        }
-        // Only return a value if we resolved at least one fielder. Partial
-        // resolution (e.g. 5 of 7) returns the partial sum — better than
-        // discarding signal, and warnings above flag the misses.
-        return resolved > 0 ? sum : null;
-      };
-      awayFieldingRunsPerGame = teamFielding(awayAbbr, gameRow.away_lineup_json);
-      homeFieldingRunsPerGame = teamFielding(homeAbbr, gameRow.home_lineup_json);
-    }
+    // ONE implementation, shared with both backtest harnesses
+    // (utils/fielding-frv-term.js). It used to live here and be copied
+    // twice, and the copies had drifted: this one applied FRV_MIN_OUTS,
+    // the harnesses admitted any row with outs_total > 0.
+    const { teamFieldingRunsPerGame } = require('../utils/fielding-frv-term');
+    const frvArgs = (team, lu) => teamFieldingRunsPerGame(
+      q, team, lu, settings, resolveCatcherMlbId, gameRow.game_id);
+    awayFieldingRunsPerGame = frvArgs(awayAbbr, gameRow.away_lineup_json);
+    homeFieldingRunsPerGame = frvArgs(homeAbbr, gameRow.home_lineup_json);
   } catch (e) { /* missing table / ingest not built → null, no-op */ }
   // Projected IP/start for each SP, drives the dynamic SP/RP split in runModel.
   // Null when no projection row exists — runModel falls back to flat SP weight.

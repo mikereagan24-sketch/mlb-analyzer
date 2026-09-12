@@ -63,25 +63,14 @@ function computeFramingRvPerGame(team, lineupJson, settings) {
   return framingRateForCatcher(q, mlbId, settings).rv;
 }
 
+// Delegates to the ONE shared implementation (2026-09-12). This was a
+// verbatim copy of the production builder that had drifted: it admitted
+// any row with outs_total > 0 while production applied FRV_MIN_OUTS.
+// harness-inputs.js wires calibration-ab.js here, so the gate's evidence
+// came from the looser term.
 function computeTeamFieldingRunsPerGame(team, lineupJson, settings) {
-  if (!q.getFieldingFrvById) return null;
-  const arr = tryParse(lineupJson) || [];
-  if (!arr.length) return null;
-  const FIELD_POS = new Set(['1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF']);
-  const oppsPerGame = settings.DEFENSE_FRV_OPPS_PER_GAME != null
-    ? Number(settings.DEFENSE_FRV_OPPS_PER_GAME) : 25;
-  let sum = 0, resolved = 0;
-  for (const p of arr) {
-    const pos = (p.pos || '').toUpperCase();
-    if (!FIELD_POS.has(pos)) continue;
-    const mlbId = resolveCatcherMlbId(team, p.name);
-    if (!mlbId) continue;
-    const row = q.getFieldingFrvById.get(mlbId);
-    if (!row || !row.outs_total || row.outs_total <= 0) continue;
-    sum += (row.total_runs / row.outs_total) * oppsPerGame;
-    resolved++;
-  }
-  return resolved > 0 ? sum : null;
+  const { teamFieldingRunsPerGame } = require('../utils/fielding-frv-term');
+  return teamFieldingRunsPerGame(q, team, lineupJson, settings, resolveCatcherMlbId);
 }
 
 function buildBacktestGame(gameRow, settings) {
