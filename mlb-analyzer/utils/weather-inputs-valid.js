@@ -41,9 +41,17 @@ const GAP_HI_UTC   = '2026-08-05 23:22:25';   // first backfill write
 
 // SQL predicate over game_log. No bound parameters so it can be inlined
 // into the boot migration and into aggregate reporting alike.
+// The fixed_dome_* class (2026-09-12) is the one case the timestamp
+// boundary cannot see. Those rows were written by the live weather job
+// AFTER the boundary, so their weather_quality_at is fresh, but their
+// columns hold outdoor temp for a park that cannot open. Excluded by tag
+// rather than by timestamp, because the defect is the park, not the write.
+const FIXED_DOME_REASON_PREFIX = 'fixed_dome_';
 const VALID_SQL =
   "(temp_f IS NOT NULL AND weather_quality_at IS NOT NULL AND weather_quality_at >= '"
-  + BOUNDARY_UTC + "')";
+  + BOUNDARY_UTC + "'"
+  + " AND (weather_contamination_reason IS NULL OR weather_contamination_reason NOT LIKE '"
+  + FIXED_DOME_REASON_PREFIX + "%'))";
 
 // Throws if the boundary constant is no longer sited in empty space.
 function assertGapEmpty(db) {
@@ -84,9 +92,11 @@ const CLASS_ASSERTIONS = [
   ['every ari_roof_* row is VALID (recomputed under actual roof)',
     "weather_contamination_reason LIKE 'ari_roof_%' AND NOT " + VALID_SQL],
   ['no row with NULL temp_f is VALID', 'temp_f IS NULL AND ' + VALID_SQL],
+  ['every fixed_dome_* row is INVALID (outdoor weather at a park that cannot open)',
+    "weather_contamination_reason LIKE '" + FIXED_DOME_REASON_PREFIX + "%' AND " + VALID_SQL],
 ];
 
 module.exports = {
-  BOUNDARY_UTC, GAP_LO_UTC, GAP_HI_UTC, VALID_SQL,
+  BOUNDARY_UTC, GAP_LO_UTC, GAP_HI_UTC, VALID_SQL, FIXED_DOME_REASON_PREFIX,
   assertGapEmpty, backfillNullFlags, CLASS_ASSERTIONS,
 };
