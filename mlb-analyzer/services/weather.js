@@ -100,7 +100,25 @@ const PARKS = {
   'kan': { lat:39.051245928408854, lng:-94.48082370618096, cfDir:46, sens:1.3, name:'Kauffman' },
   'kc':  { lat:39.051245928408854, lng:-94.48082370618096, cfDir:46, sens:1.3, name:'Kauffman' },
   'sd':  { lat:32.70705001125514, lng:-117.15706906729568, cfDir:0, sens:0.4, name:'Petco Park' },
-  'tb':  { lat:27.7683, lng:-82.6534, cfDir:45,  sens:0.5, name:'Tropicana' },
+  // fixedDome (2026-09-12): a park that CANNOT open, ever. Distinct from
+  // the six retractables in SEALED_DOME_VENUE_IDS (services/roof-prior.js),
+  // which that file explicitly says is "an enumeration of retractable
+  // parks, NOT a registry of every sealed venue -- Tropicana Field (12) is
+  // a fixed dome and is not in here." This is that missing registry, and
+  // it is one flag on the park rather than a fourth roof mechanism.
+  //
+  // FOUNDING INSTANCE: the roof scraper wrote roof_status='open' at
+  // confidence 'estimated' on all 15 Tropicana home games from
+  // 2026-08-14 to 2026-09-12, so calcWindFactor priced OUTDOOR WIND
+  // inside a fixed dome. Three of them cleared the 8 mph deadband and
+  // carried a non-zero factor:
+  //     bal-tb 2026-08-17   9.0 mph  dir 263  wind_factor +0.016
+  //     tor-tb 2026-08-18   9.0 mph  dir 264  wind_factor +0.016
+  //     nym-tb 2026-09-01   8.5 mph  dir  90  wind_factor -0.007
+  // At WIND_SCALE=2.0 that is at most 0.032 runs, so the exposure is
+  // small -- but the classification was wrong, and the guard below makes
+  // it structurally impossible rather than incidentally harmless.
+  'tb':  { lat:27.7683, lng:-82.6534, cfDir:45,  sens:0.5, name:'Tropicana', fixedDome:true },
 };
 
 // Wind factor: positive = blowing out (more runs), negative = blowing in (fewer runs)
@@ -115,6 +133,19 @@ const PARKS = {
 // Run adjustment = factor * 2.0 in model.js (factor range -1 to +1 → -2 to +2 runs at sens=1)
 function calcWindFactor(windDir, windSpeed, park) {
   if (!park || !windSpeed) return 0;
+  // A fixed dome has no outdoor wind on the field on ANY date, so this
+  // does not consult roof_status — that is the point. The roof scraper
+  // wrote 'open' on all 15 Tropicana games this season (see the fixedDome
+  // note on PARKS.tb), and gating on roof_status is exactly what let
+  // outdoor wind through. Structural, not a data patch.
+  //
+  // Deliberately NOT extended to the temperature channel here. Those same
+  // rows carry temp_run_adj 0.6 — a +1.2 run outdoor-heat adjustment
+  // inside a climate-controlled building, ~20x this wind error and a real
+  // pricing change that needs its own measurement and registration. It is
+  // written up in docs/wind-badge-and-fixed-dome-2026-09-12.md, not
+  // silently bundled into a display PR.
+  if (park.fixedDome) return 0;
   // Below 8mph: negligible — don't adjust the model
   if (windSpeed < 8) return 0;
   // Convert wind direction (FROM) to where it's blowing TO

@@ -182,6 +182,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .wind-badge{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px}
 .wind-in{background:rgba(37,99,235,.12);color:#1d4ed8;border:1px solid rgba(37,99,235,.3)}
 .wind-out{background:rgba(220,38,38,.12);color:#b91c1c;border:1px solid rgba(220,38,38,.3)}
+/* Strength modifiers (2026-09-12) — direction sets the colour, strength
+   sets the emphasis, so the two are readable independently. */
+.wind-weak{opacity:.7}
+.wind-strong{font-weight:700}
 .wind-calm{background:var(--bg2);color:var(--text3);border:1px solid var(--border)}
 .roof-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent;margin-top:4px;font-weight:500}
 .roof-open{background:#e6f4ea;color:#1e7e34;border-color:#a8d5b5}
@@ -1657,7 +1661,10 @@ function renderGameGrid(games,date){
         : '')+
       '</div>'+
       '<div class="gsp"'+(lineupsStyle?' style="'+lineupsStyle+'"':'')+'>'+(_isNeverLoaded(lineupsQ)?'<span title="lineups never loaded">— vs —</span>':((g.away_sp||'TBD')+' ('+(g.away_sp_hand||'?')+'HP)'+(g.away_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'away')+' vs '+(g.home_sp||'TBD')+' ('+(g.home_sp_hand||'?')+'HP)'+(g.home_lineup_status==='confirmed'?'<span class="lu-confirmed">✓ Confirmed</span>':'<span class="lu-projected">~ Projected</span>')+spBpRatio(g,'home')))+lineupsBadge+weatherBadge+(g.temp_f!=null ? (function(){
-        var spd=g.wind_speed||0, fac=g.wind_factor||0, tmp=g.temp_f, roofSt=g.roof_status;
+        // No `fac` binding here any more: the badge must not be able to
+        // read wind_factor even by accident. scripts/test-wind-badge.js
+        // asserts this block contains no wind_factor reference.
+        var tmp=g.temp_f, roofSt=g.roof_status;
         var roofClosed=(roofSt==='closed');
         var roofPartial=(roofSt==='partial');
 
@@ -1669,22 +1676,51 @@ function renderGameGrid(games,date){
           tempBadge='<span class="temp-badge '+tCls+'">'+tIcon+' '+Math.round(tmp)+'°F</span>';
         }
 
-        // Wind badge — hide for domes and closed roofs
+        // Wind badge — DIRECTION and STRENGTH are separate things (2026-09-12).
+        //
+        // Direction comes from the angle between where the wind is blowing
+        // TO and the park's measured home-plate->CF bearing: |theta|<=60
+        // Out, >=120 In, else Cross. Strength comes from speed alone:
+        // <8 weak, 8-14 moderate, 15+ strong.
+        //
+        // The classification is served as g.wind_badge by GET /api/games
+        // (utils/wind-badge.js) because cfDir lives in PARKS and the client
+        // must not carry a second copy of it. It deliberately does NOT read
+        // wind_factor: that is cos(theta)*speed*sens, so the old
+        // |fac|>=0.08 test made the cone a function of speed and of sens,
+        // which is an unvalidated external paste. Measured effect of the
+        // old test over 2026-08-13..09-12: 49 of 114 games labelled Cross
+        // that a +/-60 cone calls Out or In.
+        //
+        // Display only. wind_factor and pricing are untouched.
         var windBadge='';
-        if(spd>0 && !roofClosed){
-          // Use raw wind dir and speed for label — more intuitive than factor
-          var windDir=g.wind_dir||0;
-          var label, cls;
-          if(spd<8){
-            label='↔ Calm '+Math.round(spd)+'mph'; cls='wind-calm';
-          } else {
-            // fac>0 = blowing out, fac<0 = blowing in, near-0 = crosswind
-            if(fac>=0.08){label='↗ Out '+Math.round(spd)+'mph';cls='wind-out';}
-            else if(fac<=-0.08){label='↙ In '+Math.round(spd)+'mph';cls='wind-in';}
-            else{label='↔ Cross '+Math.round(spd)+'mph';cls='wind-calm';}
-          }
+        var wb=g.wind_badge;
+        if(wb && wb.show){
+          // Strength drives the colour ramp; direction drives the word.
+          var cls = wb.direction==='out' ? 'wind-out'
+                  : wb.direction==='in'  ? 'wind-in'
+                  : 'wind-calm';
+          if(wb.strength==='weak') cls+=' wind-weak';
+          else if(wb.strength==='strong') cls+=' wind-strong';
+          var label=wb.label;
+          if(wb.strength) label+=' · '+wb.strength;
+          // Placeholder-bearing park (retractables + Tropicana, cfDir=45 by
+          // design): strength only, no invented direction.
+          if(wb.bearing_measured===false) label+=' (bearing n/a)';
           if(roofPartial) label+=' (partial)';
-          windBadge='<span class="wind-badge '+cls+'">'+label+'</span>';
+          var tip = wb.theta_deg!=null
+            ? 'wind to '+Math.round(((g.wind_dir||0)+180)%360)+'° vs CF bearing '+wb.cf_dir+'° → θ='+wb.theta_deg+'°'
+            : 'no measured CF bearing for this park';
+          windBadge='<span class="wind-badge '+cls+'" title="'+tip+'">'+label+'</span>';
+        } else if(wb && wb.reason==='fixed_dome'){
+          // Fixed domes report closed regardless of roof_status, which the
+          // scraper has been writing as 'open' at Tropicana all season.
+          // Only fired for fixedDome: a genuinely closed retractable roof
+          // already renders the roof badge below ("🔒 Roof Closed"), and
+          // Tropicana is not in that badge's RETRACTABLE map, so it would
+          // otherwise show nothing at all. reason==='roof_closed' stays
+          // blank here on purpose — no wind badge, no double badge.
+          windBadge='<span class="wind-badge wind-calm">🔒 Roof closed</span>';
         }
 
         // Roof badge — only for retractable roof parks

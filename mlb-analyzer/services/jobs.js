@@ -4069,12 +4069,18 @@ async function runWeatherJob(date, opts) {
       // tz the park was in.
       let tz = PARK_TZ[homeKey];
       let parkSource = 'home';
+      // fixedDome is a property of the team's HOME BUILDING, so a venue
+      // override means it no longer applies: a Rays game at a neutral
+      // outdoor site is outdoors. Cleared unless the override itself
+      // declares a fixed dome. Without this, relocating TB would silently
+      // keep wind at 0 for an open-air game — the mirror image of the bug
+      // the flag fixes.
       if (venueIdOv && venueIdOv.lat != null && venueIdOv.lng != null) {
-        park = Object.assign({}, park, { lat: venueIdOv.lat, lng: venueIdOv.lng, name: venueIdOv.name || park?.name });
+        park = Object.assign({}, park, { lat: venueIdOv.lat, lng: venueIdOv.lng, name: venueIdOv.name || park?.name, fixedDome: !!venueIdOv.fixedDome });
         if (venueIdOv.tz) tz = venueIdOv.tz;
         parkSource = 'venue_id_override:' + game.venue_id;
       } else if (teamDateOv && teamDateOv.lat != null && teamDateOv.lng != null) {
-        park = Object.assign({}, park, { lat: teamDateOv.lat, lng: teamDateOv.lng, name: teamDateOv.venue || park?.name });
+        park = Object.assign({}, park, { lat: teamDateOv.lat, lng: teamDateOv.lng, name: teamDateOv.venue || park?.name, fixedDome: !!teamDateOv.fixedDome });
         if (teamDateOv.tz) tz = teamDateOv.tz;
         parkSource = 'team_date_override:' + teamDateOv.venue;
       }
