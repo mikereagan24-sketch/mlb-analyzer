@@ -411,15 +411,26 @@ db.exec(`
   -- feature). outs_total is the fielding-opportunity count, the denominator
   -- for the per-opportunity → per-game conversion. position is the statsapi
   -- position the row was pulled under (label; game logic reads lineup pos).
+  -- PK IS (mlb_id, position) AS OF 2026-09-12. One row per player per
+  -- position, because Savant serves FRV per position and the ingest was
+  -- summing the positions away: a player's 1B and RF runs landed in one
+  -- row labelled with whichever position had more outs. Measured cost of
+  -- that collapse over 30 days: 26.6% of resolved lineup slots were scored
+  -- with a row whose position is not the one the player is playing that
+  -- night, 228 of them crossing infield<->outfield.
+  -- The snapshot table has always been keyed (snapshot_date, mlb_id,
+  -- position) "to handle the multi-position case naturally"; this makes
+  -- the live table agree with it.
   CREATE TABLE IF NOT EXISTS fielding_frv (
-    mlb_id INTEGER PRIMARY KEY,
+    mlb_id INTEGER NOT NULL,
     name TEXT,
     total_runs REAL NOT NULL DEFAULT 0,
     outs_total INTEGER NOT NULL DEFAULT 0,
-    position TEXT,
+    position TEXT NOT NULL,
     season_start INTEGER,
     season_end INTEGER,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (mlb_id, position)
   );
   -- Daily snapshot of fielding_frv (Build B defensive impact). Same
   -- date-accurate-backtest rationale as catcher_framing_snapshot:
@@ -1102,6 +1113,58 @@ try { db.exec("ALTER TABLE team_rosters ADD COLUMN position TEXT"); } catch(e) {
 // the next refresh.
 try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_start INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_end INTEGER"); } catch(e) {}
+// fielding_frv PK widening: mlb_id -> (mlb_id, position). (2026-09-12)
+//
+// SQLite cannot ALTER a primary key, so this is the standard rebuild:
+// create, copy, drop, rename, inside one transaction. Idempotent -- it
+// inspects the current key first and no-ops once the composite key is in
+// place, so it costs one PRAGMA on every boot after the first.
+//
+// EXISTING ROWS ARE KEPT, NOT TRUNCATED. They are cross-position SUMS
+// carrying the primary position's label, which is the OLD semantics; the
+// next runFieldingFrvJob (6AM chain) replaces each player's row with one
+// row per position he actually plays. In the interim the consumer finds
+// the legacy row under the primary position and behaves exactly as it did
+// before, so the migration is not a behaviour change on its own -- the
+// ingest change is. Truncating instead would leave the term null until the
+// next fetch, and an empty table is the one state the delete-missing guard
+// exists to prevent.
+try {
+  const cols = db.prepare("PRAGMA table_info(fielding_frv)").all();
+  const pkCols = cols.filter(c => c.pk > 0).map(c => c.name);
+  const needsWiden = pkCols.length === 1 && pkCols[0] === 'mlb_id';
+  if (needsWiden) {
+    // A NULL position cannot be part of the new key. None exist today
+    // (every row carries 3..9 from the Savant fetch); if one ever does it
+    // is dropped here and the next fetch recreates it correctly.
+    const nullPos = db.prepare("SELECT COUNT(*) n FROM fielding_frv WHERE position IS NULL").get().n;
+    db.exec('BEGIN');
+    db.exec(`CREATE TABLE fielding_frv_new (
+      mlb_id INTEGER NOT NULL,
+      name TEXT,
+      total_runs REAL NOT NULL DEFAULT 0,
+      outs_total INTEGER NOT NULL DEFAULT 0,
+      position TEXT NOT NULL,
+      season_start INTEGER,
+      season_end INTEGER,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (mlb_id, position)
+    )`);
+    db.exec(`INSERT INTO fielding_frv_new
+      (mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at)
+      SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at
+      FROM fielding_frv WHERE position IS NOT NULL`);
+    db.exec('DROP TABLE fielding_frv');
+    db.exec('ALTER TABLE fielding_frv_new RENAME TO fielding_frv');
+    db.exec('COMMIT');
+    const after = db.prepare("SELECT COUNT(*) n FROM fielding_frv").get().n;
+    console.log('[schema] fielding_frv PK widened to (mlb_id, position): ' + after + ' row(s) kept'
+      + (nullPos ? ', ' + nullPos + ' NULL-position row(s) dropped' : ''));
+  }
+} catch (e) {
+  try { db.exec('ROLLBACK'); } catch (e2) { /* no open tx */ }
+  console.error('[schema] fielding_frv PK widening FAILED: ' + (e && e.message));
+}
 try { db.exec("ALTER TABLE game_log ADD COLUMN ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
@@ -2951,11 +3014,28 @@ q.listCatcherFramingHist = db.prepare("SELECT mlb_id,name,rv_tot,pitches,season_
 q.upsertFieldingFrv = db.prepare(
   "INSERT INTO fielding_frv (mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at) " +
   "VALUES (?,?,?,?,?,?,?,datetime('now')) " +
-  "ON CONFLICT(mlb_id) DO UPDATE SET " +
+  "ON CONFLICT(mlb_id,position) DO UPDATE SET " +
   "  name=excluded.name, total_runs=excluded.total_runs, outs_total=excluded.outs_total, " +
-  "  position=excluded.position, season_start=excluded.season_start, season_end=excluded.season_end, updated_at=excluded.updated_at"
+  "  season_start=excluded.season_start, season_end=excluded.season_end, updated_at=excluded.updated_at"
 );
-q.getFieldingFrvById = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end FROM fielding_frv WHERE mlb_id=?");
+// THE SLOT LOOKUP (2026-09-12). Exact (player, position) is what the term
+// should use: a left fielder's FRV at CF is not his FRV in left.
+q.getFieldingFrvByIdPos = db.prepare(
+  "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end " +
+  "FROM fielding_frv WHERE mlb_id=? AND position=?");
+// THE FALLBACK. The player's biggest-sample row, used only when he has no
+// row at tonight's position. Ordering by outs_total makes "primary" a
+// measured property of the data rather than a stored label, which is what
+// the old single-row schema had to guess at.
+q.getFieldingFrvPrimary = db.prepare(
+  "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end " +
+  "FROM fielding_frv WHERE mlb_id=? ORDER BY outs_total DESC LIMIT 1");
+// Legacy name, kept so nothing outside the FRV term breaks; it now returns
+// the biggest-sample row rather than THE row. New callers want one of the
+// two above.
+q.getFieldingFrvById = db.prepare(
+  "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end " +
+  "FROM fielding_frv WHERE mlb_id=? ORDER BY outs_total DESC LIMIT 1");
 q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at FROM fielding_frv ORDER BY total_runs DESC");
 // Position players for a team (for the abbreviated-lineup-name → mlb_id
 // resolver). Returns full names + ids; JS does accent-folded initial+last

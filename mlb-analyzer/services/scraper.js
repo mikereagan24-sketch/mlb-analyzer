@@ -1137,17 +1137,23 @@ async function fetchFieldingFrv(opts) {
       const total_runs = parseFloat(clean[iRuns]);
       const outs_total = parseInt(clean[iOuts], 10);
       if (!mlb_id || isNaN(total_runs)) continue;
-      const cur = agg.get(mlb_id) || { mlb_id, name: iName >= 0 ? clean[iName] : '', total_runs: 0, outs_total: 0, position: String(pos), _posOuts: 0 };
+      // ONE ROW PER (PLAYER, POSITION) as of 2026-09-12. This used to
+      // aggregate by mlb_id alone: a player's runs at every position were
+      // summed and the row was labelled with whichever position had the
+      // most outs. Savant serves the split and we were throwing it away.
+      //
+      // Every row Savant returns here already cleared minInnings=200 AT
+      // THAT POSITION, so each per-position row clears FRV_MIN_OUTS on its
+      // own -- splitting creates no sub-floor rows, and the job's floor
+      // prune stays correct without modification.
+      const key = mlb_id + ':' + pos;
+      const cur = agg.get(key) || { mlb_id, name: iName >= 0 ? clean[iName] : '', total_runs: 0, outs_total: 0, position: String(pos) };
       cur.total_runs += total_runs;
       cur.outs_total += (isNaN(outs_total) ? 0 : outs_total);
-      // Track primary position = the one with the most opportunities.
-      const thisOuts = isNaN(outs_total) ? 0 : outs_total;
-      if (thisOuts > cur._posOuts) { cur._posOuts = thisOuts; cur.position = String(pos); }
       if (!cur.name && iName >= 0) cur.name = clean[iName];
-      agg.set(mlb_id, cur);
+      agg.set(key, cur);
     }
   }
-  // Strip the internal tracking field.
   return [...agg.values()].map(c => ({ mlb_id: c.mlb_id, name: c.name, total_runs: c.total_runs, outs_total: c.outs_total, position: c.position }));
 }
 // Statsapi schedule bootstrap. RotoWire only publishes today + tomorrow, and

@@ -227,7 +227,45 @@ const GATES = [
         + 'WINDOW: re-evaluate 2026-09-30. Do not flip before then. '
         + 'NOTE the first run reported the flag as INERT — a harness artifact, because runModel reads '
         + 'game.{away,home}FieldingRunsPerGame which the caller populates and the harness did not. '
-        + 'scripts/calibration-ab.js now hard-fails on that class rather than reporting a false negative.' },
+        + 'scripts/calibration-ab.js now hard-fails on that class rather than reporting a false negative.\n'
+        + 'TERM REDEFINED 2026-09-12 — THE EVIDENCE ABOVE PRE-DATES THE SPLIT AND DOES NOT CARRY OVER. '
+        + 'fielding_frv was keyed by mlb_id and summed a player\'s runs across every position he plays, '
+        + 'labelling the row with whichever position had the most outs; the term then looked players up by '
+        + 'id alone and ignored position entirely. Measured over 2026-08-13..09-10: 26.6% of resolved '
+        + 'lineup slots were scored with a row for a position the player was not playing that night, 228 of '
+        + 'them crossing infield<->outfield. Two further changes land with it: a fielder with no usable row '
+        + 'contributes NULL rather than 0 (6.9% of slots, 372 in 30 days, were being treated as exactly '
+        + 'league-average defenders), and the three copies of the term were collapsed into one — the two '
+        + 'harness copies had drifted to `outs_total > 0` while production applied FRV_MIN_OUTS, and '
+        + 'harness-inputs.js wires calibration-ab.js to a harness copy, so the numbers above were produced '
+        + 'by a term production does not compute. '
+        + 'THIS ROW IS CLOSING ON ITS RECORDED EVIDENCE. The split term is a new question and opens as '
+        + 'defense_frv_split below. Do not carry the -0.00087 delta or the ALL FIVE METRICS claim across.' },
+
+  // The split term. Same criterion as the row above, deliberately: what
+  // changed is the term, not the standard it has to clear.
+  { id: 'defense_frv_split', key: 'defense_frv_enabled', on_expected: false,
+    criterion: 'Calibration A/B (scripts/calibration-ab.js DEFENSE_FRV_ENABLED false true), log loss over '
+             + 'all scored games, identical game set both arms. SAME BAR AS THE PRE-SPLIT ROW: '
+             + 'delta_log_loss CI excludes zero on the negative side, on >= 1200 games.',
+    criterion_type: 'calibration', precondition: 'fielding_frv_populated',
+    window_end: '2026-10-31', decision: null,
+    corpus_size: 1078,
+    note: 'OPENED 2026-09-12 when the FRV term was redefined — see defense_frv_enabled above for what '
+        + 'changed and why its evidence does not transfer. The term is now: per-fielder FRV AT THE '
+        + 'POSITION HE IS PLAYING TONIGHT ((mlb_id, position) key), summed over the non-catcher lineup '
+        + 'slots, with unresolved slots scaled over rather than treated as average, one implementation '
+        + 'shared by production and both harnesses (utils/fielding-frv-term.js), one floor (FRV_MIN_OUTS).\n'
+        + 'corpus_size 1078 = graded games in 2026-06-16..09-10 with both lineups posted and '
+        + 'weather_inputs_valid=1, i.e. what a calibration run actually scores. Season-wide the same '
+        + 'filter gives 1976, so the >= 1200 bar is reachable without waiting.\n'
+        + 'NO MEASUREMENT YET. The split only takes effect once runFieldingFrvJob re-runs and replaces the '
+        + 'legacy summed rows with per-position ones; until then the consumer finds the legacy row under '
+        + 'the primary position and behaves as before. On the legacy table the term reports 68.3% exact '
+        + 'position matches, 24.8% position fallbacks and 6.9% unresolved — the fallback share is what '
+        + 'should fall once the per-position ingest has run, and re-measuring that is the first step of '
+        + 'any evaluation.\n'
+        + 'DO NOT FLIP on the pre-split evidence.' },
 
   { id: 'use_hand_conditional_sp_weight', key: 'use_hand_conditional_sp_weight', on_expected: false,
     criterion: 'Calibration A/B (scripts/calibration-ab.js). Tier-2 sign-test standard: favourable windows at '
