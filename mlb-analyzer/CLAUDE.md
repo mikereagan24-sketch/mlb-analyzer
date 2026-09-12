@@ -1559,6 +1559,55 @@ cause is added, *what already explains this branch to a human.* Three
 occurrences in one working sequence is enough to make it a habit rather than
 a lesson.
 
+## Local measurement runs stay under 2GB (2026-09-12)
+
+**Any measurement, backtest, sweep, replay, or DB job run on Mike's Windows
+machine must stay under 2GB total RAM. Run local Node scripts with
+`--max-old-space-size=1536`.**
+
+```
+"$NODE20" --max-old-space-size=1536 scripts/whatever.js
+```
+
+Reason: heavy local runs have repeatedly frozen **Windows Explorer** on that
+machine — the desktop shell stops repainting and the session has to be
+recovered. The cost lands on the person running the measurement, never on the
+measurement itself, which is why nothing in any harness output has ever shown
+it.
+
+### The three rules that follow
+
+1. **Cap the heap explicitly**, every run, not just the ones you expect to be
+   large. Node's default heap on this box is well above the budget, so an
+   unbounded run grows past 2GB before anything in the script complains. The
+   flag turns a machine freeze into a clean `heap out of memory` on stderr,
+   which is the outcome you want: a failed measurement you can read.
+2. **Never load a full table into memory when a streaming or windowed query
+   will do.** `db.prepare(...).all()` over `game_log`, `bet_signal_audit`,
+   `pitcher_game_log`, `empirical_market_captures` or `woba_data`
+   materialises every row at once; `.iterate()`, or a per-date loop over the
+   window, returns the same answer at bounded cost. Accumulate **scalars**,
+   not row arrays — and `includeDetail`-style per-row payloads are the same
+   trap one level up: they are for a handful of dates, not a season.
+3. **Never run two heavy local jobs concurrently.** A model re-price
+   alongside a DB refresh, two sweeps, a backtest while
+   `scripts/refresh-analysis-db.sh` is still downloading — serialise them.
+   The 2GB ceiling is a budget for the **machine**, not per process, and the
+   1536MB flag does nothing to enforce it across two processes.
+
+### If a measurement genuinely needs more, say so and stop
+
+Report what it would take — which table, roughly how many rows, why the
+windowed form does not work — and let Mike decide whether to run it another
+way or not at all. **Do not run it anyway.** Freezing the machine costs the
+number *and* the session, so the honest stop is strictly cheaper than the
+attempt.
+
+Related: this is the same asymmetry as §"an observability mechanism must not
+be able to take down the thing it observes" — there, a synchronous stringify
+of an 88MB feed OOM-killed a 512MB instance for a capability nothing read.
+Same shape, with the laptop as the instance.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
