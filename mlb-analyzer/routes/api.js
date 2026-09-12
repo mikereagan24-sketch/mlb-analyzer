@@ -3672,8 +3672,12 @@ router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
     const forwardHonest = req.query.forwardHonest === 'true' || req.query.forwardHonest === '1';
     const construction = (req.query.construction || '').toString().toLowerCase() || undefined;
 
+    // ?weatherFilter=tag reproduces the pre-#382 corpus; default 'valid'.
+    // Unrecognised values throw inside the harness rather than silently
+    // scoring a different population than the caller asked for.
+    const weatherFilter = (req.query.weatherFilter || '').toString().toLowerCase() || undefined;
     const { runBaserunningBacktest } = require('../services/baserunning-backtest');
-    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest, construction });
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest, construction, weatherFilter });
     res.json(out);
   } catch (e) {
     console.error('[admin/baserunning-backtest] error:', e);

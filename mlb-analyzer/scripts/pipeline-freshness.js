@@ -51,6 +51,25 @@ function render(label, r) {
         : 'PER-ROW: oldest ' + row.perRow.oldest + ' (+' + row.perRow.excess + 'd), '
           + row.perRow.rowsBehindNewest + ' row(s) behind the newest'));
     }
+    // MID-ERA GAPS print whenever any exist, even when the pipeline reads
+    // `ok`. The whole point is that they are invisible to the last-arrival
+    // number, so hiding them behind a non-ok level would reproduce the bug
+    // this check exists to catch.
+    if (row.gaps) {
+      if (row.gaps.error) {
+        console.log('      gap check failed: ' + row.gaps.error);
+      } else if (row.gaps.missingCount) {
+        console.log('      GAPS INSIDE THE ERA: ' + row.gaps.missingCount + ' date(s), '
+          + row.gaps.gamesLost + ' game(s) lost from every calibration corpus'
+          + (row.gaps.recentCount ? '   (' + row.gaps.recentCount + ' in the last '
+            + row.gaps.recentDays + 'd -- ACTIONABLE)' : '   (all historical, unrecoverable)'));
+        for (const g of row.gaps.missing) {
+          const isRecent = row.gaps.recent.some((r) => r.date === g.date);
+          console.log('        ' + g.date + '  ' + String(g.games).padStart(2) + ' games'
+            + (isRecent ? '   <- recent' : ''));
+        }
+      }
+    }
   }
   console.log('  ' + r.crit + ' critical, ' + r.warn + ' stale, '
     + (r.rows.length - r.crit - r.warn) + ' ok');
