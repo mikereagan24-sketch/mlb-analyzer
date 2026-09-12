@@ -8222,6 +8222,46 @@ async function runFangraphsRolesJob() {
 const FG_SYNC_RETRY_DELAYS_MS = [15 * 60 * 1000, 30 * 60 * 1000];
 const FG_SYNC_KEYS_ACT = ['bat-act-lhp', 'bat-act-rhp', 'pit-act-lhb', 'pit-act-rhb'];
 
+// Pitcher batted-ball profile (2026-09-12). Rides the wOBA sync cadence
+// because it is the same endpoint, the same Member session and the same
+// two-year window -- a second schedule would double the authenticated
+// request load for data that changes at exactly the same rate.
+//
+// NON-FATAL BY DESIGN. A batted-ball failure must never sink the wOBA sync:
+// wOBA feeds live pricing, this feeds an unshipped interaction measurement.
+// It logs its own cron row so a silent failure is visible, which is the
+// lesson of the snapshot chain that wrote no cron_log rows for weeks.
+async function runPitcherBattedBallJob(cookieValue) {
+  const { fetchPitcherBattedBall } = require('./fangraphs');
+  const dateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  try {
+    const rows = await fetchPitcherBattedBall(cookieValue);
+    let applied = 0;
+    const tx = db.transaction((rs) => {
+      for (const r of rs) {
+        q.upsertPitcherBattedBall.run(r.mlb_id, r.split, r.name || null,
+          r.gb_pct, r.fb_pct, r.ld_pct, r.bip || 0);
+        applied++;
+      }
+    });
+    tx(rows);
+    // Snapshot AFTER the upsert, from the same row set, so the dated copy
+    // and the live table can never disagree about what this run produced.
+    let snapped = 0;
+    try { snapped = q.snapshotPitcherBattedBall(dateStr, rows); }
+    catch (e) { console.warn('[fg-bb] snapshot failed (non-fatal): ' + e.message); }
+    const msg = 'upserted ' + applied + ' row(s), snapshot ' + snapped + ' for ' + dateStr;
+    console.log('[fg-bb] ' + msg);
+    try { q.logCron.run('fg-batted-ball', dateStr, 'success', msg, applied); } catch (e) { /* non-fatal */ }
+    return { success: true, applied, snapped, snapshot_date: dateStr };
+  } catch (e) {
+    const msg = 'failed: ' + (e && e.message ? e.message : String(e));
+    console.error('[fg-bb] ' + msg);
+    try { q.logCron.run('fg-batted-ball', dateStr, 'error', msg, 0); } catch (e2) { /* non-fatal */ }
+    return { success: false, error: msg };
+  }
+}
+
 async function runFangraphsWobaSyncJob(opts) {
   opts = opts || {};
   const maxAttempts = Number.isFinite(opts.maxAttempts) ? opts.maxAttempts : 3;
@@ -8301,6 +8341,12 @@ async function runFangraphsWobaSyncJob(opts) {
     }
   }
 
+  // Batted-ball profile on the same cadence and the same session. Awaited
+  // but never allowed to change the wOBA result.
+  let battedBall = null;
+  try { battedBall = await runPitcherBattedBallJob(cookieValue); }
+  catch (e) { battedBall = { success: false, error: e && e.message }; }
+
   const finalOk = attempts.length && attempts[attempts.length - 1].success === true;
   const status = finalOk ? 'success' : (attempts.some(a => a.ok_keys > 0) ? 'partial' : 'error');
   const summary = 'attempts=' + attempts.length
@@ -8309,7 +8355,7 @@ async function runFangraphsWobaSyncJob(opts) {
   try { q.logCron.run('fg-woba', dateStr, status, summary, (lastResults || []).filter(r => r.success).length); }
   catch (e) { console.warn('[fg-woba] cron_log write failed (non-fatal): ' + e.message); }
   console.log('[fg-woba] ' + summary);
-  return { success: finalOk, status, attempts };
+  return { success: finalOk, status, attempts, batted_ball: battedBall };
 }
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -8341,4 +8387,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

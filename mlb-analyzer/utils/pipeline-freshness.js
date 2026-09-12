@@ -70,6 +70,11 @@ function todayPt() {
  *                   are behind the newest. Only meaningful for tables
  *                   upserted per entity (per catcher, per player, per
  *                   team), where a partial refresh leaves a stale tail.
+ *   awaitingFirstRun OPTIONAL. Table exists but has never been written.
+ *                   Reports STALE rather than CRITICAL on the no-rows
+ *                   path only, for a capture that ships before its first
+ *                   cron fires. Self-disarming; a query ERROR stays
+ *                   CRITICAL regardless.
  *   gaps            OPTIONAL {sql, recentDays, warnCount, critCount, note}.
  *                   sql returns MANY rows, {d, n}: a date INSIDE the
  *                   pipeline's own era that has no row, and how many games
@@ -303,6 +308,24 @@ const PIPELINES = [
       note: 'a team left behind by a partial pull -- the ingest refuses to write a partial set, so a split here means something wrote outside the job',
     },
   },
+  {
+    // Pitcher batted-ball profile (2026-09-12). Rides the wOBA sync, so it
+    // gets the same treatment woba_data_snapshot gets: a last-arrival check
+    // AND a mid-era gap check, because it is a per-DATE capture and the
+    // as-of lookup that the interaction measurement depends on silently
+    // reaches further back on a missing date rather than failing.
+    key: 'pitcher_batted_ball_snapshot',
+    awaitingFirstRun: true,   // cleared by reality on the first sync; see the no-rows branch
+    sql: 'SELECT MAX(snapshot_date) v FROM pitcher_batted_ball_snapshot',
+    zone: 'PT-date', expectedLagDays: 0, warnDays: 2, critDays: 3,
+    note: 'pitcher GB%/FB%/LD% freezes; the as-of lookup silently serves an older profile',
+    gaps: {
+      sql: snapshotGapSql('pitcher_batted_ball_snapshot'),
+      recentDays: 7, warnCount: 1, critCount: 2,
+      note: 'a missing date makes getPitcherBattedBallAsOf reach further back, which is a '
+          + 'quieter failure than an absent row -- the measurement still runs, on a staler profile',
+    },
+  },
   // The 6AM snapshot chain (2026-09-12). Each is a per-DATE capture, so a
   // gap check is the only thing that can see a missed day once the job
   // recovers -- the last-arrival number is current again the next morning.
@@ -347,9 +370,28 @@ function checkPipelineFreshness(db, asOf) {
     // A pipeline that cannot be read at all is a CRITICAL finding, not a
     // skip -- a dropped table looks identical to a stopped job downstream.
     if (err || !last) {
-      crit++;
-      rows.push({ key: p.key, last: null, lagDays: null, excess: null, level: 'CRITICAL',
-                  detail: err ? ('query failed: ' + err) : ('no rows at all -- ' + p.note) });
+      // awaitingFirstRun (2026-09-12): a pipeline whose table exists but has
+      // never been written yet. Empty is the EXPECTED initial state for a
+      // capture that ships before its first cron fires, and reporting it
+      // CRITICAL would fail the whole check -- exit 1, /health critical, an
+      // existing green test red -- for a table nothing has had the chance to
+      // populate. That is a checker crying wolf, which is what trains people
+      // to stop reading it.
+      //
+      // It SELF-DISARMS: the flag is only consulted on the no-rows path, so
+      // the moment a first row lands the normal thresholds apply and the flag
+      // is inert. Leaving it in place afterwards costs nothing.
+      //
+      // A QUERY ERROR IS STILL CRITICAL even with the flag: a dropped table
+      // and a job that never ran look identical downstream, and only one of
+      // them is expected.
+      const awaiting = !err && p.awaitingFirstRun;
+      if (awaiting) warn++; else crit++;
+      rows.push({ key: p.key, last: null, lagDays: null, excess: null,
+                  level: awaiting ? 'STALE' : 'CRITICAL',
+                  detail: err ? ('query failed: ' + err)
+                    : (awaiting ? ('no rows yet -- awaiting its first run; ' + p.note)
+                                : ('no rows at all -- ' + p.note)) });
       continue;
     }
 

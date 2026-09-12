@@ -432,6 +432,42 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (mlb_id, position)
   );
+  -- Pitcher batted-ball profile (2026-09-12). GB%/FB%/LD% per pitcher per
+  -- handedness split, from the FanGraphs splits endpoint with strType '3'.
+  -- Shares are stored as FRACTIONS (0..1), normalised at ingest against the
+  -- GB+FB+LD=1 identity rather than against an assumption about how FG
+  -- formats them. bip is the per-split sample size; without it the shares
+  -- cannot be weighted, so the ingest refuses to write a row lacking it.
+  -- Split is 'vs_lhb' / 'vs_rhb' -- NOT blended, because weighting the two
+  -- into one number at ingest would bake in an assumption the consumer
+  -- should make itself.
+  CREATE TABLE IF NOT EXISTS pitcher_batted_ball (
+    mlb_id INTEGER NOT NULL,
+    split TEXT NOT NULL,
+    name TEXT,
+    gb_pct REAL,
+    fb_pct REAL,
+    ld_pct REAL,
+    bip INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (mlb_id, split)
+  );
+  -- Dated snapshot, same rationale as woba_data_snapshot: the interaction
+  -- has to be measurable AS-OF a game date, not against today's profile. A
+  -- pitcher's GB% on 2026-05-01 is not his GB% now, and scoring an old game
+  -- with the current number is hindsight.
+  CREATE TABLE IF NOT EXISTS pitcher_batted_ball_snapshot (
+    snapshot_date TEXT NOT NULL,
+    mlb_id INTEGER NOT NULL,
+    split TEXT NOT NULL,
+    name TEXT,
+    gb_pct REAL,
+    fb_pct REAL,
+    ld_pct REAL,
+    bip INTEGER,
+    PRIMARY KEY (snapshot_date, mlb_id, split)
+  );
+  CREATE INDEX IF NOT EXISTS idx_pbb_snap_date ON pitcher_batted_ball_snapshot(snapshot_date);
   -- Daily snapshot of fielding_frv (Build B defensive impact). Same
   -- date-accurate-backtest rationale as catcher_framing_snapshot:
   -- fielding_frv is upserted on every runFieldingFrvJob (daily 6AM PT
@@ -3020,6 +3056,42 @@ q.upsertFieldingFrv = db.prepare(
 );
 // THE SLOT LOOKUP (2026-09-12). Exact (player, position) is what the term
 // should use: a left fielder's FRV at CF is not his FRV in left.
+q.upsertPitcherBattedBall = db.prepare(
+  "INSERT INTO pitcher_batted_ball (mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,updated_at) " +
+  "VALUES (?,?,?,?,?,?,?,datetime('now')) " +
+  "ON CONFLICT(mlb_id,split) DO UPDATE SET " +
+  "  name=excluded.name, gb_pct=excluded.gb_pct, fb_pct=excluded.fb_pct, " +
+  "  ld_pct=excluded.ld_pct, bip=excluded.bip, updated_at=excluded.updated_at"
+);
+q.getPitcherBattedBall = db.prepare(
+  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip FROM pitcher_batted_ball WHERE mlb_id=? AND split=?');
+// AS-OF lookup: newest snapshot at or before a game date. This is the one
+// the interaction measurement must use; the live table is current-state and
+// carries hindsight for any past game.
+q.getPitcherBattedBallAsOf = db.prepare(
+  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,snapshot_date FROM pitcher_batted_ball_snapshot ' +
+  'WHERE mlb_id=? AND split=? AND snapshot_date<=? ORDER BY snapshot_date DESC LIMIT 1');
+q._pbbSnapClearDate = db.prepare('DELETE FROM pitcher_batted_ball_snapshot WHERE snapshot_date=?');
+q._pbbSnapInsert = db.prepare(
+  'INSERT INTO pitcher_batted_ball_snapshot (snapshot_date,mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip) ' +
+  'VALUES (?,?,?,?,?,?,?,?)');
+// Replace-the-date, same shape as snapshotFieldingFrv: a re-run on the same
+// day overwrites rather than duplicating or half-updating.
+q.snapshotPitcherBattedBall = (snapshotDate, rows) => {
+  const tx = db.transaction((d, rs) => {
+    q._pbbSnapClearDate.run(d);
+    for (const r of rs) {
+      if (r == null || r.mlb_id == null || r.split == null) continue;
+      q._pbbSnapInsert.run(d, r.mlb_id, r.split, r.name || null,
+        r.gb_pct == null ? null : Number(r.gb_pct),
+        r.fb_pct == null ? null : Number(r.fb_pct),
+        r.ld_pct == null ? null : Number(r.ld_pct),
+        r.bip == null ? null : Number(r.bip));
+    }
+  });
+  tx(snapshotDate, rows || []);
+  return (rows || []).length;
+};
 q.getFieldingFrvByIdPos = db.prepare(
   "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end " +
   "FROM fielding_frv WHERE mlb_id=? AND position=?");

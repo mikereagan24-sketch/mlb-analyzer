@@ -228,7 +228,18 @@ function twoYearDateRange() {
   return { start: iso(start), end: iso(end) };
 }
 
-async function fetchActualSplit(splitCode, position, cookieValue) {
+// opts (2026-09-12), both optional and both defaulting to the pre-existing
+// behaviour so every current caller is byte-identical:
+//   strType  override the FG stat panel. '1' Standard, '2' Advanced,
+//            '3' BATTED BALL (GB%/FB%/LD%/Pull%/Hard%). Extended here
+//            rather than added as a second fetcher: the auth, the strict
+//            body shape and the error handling are the hard part and must
+//            not exist twice.
+//   raw      return the parsed row objects instead of CSV. The batted-ball
+//            consumer upserts typed columns; round-tripping through CSV
+//            just to re-split it would lose types for no reason.
+async function fetchActualSplit(splitCode, position, cookieValue, opts) {
+  const o = opts || {};
   const { start, end } = twoYearDateRange();
   // Body shape captured from FG's own frontend 2026-08-03 after the
   // splits-leaderboards rewrite. Prior body caused unhandled ASP.NET
@@ -261,7 +272,7 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
     // pitcher Advanced doesn't. strType='1' returns wOBA for pitchers
     // (verified 2026-08-04 via tmp/diag-fg-actuals-pitcher-strtype.js:
     // pit-act-lhb strType='1' = 21 cols including wOBA, 713 rows).
-    strType: position === 'P' ? '1' : '2',
+    strType: o.strType != null ? String(o.strType) : (position === 'P' ? '1' : '2'),
     strStartDate: start,
     strEndDate: end,
     strSplitTeams: false,       // boolean, NOT the string 'false'
@@ -312,7 +323,107 @@ async function fetchActualSplit(splitCode, position, cookieValue) {
   if (!json || !Array.isArray(json.data)) {
     throw new Error('Actual split=' + splitCode + ' pos=' + position + ' returned no data array. Top keys: ' + Object.keys(json||{}).join(','));
   }
-  return jsonToCsv(json.data);
+  return o.raw ? json.data : jsonToCsv(json.data);
+}
+
+// --- Pitcher batted-ball profile (2026-09-12) ---
+//
+// GB%/FB%/LD% per pitcher per handedness split, from the SAME splits
+// endpoint the wOBA actuals use, with strType '3' (the Batted Ball panel).
+// Split codes match _actTasks: 5 = vs LHB, 6 = vs RHB. There is no
+// 'overall' code in use here, so the two splits are stored SEPARATELY
+// rather than blended: weighting them into one number at ingest would bake
+// in an assumption that the consumer should be free to make itself.
+//
+// THE PAYLOAD SHAPE IS NOT VERIFIED AGAINST THE LIVE ENDPOINT. Reaching it
+// needs an authenticated FG Member session, so this parser was written
+// against the documented panel contents and tested on synthetic rows. It
+// is therefore built to FAIL LOUDLY on an unexpected shape -- naming the
+// keys it did find -- rather than write nulls that look like data. Expect
+// the first live run to be the real test; that is what the cron_log entry
+// and the freshness row are for.
+const _BB_KEYS = {
+  gb: ['GB%', 'GBpct', 'gb_pct', 'GB_pct'],
+  fb: ['FB%', 'FBpct', 'fb_pct', 'FB_pct'],
+  ld: ['LD%', 'LDpct', 'ld_pct', 'LD_pct'],
+};
+const _BB_BIP_KEYS = ['BIP', 'Balls', 'BallsInPlay', 'balls_in_play'];
+const _BB_COUNT_KEYS = { gb: ['GB'], fb: ['FB'], ld: ['LD'] };
+
+function _pick(row, keys) {
+  for (const k of keys) {
+    if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+  }
+  return undefined;
+}
+
+// GB + FB + LD is 1 (or 100) by construction. That identity -- not a guess
+// about FanGraphs' formatting -- is what settles the units, and a row whose
+// three shares sum to neither is a row we do not understand and must not
+// store.
+function _normaliseShares(gb, fb, ld) {
+  const sum = gb + fb + ld;
+  if (sum >= 50 && sum <= 150) return { gb: gb / 100, fb: fb / 100, ld: ld / 100, scale: 'pct_points' };
+  if (sum >= 0.5 && sum <= 1.5) return { gb: gb, fb: fb, ld: ld, scale: 'fraction' };
+  return null;
+}
+
+async function fetchPitcherBattedBall(cookieValue, opts) {
+  const o = opts || {};
+  const splits = o.splits || [{ code: 5, split: 'vs_lhb' }, { code: 6, split: 'vs_rhb' }];
+  const out = [];
+  for (const sp of splits) {
+    const rows = await fetchActualSplit(sp.code, 'P', cookieValue, { strType: '3', raw: true });
+    if (!rows.length) throw new Error('FG batted-ball split ' + sp.code + ' returned 0 rows');
+    const sample = rows[0];
+    for (const f of ['gb', 'fb', 'ld']) {
+      if (_pick(sample, _BB_KEYS[f]) === undefined) {
+        throw new Error('FG batted-ball split ' + sp.code + ': no ' + f.toUpperCase()
+          + '% column. Keys present: ' + Object.keys(sample).join(','));
+      }
+    }
+    let badShares = 0, noId = 0;
+    for (const r of rows) {
+      const mlb_id = parseInt(_pick(r, ['xMLBAMID', 'MLBAMID', 'mlbamid']), 10);
+      if (!mlb_id) { noId++; continue; }
+      const gbRaw = parseFloat(_pick(r, _BB_KEYS.gb));
+      const fbRaw = parseFloat(_pick(r, _BB_KEYS.fb));
+      const ldRaw = parseFloat(_pick(r, _BB_KEYS.ld));
+      if (!isFinite(gbRaw) || !isFinite(fbRaw) || !isFinite(ldRaw)) { badShares++; continue; }
+      const norm = _normaliseShares(gbRaw, fbRaw, ldRaw);
+      if (!norm) { badShares++; continue; }
+      // BIP: prefer a stated count, else reconstruct from the three
+      // batted-ball counts. Without it the shares cannot be weighted, which
+      // is most of their value, so an absence is fatal rather than null.
+      let bip = parseFloat(_pick(r, _BB_BIP_KEYS));
+      if (!isFinite(bip)) {
+        const g = parseFloat(_pick(r, _BB_COUNT_KEYS.gb));
+        const f = parseFloat(_pick(r, _BB_COUNT_KEYS.fb));
+        const l = parseFloat(_pick(r, _BB_COUNT_KEYS.ld));
+        if (isFinite(g) && isFinite(f) && isFinite(l)) bip = g + f + l;
+      }
+      if (!isFinite(bip)) {
+        throw new Error('FG batted-ball split ' + sp.code + ': no BIP column and no GB/FB/LD'
+          + ' counts to reconstruct it from. Keys present: ' + Object.keys(sample).join(','));
+      }
+      out.push({
+        mlb_id: mlb_id,
+        name: _pick(r, ['PlayerName', 'Name', 'playerName']) || null,
+        split: sp.split,
+        gb_pct: norm.gb, fb_pct: norm.fb, ld_pct: norm.ld,
+        bip: Math.round(bip),
+      });
+    }
+    if (!out.length) {
+      throw new Error('FG batted-ball split ' + sp.code + ': parsed 0 usable rows from '
+        + rows.length + ' (' + noId + ' without an MLBAM id, ' + badShares + ' with shares that sum to neither 1 nor 100)');
+    }
+    if (badShares || noId) {
+      console.warn('[fg-bb] split ' + sp.code + ': skipped ' + noId + ' row(s) with no MLBAM id, '
+        + badShares + ' with unusable shares');
+    }
+  }
+  return out;
 }
 
 // --- Main orchestrator ---
@@ -798,4 +909,4 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
   return out;
 }
 
-module.exports = { refreshAllFanGraphs, refreshFanGraphsActuals, fetchActualSplit, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
+module.exports = { refreshAllFanGraphs, refreshFanGraphsActuals, fetchActualSplit, fetchPitcherBattedBall, _normaliseShares, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
