@@ -116,8 +116,29 @@ console.log('');
 const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
 const SAMPLE_N = process.env.SAMPLE_N ? Number(process.env.SAMPLE_N) : 0;
 const SAMPLE_SEED = process.env.SAMPLE_SEED ? Number(process.env.SAMPLE_SEED) : 1;
+
+// WEATHER_FILTER (2026-09-12) — which weather population to score.
+//
+//   valid (default)  weather_inputs_valid = 1. Rows whose stored weather
+//                    columns can be re-scored from. The production arm.
+//   tag              weather_contamination_reason IS NULL. Reproduces the
+//                    PRE-#382 corpus exactly, which is what #382's own
+//                    write-up tells the reader to do -- and until now
+//                    there was no way to do it without editing this file.
+//                    The FRV before/after was measured through a local
+//                    patch for exactly this reason.
+//
+// Anything else throws inside loadGames rather than silently falling
+// through to no filter.
+const WEATHER_FILTER = process.env.WEATHER_FILTER || 'valid';
 let games = ps.loadGames(db, FROM, TO,
-  { includeMarketContaminated: INCLUDE_DIRTY, includeWeatherContaminated: INCLUDE_DIRTY });
+  { includeMarketContaminated: INCLUDE_DIRTY, includeWeatherContaminated: INCLUDE_DIRTY,
+    weatherFilter: WEATHER_FILTER });
+// Echoed into the run's OWN output, so a pasted result carries the corpus
+// it was computed on. A number quoted without its filter is not
+// reproducible, and the two arms differ by 428 games on the full season.
+console.log('  weather filter: ' + WEATHER_FILTER
+  + (WEATHER_FILTER === 'tag' ? '   *** PRE-#382 CORPUS (comparison arm) ***' : ''));
 if (INCLUDE_DIRTY) console.log('  *** ARM A: corpus RETAINS both contamination classes (comparison run) ***');
 if (SAMPLE_N) {
   const before = games.length;

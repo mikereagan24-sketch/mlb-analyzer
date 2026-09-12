@@ -70,6 +70,27 @@ function todayPt() {
  *                   are behind the newest. Only meaningful for tables
  *                   upserted per entity (per catcher, per player, per
  *                   team), where a partial refresh leaves a stale tail.
+ *   gaps            OPTIONAL {sql, recentDays, warnCount, critCount, note}.
+ *                   sql returns MANY rows, {d, n}: a date INSIDE the
+ *                   pipeline's own era that has no row, and how many games
+ *                   that date holds. For a per-DATE capture, "last arrival
+ *                   is current" says nothing about holes behind it.
+ *                   (2026-09-12) woba_data_snapshot reported `ok` all
+ *                   season while missing 2026-06-26 and 2026-07-19
+ *                   outright. parameter-sweep.js:397 looks the snapshot up
+ *                   with `snapshot_date = <game date>`, an EXACT match, so
+ *                   each missing day silently dropped its whole slate from
+ *                   every calibration corpus: 30 otherwise-perfect graded
+ *                   games, gone and unrecoverable -- a snapshot records
+ *                   what wOBA looked like that morning and there is no
+ *                   backfill for a day that has passed.
+ *                   LEVEL IS DRIVEN BY RECENT GAPS ONLY. Older holes can
+ *                   never be repaired, so alarming on them forever would
+ *                   train the reader to skip the output, which costs more
+ *                   than the check is worth (see CLAUDE.md, "Scope a check
+ *                   to what it can act on"). They are still PRINTED BY
+ *                   NAME every run, because an analysis spanning them
+ *                   should say so.
  */
 const PIPELINES = [
   {
@@ -101,6 +122,25 @@ const PIPELINES = [
     sql: 'SELECT MAX(snapshot_date) v FROM woba_data_snapshot',
     zone: 'PT-date', expectedLagDays: 0, warnDays: 2, critDays: 3,
     note: 'batter inputs freeze; every signal is priced on old wOBA',
+    // MID-ERA GAP CHECK (2026-09-12). Every game date strictly inside the
+    // snapshot era that has no snapshot of its own. Bounded by the era on
+    // both sides, so pre-era dates (44 of them, before 2026-05-20) never
+    // appear -- no snapshot could exist for those and listing them would
+    // be permanent noise. TODAY is excluded because the day's snapshot is
+    // written during the day; without that, the check would report a false
+    // gap every morning, which is the fastest way to make it unread.
+    gaps: {
+      sql:
+        'WITH era AS (SELECT MIN(snapshot_date) lo, MAX(snapshot_date) hi FROM woba_data_snapshot) '
+        + 'SELECT g.game_date AS d, COUNT(*) AS n FROM game_log g, era '
+        + 'WHERE g.game_date > era.lo AND g.game_date < era.hi '
+        + '  AND NOT EXISTS (SELECT 1 FROM woba_data_snapshot s WHERE s.snapshot_date = g.game_date) '
+        + 'GROUP BY g.game_date ORDER BY g.game_date',
+      recentDays: 7, warnCount: 1, critCount: 2,
+      note: 'a missing snapshot date drops that whole slate from every calibration corpus '
+          + '(parameter-sweep.js:397 matches snapshot_date to the game date exactly) and is '
+          + 'NOT recoverable afterwards',
+    },
   },
   {
     key: 'empirical_market_captures',
@@ -287,9 +327,44 @@ function checkPipelineFreshness(db, asOf) {
       }
     }
 
+    // MID-ERA GAP pass. The aggregate says the newest capture is current
+    // and perRow says the oldest row is; neither can see a date MISSING
+    // from the middle. Level is driven by RECENT gaps only -- older holes
+    // are unrepairable, and a check that fails forever on unfixable
+    // history is a check nobody reads. Old gaps are still reported.
+    let gaps = null;
+    if (p.gaps) {
+      try {
+        const all = db.prepare(p.gaps.sql).all()
+          .map((r) => ({ date: String(r.d).slice(0, 10), games: Number(r.n) || 0 }))
+          .filter((r) => r.date !== today);     // today's capture may still be pending
+        const recent = all.filter((r) => dayDiff(today, r.date) <= p.gaps.recentDays);
+        let gLevel = 'ok';
+        if (recent.length >= p.gaps.critCount) gLevel = 'CRITICAL';
+        else if (recent.length >= p.gaps.warnCount) gLevel = 'STALE';
+        gaps = {
+          missing: all, missingCount: all.length,
+          recent: recent, recentCount: recent.length,
+          gamesLost: all.reduce((s, r) => s + r.games, 0),
+          recentDays: p.gaps.recentDays, level: gLevel, note: p.gaps.note,
+        };
+        if (gLevel === 'CRITICAL' && level !== 'CRITICAL') {
+          if (level === 'STALE') warn--;
+          level = 'CRITICAL'; crit++;
+        } else if (gLevel === 'STALE' && level === 'ok') {
+          level = 'STALE'; warn++;
+        }
+      } catch (e) {
+        // Same rule as perRow: a gap query that cannot run must not take
+        // the check down, and must not read as a pass either.
+        gaps = { error: e && e.message, level: 'CRITICAL' };
+        if (level !== 'CRITICAL') { if (level === 'STALE') warn--; level = 'CRITICAL'; crit++; }
+      }
+    }
+
     rows.push({ key: p.key, last, lagDays: lag, excess, level,
                 expectedLagDays: p.expectedLagDays, zone: p.zone, detail: p.note,
-                perRow });
+                perRow, gaps });
   }
 
   return { asOf: today, rows, warn, crit, ok: warn === 0 && crit === 0 };
@@ -306,6 +381,23 @@ function logPipelineFreshness(db, asOf) {
   } catch (e) {
     console.warn('[freshness] check failed (non-fatal): ' + (e && e.message));
     return null;
+  }
+
+  // Mid-era gaps are reported even on an all-OK run, because a historical
+  // hole does not raise the level and would otherwise never be mentioned
+  // again. This is the line that would have named 2026-06-26 and
+  // 2026-07-19 the morning after each of them.
+  for (const row of r.rows) {
+    if (!row.gaps) continue;
+    if (row.gaps.error) {
+      console.warn('[freshness]     ' + row.key + ' gap check failed: ' + row.gaps.error);
+    } else if (row.gaps.missingCount) {
+      console.warn('[freshness]     ' + row.key + ' MID-ERA GAPS: '
+        + row.gaps.missingCount + ' date(s), ' + row.gaps.gamesLost + ' game(s) lost'
+        + (row.gaps.recentCount ? ' (' + row.gaps.recentCount + ' recent)' : ' (all historical)')
+        + ' -- ' + row.gaps.missing.map((g) => g.date + '(' + g.games + ')').join(' ')
+        + '  -- ' + row.gaps.note);
+    }
   }
 
   if (r.ok) {

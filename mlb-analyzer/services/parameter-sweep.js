@@ -456,9 +456,15 @@ function loadGames(db, fromDate, toDate, opts) {
   // Unrecognised values THROW rather than falling through to no filter:
   // three hand-maintained lookups in this repo have failed open and each
   // produced a confident wrong null (see CLAUDE.md, guard-removal rule).
-  const weatherFilter = opts.includeWeatherContaminated ? 'none' : (opts.weatherFilter || 'inputs_valid');
+  const weatherFilter = opts.includeWeatherContaminated ? 'none' : (opts.weatherFilter || 'valid');
+  const VALID_SQL_FRAGMENT = 'AND weather_inputs_valid = 1 ';
   const WEATHER_SQL = {
-    inputs_valid: 'AND weather_inputs_valid = 1 ',
+    // 'valid' is the canonical short spelling the harnesses expose;
+    // 'inputs_valid' is the name #382 shipped and is kept as an alias so
+    // its own documentation stays runnable. ONE fragment, two keys -- not
+    // two copies of the SQL.
+    valid:        VALID_SQL_FRAGMENT,
+    inputs_valid: VALID_SQL_FRAGMENT,
     tag:          'AND weather_contamination_reason IS NULL ',
     none:         '',
   };

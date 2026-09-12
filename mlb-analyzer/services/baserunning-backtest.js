@@ -582,11 +582,29 @@ function runBaserunningBacktest(opts) {
   // emit-time population instead, partition on
   // gameRow.weather_contamination_reason inside the loop — do not narrow
   // this pull, or the calibration prong loses the rows too.
+  // opts.weatherFilter (2026-09-12): 'valid' (default) | 'tag'.
+  //   valid  weather_inputs_valid = 1 — the production arm.
+  //   tag    weather_contamination_reason IS NULL — reproduces the
+  //          PRE-#382 corpus, which #382's write-up tells the reader to
+  //          do and which previously required editing this file.
+  // Throws on anything else rather than falling through to no filter;
+  // three hand-maintained lookups in this repo have failed open and each
+  // produced a confident wrong null.
+  const WEATHER_SQL = {
+    valid: 'AND weather_inputs_valid = 1 ',
+    tag:   'AND weather_contamination_reason IS NULL ',
+  };
+  const weatherFilter = opts.weatherFilter || 'valid';
+  if (!Object.prototype.hasOwnProperty.call(WEATHER_SQL, weatherFilter)) {
+    throw new Error('runBaserunningBacktest: unrecognised weatherFilter '
+      + JSON.stringify(weatherFilter) + ' (expected one of '
+      + Object.keys(WEATHER_SQL).join(', ') + ')');
+  }
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
-    + "AND weather_inputs_valid = 1 "
+    + WEATHER_SQL[weatherFilter]
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 
@@ -946,6 +964,13 @@ function runBaserunningBacktest(opts) {
     season,
     level,
     window,
+    // Which weather population this run scored. Carried in the RESULT so a
+    // pasted number arrives with its corpus attached; the two arms differ
+    // by 271 games on 2026-06-16..09-10.
+    weather_filter: weatherFilter,
+    weather_filter_meaning: weatherFilter === 'tag'
+      ? 'weather_contamination_reason IS NULL — the pre-#382 corpus'
+      : 'weather_inputs_valid = 1 — rows whose stored weather can be re-scored from',
     mode: forwardHonest ? 'forward_honest' : 'hindsight',
     bsr_source_table: forwardHonest ? 'player_baserunning_trailing_snapshot (as-of game_date)' : (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning'),
     trailing_window: playerWindowMeta,

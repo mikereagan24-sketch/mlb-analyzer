@@ -338,6 +338,24 @@ app.get('/health', (req, res) => {
       stale: fr.rows.filter(r => r.level === 'STALE').map(r => ({
         pipeline: r.key, last: r.last, days_beyond_normal_lag: r.excess })),
       per_pipeline: fr.rows,
+      // MID-ERA GAPS surfaced at the top level, not only inside
+      // per_pipeline, because a historical gap does NOT raise the
+      // pipeline's level and would otherwise be invisible to anything
+      // reading status alone. woba_data_snapshot read `ok` all season
+      // while missing 2026-06-26 and 2026-07-19 outright, which silently
+      // cost 30 graded games from every calibration corpus.
+      mid_era_gaps: fr.rows
+        .filter(r => r.gaps && (r.gaps.missingCount || r.gaps.error))
+        .map(r => ({
+          pipeline: r.key,
+          error: r.gaps.error || undefined,
+          missing_dates: r.gaps.missing ? r.gaps.missing.map(g => g.date) : undefined,
+          games_lost: r.gaps.gamesLost,
+          recent_count: r.gaps.recentCount,
+          recent_window_days: r.gaps.recentDays,
+          level: r.gaps.level,
+          note: r.gaps.note,
+        })),
     };
     if (fr.crit > 0) {
       out.status = 'critical';
