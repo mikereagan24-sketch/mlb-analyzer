@@ -35,11 +35,11 @@ function open(p) {
 function render(label, r) {
   console.log('');
   console.log('=== ' + label + '   (as of ' + r.asOf + ' PT) ===');
-  console.log('  ' + 'pipeline'.padEnd(28) + 'last'.padEnd(13) + 'lag'.padStart(4)
+  console.log('  ' + 'pipeline'.padEnd(36) + 'last'.padEnd(13) + 'lag'.padStart(4)
     + 'excess'.padStart(8) + '  level');
   for (const row of r.rows) {
     const mark = row.level === 'ok' ? '   ' : (row.level === 'STALE' ? ' ! ' : '***');
-    console.log('  ' + row.key.padEnd(28) + String(row.last || 'none').padEnd(13)
+    console.log('  ' + row.key.padEnd(36) + String(row.last || 'none').padEnd(13)
       + String(row.lagDays == null ? '-' : row.lagDays).padStart(4)
       + String(row.excess == null ? '-' : (row.excess > 0 ? '+' + row.excess : row.excess)).padStart(8)
       + '  ' + mark + ' ' + row.level);
@@ -102,7 +102,7 @@ function render(label, r) {
       differ++;
       if (av && bv) { if (bv > av) refNewer++; else thisNewer++; }
       else if (bv) refNewer++; else thisNewer++;
-      console.log('  ' + a.rows[i].key.padEnd(28)
+      console.log('  ' + a.rows[i].key.padEnd(36)
         + (av || 'none') + '  vs  ' + (bv || 'none'));
     }
     console.log('');
