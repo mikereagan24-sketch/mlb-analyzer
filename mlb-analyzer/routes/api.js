@@ -1219,9 +1219,14 @@ router.get('/games/:date', (req, res) => {
         // and the client must not carry a second copy of it. Reads
         // wind_dir / wind_speed / roof_status and deliberately NOT
         // wind_factor, which carries the unvalidated per-park sens.
+        // tempF rides along for the diamond's text line. Still no
+        // wind_factor: the badge and the diamond are both angle-derived.
+        // Humidity is not stored anywhere (no game_log column, never
+        // fetched), so the helper returns humidity_pct: null.
         wind_badge: _windBadge({
           homeKey: (g.game_id || '').split('-')[1],
           windDir: g.wind_dir, windSpeed: g.wind_speed, roofStatus: g.roof_status,
+          tempF: g.temp_f,
         }),
       };
       // Catcher-framing impact block (feat/matchups-framing-impact).
