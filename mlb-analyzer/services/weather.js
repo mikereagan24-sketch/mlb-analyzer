@@ -588,6 +588,32 @@ function roofChannelMults(roofStatus, venueId) {
 }
 
 function computeEffectiveWeather({ windSpeed, windDir, tempF, roofStatus, venueId, park }) {
+  // FIXED DOME: both channels zero, and NOT gated on roofStatus (2026-09-12).
+  // A park that cannot open is indoors on every date, so consulting
+  // roof_status is exactly what let outdoor weather in — the scraper wrote
+  // roof_status='open' at confidence 'estimated' on all 72 Tropicana home
+  // games this season, and `estTot = aRuns + hRuns + windRunAdj +
+  // tempRunAdj` (model.js:1389) put a mean +0.556 runs of outdoor heat
+  // straight onto the total of 69 graded ones.
+  //
+  // WHY ZERO AND NOT AN INDOOR BASELINE. tempRunAdjFromTempF is a
+  // DEVIATION bucket, not an absolute temperature term: <55F -> -0.5,
+  // 55-70 -> 0, 70-80 -> +0.3, 80+ -> +0.6. Its zero bucket IS the neutral
+  // case, so "no thermal effect" is spelled 0. Substituting the reported
+  // indoor temperature instead would land ~72F in the 70-80 bucket and
+  // assert +0.3 — i.e. that a climate-controlled building plays a third of
+  // a run hotter than neutral, which nothing measures. Two independent
+  // reasons to prefer 0:
+  //   1. CONVENTION: roofChannelMults already returns tempMult 0 for every
+  //      closed non-canopy venue (sealed retractables and fixed domes
+  //      alike), with SEA's canopy the single allowlisted exception. A
+  //      fixed dome getting 0 is the existing treatment, not a new theory.
+  //   2. MEASUREMENT: on TB home games with blowouts removed (n=59), the
+  //      totals level moves +0.506 -> -0.043 when the term is dropped, with
+  //      MAE, RMSE, median and sign-split all agreeing. 0 is what centres
+  //      the residuals; +0.3 would leave them over-forecast.
+  // See docs/fixed-dome-temp-2026-09-12.md.
+  if (park && park.fixedDome) return { windFactor: 0, tempRunAdj: 0 };
   const rawWindFactor = (park && windSpeed != null && windDir != null)
     ? calcWindFactor(windDir, windSpeed, park)
     : 0;

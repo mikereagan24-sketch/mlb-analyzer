@@ -1119,6 +1119,46 @@ rows were scored under, since it is no longer in the source tree.
   That is a reason to prefer the post-cutover side where a choice exists,
   not a reason to discard the earlier games.
 
+### The SECOND regime boundary, in the wind channel, at 2026-08-18 (2026-09-12)
+
+**`PARKS.cfDir` moved for 7 parks on 2026-08-18 (bearing batch 3: `nym
+min atl col lad laa sd`), and `game_log.wind_factor` is persisted at
+scrape time just like `park_factor`.** So rows written before their
+park's cutover hold a factor computed against the OLD bearing, and any
+analysis that re-derives wind from stored bearings across that date is
+pooling two regimes — exactly the failure this section exists to prevent,
+one column over.
+
+Found by asserting that stored `wind_factor` re-derives from stored
+`wind_dir`/`wind_speed`: 8 rows in a 30-day window did not, and all 8
+were at those 7 parks. Worked example — `mil-lad 2026-08-15`, 9.5 mph
+from 246°: stored 0.029 is exactly `cos(21°) x 0.0625 x 0.5` at the old
+`cfDir = 45`, against 0.024 at the measured 25°.
+
+**The boundary is INTRA-DAY**, so a date filter mislabels rows on the day
+itself: `lad-col 2026-08-19` has `weather_quality_at 2026-08-20 00:00:43Z`
+(17:00 PT on 08-19) and still matches the old bearing. Filter on the row,
+not the day.
+
+Differences from the park-factor boundary worth keeping straight:
+
+- **There is no `wind_factor_source` column.** The park-factor regime is
+  classified by comparing the stored value against both tables, which is
+  directly observable; the wind regime is not recorded anywhere, and the
+  only way to detect a row is to re-derive it and compare. If this starts
+  deciding anything, add the column rather than a remembered date.
+- **It is much smaller.** 7 parks, and the affected rows are the ones
+  whose wind was non-trivial to begin with — 8 in 30 days, against 1436
+  of 1876 rows on the park-factor side.
+- **`calcWindFactor` is not a pricing regression here.** Both regimes were
+  "correct at the time" in the same sense: the batch-3 bearings are the
+  measured ones and the placeholders were not, so the post-cutover side is
+  the better one to prefer where a choice exists.
+
+`scripts/test-wind-diamond.js` and `scripts/test-wind-badge.js` both
+exclude these rows by name with the count printed, rather than dropping
+them silently.
+
 ## Park factors are evaluated on TOTALS, never on the ML target (2026-08-25)
 
 **The ML calibration A/B is structurally blind to park factor.** Measured:
