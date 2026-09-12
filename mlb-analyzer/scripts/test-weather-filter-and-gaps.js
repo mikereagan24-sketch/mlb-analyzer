@@ -63,6 +63,63 @@ const bsrTag = bsrCount('AND weather_contamination_reason IS NULL');
 console.log('     BsR window: valid=' + bsrValid + '  tag=' + bsrTag + '  delta=' + (bsrValid - bsrTag));
 check('the two BsR arms differ', bsrValid !== bsrTag, true);
 
+console.log('\n2b. every loadGames caller can now select its corpus');
+// The gap this closes: #382 documented weatherFilter:'tag' and no script
+// could pass it, so the FRV before/after was measured through a local
+// patch. Asserted per file rather than in aggregate, so a caller added
+// later without the switch is visibly missing rather than averaged away.
+const fsx = require('fs'), pathx = require('path');
+for (const f of ['scripts/calibration-ab.js', 'scripts/calibration-sweep.js',
+  'scripts/component-signal-diagnostic.js', 'scripts/bullpen-neutral-ab.js']) {
+  const s = fsx.readFileSync(pathx.join(__dirname, '..', f), 'utf8');
+  check(f + ' reads WEATHER_FILTER', /process\.env\.WEATHER_FILTER \|\| 'valid'/.test(s), true);
+  check(f + ' passes it to loadGames', /weatherFilter: WEATHER_FILTER/.test(s), true);
+  check(f + ' echoes it into its own output', /weather filter: ' \+ WEATHER_FILTER/.test(s), true);
+}
+
+console.log('\n2c. the BsR harness carries an n-matched control');
+const bsrSrc = fsx.readFileSync(pathx.join(__dirname, '..', 'services/baserunning-backtest.js'), 'utf8');
+check('accepts sampleN / sampleSeed', /opts\.sampleN/.test(bsrSrc) && /opts\.sampleSeed/.test(bsrSrc), true);
+check('reuses parameter-sweep sampleGames, not a second shuffle',
+  /require\('\.\/parameter-sweep'\)\.sampleGames/.test(bsrSrc), true);
+// No source regex for "is the field top-level" — a proximity match on the
+// surrounding text is brittle and would have passed while the field sat
+// nested inside baserunning_coverage, which is the bug that actually
+// happened. The behavioural checks below read the returned object instead.
+check('sample is null when the run was not downsampled, so an uncontrolled '
+  + 'run cannot look controlled', /sample: sampledFrom$/m.test(bsrSrc), true);
+// Determinism of the shared sampler, which is what makes the control
+// reproducible across the two arms.
+const pool = Array.from({ length: 50 }, (_, i) => ({ i }));
+const s1 = ps.sampleGames(pool, 12, 20260912).map((r) => r.i);
+const s2 = ps.sampleGames(pool, 12, 20260912).map((r) => r.i);
+const s3 = ps.sampleGames(pool, 12, 7).map((r) => r.i);
+check('same seed -> same subsample', s1, s2);
+check('different seed -> different subsample', s1.join() === s3.join(), false);
+check('subsample keeps chronological order', s1.slice().sort((a, b) => a - b), s1);
+
+// BEHAVIOURAL, on a 3-day window so it stays cheap: the result must carry
+// the filter it was run under. Source checks cannot catch the failure this
+// had -- the echo was present but nested inside baserunning_coverage, so
+// the top-level field a caller reads came back undefined.
+const { runBaserunningBacktest } = require('../services/baserunning-backtest');
+const tiny = (o) => runBaserunningBacktest(Object.assign(
+  { fromDate: '2026-07-01', toDate: '2026-07-03', level: 'player', window: 'trailing', forwardHonest: true }, o));
+const rTag = tiny({ weatherFilter: 'tag' });
+const rValid = tiny({ weatherFilter: 'valid' });
+check('tag arm echoes its filter at the top level', rTag.weather_filter, 'tag');
+check('valid arm echoes its filter at the top level', rValid.weather_filter, 'valid');
+check('an un-sampled run reports sample: null', [rTag.sample, rValid.sample], [null, null]);
+check('valid admits at least as many games as tag',
+  rValid.games_considered >= rTag.games_considered, true);
+const rCtl = tiny({ weatherFilter: 'valid', sampleN: 5, sampleSeed: 3 });
+check('a sampled run reports its sample block',
+  [rCtl.sample.n, rCtl.sample.seed, rCtl.sample.drawn_from > 5], [5, 3, true]);
+check('sampling actually reduces what was scored', rCtl.games_considered, 5);
+let bsrThrew = false;
+try { tiny({ weatherFilter: 'nonsense' }); } catch (e) { bsrThrew = true; }
+check('BsR throws on an unrecognised filter', bsrThrew, true);
+
 console.log('\n3. the mid-era gap check is declared on woba_data_snapshot');
 const snap = PIPELINES.filter((p) => p.key === 'woba_data_snapshot')[0];
 check('gaps hook declared', !!(snap && snap.gaps && snap.gaps.sql), true);

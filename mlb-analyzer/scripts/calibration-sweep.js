@@ -72,8 +72,15 @@ console.log('');
 const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
 const SAMPLE_N = process.env.SAMPLE_N ? Number(process.env.SAMPLE_N) : 0;
 const SAMPLE_SEED = process.env.SAMPLE_SEED ? Number(process.env.SAMPLE_SEED) : 1;
+// WEATHER_FILTER (2026-09-12): 'valid' (default) | 'tag' | 'none'. 'tag'
+// reproduces the pre-#382 corpus. Echoed below so a pasted result carries
+// the corpus it was computed on.
+const WEATHER_FILTER = process.env.WEATHER_FILTER || 'valid';
 let games = ps.loadGames(db, FROM, TO,
-  { includeMarketContaminated: INCLUDE_DIRTY, includeWeatherContaminated: INCLUDE_DIRTY });
+  { includeMarketContaminated: INCLUDE_DIRTY, includeWeatherContaminated: INCLUDE_DIRTY,
+    weatherFilter: WEATHER_FILTER });
+console.log('  weather filter: ' + WEATHER_FILTER
+  + (WEATHER_FILTER === 'tag' ? '   *** PRE-#382 CORPUS ***' : ''));
 if (INCLUDE_DIRTY) console.log('  *** ARM A: corpus RETAINS both contamination classes ***');
 if (SAMPLE_N) {
   const before = games.length;

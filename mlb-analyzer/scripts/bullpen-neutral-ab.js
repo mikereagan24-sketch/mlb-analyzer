@@ -106,7 +106,10 @@ function sd(a) { if (a.length < 2) return null; const m = mean(a);
   // ---- game-weighted ---------------------------------------------------
   console.log('');
   console.log('=== GAME-WEIGHTED: re-scored both ways ===');
-  const games = ps.loadGames(db, '2026-04-01', '2026-12-31');
+  // WEATHER_FILTER (2026-09-12): 'valid' (default) | 'tag' | 'none'.
+  const WEATHER_FILTER = process.env.WEATHER_FILTER || 'valid';
+  console.log('  weather filter: ' + WEATHER_FILTER);
+  const games = ps.loadGames(db, '2026-04-01', '2026-12-31', { weatherFilter: WEATHER_FILTER });
   const snap = new Map();
   const dTot = [], dHome = [], dLL = [];
   let scored = 0, moved = 0;

@@ -3676,8 +3676,11 @@ router.get('/admin/baserunning-backtest', requireAdminToken, (req, res) => {
     // Unrecognised values throw inside the harness rather than silently
     // scoring a different population than the caller asked for.
     const weatherFilter = (req.query.weatherFilter || '').toString().toLowerCase() || undefined;
+    // ?sampleN= &sampleSeed= run the n-matched power control.
+    const sampleN = req.query.sampleN ? Number(req.query.sampleN) : undefined;
+    const sampleSeed = req.query.sampleSeed ? Number(req.query.sampleSeed) : undefined;
     const { runBaserunningBacktest } = require('../services/baserunning-backtest');
-    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest, construction, weatherFilter });
+    const out = runBaserunningBacktest({ fromDate: from, toDate: to, includeDetail: detail, level, window, forwardHonest, construction, weatherFilter, sampleN, sampleSeed });
     res.json(out);
   } catch (e) {
     console.error('[admin/baserunning-backtest] error:', e);
