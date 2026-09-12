@@ -92,6 +92,57 @@ function todayPt() {
  *                   NAME every run, because an analysis spanning them
  *                   should say so.
  */
+
+// Gap SQL for a per-DATE capture table, built once and shared by every
+// snapshot pipeline (2026-09-12). Six tables need this rule and none of
+// them may re-spell it.
+//
+// THE ERA MUST START AT THE DAILY REGIME, NOT AT THE FIRST ROW EVER.
+// The first version of this check (#386) bounded the era by MIN..MAX of
+// the capture column, which is only correct when the first capture IS the
+// start of daily operation. catcher_framing_snapshot is the counter-
+// example: one lone capture on 2026-06-03, an 83-day desert, then daily
+// from 2026-08-25. Under the MIN..MAX rule that table reports 81 missing
+// dates -- every one of them a date on which nothing was expected -- and a
+// check that cries wolf 81 times is one nobody reads, which is the exact
+// failure this family of checks exists to avoid.
+//
+// So the era starts at the first capture whose NEXT capture is within
+// maxCadenceDays. Observable from the data, needs no remembered per-table
+// start date, and self-corrects if a table's cadence changes. Measured
+// effect on catcher_framing_snapshot: 81 reported gaps -> 1 (2026-09-03),
+// which is the real one. woba_data_snapshot is unchanged at 3, so the rule
+// is backward-compatible with what #386 shipped.
+function snapshotGapSql(table, maxCadenceDays) {
+  const cadence = maxCadenceDays || 7;
+  return 'WITH dates AS (SELECT DISTINCT snapshot_date d FROM ' + table + '), '
+    + 'seq AS (SELECT d, LEAD(d) OVER (ORDER BY d) nxt FROM dates), '
+    + 'era AS (SELECT (SELECT MIN(d) FROM seq WHERE nxt IS NOT NULL '
+    + '                  AND julianday(nxt) - julianday(d) <= ' + cadence + ') lo, '
+    + '               (SELECT MAX(d) FROM dates) hi) '
+    + 'SELECT g.game_date AS d, COUNT(*) AS n FROM game_log g, era '
+    + 'WHERE g.game_date > era.lo AND g.game_date < era.hi '
+    + '  AND NOT EXISTS (SELECT 1 FROM ' + table + ' s WHERE s.snapshot_date = g.game_date) '
+    + 'GROUP BY g.game_date ORDER BY g.game_date';
+}
+
+// The five tables the 6AM chain snapshots, in chain order. A miss on any
+// of them is invisible to a last-arrival check the moment the job recovers
+// the next day, which is how 2026-09-03 -- a WHOLE-CHAIN miss, all five
+// tables plus the 5:30 PT fg-woba job -- went a week without being noticed.
+const SNAPSHOT_CHAIN = [
+  { key: 'fielding_frv_snapshot',
+    note: 'defensive run values freeze; DEFENSE_FRV scoring falls back to the current table, which is hindsight' },
+  { key: 'catcher_framing_snapshot',
+    note: 'framing rates freeze; forward-honest framing scoring loses the day' },
+  { key: 'team_baserunning_snapshot',
+    note: 'team BsR freezes; the team-level BsR harness loses the day' },
+  { key: 'player_baserunning_snapshot',
+    note: 'player BsR freezes; the player-level BsR harness loses the day' },
+  { key: 'player_baserunning_trailing_snapshot',
+    note: 'trailing-1yr BsR freezes; the FORWARD-HONEST BsR prong drops that date entirely' },
+];
+
 const PIPELINES = [
   {
     key: 'cron_log',
@@ -130,12 +181,7 @@ const PIPELINES = [
     // written during the day; without that, the check would report a false
     // gap every morning, which is the fastest way to make it unread.
     gaps: {
-      sql:
-        'WITH era AS (SELECT MIN(snapshot_date) lo, MAX(snapshot_date) hi FROM woba_data_snapshot) '
-        + 'SELECT g.game_date AS d, COUNT(*) AS n FROM game_log g, era '
-        + 'WHERE g.game_date > era.lo AND g.game_date < era.hi '
-        + '  AND NOT EXISTS (SELECT 1 FROM woba_data_snapshot s WHERE s.snapshot_date = g.game_date) '
-        + 'GROUP BY g.game_date ORDER BY g.game_date',
+      sql: snapshotGapSql('woba_data_snapshot'),
       recentDays: 7, warnCount: 1, critCount: 2,
       note: 'a missing snapshot date drops that whole slate from every calibration corpus '
           + '(parameter-sweep.js:397 matches snapshot_date to the game date exactly) and is '
@@ -257,6 +303,26 @@ const PIPELINES = [
       note: 'a team left behind by a partial pull -- the ingest refuses to write a partial set, so a split here means something wrote outside the job',
     },
   },
+  // The 6AM snapshot chain (2026-09-12). Each is a per-DATE capture, so a
+  // gap check is the only thing that can see a missed day once the job
+  // recovers -- the last-arrival number is current again the next morning.
+  // FOUNDING INSTANCE 2026-09-03: all five missed together, plus the 5:30 PT
+  // fg-woba job, on a day with 726 cron rows and no restart signature. It was
+  // found a WEEK LATE by diffing snapshot dates against a calendar.
+  ...SNAPSHOT_CHAIN.map(function (t) {
+    return {
+      key: t.key,
+      sql: 'SELECT MAX(snapshot_date) v FROM ' + t.key,
+      zone: 'PT-date', expectedLagDays: 0, warnDays: 2, critDays: 3,
+      note: t.note,
+      gaps: {
+        sql: snapshotGapSql(t.key),
+        recentDays: 7, warnCount: 1, critCount: 2,
+        note: 'a missed capture cannot be backfilled -- the snapshot records what that '
+            + 'day looked like, and forward-honest scoring for the date is gone',
+      },
+    };
+  }),
 ];
 
 /**
@@ -409,7 +475,7 @@ function logPipelineFreshness(db, asOf) {
     + '  (' + r.crit + ' critical, ' + r.warn + ' stale) ***');
   for (const row of r.rows) {
     if (row.level === 'ok') continue;
-    console.warn('[freshness]     ' + row.level.padEnd(9) + row.key.padEnd(28)
+    console.warn('[freshness]     ' + row.level.padEnd(9) + row.key.padEnd(36)
       + 'last=' + (row.last || 'none')
       + (row.excess != null ? ('  +' + row.excess + 'd beyond normal lag') : '')
       + '  -- ' + row.detail);
@@ -430,4 +496,5 @@ function logPipelineFreshness(db, asOf) {
   return r;
 }
 
-module.exports = { checkPipelineFreshness, logPipelineFreshness, PIPELINES, todayPt, dayDiff };
+module.exports = { checkPipelineFreshness, logPipelineFreshness, PIPELINES, todayPt, dayDiff,
+  SNAPSHOT_CHAIN, snapshotGapSql };
