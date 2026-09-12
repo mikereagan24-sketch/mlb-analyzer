@@ -600,13 +600,30 @@ function runBaserunningBacktest(opts) {
       + JSON.stringify(weatherFilter) + ' (expected one of '
       + Object.keys(WEATHER_SQL).join(', ') + ')');
   }
-  const games = db.prepare(
+  let games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
     + WEATHER_SQL[weatherFilter]
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
+
+  // N-MATCHED POWER CONTROL (2026-09-12). opts.sampleN / opts.sampleSeed
+  // deterministically downsample the corpus, so "the delta moved because
+  // the population changed" can be separated from "the delta moved because
+  // n changed". CLAUDE.md already asserts that EVERY harness takes
+  // SAMPLE_N + SAMPLE_SEED for exactly this; this one did not, which is
+  // why the widened-corpus comparison had no control available.
+  //
+  // Reuses parameter-sweep's sampleGames rather than rolling a second
+  // shuffle: same seedable LCG, same semantics, one implementation.
+  const sampleN = opts.sampleN ? Number(opts.sampleN) : 0;
+  const sampleSeed = opts.sampleSeed ? Number(opts.sampleSeed) : 1;
+  let sampledFrom = null;
+  if (sampleN && sampleN < games.length) {
+    sampledFrom = games.length;
+    games = require('./parameter-sweep').sampleGames(games, sampleN, sampleSeed);
+  }
 
   let gamesConsidered = 0, gamesScored = 0, suppressed = 0;
   let gamesMissingBsr = 0;
@@ -971,6 +988,12 @@ function runBaserunningBacktest(opts) {
     weather_filter_meaning: weatherFilter === 'tag'
       ? 'weather_contamination_reason IS NULL — the pre-#382 corpus'
       : 'weather_inputs_valid = 1 — rows whose stored weather can be re-scored from',
+    // Present only when the run was downsampled, so an un-controlled run
+    // cannot be mistaken for a controlled one.
+    sample: sampledFrom
+      ? { n: games.length, drawn_from: sampledFrom, seed: sampleSeed,
+          note: 'n-matched power control — deterministic subsample, not the full corpus' }
+      : null,
     mode: forwardHonest ? 'forward_honest' : 'hindsight',
     bsr_source_table: forwardHonest ? 'player_baserunning_trailing_snapshot (as-of game_date)' : (window === 'trailing' ? 'player_baserunning_trailing' : 'player_baserunning'),
     trailing_window: playerWindowMeta,
@@ -1021,6 +1044,14 @@ function runBaserunningBacktest(opts) {
       ? 'forwardHonest=true ignored: forward mode is implemented only for level=player + window=trailing. Other variants run in hindsight mode.'
       : undefined,
     scope_note: 'ML-side only. Per-team BsR/game added to each team\'s projected runs (own baserunning helps own offense). estTot and totals untouched.',
+    // TOP-LEVEL, not only inside baserunning_coverage: a caller reading the
+    // result to quote a number reads this object, and a delta quoted
+    // without the corpus it came from is not reproducible. The two arms
+    // differ by 271 games on 2026-06-16..09-10.
+    weather_filter: weatherFilter,
+    sample: sampledFrom
+      ? { n: games.length, drawn_from: sampledFrom, seed: sampleSeed }
+      : null,
     level,
     bsr_window: level === 'player' ? window : null,
     construction: level === 'player' ? construction : null,
