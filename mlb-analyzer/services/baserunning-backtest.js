@@ -565,16 +565,28 @@ function runBaserunningBacktest(opts) {
       / Object.values(denominatorByTeam).length
     : null;
 
-  // Contamination filter (2026-08-06): line 744 calls model.runModel
-  // per game with cfg { with-BSR vs without-BSR }; contaminated
-  // weather would feed biased temp_run_adj/wind_factor into both
-  // config branches equally, muddying the BSR isolation this
-  // backtest is trying to measure.
+  // Weather filter (2026-08-06, re-based 2026-09-12): the loop below
+  // calls model.runModel per game with cfg { with-BSR vs without-BSR },
+  // so what it needs is rows whose persisted weather columns are
+  // trustworthy NOW — bad weather would feed biased
+  // temp_run_adj/wind_factor into both config branches equally, muddying
+  // the BsR isolation this backtest is trying to measure.
+  //
+  // weather_inputs_valid, NOT weather_contamination_reason IS NULL. The
+  // tag also covers "the emit-time price used bad weather", which is a
+  // different population and not what a re-scoring harness cares about
+  // (db/schema.js documents both senses). Nothing in this file reads a
+  // stored emit-time artifact: the CLV prong's only stored inputs are the
+  // morning ML capture and the final score, neither weather-derived, so
+  // both prongs take the same set. If CLV should ever be pinned to the
+  // emit-time population instead, partition on
+  // gameRow.weather_contamination_reason inside the loop — do not narrow
+  // this pull, or the calibration prong loses the rows too.
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
-    + "AND weather_contamination_reason IS NULL "
+    + "AND weather_inputs_valid = 1 "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 

@@ -408,7 +408,15 @@ function loadWobaSnapshot(db, snapshotDate) {
 // opts (2026-08-23, for the contamination re-run only):
 //   includeMarketContaminated -- keep post-first-pitch-priced rows. ONLY for
 //     measuring what the exclusion changed. Never for production analysis.
+//   weatherFilter (2026-09-12) -- 'inputs_valid' (default) | 'tag' | 'none'.
+//     Which weather population to admit; see the block inside loadGames.
+//     The default changed on 2026-09-12 from the emit-time tag to
+//     weather_inputs_valid, which widens every re-scoring caller by the
+//     738 naive-hour rows whose columns were corrected before they were
+//     tagged. docs/weather-inputs-valid-2026-09-12.md carries the
+//     measurement and the park-clustering reason.
 //   includeWeatherContaminated (2026-08-24) -- keep known-wrong-weather rows.
+//     Now an alias for weatherFilter:'none' and still the widest setting.
 //     Added for the same reason and with the same restriction. It did not
 //     exist for the 2026-08-23 re-run, and its absence made that re-run
 //     misleading: the weather filter was UNCONDITIONAL, so arms A and B
@@ -426,17 +434,42 @@ function loadWobaSnapshot(db, snapshotDate) {
 //     nothing about contamination.
 function loadGames(db, fromDate, toDate, opts) {
   opts = opts || {};
-  // Contamination filter (2026-08-06): the parameter sweep reruns
-  // runModel per combo on historical rows; a row whose persisted
-  // weather is known-wrong feeds biased inputs into EVERY combo
-  // equally, but the biased contribution can favor different combos
-  // depending on how the weather term interacts with the parameter
-  // being swept. Cleaner to exclude the rows entirely so the sweep
-  // sees only trusted weather inputs.
+  // Weather filter (2026-08-06, re-based 2026-09-12): every caller of
+  // loadGames RE-RUNS runModel on these rows, so what it needs is rows
+  // whose persisted weather columns are trustworthy NOW — not rows whose
+  // emit-time price was clean. Those are different populations; see the
+  // two senses documented on weather_contamination_reason in db/schema.js.
+  // A row with known-wrong weather feeds biased temp_run_adj/wind_factor
+  // into EVERY combo equally, but the biased contribution can favour
+  // different combos depending on how the weather term interacts with the
+  // parameter being swept, so it still has to go.
+  //
+  //   'inputs_valid' (default) — weather_inputs_valid = 1. The correct
+  //     filter for a re-scoring harness. Admits the 738 naive_hour rows
+  //     whose columns were corrected on 2026-08-05/06 and still excludes
+  //     the 56 ath_* rows, whose columns are the pre-fix values.
+  //   'tag' — weather_contamination_reason IS NULL. The emit-time filter.
+  //     Use it for anything reading a stored emit-time artifact.
+  //   'none' — no weather filter. For contamination-cost measurement only
+  //     (scripts/contamination-impact.js), never production analysis.
+  //
+  // Unrecognised values THROW rather than falling through to no filter:
+  // three hand-maintained lookups in this repo have failed open and each
+  // produced a confident wrong null (see CLAUDE.md, guard-removal rule).
+  const weatherFilter = opts.includeWeatherContaminated ? 'none' : (opts.weatherFilter || 'inputs_valid');
+  const WEATHER_SQL = {
+    inputs_valid: 'AND weather_inputs_valid = 1 ',
+    tag:          'AND weather_contamination_reason IS NULL ',
+    none:         '',
+  };
+  if (!Object.prototype.hasOwnProperty.call(WEATHER_SQL, weatherFilter)) {
+    throw new Error('loadGames: unrecognised weatherFilter ' + JSON.stringify(weatherFilter)
+      + ' (expected one of ' + Object.keys(WEATHER_SQL).join(', ') + ')');
+  }
   return db.prepare(
     "SELECT * FROM game_log WHERE game_date >= ? AND game_date <= ? "
     + "AND model_total IS NOT NULL "  // skip games the model never finished
-    + (opts.includeWeatherContaminated ? "" : "AND weather_contamination_reason IS NULL ")
+    + WEATHER_SQL[weatherFilter]
     // Same exclusion, same reasoning, different input: when the stored
     // market_*_ml moved after real first pitch it embeds the in-progress
     // score, so it is not a pre-game price. Leaving these in would let a

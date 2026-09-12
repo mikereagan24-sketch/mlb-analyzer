@@ -97,6 +97,22 @@ console.log('');
 // unconditionally -- so the arm labelled "contaminated" had already had one
 // class removed. With 27 weather tags that was nearly harmless; the
 // corrected corpus has 797, and it is not.
+//
+// 2026-09-12: the default arm-B corpus is no longer "weather tag IS NULL".
+// loadGames now filters on weather_inputs_valid, so arm B ADMITS the 738
+// naive-hour rows whose weather columns were corrected on 2026-08-05/06
+// before they were tagged, and still excludes the 56 ath_* rows whose
+// columns are the pre-fix values. What each arm now means:
+//
+//   arm B (default)  re-scoring-safe weather + clean emit-time market
+//   arm A (=1)       everything: ath_* restored rows, no-temp rows, and
+//                    post-first-pitch market prices
+//   arm C (SAMPLE_N) n-matched control over whichever of those was picked
+//
+// So an arm-A-vs-B delta measured before 2026-09-12 is not comparable to
+// one measured after: the B corpus grew. docs/weather-inputs-valid-2026-09-12.md
+// carries the before/after n. Pass weatherFilter:'tag' to reproduce the
+// old arm B exactly.
 const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
 const SAMPLE_N = process.env.SAMPLE_N ? Number(process.env.SAMPLE_N) : 0;
 const SAMPLE_SEED = process.env.SAMPLE_SEED ? Number(process.env.SAMPLE_SEED) : 1;
