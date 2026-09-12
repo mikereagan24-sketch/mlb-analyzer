@@ -57,6 +57,7 @@ const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
 const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
 const { calcCLV, clvForSignal } = require('../services/clv');
+const { windBadge: _windBadge } = require('../utils/wind-badge');
 const router = express.Router();
 
 // Shared admin-token middleware. Originally extracted from the
@@ -1212,6 +1213,16 @@ router.get('/games/:date', (req, res) => {
         weather_quality: _classifyAge(_ageMs(g.weather_quality_at, now)),
         scores_quality: _classifyAge(_ageMs(g.scores_quality_at, now)),
         lineup_sensitivity: _lineupSensitivity(g),
+        // Wind badge descriptor (2026-09-12). DISPLAY ONLY — direction
+        // from the measured cfDir angle, strength from speed. Computed
+        // here rather than in the browser because cfDir lives in PARKS
+        // and the client must not carry a second copy of it. Reads
+        // wind_dir / wind_speed / roof_status and deliberately NOT
+        // wind_factor, which carries the unvalidated per-park sens.
+        wind_badge: _windBadge({
+          homeKey: (g.game_id || '').split('-')[1],
+          windDir: g.wind_dir, windSpeed: g.wind_speed, roofStatus: g.roof_status,
+        }),
       };
       // Catcher-framing impact block (feat/matchups-framing-impact).
       // For each side, surface the catcher and the SIGNED runs delta
