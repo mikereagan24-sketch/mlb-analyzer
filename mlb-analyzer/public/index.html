@@ -179,14 +179,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .dq-bat{background:rgba(217,119,6,.12);color:#d97706}
 .lu-confirmed{font-size:9px;font-weight:600;color:#16a34a;background:rgba(22,163,74,.1);border:1px solid rgba(22,163,74,.3);border-radius:3px;padding:1px 5px;margin-left:4px;vertical-align:middle}
 .lu-projected{font-size:9px;font-weight:500;color:var(--text3);background:var(--border);border-radius:3px;padding:1px 5px;margin-left:4px;vertical-align:middle}
+/* ONE wind palette, shared by the badge and the diamond (2026-09-12), so
+   the two glyphs sitting side by side cannot drift apart. Out reads green
+   (runs leaving the park), In reads red (runs suppressed), Cross neutral.
+   NOTE this REPAINTS the #383 badge, which shipped out=red / in=blue. To
+   go back, restore --wind-out-* to rgba(220,38,38,*) / #b91c1c and
+   --wind-in-* to rgba(37,99,235,*) / #1d4ed8 — nothing else references
+   these colours. */
+:root{
+  --wind-out-bg:rgba(22,163,74,.12); --wind-out-fg:#15803d; --wind-out-br:rgba(22,163,74,.3);
+  --wind-in-bg:rgba(220,38,38,.12);  --wind-in-fg:#b91c1c;  --wind-in-br:rgba(220,38,38,.3);
+}
 .wind-badge{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:6px}
-.wind-in{background:rgba(37,99,235,.12);color:#1d4ed8;border:1px solid rgba(37,99,235,.3)}
-.wind-out{background:rgba(220,38,38,.12);color:#b91c1c;border:1px solid rgba(220,38,38,.3)}
+.wind-in{background:var(--wind-in-bg);color:var(--wind-in-fg);border:1px solid var(--wind-in-br)}
+.wind-out{background:var(--wind-out-bg);color:var(--wind-out-fg);border:1px solid var(--wind-out-br)}
 /* Strength modifiers (2026-09-12) — direction sets the colour, strength
    sets the emphasis, so the two are readable independently. */
 .wind-weak{opacity:.7}
 .wind-strong{font-weight:700}
 .wind-calm{background:var(--bg2);color:var(--text3);border:1px solid var(--border)}
+/* Wind diamond (2026-09-12). Original inline SVG, no third-party assets.
+   The glyph is 46px and sits inline with a two-line text block. */
+.wind-dia{display:inline-flex;align-items:center;gap:7px;margin-left:6px;vertical-align:middle}
+.wind-dia svg{display:block;flex:0 0 auto}
+.wind-dia .wd-txt{font-size:10px;line-height:1.35;color:var(--text2);white-space:nowrap}
+.wind-dia .wd-txt b{font-weight:600;color:var(--text)}
+.wind-dia .wd-hint{font-size:9px;color:var(--text3);font-style:italic}
+.wd-out{color:var(--wind-out-fg)}
+.wd-in{color:var(--wind-in-fg)}
+.wd-cross{color:var(--text3)}
+.wd-field{fill:none;stroke:var(--border);stroke-width:1}
+.wd-infield{fill:var(--bg2);stroke:var(--border);stroke-width:1}
+.wd-plate{fill:var(--text3)}
 .roof-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent;margin-top:4px;font-weight:500}
 .roof-open{background:#e6f4ea;color:#1e7e34;border-color:#a8d5b5}
 .roof-closed{background:#fdecea;color:#c0392b;border-color:#f5b7b1}
@@ -1723,6 +1747,67 @@ function renderGameGrid(games,date){
           windBadge='<span class="wind-badge wind-calm">🔒 Roof closed</span>';
         }
 
+        // Wind diamond (2026-09-12) — our own inline SVG, no third-party
+        // assets. A baseball diamond seen from above with CENTRE FIELD AT
+        // THE TOP, and an arrow rotated to where the wind is blowing
+        // relative to that bearing: straight up = straight out, straight
+        // down = straight in.
+        //
+        // The rotation is wb.diamond.rotation_deg, the SIGNED angle the
+        // helper already used to pick the direction word, so the arrow and
+        // the badge cannot disagree — there is deliberately no second
+        // angle computed here. Compass bearings and SVG rotate() are both
+        // clockwise and centre field is drawn straight up, so the value is
+        // consumed verbatim with no sign flip.
+        //
+        // Display only: nothing in this block reads wind_factor.
+        var windDia='';
+        if(wb && wb.dome){
+          // Roof closed or fixed dome: dome glyph, no arrow. Nothing is
+          // blowing on the field, so there is no direction to draw.
+          windDia='<span class="wind-dia" title="no wind on the field">'
+            +'<svg width="46" height="46" viewBox="0 0 46 46" aria-label="dome, no wind">'
+            +'<path class="wd-field" d="M8 32 A15 15 0 0 1 38 32"/>'
+            +'<line class="wd-field" x1="6" y1="32" x2="40" y2="32"/>'
+            +'<line class="wd-field" x1="23" y1="17" x2="23" y2="32"/>'
+            +'</svg>'
+            +'<span class="wd-txt"><b>Indoors</b><br>no wind</span></span>';
+        } else if(wb && wb.show){
+          var tone = wb.direction==='out' ? 'wd-out' : wb.direction==='in' ? 'wd-in' : 'wd-cross';
+          // Field: outfield arc + infield square rotated 45° (home plate
+          // bottom, second base top toward centre field).
+          var field='<path class="wd-field" d="M6 30 A19 19 0 0 1 40 30"/>'
+            +'<polygon class="wd-infield" points="23,32 33,22 23,12 13,22"/>'
+            +'<circle class="wd-plate" cx="23" cy="32" r="1.6"/>';
+          var arrowSvg='';
+          if(wb.diamond){
+            var L=wb.diamond.arrow_len, W=wb.diamond.arrow_width, cy=22;
+            // Arrow drawn pointing UP from the infield centre, then rotated.
+            var y1=cy+L/2, y2=cy-L/2, head=Math.max(3, W*2);
+            arrowSvg='<g transform="rotate('+wb.diamond.rotation_deg+' 23 '+cy+')" class="'+tone+'">'
+              +'<line x1="23" y1="'+y1+'" x2="23" y2="'+y2+'" stroke="currentColor" stroke-width="'+W+'" stroke-linecap="round"/>'
+              +'<polygon points="23,'+(y2-head*0.6)+' '+(23-head*0.5)+','+(y2+head*0.35)+' '+(23+head*0.5)+','+(y2+head*0.35)+'" fill="currentColor"/>'
+              +'</g>';
+          }
+          var txtBits=[];
+          txtBits.push('<b>'+Math.round(wb.speed_mph)+' mph</b>');
+          if(wb.from_abbr) txtBits.push(wb.from_abbr);
+          var line1=txtBits.join(' ');
+          var line2=[];
+          if(wb.temp_f!=null) line2.push(Math.round(wb.temp_f)+'°F');
+          // humidity_pct is always null today: not stored, never fetched.
+          if(wb.humidity_pct!=null) line2.push(wb.humidity_pct+'% rh');
+          var hint = wb.bearing_measured===false
+            ? '<br><span class="wd-hint">bearing unverified</span>' : '';
+          var diaTip = wb.rotation_deg!=null
+            ? 'wind from '+wb.from_abbr+', blowing to '+wb.to_abbr+' · CF bearing '+wb.cf_dir+'° · rotation '+wb.rotation_deg+'°'
+            : 'no measured CF bearing for this park — speed only';
+          windDia='<span class="wind-dia" title="'+diaTip+'">'
+            +'<svg width="46" height="46" viewBox="0 0 46 46" aria-label="wind relative to centre field">'
+            +field+arrowSvg+'</svg>'
+            +'<span class="wd-txt">'+line1+(line2.length?'<br>'+line2.join(' · '):'')+hint+'</span></span>';
+        }
+
         // Roof badge — only for retractable roof parks
         var roofBadge='';
         if(g.roof_status && g.roof_status!=='open'){
@@ -1739,7 +1824,9 @@ function renderGameGrid(games,date){
             roofBadge='<span class="roof-badge roof-open roof-est">🌤️ Open ⚠️</span>';
           }
         }
-        return tempBadge+windBadge+roofBadge;
+        // Diamond sits immediately after the badge it agrees with, so a
+        // reader can check the arrow against the word at a glance.
+        return tempBadge+windBadge+windDia+roofBadge;
       })() : '')+'</div>'+
       '<div class="godds"'+(oddsStyle?' style="'+oddsStyle+'"':'')+'>'+(_isNeverLoaded(oddsQ)?'<span class="gml" title="odds never loaded">—</span><span class="gtot">—</span><span class="gml">—</span>':'<span class="gml">'+fmtML(_resolveAwayML(g, sigs))+'</span><span class="gtot">'+fmtTotalsBlock(g)+'</span><span class="gml">'+fmtML(_resolveHomeML(g, sigs))+'</span>')+oddsBadge+'</div>'+
       (g.odds_flagged?'<div style="background:rgba(220,40,40,0.15);border:1px solid #cc3333;color:#ff6666;font-size:10px;font-weight:600;padding:3px 6px;margin:3px 0;border-radius:3px;text-align:center">⚠ ODDS FLAG: '+(g.odds_flag_reason||'unknown')+'</div>':'')+
