@@ -98,9 +98,16 @@ console.log('  corpus: ' + idx.totalGraded + ' rows, ' + idx.skipped + ' skipped
 
 ok('every cell is at or above its measured 2026-09-10 count', floorsOk,
    'floors, not equalities — the corpus only grows');
-ok('7 of 9 cells clear the 150 display floor', over150 === 7,
-   over150 + ' of 9   (was 3 of 9 under the filter)');
-ok('3 of 9 cells clear 250', over250 === 3, over250 + ' of 9   (was 0 of 9)');
+// FLOORS, not equalities — same reason as the per-cell counts above, and
+// I got these two wrong in #372 while getting the per-cell ones right.
+// On a DB refreshed to 2026-09-11 this went red at 8 of 9: Balanced/High
+// was 148 at the cutover, "misses by two games", and the season closed
+// the gap exactly as the comment predicted. A guard that fails for the
+// thing working is how a suite gets ignored.
+ok('at least 7 of 9 cells clear the 150 display floor', over150 >= 7,
+   over150 + ' of 9   (7 at the 2026-09-10 cutover, 3 of 9 under the filter)');
+ok('at least 3 of 9 cells clear 250', over250 >= 3,
+   over250 + ' of 9   (3 at the cutover, 0 of 9 under the filter)');
 ok('corpus is at least the 1938 the decision was measured on',
    idx.totalGraded >= 1938, idx.totalGraded + ' rows   (was 1158)');
 
