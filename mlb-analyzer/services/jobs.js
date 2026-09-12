@@ -4030,7 +4030,10 @@ async function runWeatherJob(date, opts) {
         if (q.updateWindData) {
           q.updateWindData.run(speed, dir, effWind, temp, effTemp, roofStatus, roofConfidence, date, game.game_id);
         } else {
-          db.prepare("UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now') WHERE game_date=? AND game_id=?")
+          // weather_inputs_valid=1 — see the note on q.updateWindData in
+          // db/schema.js. This is the second of the two writers of these
+          // columns; both set the flag.
+          db.prepare("UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now'),weather_inputs_valid=1 WHERE game_date=? AND game_id=?")
             .run(speed, dir, effWind, temp, effTemp, roofStatus, roofConfidence, date, game.game_id);
         }
         const latestRow = q.getGameById.get(date, game.game_id);

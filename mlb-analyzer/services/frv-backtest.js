@@ -255,16 +255,26 @@ function runFrvBacktest(opts) {
     CATCHER_FRAMING_ENABLED: true, DEFENSE_FRV_ENABLED: false,
   });
 
-  // Contamination filter (2026-08-06): FRV backtest reruns runModel
-  // per cfgB/cfgC on historical rows; contaminated weather would feed
-  // biased temp_run_adj/wind_factor into both configs, muddying the
-  // signal this backtest is trying to isolate (fielding-run-value on
-  // vs off).
+  // Weather filter (2026-08-06, re-based 2026-09-12): this harness reruns
+  // runModel per cfgB/cfgC on historical rows, so it needs rows whose
+  // persisted weather columns are trustworthy NOW — bad weather would
+  // feed biased temp_run_adj/wind_factor into both configs, muddying the
+  // signal this backtest is trying to isolate (fielding-run-value on vs
+  // off).
+  //
+  // weather_inputs_valid, NOT weather_contamination_reason IS NULL; see
+  // db/schema.js for why those are different populations. Note this
+  // harness is ROI-on-emitted-signals, which CLAUDE.md reframes as a
+  // SELECTION measurement — but nothing here reads a stored emit-time
+  // artifact (no model_total, no bet_signals; the market price and final
+  // score are not weather-derived), so the re-scoring filter is the right
+  // one. The FRV flip criterion lives in scripts/calibration-ab.js, not
+  // here.
   const games = db.prepare(
     "SELECT * FROM game_log "
     + "WHERE game_date >= ? AND game_date <= ? "
     + "AND away_score IS NOT NULL AND home_score IS NOT NULL "
-    + "AND weather_contamination_reason IS NULL "
+    + "AND weather_inputs_valid = 1 "
     + "ORDER BY game_date, game_id"
   ).all(fromDate, toDate);
 

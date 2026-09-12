@@ -65,6 +65,12 @@ const RESTORE_COLS = [
   'temp_f', 'temp_run_adj',
   'roof_status', 'roof_confidence',
   'weather_quality', 'weather_quality_at',
+  // weather_inputs_valid (2026-09-12) must restore with the values it
+  // describes. runWeatherJob sets it to 1; if we then put the pre-fix
+  // values back and leave the flag at 1, the row claims re-scoring-safe
+  // weather it does not have. That is exactly the state the 56 ath_* rows
+  // would have been left in by the 2026-08-05 run had the flag existed.
+  'weather_inputs_valid',
 ];
 
 function tempBucket(tempF) {
@@ -164,7 +170,7 @@ registerBackfillTask({
         const before = db.prepare(
           "SELECT game_id, temp_f, wind_factor, wind_speed, wind_dir, temp_run_adj, "
           + "  roof_status, roof_confidence, weather_quality, weather_quality_at, "
-          + "  weather_contamination_reason "
+          + "  weather_inputs_valid, weather_contamination_reason "
           + "FROM game_log WHERE game_date = ? AND COALESCE(is_removed, 0) = 0"
         ).all(date);
         if (!before.length) { processed++; continue; }

@@ -1674,16 +1674,83 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN wind_dir REAL DEFAULT 0"); } catc
 try { db.exec("ALTER TABLE game_log ADD COLUMN wind_factor REAL DEFAULT 0"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN temp_f REAL DEFAULT NULL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN temp_run_adj REAL DEFAULT 0"); } catch(e) {}
-// Weather contamination tag (2026-07-27). Text reason string when the
-// persisted wind_*/temp_f/wind_factor/temp_run_adj values are known to be
-// wrong (e.g. the 49 ATH home games pulled Oakland Coliseum weather
-// pre-Sutter-Health-fix). NULL = weather trusted. Backtests, calibration,
-// and cross-cohort sweeps should filter WHERE weather_contamination_reason
-// IS NULL when weather is a load-bearing input. Historical values are NOT
-// overwritten — contamination is tagged, not silently re-scored, so the
-// persisted values still faithfully record what the model actually saw at
-// signal-emit time.
+// Weather contamination tag (2026-07-27). Text reason string when this
+// game's weather was wrong AT SIGNAL-EMIT TIME. NULL = the emit-time
+// weather is trusted.
+//
+// THIS COLUMN MEANS TWO DIFFERENT THINGS AND THEY CAME APART (2026-09-12).
+// Read this before using it as a filter:
+//
+//   (a) "the emit-time price used bad weather" — ALWAYS true while the
+//       tag is set, permanently, because the signal was emitted against
+//       whatever the weather columns held that day. Anything reading a
+//       stored emit-time artifact (bet_signals, game_log.model_total as a
+//       VALUE, ROI, CLV) must keep filtering on this column.
+//
+//   (b) "the weather columns in this row are bad right now" — NO LONGER
+//       implied by the tag. The season archive backfill
+//       (weather_backfill_season, first live write 2026-08-05 23:22:25Z)
+//       rewrote the weather columns through the FIXED park-local-hour
+//       path, and the naive-hour tagging job ran the next day
+//       (2026-08-06 10:49 PT) against rows that had already been
+//       corrected. So all 738 naive_hour rows carry correct columns under
+//       a tag describing a defect that is no longer in them. The 56 ath_*
+//       rows are the opposite: the backfill RESTORED them from its
+//       pre-write snapshot, so their columns are still the pre-fix values.
+//
+// Sense (b) now lives in weather_inputs_valid below. The comment this
+// replaced claimed "historical values are NOT overwritten — contamination
+// is tagged, not silently re-scored"; that was true of the tagging jobs
+// themselves and false of the row state, because the backfill had already
+// rewritten them. Measured, re-runnable:
+//   node scripts/verify-weather-inputs-valid.js
 try { db.exec("ALTER TABLE game_log ADD COLUMN weather_contamination_reason TEXT"); } catch(e) {}
+// Weather input validity (2026-09-12). 1 = the persisted
+// wind_*/temp_f/wind_factor/temp_run_adj in THIS ROW were produced by a
+// park-local-hour-correct, correct-coordinates code path, so a harness
+// that RE-SCORES from these columns can trust them. 0/NULL = it cannot.
+// This is sense (b) above, split out from the contamination tag.
+//
+// Not the same population as weather_contamination_reason IS NULL:
+//   naive_hour tagged   738 rows -> valid=1 (corrected 2026-08-05/06)
+//   ari_roof_* tagged     3 rows -> valid=1 (recomputed under actual roof)
+//   ath_*      tagged    56 rows -> valid=0 (restored from pre-fix snapshot)
+//   untagged           1320 rows -> valid=1 except 1 row with no temp_f
+// Verified per row, not inferred: 17/18 sampled naive_hour rows reproduce
+// the archive value at the park-local hour to 0.00F and 0/18 match the
+// naive ET hour, while sampled ath_* rows match neither their current park
+// nor a clean derivation. Re-run: node scripts/verify-weather-inputs-valid.js
+//
+// Maintained at the ingest layer (q.updateWindData + the jobs.js copy set
+// it to 1 on every live weather write) and backfilled for history by the
+// boot migration below, with scripts/set-weather-inputs-valid.js as the
+// explicit, assertion-carrying entry point.
+try { db.exec("ALTER TABLE game_log ADD COLUMN weather_inputs_valid INTEGER"); } catch(e) {}
+// One-time backfill, same shape as the game_number one above: classify
+// rows that have no verdict yet, never overwrite one. Idempotent, so it is
+// a no-op on every boot after the first.
+//
+// This runs at boot ON PURPOSE. The consumers switched to
+// `weather_inputs_valid = 1` in the same PR, and a column that is NULL
+// until someone remembers to run a script would make every calibration
+// harness return only rows written since the deploy — a silent
+// degradation, not an error. Same failure shape as the 2026-07-11
+// demotion incident: the replacement writer has to be live BEFORE the
+// consumers depend on it. Here they ship together, so the fill has to
+// happen wherever the schema does.
+try {
+  const wiv = require('../utils/weather-inputs-valid');
+  wiv.assertGapEmpty(db);
+  const r = wiv.backfillNullFlags(db);
+  if (r.scanned) {
+    console.log('[schema] weather_inputs_valid backfill: ' + r.scanned + ' unclassified rows -> '
+      + r.valid + ' valid, ' + r.invalid + ' invalid');
+  }
+} catch (e) {
+  // Loud but non-fatal: a boot must not die here, and a wrong/missing fill
+  // shows up immediately as a harness with an empty corpus.
+  console.error('[schema] weather_inputs_valid backfill FAILED: ' + e.message);
+}
 // Market contamination tag (2026-08-22). Deliberately the SAME SHAPE as
 // weather_contamination_reason above: one nullable text reason, NULL =
 // trusted, consumers filter IS NULL. Not a multi-tag column and not a
@@ -3742,7 +3809,14 @@ q.getMorningCaptureState = db.prepare(
 
 // Initialize prepared statements that need new columns
 try {
-  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now') WHERE game_date=? AND game_id=?`);
+  // weather_inputs_valid=1: this write comes from runWeatherJob, which
+  // resolves the park-local hour ISO and the venue-override coordinate
+  // chain. A row written here is re-scoring-safe by construction. Keep
+  // this in lockstep with the inline copy at services/jobs.js:4033 —
+  // there are exactly two writers of these columns and both must set the
+  // flag, or new rows land NULL and every `weather_inputs_valid = 1`
+  // filter silently drops the current slate.
+  q.updateWindData = db.prepare(`UPDATE game_log SET wind_speed=?,wind_dir=?,wind_factor=?,temp_f=?,temp_run_adj=?,roof_status=?,roof_confidence=?,weather_quality='fresh',weather_quality_at=datetime('now'),weather_inputs_valid=1 WHERE game_date=? AND game_id=?`);
 } catch(e) { console.error('updateWindData init failed:', e.message); }
 
 

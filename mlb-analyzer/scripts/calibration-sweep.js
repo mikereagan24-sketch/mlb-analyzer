@@ -64,7 +64,11 @@ console.log('');
 // Three arms, same env contract as scripts/calibration-ab.js:
 //   (default)  arm B clean  |  INCLUDE_CONTAMINATED=1  arm A both classes
 //   SAMPLE_N + SAMPLE_SEED  arm C  n-matched power control
-// See the note in calibration-ab.js for why the control is not optional.
+// See the note in calibration-ab.js for why the control is not optional,
+// and for what changed on 2026-09-12: arm B is now "re-scoring-safe
+// weather" (weather_inputs_valid), not "clean emit-time weather tag", so
+// it admits 738 more rows than it did and arm-A-vs-B deltas from before
+// that date are not comparable to ones from after.
 const INCLUDE_DIRTY = process.env.INCLUDE_CONTAMINATED === '1';
 const SAMPLE_N = process.env.SAMPLE_N ? Number(process.env.SAMPLE_N) : 0;
 const SAMPLE_SEED = process.env.SAMPLE_SEED ? Number(process.env.SAMPLE_SEED) : 1;
