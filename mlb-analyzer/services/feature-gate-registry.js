@@ -247,12 +247,22 @@ const GATES = [
   { id: 'defense_frv_split', key: 'defense_frv_enabled', on_expected: false,
     criterion: 'Calibration A/B (scripts/calibration-ab.js DEFENSE_FRV_ENABLED false true), log loss over '
              + 'all scored games, identical game set both arms. SAME BAR AS THE PRE-SPLIT ROW: '
-             + 'delta_log_loss CI excludes zero on the negative side, on >= 1200 games.',
+             + 'delta_log_loss CI excludes zero on the negative side, on >= 1200 games. '
+             + 'SCOPE FIXED 2026-09-13: the AS-OF window only -- games inside the '
+             + 'fielding_frv_snapshot era with the FRV rows read as-of the game date, not '
+             + 'current-state. The bar is unchanged; what is now pinned is the corpus it '
+             + 'applies to, because a current-state read prices a game with FRV that already '
+             + 'knows how those fielders turned out.',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
     window_end: '2026-10-31', decision: null,
-    // corpus_size CORRECTED 2026-09-13: was 1078, which was not what a run
-    // scores. See the chain below. Re-run: node scripts/measure-calibration-corpus.js
-    corpus_size: 797,
+    // corpus_size CORRECTED 2026-09-13 (1078 -> 797, see the chain below), then set
+    // NULL the same day when the criterion scope was pinned to the as-of window:
+    // under that scope there is no qualifying measurement yet, and 797 describes a
+    // corpus the criterion no longer uses. An explicit null is the honest state and
+    // test-registry-corpus-size.js accepts it as such; the superseded-scope figures
+    // are kept in the note WITH their n rather than deleted.
+    // Re-run the chain: node scripts/measure-calibration-corpus.js
+    corpus_size: null,
     note: 'OPENED 2026-09-12 when the FRV term was redefined — see defense_frv_enabled above for what '
         + 'changed and why its evidence does not transfer. The term is now: per-fielder FRV AT THE '
         + 'POSITION HE IS PLAYING TONIGHT ((mlb_id, position) key), summed over the non-catcher lineup '
@@ -296,6 +306,45 @@ const GATES = [
         + 'DOES NOT CLEAR THE BAR, on both clauses: the CI includes zero, and 797 < 1200. The window count '
         + 'is deliberately NOT quoted here -- per the CLAUDE.md sign-test rule it carries no information '
         + 'at this n without an n-matched resample spread beside it.\n'
+        + 'SCOPE AND DISPOSITION 2026-09-13.\n'
+        + 'WHY CURRENT-STATE IS EXCLUDED. utils/fielding-frv-term.js reads the current-state '
+        + 'fielding_frv table -- there is no as-of FRV query in the schema -- so every replayed '
+        + 'game is priced with FRV as of the run date. The hindsight horizon grows with lookback: '
+        + 'measured across the five windows of the season run it is 96-116 days in W1 and 1-23 in '
+        + 'W5. THE FULL-SEASON RESULT (delta_log_loss -0.00066, 95% CI [-0.00216, +0.00078], '
+        + 'n=1158) IS EXCLUDED ON THOSE GROUNDS, NOT FOR BEING WEAKER. It is also structurally '
+        + 'unfixable there: woba_data_snapshot starts 2026-05-20 but fielding_frv_snapshot starts '
+        + '2026-06-04, so 05-20..06-03 can never be scored as-of.\n'
+        + 'AND THE WEAKNESS WAS NOT A SAMPLE-SIZE EFFECT, which is why the exclusion had to be '
+        + 'argued on hindsight rather than on the delta. Three n-matched resamples of the '
+        + 'season corpus at the gate window n (SAMPLE_N=1226 -> 812/779/801 usable, seeds 1-3) '
+        + 'returned -0.00058, -0.00075, -0.00091, i.e. they reproduce the SEASON delta at the '
+        + "GATE WINDOW'S n. The gap between -0.00154 and -0.00066 is a WINDOW effect. Window "
+        + 'count was 4/5 in all four runs (spread 4,4,4), so it is reproducible at this n and '
+        + 'also does not separate the two results.\n'
+        + 'EFFECT-TO-RESOLVE ARITHMETIC, the tighter constraint. Gate window: |delta| 0.00154 '
+        + 'against a CI half-width of 0.00169 = 0.91x the resolvable threshold, so resolving it '
+        + 'needs about 797 * (1/0.91)^2 = 950 games. Full season: 0.00066 against 0.00147 = '
+        + '0.45x, needing about 5700 -- roughly four more seasons. Widening the window buys '
+        + 'games and loses effect, and the effect loss dominates.\n'
+        + 'THE AS-OF CORPUS IS 0 GAMES TODAY, measured, and this is the binding fact. '
+        + 'fielding_frv_snapshot spans 2026-06-04..09-13, but only the 2026-09-13 capture holds '
+        + 'PER-POSITION rows (845 rows / 522 players); every earlier date is 521 rows / 521 '
+        + 'players -- one summed cross-position row per player carrying a primary-position '
+        + 'label, i.e. the LEGACY term whose evidence this row exists not to reuse. So an as-of '
+        + 'read before 09-13 returns the pre-split term, and the as-of SPLIT corpus begins '
+        + '2026-09-13: 11 games, none graded yet, 0 USABLE. It grows at the ~10-13 usable games '
+        + 'per date the chain has been yielding, so ~950 games is ~80 slates away and the '
+        + '1200-game bar ~115. Neither is this season, and no backfill can help -- Savant '
+        + 'serves current-state, so what its per-position leaderboard said in June is gone.\n'
+        + 'EXPECTED DISPOSITION AT WINDOW CLOSE 2026-10-31: UNRESOLVED. Re-evaluate on a pooled '
+        + 'corpus rather than extending this window, and record it as unresolved rather than as '
+        + 'a negative -- a null from a 0-game corpus carries no information about the term.\n'
+        + 'SUPERSEDED-SCOPE EVIDENCE, kept with its n: gate window 2026-06-16..09-10, '
+        + 'current-state FRV, n=797, delta_log_loss -0.00154, 95% CI [-0.00334, +0.00003], four '
+        + 'of five metrics favourable (ECE 0.0331 -> 0.0339 the exception). Season 1158 as '
+        + 'above, all five favourable (ECE 0.0252 -> 0.0214). Both are hindsight-contaminated '
+        + 'and neither is a verdict.\n'
         + 'DO NOT FLIP on the pre-split evidence, and do not flip on the 797-game figure either.' },
 
   { id: 'use_hand_conditional_sp_weight', key: 'use_hand_conditional_sp_weight', on_expected: false,
