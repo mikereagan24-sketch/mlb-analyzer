@@ -465,6 +465,12 @@ db.exec(`
     fb_pct REAL,
     ld_pct REAL,
     bip INTEGER,
+    -- source (2026-09-13): 'prior_season' | 'live'. The series does not
+    -- start with 2026 -- a 2025 full-season pull is stamped at
+    -- 2026-03-31 so the as-of lookup has something to resolve to for
+    -- games before the first live capture. Consumers that need
+    -- within-season drift must know which kind of row they got.
+    source TEXT,
     PRIMARY KEY (snapshot_date, mlb_id, split)
   );
   CREATE INDEX IF NOT EXISTS idx_pbb_snap_date ON pitcher_batted_ball_snapshot(snapshot_date);
@@ -1149,6 +1155,12 @@ try { db.exec("ALTER TABLE team_rosters ADD COLUMN position TEXT"); } catch(e) {
 // the next refresh.
 try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_start INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_end INTEGER"); } catch(e) {}
+// pitcher_batted_ball_snapshot.source (2026-09-13). The table shipped in
+// #390 without it; a plain ADD COLUMN is enough because the only rows that
+// can exist so far are live captures, and a NULL source on those is read
+// as 'live' by the backfill below rather than being guessed at write time.
+try { db.exec("ALTER TABLE pitcher_batted_ball_snapshot ADD COLUMN source TEXT"); } catch(e) {}
+try { db.exec("UPDATE pitcher_batted_ball_snapshot SET source='live' WHERE source IS NULL"); } catch(e) {}
 // fielding_frv PK widening: mlb_id -> (mlb_id, position). (2026-09-12)
 //
 // SQLite cannot ALTER a primary key, so this is the standard rebuild:
@@ -3069,15 +3081,15 @@ q.getPitcherBattedBall = db.prepare(
 // the interaction measurement must use; the live table is current-state and
 // carries hindsight for any past game.
 q.getPitcherBattedBallAsOf = db.prepare(
-  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,snapshot_date FROM pitcher_batted_ball_snapshot ' +
+  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,snapshot_date,source FROM pitcher_batted_ball_snapshot ' +
   'WHERE mlb_id=? AND split=? AND snapshot_date<=? ORDER BY snapshot_date DESC LIMIT 1');
 q._pbbSnapClearDate = db.prepare('DELETE FROM pitcher_batted_ball_snapshot WHERE snapshot_date=?');
 q._pbbSnapInsert = db.prepare(
-  'INSERT INTO pitcher_batted_ball_snapshot (snapshot_date,mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip) ' +
-  'VALUES (?,?,?,?,?,?,?,?)');
+  'INSERT INTO pitcher_batted_ball_snapshot (snapshot_date,mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,source) ' +
+  'VALUES (?,?,?,?,?,?,?,?,?)');
 // Replace-the-date, same shape as snapshotFieldingFrv: a re-run on the same
 // day overwrites rather than duplicating or half-updating.
-q.snapshotPitcherBattedBall = (snapshotDate, rows) => {
+q.snapshotPitcherBattedBall = (snapshotDate, rows, source) => {
   const tx = db.transaction((d, rs) => {
     q._pbbSnapClearDate.run(d);
     for (const r of rs) {
@@ -3086,7 +3098,8 @@ q.snapshotPitcherBattedBall = (snapshotDate, rows) => {
         r.gb_pct == null ? null : Number(r.gb_pct),
         r.fb_pct == null ? null : Number(r.fb_pct),
         r.ld_pct == null ? null : Number(r.ld_pct),
-        r.bip == null ? null : Number(r.bip));
+        r.bip == null ? null : Number(r.bip),
+        r.source || source || 'live');
     }
   });
   tx(snapshotDate, rows || []);

@@ -240,7 +240,13 @@ function twoYearDateRange() {
 //            just to re-split it would lose types for no reason.
 async function fetchActualSplit(splitCode, position, cookieValue, opts) {
   const o = opts || {};
-  const { start, end } = twoYearDateRange();
+  // opts.start / opts.end (2026-09-13) override the rolling two-year
+  // window. Added for the 2025 prior-season backfill, which needs one
+  // fixed completed season rather than "the last two years from today" --
+  // a rolling window would make the backfill non-reproducible, returning
+  // a different corpus every day it is re-run.
+  const range = (o.start && o.end) ? { start: o.start, end: o.end } : twoYearDateRange();
+  const start = range.start, end = range.end;
   // Body shape captured from FG's own frontend 2026-08-03 after the
   // splits-leaderboards rewrite. Prior body caused unhandled ASP.NET
   // exceptions ({"Message":"An error has occurred."}) because the new
@@ -373,7 +379,10 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
   const splits = o.splits || [{ code: 5, split: 'vs_lhb' }, { code: 6, split: 'vs_rhb' }];
   const out = [];
   for (const sp of splits) {
-    const rows = await fetchActualSplit(sp.code, 'P', cookieValue, { strType: '3', raw: true });
+    // opts.start/opts.end thread through to the window; omitted, the
+    // rolling two-year default applies exactly as before.
+    const rows = await fetchActualSplit(sp.code, 'P', cookieValue,
+      { strType: '3', raw: true, start: o.start, end: o.end });
     if (!rows.length) throw new Error('FG batted-ball split ' + sp.code + ' returned 0 rows');
     const sample = rows[0];
     for (const f of ['gb', 'fb', 'ld']) {

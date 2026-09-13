@@ -8248,7 +8248,9 @@ async function runPitcherBattedBallJob(cookieValue) {
     // Snapshot AFTER the upsert, from the same row set, so the dated copy
     // and the live table can never disagree about what this run produced.
     let snapped = 0;
-    try { snapped = q.snapshotPitcherBattedBall(dateStr, rows); }
+    // Tagged 'live' so it is distinguishable from the 2025 prior-season
+    // row set, which the as-of lookup also serves.
+    try { snapped = q.snapshotPitcherBattedBall(dateStr, rows, 'live'); }
     catch (e) { console.warn('[fg-bb] snapshot failed (non-fatal): ' + e.message); }
     const msg = 'upserted ' + applied + ' row(s), snapshot ' + snapped + ' for ' + dateStr;
     console.log('[fg-bb] ' + msg);
