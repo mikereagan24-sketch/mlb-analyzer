@@ -250,22 +250,45 @@ const GATES = [
              + 'delta_log_loss CI excludes zero on the negative side, on >= 1200 games.',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
     window_end: '2026-10-31', decision: null,
-    corpus_size: 1078,
+    // corpus_size CORRECTED 2026-09-13: was 1078, which was not what a run
+    // scores. See the chain below. Re-run: node scripts/measure-calibration-corpus.js
+    corpus_size: 797,
     note: 'OPENED 2026-09-12 when the FRV term was redefined — see defense_frv_enabled above for what '
         + 'changed and why its evidence does not transfer. The term is now: per-fielder FRV AT THE '
         + 'POSITION HE IS PLAYING TONIGHT ((mlb_id, position) key), summed over the non-catcher lineup '
         + 'slots, with unresolved slots scaled over rather than treated as average, one implementation '
         + 'shared by production and both harnesses (utils/fielding-frv-term.js), one floor (FRV_MIN_OUTS).\n'
-        + 'corpus_size 1078 = graded games in 2026-06-16..09-10 with both lineups posted and '
-        + 'weather_inputs_valid=1, i.e. what a calibration run actually scores. Season-wide the same '
-        + 'filter gives 1976, so the >= 1200 bar is reachable without waiting.\n'
-        + 'NO MEASUREMENT YET. The split only takes effect once runFieldingFrvJob re-runs and replaces the '
-        + 'legacy summed rows with per-position ones; until then the consumer finds the legacy row under '
-        + 'the primary position and behaves as before. On the legacy table the term reports 68.3% exact '
-        + 'position matches, 24.8% position fallbacks and 6.9% unresolved — the fallback share is what '
-        + 'should fall once the per-position ingest has run, and re-measuring that is the first step of '
-        + 'any evaluation.\n'
-        + 'DO NOT FLIP on the pre-split evidence.' },
+        + 'CORPUS CORRECTED 2026-09-13. corpus_size was 1078 and the row claimed that was "what a '
+        + 'calibration run actually scores". It is not: a run on 2026-06-16..09-10 scores 797. The 1078 '
+        + 'counted graded games with both lineups and a weather predicate and stopped there, omitting the '
+        + 'market-contamination filter loadGames applies unconditionally plus three later requirements. '
+        + 'THE FULL CHAIN, in the order calibration-ab.js walks it: (1) graded with both lineups posted '
+        + '1100; (2) weather_inputs_valid (temp_f NOT NULL AND weather_quality_at >= 2026-08-05 23:00 UTC) '
+        + '1078; (3) market_contamination_reason IS NULL -258 -> 852; (4) a woba_data_snapshot row for the '
+        + 'game date -28 (two dates, 2026-06-26 and 2026-07-19, UNBACKFILLABLE); (5) both scores present '
+        + '-24; (6) both market ML present -3; (7) preScreenGame non-null and implied prob usable -0. '
+        + 'USABLE = 797. Quoting step 2 overstates the measurement n by 281 games.\n'
+        + 'THE >= 1200 BAR IS NOT REACHABLE ON THE SEASON TO DATE. Season-wide 2026-04-01..09-12 under the '
+        + 'SAME chain: 2062 graded with lineups, 2006 weather-valid, 1781 after the market filter, and '
+        + '1158 USABLE -- SHORT BY 42. The old row said "season-wide the same filter gives 1976, so the '
+        + 'bar is reachable without waiting"; 1976 was the step-2 partial count, and the real number is '
+        + '1158. The dominant loss is step 4: 589 games over 46 dates (2026-04-04..07-19) have no wOBA '
+        + 'snapshot, which cannot be backfilled -- a snapshot records what that morning looked like. So '
+        + 'the shortfall is closed only by FORWARD dates, at roughly the observed 65% chain survival, and '
+        + 'only while daily snapshots keep landing. A missed snapshot day costs its whole slate '
+        + 'permanently, which makes the 6AM chain gap check (utils/pipeline-freshness.js) a precondition '
+        + 'for this bar rather than a side concern.\n'
+        + 'FALLBACK SHARE MEASURED 2026-09-13 (the row called this the first step of any evaluation, and '
+        + 'it is now done). Post-ingest, through the real term and resolver over 2026-08-16..09-14: 87.9% '
+        + 'exact position matches, 5.8% position fallbacks, 6.3% unresolved on 5614 fielding slots -- '
+        + 'against 68.3 / 24.8 / 6.9 on the legacy table. The fallback share fell 4.3x, as predicted. All '
+        + '356 unresolved are no_frv_row (genuinely absent from Savant), zero name-resolution failures.\n'
+        + 'FIRST A/B, gate window, n=797: delta_log_loss -0.00154, 95% CI [-0.00334, +0.00003]. Better on '
+        + 'log loss, Brier, AUC and edge slope (-0.110 -> +0.066); ECE marginally worse (0.0331 -> 0.0339). '
+        + 'DOES NOT CLEAR THE BAR, on both clauses: the CI includes zero, and 797 < 1200. The window count '
+        + 'is deliberately NOT quoted here -- per the CLAUDE.md sign-test rule it carries no information '
+        + 'at this n without an n-matched resample spread beside it.\n'
+        + 'DO NOT FLIP on the pre-split evidence, and do not flip on the 797-game figure either.' },
 
   { id: 'use_hand_conditional_sp_weight', key: 'use_hand_conditional_sp_weight', on_expected: false,
     criterion: 'Calibration A/B (scripts/calibration-ab.js). Tier-2 sign-test standard: favourable windows at '
