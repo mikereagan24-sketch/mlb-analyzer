@@ -436,7 +436,7 @@ db.exec(`
   -- handedness split, from the FanGraphs splits endpoint with strType '3'.
   -- Shares are stored as FRACTIONS (0..1), normalised at ingest against the
   -- GB+FB+LD=1 identity rather than against an assumption about how FG
-  -- formats them. bip is the per-split sample size; without it the shares
+  -- formats them. sample_tbf is the per-split weight; without it the shares
   -- cannot be weighted, so the ingest refuses to write a row lacking it.
   -- Split is 'vs_lhb' / 'vs_rhb' -- NOT blended, because weighting the two
   -- into one number at ingest would bake in an assumption the consumer
@@ -448,7 +448,13 @@ db.exec(`
     gb_pct REAL,
     fb_pct REAL,
     ld_pct REAL,
-    bip INTEGER NOT NULL DEFAULT 0,
+    -- sample_tbf: BATTERS FACED, not balls in play. The strType=3 panel
+    -- carries no BIP column and no counts to build one from, so TBF is the
+    -- weight. It overcounts the batted-ball sample by the K+BB share,
+    -- which is fine for weighting one pitcher's rates against another's
+    -- and is NOT a batted-ball count. Named for what it is, because a
+    -- column called bip holding TBF is the capture_track='gametime' trap.
+    sample_tbf INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (mlb_id, split)
   );
@@ -464,7 +470,7 @@ db.exec(`
     gb_pct REAL,
     fb_pct REAL,
     ld_pct REAL,
-    bip INTEGER,
+    sample_tbf INTEGER,   -- batters faced; see the note on pitcher_batted_ball
     -- source (2026-09-13): 'prior_season' | 'live'. The series does not
     -- start with 2026 -- a 2025 full-season pull is stamped at
     -- 2026-03-31 so the as-of lookup has something to resolve to for
@@ -1160,6 +1166,20 @@ try { db.exec("ALTER TABLE fielding_frv ADD COLUMN season_end INTEGER"); } catch
 // can exist so far are live captures, and a NULL source on those is read
 // as 'live' by the backfill below rather than being guessed at write time.
 try { db.exec("ALTER TABLE pitcher_batted_ball_snapshot ADD COLUMN source TEXT"); } catch(e) {}
+// bip -> sample_tbf (2026-09-13). The strType=3 panel gives no BIP and no
+// counts to reconstruct one, so the weight is TBF; a column named bip
+// holding batters faced would be a name that lies. Safe as a plain rename:
+// both tables were empty at the time of this change, because every write
+// attempt had failed on the missing BIP column. Guarded and idempotent.
+for (const _t of ['pitcher_batted_ball', 'pitcher_batted_ball_snapshot']) {
+  try {
+    const _cols = db.prepare('PRAGMA table_info(' + _t + ')').all().map(c => c.name);
+    if (_cols.indexOf('bip') > -1 && _cols.indexOf('sample_tbf') === -1) {
+      db.exec('ALTER TABLE ' + _t + ' RENAME COLUMN bip TO sample_tbf');
+      console.log('[schema] ' + _t + ': renamed bip -> sample_tbf');
+    }
+  } catch (e) { console.error('[schema] ' + _t + ' bip rename failed: ' + (e && e.message)); }
+}
 try { db.exec("UPDATE pitcher_batted_ball_snapshot SET source='live' WHERE source IS NULL"); } catch(e) {}
 // fielding_frv PK widening: mlb_id -> (mlb_id, position). (2026-09-12)
 //
@@ -3069,23 +3089,23 @@ q.upsertFieldingFrv = db.prepare(
 // THE SLOT LOOKUP (2026-09-12). Exact (player, position) is what the term
 // should use: a left fielder's FRV at CF is not his FRV in left.
 q.upsertPitcherBattedBall = db.prepare(
-  "INSERT INTO pitcher_batted_ball (mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,updated_at) " +
+  "INSERT INTO pitcher_batted_ball (mlb_id,split,name,gb_pct,fb_pct,ld_pct,sample_tbf,updated_at) " +
   "VALUES (?,?,?,?,?,?,?,datetime('now')) " +
   "ON CONFLICT(mlb_id,split) DO UPDATE SET " +
   "  name=excluded.name, gb_pct=excluded.gb_pct, fb_pct=excluded.fb_pct, " +
-  "  ld_pct=excluded.ld_pct, bip=excluded.bip, updated_at=excluded.updated_at"
+  "  ld_pct=excluded.ld_pct, sample_tbf=excluded.sample_tbf, updated_at=excluded.updated_at"
 );
 q.getPitcherBattedBall = db.prepare(
-  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip FROM pitcher_batted_ball WHERE mlb_id=? AND split=?');
+  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,sample_tbf FROM pitcher_batted_ball WHERE mlb_id=? AND split=?');
 // AS-OF lookup: newest snapshot at or before a game date. This is the one
 // the interaction measurement must use; the live table is current-state and
 // carries hindsight for any past game.
 q.getPitcherBattedBallAsOf = db.prepare(
-  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,snapshot_date,source FROM pitcher_batted_ball_snapshot ' +
+  'SELECT mlb_id,split,name,gb_pct,fb_pct,ld_pct,sample_tbf,snapshot_date,source FROM pitcher_batted_ball_snapshot ' +
   'WHERE mlb_id=? AND split=? AND snapshot_date<=? ORDER BY snapshot_date DESC LIMIT 1');
 q._pbbSnapClearDate = db.prepare('DELETE FROM pitcher_batted_ball_snapshot WHERE snapshot_date=?');
 q._pbbSnapInsert = db.prepare(
-  'INSERT INTO pitcher_batted_ball_snapshot (snapshot_date,mlb_id,split,name,gb_pct,fb_pct,ld_pct,bip,source) ' +
+  'INSERT INTO pitcher_batted_ball_snapshot (snapshot_date,mlb_id,split,name,gb_pct,fb_pct,ld_pct,sample_tbf,source) ' +
   'VALUES (?,?,?,?,?,?,?,?,?)');
 // Replace-the-date, same shape as snapshotFieldingFrv: a re-run on the same
 // day overwrites rather than duplicating or half-updating.
@@ -3098,7 +3118,7 @@ q.snapshotPitcherBattedBall = (snapshotDate, rows, source) => {
         r.gb_pct == null ? null : Number(r.gb_pct),
         r.fb_pct == null ? null : Number(r.fb_pct),
         r.ld_pct == null ? null : Number(r.ld_pct),
-        r.bip == null ? null : Number(r.bip),
+        r.sample_tbf == null ? null : Number(r.sample_tbf),
         r.source || source || 'live');
     }
   });

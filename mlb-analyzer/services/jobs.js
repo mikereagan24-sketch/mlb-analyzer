@@ -8248,7 +8248,7 @@ async function runPitcherBattedBallJob(cookieValue) {
     const tx = db.transaction((rs) => {
       for (const r of rs) {
         q.upsertPitcherBattedBall.run(r.mlb_id, r.split, r.name || null,
-          r.gb_pct, r.fb_pct, r.ld_pct, r.bip || 0);
+          r.gb_pct, r.fb_pct, r.ld_pct, r.sample_tbf || 0);
         applied++;
       }
     });

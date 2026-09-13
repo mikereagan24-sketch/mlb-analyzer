@@ -77,10 +77,10 @@ const realFetch = global.fetch;
 // 4 rows, FG Batted Ball shape: Name/Team/GB%/FB%/LD%/BIP, no xMLBAMID.
 // Shares are percent points, which the GB+FB+LD identity must detect.
 const payload = { data: [
-  { PlayerName: 'Dustin May', Team: 'LAD', 'GB%': 48.5, 'FB%': 30.2, 'LD%': 21.3, BIP: 300 },
-  { PlayerName: 'Jack Flaherty', Team: 'DET', 'GB%': 35.1, 'FB%': 43.6, 'LD%': 21.3, BIP: 280 },
-  { PlayerName: 'Luis Ortiz', Team: null, 'GB%': 44.0, 'FB%': 34.0, 'LD%': 22.0, BIP: 200 },
-  { PlayerName: 'Nobody At All', Team: 'LAD', 'GB%': 40.0, 'FB%': 38.0, 'LD%': 22.0, BIP: 150 },
+  { PlayerName: 'Dustin May', Team: 'LAD', 'GB%': 48.5, 'FB%': 30.2, 'LD%': 21.3, TBF: 300 },
+  { PlayerName: 'Jack Flaherty', Team: 'DET', 'GB%': 35.1, 'FB%': 43.6, 'LD%': 21.3, TBF: 280 },
+  { PlayerName: 'Luis Ortiz', Team: null, 'GB%': 44.0, 'FB%': 34.0, 'LD%': 22.0, TBF: 200 },
+  { PlayerName: 'Nobody At All', Team: 'LAD', 'GB%': 40.0, 'FB%': 38.0, 'LD%': 22.0, TBF: 150 },
 ] };
 global.fetch = async () => ({ ok: true, status: 200, json: async () => payload });
 const fg = require('../services/fangraphs.js');
@@ -106,7 +106,7 @@ let result = null, threw = null;
   check('percent points detected and stored as fractions',
     Number(result.rows[0].gb_pct.toFixed(3)), 0.485);
   check('ids attached', result.rows.map((r) => r.mlb_id).sort(), [111, 222]);
-  check('BIP carried through', result.rows[0].bip, 300);
+  check('TBF carried through as the weight', result.rows[0].sample_tbf, 300);
 
   // And with NO resolver injected, the old failure reappears — which is
   // what makes the injection the fix rather than a coincidence.
@@ -119,6 +119,85 @@ let result = null, threw = null;
   check('and names examples so the next panel change is diagnosable',
     /Sample: /.test(threw2.message), true);
 
+  global.fetch = realFetch;
+
+  console.log('\n3b. the EXACT captured panel key set (dry run 2f88b687)');
+  // Verbatim from the failed dry run, in order. If the parser cannot read
+  // this row set the dry run cannot pass, so this is the check that matters
+  // most in this file:
+  //   Season, playerName, playerId, TeamNameAbb, IP, TBF, GB/FB, LD%, GB%,
+  //   FB%, IFFB%, HR/FB, IFH%, BUH%, Pull%, Cent%, Oppo%, Soft%, Med%, Hard%
+  const CAPTURED_KEYS = ['Season', 'playerName', 'playerId', 'TeamNameAbb', 'IP', 'TBF',
+    'GB/FB', 'LD%', 'GB%', 'FB%', 'IFFB%', 'HR/FB', 'IFH%', 'BUH%',
+    'Pull%', 'Cent%', 'Oppo%', 'Soft%', 'Med%', 'Hard%'];
+  const capturedRow = (name, team, gb, fb, ld, tbf) => ({
+    Season: 2025, playerName: name, playerId: 'sa3008312', TeamNameAbb: team,
+    IP: 180.1, TBF: tbf, 'GB/FB': 1.42, 'LD%': ld, 'GB%': gb, 'FB%': fb,
+    'IFFB%': 0.08, 'HR/FB': 0.11, 'IFH%': 0.06, 'BUH%': 0.2,
+    'Pull%': 0.39, 'Cent%': 0.35, 'Oppo%': 0.26,
+    'Soft%': 0.17, 'Med%': 0.51, 'Hard%': 0.32,
+  });
+  // Both unit conventions, because which one FG serves is still unverified
+  // and the GB+FB+LD identity is what decides it either way.
+  for (const [label, gb, fb, ld] of [
+    ['fractions', 0.485, 0.302, 0.213],
+    ['percent points', 48.5, 30.2, 21.3],
+  ]) {
+    const capRows = [capturedRow('Dustin May', 'LAD', gb, fb, ld, 700),
+      capturedRow('Jack Flaherty', 'DET', gb, fb, ld, 650)];
+    check('captured key set matches the capture (' + label + ')',
+      Object.keys(capRows[0]).sort(), CAPTURED_KEYS.slice().sort());
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ data: capRows }) });
+    delete require.cache[fgPath];
+    const fg2 = require('../services/fangraphs.js');
+    let r2 = null, err2 = null;
+    try {
+      r2 = await fg2.fetchPitcherBattedBall('fake-cookie', {
+        splits: [{ code: 5, split: 'vs_lhb' }],
+        resolveId: (n, t) => fgId.resolvePitcherId(idx, n, t),
+      });
+    } catch (e) { err2 = e; }
+    check('  no throw on the captured panel (' + label + ')',
+      err2 === null ? 'ok' : err2.message, 'ok');
+    check('  both rows resolved (' + label + ')', r2 && r2.stats.resolved, 2);
+    check('  shares normalised to fractions (' + label + ')',
+      r2 && Number(r2.rows[0].gb_pct.toFixed(3)), 0.485);
+    check('  TBF carried as the weight, no reconstructed BIP (' + label + ')',
+      r2 && r2.rows[0].sample_tbf, 700);
+    check('  no bip field on the row (' + label + ')',
+      r2 && Object.prototype.hasOwnProperty.call(r2.rows[0], 'bip'), false);
+    check('  TeamNameAbb reached the resolver (' + label + ')',
+      r2 && r2.stats.from_name_resolver, 2);
+  }
+  // FanGraphs' own playerId must never be taken for an MLBAM id.
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({
+    data: [capturedRow('Nobody At All', 'LAD', 0.44, 0.34, 0.22, 500)] }) });
+  delete require.cache[fgPath];
+  let err3 = null;
+  try {
+    await require('../services/fangraphs.js').fetchPitcherBattedBall('fake-cookie', {
+      splits: [{ code: 5, split: 'vs_lhb' }], resolveId: () => ({ id: null, how: null }),
+    });
+  } catch (e) { err3 = e; }
+  check('an unresolvable row does NOT fall back to FG playerId',
+    !!(err3 && /parsed 0 usable rows/.test(err3.message)), true);
+  // A panel with no TBF must fail naming the missing weight.
+  global.fetch = async () => {
+    const row = capturedRow('Dustin May', 'LAD', 0.485, 0.302, 0.213, 700);
+    delete row.TBF;
+    return { ok: true, status: 200, json: async () => ({ data: [row] }) };
+  };
+  delete require.cache[fgPath];
+  let err4 = null;
+  try {
+    await require('../services/fangraphs.js').fetchPitcherBattedBall('fake-cookie', {
+      splits: [{ code: 5, split: 'vs_lhb' }], resolveId: (n, t) => fgId.resolvePitcherId(idx, n, t),
+    });
+  } catch (e) { err4 = e; }
+  check('a panel without TBF fails naming the missing weight',
+    !!(err4 && /no TBF column to weight by/.test(err4.message)), true);
+  check('  and no longer claims to look for BIP counts',
+    !!(err4 && /reconstruct/.test(err4.message)), false);
   global.fetch = realFetch;
 
   console.log('\n4. the dry run fetches and reports resolved N of M');

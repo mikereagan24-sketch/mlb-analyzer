@@ -53,9 +53,13 @@ live shape is not verified.** It is therefore built to throw — naming the
 keys it actually found — rather than write nulls that look like data:
 
 - no GB%/FB%/LD% column → throw, listing `Object.keys(row)`
-- no BIP column **and** no GB/FB/LD counts to reconstruct it → throw.
-  Sample size is most of the value of a rate; a row without it cannot be
-  weighted, so its absence is fatal rather than null.
+- no `TBF` column → throw. Sample size is most of the value of a rate; a
+  row without it cannot be weighted, so its absence is fatal rather than
+  null. **Superseded 2026-09-13:** this originally looked for a `BIP`
+  column and tried to reconstruct one from GB/FB/LD counts. The real
+  strType=3 panel has neither — it is percentages plus `IP` and `TBF` —
+  so the weight is TBF and the column is `sample_tbf`. See
+  docs/batted-ball-tbf-sample-2026-09-13.md.
 - 0 usable rows parsed → throw, reporting how many lacked an MLBAM id and
   how many had unusable shares
 

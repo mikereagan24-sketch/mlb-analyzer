@@ -108,10 +108,10 @@ registerBackfillTask({
     const written = q.snapshotPitcherBattedBall(SNAPSHOT_DATE, rows, SOURCE);
 
     const bySplit = {};
-    let bipSum = 0;
+    let tbfSum = 0;
     for (const r of rows) {
       bySplit[r.split] = (bySplit[r.split] || 0) + 1;
-      bipSum += Number(r.bip) || 0;
+      tbfSum += Number(r.sample_tbf) || 0;
     }
     const check = db.prepare(
       "SELECT COUNT(*) n, COUNT(DISTINCT mlb_id) pitchers, SUM(source = ?) tagged "
@@ -128,7 +128,7 @@ registerBackfillTask({
       resolution: resStats,
       written: written,
       by_split: bySplit,
-      total_bip: bipSum,
+      total_tbf: tbfSum,
       verification: {
         rows_at_snapshot_date: check.n,
         distinct_pitchers: check.pitchers,
