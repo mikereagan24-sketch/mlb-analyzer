@@ -40,12 +40,32 @@ const PARKS = {
   //                            placeholder; -1° — the only park
   //                            where the placeholder happened to be
   //                            approximately right)
-  //   8 parks remain on the 45° placeholder — all retractable-roof
-  //   or fixed-dome (tor, mia, mil, ari, sea, tex, hou, tb). Closed
-  //   roofs mean no wind reaches the field, so cfDir is unused for
-  //   those cohorts; leaving the placeholder is intentional. All
-  //   open-air parks now have measured bearings, which unblocks the
-  //   per-park sens audit. See docs/park-bearings-audit.md.
+  //   BATCH 4a (2026-09-12) measured the two retractables that play
+  //   OPEN most of the time, from home-plate + CF-fence coordinates,
+  //   same method as batches 2 and 3:
+  //       SEA  45° → 48°  NE  (T-Mobile Park; +3°, 402.4 ft)
+  //       MIL  45° → 128° SE  (American Family;  +83°, 406.6 ft)
+  //   Both distances land in the 395–415 ft window every measured
+  //   bearing has. Coordinate pairs and the independent atan2 /
+  //   haversine check: tmp/verify-batch4a-bearings.js.
+  //
+  //   THE PLACEHOLDER RATIONALE WAS FALSE FOR THESE TWO. "Closed roofs
+  //   mean no wind reaches the field" holds for hou/tex/mia, which play
+  //   open 10–12% of the time. SEA plays open on 97% of its home games
+  //   and MIL on 55%, so their 45° placeholder was live nearly always.
+  //   The cost is measurable: re-deriving MIL's 19 roof-open windy
+  //   games at 128° instead of 45° FLIPS THE SIGN on 5 of them — a
+  //   third of the sample had the wind blowing the other way. SEA's 3°
+  //   correction flips nothing (max |Δwind_factor| 0.004).
+  //
+  //   6 parks remain on the 45° placeholder — tor, mia, ari, tex, hou
+  //   (retractable) and tb (fixed dome, where cfDir is now unreachable
+  //   anyway because computeEffectiveWeather zeroes both channels).
+  //   tor and ari play open 68% and 42% of the time, so the same
+  //   argument applies to them; they are unmeasured only because the
+  //   roof was closed in the available imagery.
+  //
+  //   sens is NOT touched by this batch. See docs/park-bearings-audit.md.
   'chc': { lat:41.94792028864351, lng:-87.6558333825289,  cfDir:38,  sens:2.0, name:'Wrigley Field' },
   'cws': { lat:41.8300, lng:-87.6339, cfDir:5,   sens:1.0, name:'Guaranteed Rate' },
   'nyy': { lat:40.82949062712526, lng:-73.92695841016014, cfDir:75,  sens:1.0, name:'Yankee Stadium' },
@@ -62,7 +82,7 @@ const PARKS = {
   'phi': { lat:39.90558890172053, lng:-75.16660702298513, cfDir:8,   sens:1.5, name:'Citizens Bank' },
   'pit': { lat:40.4469, lng:-80.0058, cfDir:30,  sens:1.2, name:'PNC Park' },
   'cin': { lat:39.097471625086264, lng:-84.5070384836874, cfDir:122, sens:1.0, name:'Great American' },
-  'mil': { lat:43.0280, lng:-87.9712, cfDir:45,  sens:0.2, name:'American Family' },
+  'mil': { lat:43.02843261143977, lng:-87.97165845928563, cfDir:128, sens:0.2, name:'American Family' },
   'stl': { lat:38.6226, lng:-90.1930, cfDir:25,  sens:1.0, name:'Busch Stadium' },
   'col': { lat:39.75570889434178, lng:-104.99420013642896, cfDir:3, sens:0.5, name:'Coors Field' },
   'ari': { lat:33.4453, lng:-112.0667,cfDir:45,  sens:0.2, name:'Chase Field' },
@@ -93,7 +113,7 @@ const PARKS = {
   // coordinates: bearing = 42° NE, only 3° off the 45° placeholder.
   'oak': { lat:38.58020291363677, lng:-121.51406478832237, cfDir:42, sens:1.0, name:'Sutter Health Park' },
   'ath': { lat:38.58020291363677, lng:-121.51406478832237, cfDir:42, sens:1.0, name:'Sutter Health Park' },
-  'sea': { lat:47.5914, lng:-122.3325,cfDir:45,  sens:0.6, name:'T-Mobile Park' },
+  'sea': { lat:47.59111919797947, lng:-122.33291007789138, cfDir:48, sens:0.6, name:'T-Mobile Park' },
   'tex': { lat:32.7512, lng:-97.0832, cfDir:45,  sens:0.1, name:'Globe Life' },
   'hou': { lat:29.7573, lng:-95.3555, cfDir:45,  sens:0.1, name:'Minute Maid' },
   'laa': { lat:33.799920691495615, lng:-117.88316982446123, cfDir:44, sens:0.8, name:'Angel Stadium' },

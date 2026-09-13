@@ -22,8 +22,20 @@ Summary as of 2026-08-18:
   refined Wrigley from home-plate + CF-fence coordinates; batch 3
   (2026-08-18) measured the remaining 7 open-air parks (nym, min,
   atl, col, lad, laa, sd).
-- **8 roofed / fixed-dome parks — intentionally on 45° placeholder**
-  (tor, mia, mil, ari, sea, tex, hou, tb). Closed roofs mean no wind
+- **Batch 4a (2026-09-12): sea and mil measured.** The two retractables
+  that play roof-open most often (SEA 97% of home games, MIL 55%), so
+  their placeholder was live nearly always and the "closed roofs mean no
+  wind" rationale did not hold for them. SEA 45° → 48° (402.4 ft), MIL
+  45° → 128° (406.6 ft). MIL's correction flips the sign of wind_factor on
+  5 of its 19 roof-open windy games. Artifact:
+  `tmp/verify-batch4a-bearings.js`.
+  FIRST ATTEMPT FAILED THE DISTANCE CHECK AND WAS NOT SHIPPED: using the
+  coarse PARKS lat/lng as the origin (sea 4dp, mil 3dp latitude — the
+  original weather-grid coords) gave 259 ft and 219 ft. Batches 2 and 3
+  re-measured HOME PLATE as well as CF, which is why their pairs carry ~14
+  decimal places at both ends. Any future batch must re-read both.
+- **6 roofed / fixed-dome parks — intentionally on 45° placeholder**
+  (tor, mia, ari, tex, hou, tb). Closed roofs mean no wind
   reaches the field, so `cfDir` is unused for those cohorts.
 - **Method:** great-circle initial bearing from home-plate to
   center-field coordinates read off Google Maps satellite,

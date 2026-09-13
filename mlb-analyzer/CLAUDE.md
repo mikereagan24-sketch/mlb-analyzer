@@ -1159,6 +1159,43 @@ Differences from the park-factor boundary worth keeping straight:
 exclude these rows by name with the count printed, rather than dropping
 them silently.
 
+### And a THIRD, at 2026-09-12: bearing batch 4a (sea, mil)
+
+**`cfDir` moved again — `sea` 45° → 48° and `mil` 45° → 128°** — so there
+are now three wind regimes, not two, and a corpus-wide re-derivation
+crossing 2026-09-12 pools them the same way one crossing 2026-08-18 does.
+
+The two are not equally consequential, and the difference is the point:
+
+```
+park  change      roof-open windy games   sign flips   max |d wind_factor|
+sea   45 -> 48°            19                 0              0.004  (0.01 runs)
+mil   45 -> 128°           19                 5              0.081  (0.16 runs)
+```
+
+**`mil` had the wind blowing the wrong way on 5 of 19 games.** `sea`'s
+correction is cosmetic. A regime boundary is not automatically material —
+but you cannot know which kind you have without measuring it, and the
+measurement is three lines of re-derivation.
+
+**THE LIST OF REGIME PARKS NOW LIVES IN ONE PLACE**,
+`utils/bearing-regimes.js`, with each park's batch and date. It was
+hardcoded in two test files before 4a and a third copy was about to be
+added; any check that re-derives stored wind needs it to tell a regime
+artifact from a code defect.
+
+**Checks should assert the invariant, not a count.** The badge test used to
+assert the number of non-re-deriving rows was `> 0 && <= 10`. Batch 4a
+pushed it over the bound, and the failure said nothing true — the bound was
+never the property being tested. It now asserts that every drifting park is
+a known regime park, which is the actual invariant and needs no editing
+when the next batch lands.
+
+**Six parks remain on the placeholder** — `tor`, `mia`, `ari`, `tex`, `hou`
+and `tb`. `tor` (68% roof-open) and `ari` (42%) carry the same exposure
+`mil` did and are unmeasured only because the roof was closed in the
+available imagery.
+
 ## Park factors are evaluated on TOTALS, never on the ML target (2026-08-25)
 
 **The ML calibration A/B is structurally blind to park factor.** Measured:
