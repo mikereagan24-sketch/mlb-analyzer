@@ -100,5 +100,67 @@ for (const k of CHAIN) {
 check('synthetic: the lone 2026-05-01 capture produced no phantom gaps',
   memRun.rows.filter((x) => x.key === CHAIN[0])[0].gaps.missingCount, 1);
 
+console.log('');
+console.log('6. pitcher_batted_ball_snapshot freshness counts LIVE captures only');
+// FOUNDING INSTANCE 2026-09-13: the prior_season backfill landed 626 rows
+// stamped 2026-03-31 and /health went CRITICAL +166d on a pipeline whose
+// live sync had never run once. An unfiltered MAX(snapshot_date) cannot
+// tell a fixed historical load from a capture of that day.
+const pbb = PIPELINES.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
+check('the freshness query filters on source',
+  pbb.sql.indexOf("source = 'live'") > -1, true);
+check('it is still flagged awaitingFirstRun', pbb.awaitingFirstRun, true);
+
+// The states, on the real column shape. APRIL GAME DATES MATTER: they are
+// what a wrongly-placed era start would report as phantom gaps, so a
+// fixture without them cannot tell the era rule working from the fixture
+// simply having nothing to find.
+function pbbFixture(rows, gameDates) {
+  const m = new Database(':memory:');
+  m.exec('CREATE TABLE game_log (game_date TEXT);'
+    + 'CREATE TABLE pitcher_batted_ball_snapshot (snapshot_date TEXT, source TEXT);');
+  const ag = m.prepare('INSERT INTO game_log VALUES (?)');
+  const days = gameDates
+    || ['2026-04-15', '2026-06-20', '2026-09-10', '2026-09-11', '2026-09-12'];
+  for (const d of days) for (let i = 0; i < 12; i++) ag.run(d);
+  const ins = m.prepare('INSERT INTO pitcher_batted_ball_snapshot VALUES (?,?)');
+  for (const r of rows) ins.run(r[0], r[1]);
+  const run = checkPipelineFreshness(m, '2026-09-12');
+  return run.rows.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
+}
+
+const priorOnly = pbbFixture([['2026-03-31', 'prior_season']]);
+check('prior_season only -> STALE (awaiting), not the +166d CRITICAL',
+  [priorOnly.level, priorOnly.last], ['STALE', null]);
+// The message is the other half of the fix: 626 rows ARE in the table, so
+// the generic no-rows text would be a sentence that reads true and is not.
+check('...and its detail does not claim the table is empty',
+  [priorOnly.detail.indexOf('no LIVE capture yet') > -1,
+   priorOnly.detail.indexOf('no rows') > -1], [true, false]);
+
+const withLive = pbbFixture([['2026-03-31', 'prior_season'], ['2026-09-12', 'live']]);
+check('a live capture today -> ok, and the live date is what was read',
+  [withLive.level, withLive.last], ['ok', '2026-09-12']);
+
+const staleLive = pbbFixture([['2026-03-31', 'prior_season'], ['2026-09-05', 'live']]);
+check('a LATE live capture still escalates -- the filter did not mute the check',
+  staleLive.level, 'CRITICAL');
+
+// The gap query is deliberately NOT filtered; the era rule already
+// excludes 2026-03-31 because the first live capture is ~166 days from it.
+// This pair is what keeps that true: same April and June game dates in
+// both, and the only difference is a second prior_season date.
+const gapShape = pbbFixture([['2026-03-31', 'prior_season'],
+  ['2026-09-10', 'live'], ['2026-09-11', 'live'], ['2026-09-12', 'live']]);
+check('one prior_season date -> no phantom gaps, though April and June games exist',
+  [gapShape.gaps.missingCount, gapShape.gaps.level], [0, 'ok']);
+const twoPrior = pbbFixture([['2026-03-31', 'prior_season'], ['2026-04-02', 'prior_season'],
+  ['2026-09-10', 'live'], ['2026-09-11', 'live'], ['2026-09-12', 'live']]);
+check('DOCUMENTED LIMIT: two prior_season dates within cadence start the era early',
+  twoPrior.gaps.missing.map(function (g) { return g.date; }),
+  ['2026-04-15', '2026-06-20']);
+console.log('     (one fixed SNAPSHOT_DATE per historical load keeps that unreachable;'
+  + ' a second load would need a source predicate in the gap query)');
+
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);
