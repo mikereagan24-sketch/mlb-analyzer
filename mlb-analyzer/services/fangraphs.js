@@ -378,6 +378,14 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
   const o = opts || {};
   const splits = o.splits || [{ code: 5, split: 'vs_lhb' }, { code: 6, split: 'vs_rhb' }];
   const out = [];
+
+  // Resolution accounting, returned alongside the rows so a DRY RUN can
+  // report 'resolved N of M' and the next panel change fails there instead
+  // of live. The first failure of this job was a live run discovering that
+  // the id column it expected did not exist.
+  const stats = { fetched: 0, resolved: 0, unresolved: 0, bad_shares: 0,
+                  from_payload_id: 0, from_name_resolver: 0, per_split: {} };
+  const unresolvedSample = [];
   for (const sp of splits) {
     // opts.start/opts.end thread through to the window; omitted, the
     // rolling two-year default applies exactly as before.
@@ -391,10 +399,30 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
           + '% column. Keys present: ' + Object.keys(sample).join(','));
       }
     }
-    let badShares = 0, noId = 0;
+    let badShares = 0, noId = 0, fromPayload = 0, fromResolver = 0;
     for (const r of rows) {
-      const mlb_id = parseInt(_pick(r, ['xMLBAMID', 'MLBAMID', 'mlbamid']), 10);
-      if (!mlb_id) { noId++; continue; }
+      // The Batted Ball panel does NOT carry xMLBAMID -- that is what made
+      // the first live run fail with 362 of 362 rows id-less. Prefer a
+      // payload id if FG ever adds one, otherwise fall back to the
+      // caller-injected name resolver. The resolver is injected rather than
+      // imported so this module keeps no database dependency.
+      let mlb_id = parseInt(_pick(r, ['xMLBAMID', 'MLBAMID', 'mlbamid']), 10);
+      const fgName = _pick(r, ['PlayerName', 'Name', 'playerName']) || null;
+      const fgTeam = _pick(r, ['Team', 'team', 'TeamName']) || null;
+      if (mlb_id) {
+        fromPayload++;
+      } else if (typeof o.resolveId === 'function') {
+        const got = o.resolveId(fgName, fgTeam);
+        mlb_id = got && got.id ? got.id : (typeof got === 'number' ? got : 0);
+        if (mlb_id) fromResolver++;
+      }
+      if (!mlb_id) {
+        noId++;
+        if (unresolvedSample.length < 15) {
+          unresolvedSample.push({ split: sp.split, name: fgName, team: fgTeam });
+        }
+        continue;
+      }
       const gbRaw = parseFloat(_pick(r, _BB_KEYS.gb));
       const fbRaw = parseFloat(_pick(r, _BB_KEYS.fb));
       const ldRaw = parseFloat(_pick(r, _BB_KEYS.ld));
@@ -417,22 +445,39 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
       }
       out.push({
         mlb_id: mlb_id,
-        name: _pick(r, ['PlayerName', 'Name', 'playerName']) || null,
+        name: fgName,
         split: sp.split,
         gb_pct: norm.gb, fb_pct: norm.fb, ld_pct: norm.ld,
         bip: Math.round(bip),
       });
     }
-    if (!out.length) {
-      throw new Error('FG batted-ball split ' + sp.code + ': parsed 0 usable rows from '
-        + rows.length + ' (' + noId + ' without an MLBAM id, ' + badShares + ' with shares that sum to neither 1 nor 100)');
-    }
-    if (badShares || noId) {
-      console.warn('[fg-bb] split ' + sp.code + ': skipped ' + noId + ' row(s) with no MLBAM id, '
-        + badShares + ' with unusable shares');
-    }
+    const resolvedThisSplit = rows.length - noId - badShares;
+    stats.fetched += rows.length;
+    stats.resolved += resolvedThisSplit;
+    stats.unresolved += noId;
+    stats.bad_shares += badShares;
+    stats.from_payload_id += fromPayload;
+    stats.from_name_resolver += fromResolver;
+    stats.per_split[sp.split] = { fetched: rows.length, resolved: resolvedThisSplit,
+                                  unresolved: noId, bad_shares: badShares };
+    console.log('[fg-bb] split ' + sp.code + ' (' + sp.split + '): resolved '
+      + resolvedThisSplit + ' of ' + rows.length
+      + ' (' + fromPayload + ' by payload id, ' + fromResolver + ' by name, '
+      + noId + ' unresolved, ' + badShares + ' unusable shares)');
   }
-  return out;
+
+  // A split that resolves NOTHING is a shape failure, not thin data, and
+  // it must not be written. Reported with counts so the message names the
+  // gap rather than just refusing.
+  if (!out.length) {
+    throw new Error('FG batted-ball: parsed 0 usable rows from ' + stats.fetched
+      + ' (' + stats.unresolved + ' unresolved to an MLBAM id, ' + stats.bad_shares
+      + ' with shares summing to neither 1 nor 100)'
+      + (unresolvedSample.length ? '. Sample: '
+        + unresolvedSample.slice(0, 5).map((u) => u.name + '/' + u.team).join(', ') : ''));
+  }
+  stats.unresolved_sample = unresolvedSample;
+  return { rows: out, stats: stats };
 }
 
 // --- Main orchestrator ---

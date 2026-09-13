@@ -33,7 +33,7 @@
 # credential in version control and should be rotated in the Render
 # dashboard. Do not copy the pattern here.
 #
-#   export MLB_ADMIN_TOKEN=...
+#   export DB_DOWNLOAD_TOKEN=...      # or MLB_ADMIN_TOKEN (older name)
 #   bash scripts/refresh-analysis-db.sh              # download + compare only
 #   bash scripts/refresh-analysis-db.sh --promote    # ...and promote + re-apply
 
@@ -47,15 +47,66 @@ SNAP="data/mlb.db.prod-${STAMP}"
 PROMOTE=0
 [ "${1:-}" = "--promote" ] && PROMOTE=1
 
-if [ -z "${MLB_ADMIN_TOKEN:-}" ]; then
-  echo "MLB_ADMIN_TOKEN is not set. export it first; it is not stored here." >&2
+# TWO ACCEPTED VARIABLE NAMES, and the script says which one it used.
+# (2026-09-13)
+#
+# The server compares against DB_DOWNLOAD_TOKEN (routes/api.js
+# requireAdminToken). This script only ever read MLB_ADMIN_TOKEN, so
+# exporting the name the server documents did nothing -- and if a ROTATED
+# MLB_ADMIN_TOKEN was still sitting in the shell it won silently and the
+# download came back 401. That is what happened on 2026-09-13, and the
+# rotation is recorded in docs/the-outage-that-was-not-2026-08-24.md
+# ("the value read this morning now returns 401 on every admin endpoint").
+#
+# The deliberate decision being preserved is "READ FROM THE ENVIRONMENT,
+# NEVER HARDCODE" -- the owner's untracked refresh-db.sh carries a literal
+# token, which is the pattern this script exists not to copy. Accepting a
+# second variable name does not weaken that at all.
+#
+# DB_DOWNLOAD_TOKEN wins when both are set, because it is the name the
+# server and the API docs use; MLB_ADMIN_TOKEN stays supported so existing
+# shells keep working. Either way the name is echoed, so a stale value can
+# no longer be used without the operator seeing which variable supplied it.
+TOKEN=""
+TOKEN_VAR=""
+if [ -n "${DB_DOWNLOAD_TOKEN:-}" ]; then
+  TOKEN="${DB_DOWNLOAD_TOKEN}"; TOKEN_VAR="DB_DOWNLOAD_TOKEN"
+elif [ -n "${MLB_ADMIN_TOKEN:-}" ]; then
+  TOKEN="${MLB_ADMIN_TOKEN}"; TOKEN_VAR="MLB_ADMIN_TOKEN"
+fi
+if [ -z "${TOKEN}" ]; then
+  echo "No admin token in the environment. Export ONE of these first; neither is stored here:" >&2
+  echo "  export DB_DOWNLOAD_TOKEN=...   # the name the server uses (preferred)" >&2
+  echo "  export MLB_ADMIN_TOKEN=...     # older name, still accepted" >&2
   exit 2
+fi
+if [ -n "${DB_DOWNLOAD_TOKEN:-}" ] && [ -n "${MLB_ADMIN_TOKEN:-}" ] \
+   && [ "${DB_DOWNLOAD_TOKEN}" != "${MLB_ADMIN_TOKEN}" ]; then
+  echo "NOTE both DB_DOWNLOAD_TOKEN and MLB_ADMIN_TOKEN are set and they DIFFER;" >&2
+  echo "     using DB_DOWNLOAD_TOKEN. If the download 401s, the other one is stale." >&2
 fi
 
 echo "=== 1/5 downloading production -> ${SNAP} ==="
-curl -sS -f --max-time 1800 -H "X-Admin-Token: ${MLB_ADMIN_TOKEN}" \
-  -o "${SNAP}" -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s\n' \
-  "${HOST}/api/admin/download-db"
+echo "    host=${HOST}  header=X-Admin-Token  token from \$${TOKEN_VAR}"
+HTTP_CODE="$(curl -sS --max-time 1800 -H "X-Admin-Token: ${TOKEN}" \
+  -o "${SNAP}" -w '%{http_code}' \
+  "${HOST}/api/admin/download-db" || echo "000")"
+echo "    http=${HTTP_CODE} bytes=$(wc -c < "${SNAP}" 2>/dev/null || echo 0)"
+# A 401 used to arrive as a bare curl failure under -f, which said nothing
+# about WHICH credential was rejected. Name it, and remove the partial file
+# so a rejected download can never be mistaken for a snapshot.
+if [ "${HTTP_CODE}" != "200" ]; then
+  rm -f "${SNAP}"
+  case "${HTTP_CODE}" in
+    401) echo "DOWNLOAD REJECTED (401): the token in \$${TOKEN_VAR} is not what the server expects." >&2
+         echo "  The server compares against its own DB_DOWNLOAD_TOKEN env var (Render dashboard)." >&2
+         echo "  If \$${TOKEN_VAR} was exported a while ago it may be a rotated value." >&2 ;;
+    503) echo "DOWNLOAD UNAVAILABLE (503): the server has no DB_DOWNLOAD_TOKEN configured." >&2 ;;
+    000) echo "DOWNLOAD FAILED: could not reach ${HOST}." >&2 ;;
+    *)   echo "DOWNLOAD FAILED (http ${HTTP_CODE})." >&2 ;;
+  esac
+  exit 3
+fi
 
 echo "=== 2/5 integrity check (a truncated download must never reach mlb.db) ==="
 "$NODE" -e '
