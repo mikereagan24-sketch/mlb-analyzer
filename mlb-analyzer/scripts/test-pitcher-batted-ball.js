@@ -48,8 +48,15 @@ if (fetchSitesOnMain != null) {
   check('added no new authenticated fetch site (' + fetchSitesOnMain + ' on main)',
     (fgSrc.match(/await fetch\(url/g) || []).length, fetchSitesOnMain);
 }
-check('batted-ball goes through fetchActualSplit',
-  /fetchActualSplit\(sp\.code, 'P', cookieValue, \{ strType: '3', raw: true \}\)/.test(fgSrc), true);
+// Asserted on the ARGUMENTS, not the line layout — the first version of
+// this pinned the exact one-line formatting and broke the moment the call
+// gained the start/end passthrough, which told me nothing true.
+const bbCall = fgSrc.slice(fgSrc.indexOf('const rows = await fetchActualSplit('),
+  fgSrc.indexOf('const rows = await fetchActualSplit(') + 220);
+check('batted-ball goes through fetchActualSplit', /fetchActualSplit\(/.test(bbCall), true);
+check('  asking for the batted-ball panel', /strType: '3'/.test(bbCall), true);
+check('  as raw rows', /raw: true/.test(bbCall), true);
+check('  for pitchers', /'P'/.test(bbCall), true);
 
 console.log('\n2. units are decided by GB+FB+LD, not by assumption');
 const n = fg._normaliseShares;
@@ -132,6 +139,61 @@ broken.exec('CREATE TABLE game_log (game_date TEXT)');
 const brokenRow = checkPipelineFreshness(broken, '2026-09-12')
   .rows.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
 check('a QUERY ERROR is still CRITICAL despite the flag', brokenRow.level, 'CRITICAL');
+
+console.log('\n8. the 2025 prior-season backfill');
+const prior = require('../services/backfill-tasks/pitcher-batted-ball-prior-season');
+check('stamped 2026-03-31 so every 2026 game date resolves to it', prior.SNAPSHOT_DATE, '2026-03-31');
+check('tagged prior_season', prior.SOURCE, 'prior_season');
+// A FIXED window, not derived from today: a rolling one would return a
+// different corpus on every re-run, which is the opposite of a
+// reproducible historical load.
+check('window is fixed 2025, not rolling',
+  [prior.PRIOR_SEASON_START, prior.PRIOR_SEASON_END], ['2025-03-01', '2025-11-30']);
+const bj = require('../services/backfill-jobs');
+check('reachable via POST /admin/backfill/...',
+  !!bj.getBackfillTask('pitcher_batted_ball_prior_season'), true);
+check('source column exists on the live table',
+  db.prepare('PRAGMA table_info(pitcher_batted_ball_snapshot)').all()
+    .map((c) => c.name).indexOf('source') > -1, true);
+// The date-range override must not disturb the default path.
+check('fetchActualSplit keeps the rolling window when start/end are absent',
+  /\(o\.start && o\.end\) \? \{ start: o\.start, end: o\.end \} : twoYearDateRange\(\)/.test(fgSrc), true);
+check('the live job tags its own rows live',
+  /snapshotPitcherBattedBall\(dateStr, rows, 'live'\)/.test(read('services/jobs.js')), true);
+
+console.log('\n9. as-of resolution across the prior/live boundary');
+const mem2 = new Database(':memory:');
+mem2.exec(`CREATE TABLE pitcher_batted_ball_snapshot (
+  snapshot_date TEXT NOT NULL, mlb_id INTEGER NOT NULL, split TEXT NOT NULL,
+  name TEXT, gb_pct REAL, fb_pct REAL, ld_pct REAL, bip INTEGER, source TEXT,
+  PRIMARY KEY (snapshot_date, mlb_id, split))`);
+const ins2 = mem2.prepare('INSERT INTO pitcher_batted_ball_snapshot VALUES (?,?,?,?,?,?,?,?,?)');
+// Pitcher 701: a 2025 profile plus a live capture in September.
+ins2.run('2026-03-31', 701, 'vs_rhb', 'GB guy', 0.52, 0.27, 0.21, 400, 'prior_season');
+ins2.run('2026-09-12', 701, 'vs_rhb', 'GB guy', 0.47, 0.32, 0.21, 250, 'live');
+// Pitcher 702: a 2025 profile only — a different pitcher, so BETWEEN-pitcher
+// variation exists from opening day.
+ins2.run('2026-03-31', 702, 'vs_rhb', 'FB guy', 0.33, 0.46, 0.21, 380, 'prior_season');
+// Pitcher 999: a 2026 rookie, no row anywhere.
+const asOf2 = mem2.prepare('SELECT gb_pct, snapshot_date, source FROM pitcher_batted_ball_snapshot '
+  + 'WHERE mlb_id=? AND split=? AND snapshot_date<=? ORDER BY snapshot_date DESC LIMIT 1');
+check('an April 2026 game resolves to the 2025 profile',
+  [asOf2.get(701, 'vs_rhb', '2026-04-15').source, asOf2.get(701, 'vs_rhb', '2026-04-15').gb_pct],
+  ['prior_season', 0.52]);
+check('a game after the first live capture resolves to the live one',
+  [asOf2.get(701, 'vs_rhb', '2026-09-13').source, asOf2.get(701, 'vs_rhb', '2026-09-13').gb_pct],
+  ['live', 0.47]);
+check('BETWEEN-pitcher variation exists in April (0.52 vs 0.33 GB%)',
+  asOf2.get(701, 'vs_rhb', '2026-04-15').gb_pct !== asOf2.get(702, 'vs_rhb', '2026-04-15').gb_pct, true);
+// The constraint the methodology note exists for: across the pre-live
+// stretch a given pitcher's value never moves.
+check('NO within-season drift before the first live capture',
+  [asOf2.get(701, 'vs_rhb', '2026-04-15').gb_pct, asOf2.get(701, 'vs_rhb', '2026-08-31').gb_pct],
+  [0.52, 0.52]);
+check('a rookie with no 2025 row resolves to nothing — null, not zero',
+  asOf2.get(999, 'vs_rhb', '2026-04-15'), undefined);
+check('a game before the prior-season stamp resolves to nothing',
+  asOf2.get(701, 'vs_rhb', '2026-03-01'), undefined);
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

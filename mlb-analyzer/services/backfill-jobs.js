@@ -160,3 +160,4 @@ require('./backfill-tasks/weather-backfill-season');
 require('./backfill-tasks/weather-contamination-naive-hour');
 require('./backfill-tasks/weather-contamination-ari-roof');
 require('./backfill-tasks/weather-contamination-fixed-dome');
+require('./backfill-tasks/pitcher-batted-ball-prior-season');
