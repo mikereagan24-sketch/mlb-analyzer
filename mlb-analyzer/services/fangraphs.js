@@ -353,8 +353,25 @@ const _BB_KEYS = {
   fb: ['FB%', 'FBpct', 'fb_pct', 'FB_pct'],
   ld: ['LD%', 'LDpct', 'ld_pct', 'LD_pct'],
 };
-const _BB_BIP_KEYS = ['BIP', 'Balls', 'BallsInPlay', 'balls_in_play'];
-const _BB_COUNT_KEYS = { gb: ['GB'], fb: ['FB'], ld: ['LD'] };
+// SAMPLE SIZE IS TBF, AND IT IS NOT BALLS IN PLAY. (2026-09-13)
+//
+// Captured key set of the strType=3 panel, from the failed dry run 2f88b687:
+//   Season, playerName, playerId, TeamNameAbb, IP, TBF, GB/FB, LD%, GB%,
+//   FB%, IFFB%, HR/FB, IFH%, BUH%, Pull%, Cent%, Oppo%, Soft%, Med%, Hard%
+//
+// Percentages only -- no BIP column and no GB/FB/LD counts to reconstruct
+// one from, which is what the previous version died on. TBF is the
+// sample-size field the panel does carry.
+//
+// TBF OVERCOUNTS THE BATTED-BALL SAMPLE by the strikeout-plus-walk share:
+// a batter faced who strikes out or walks never puts a ball in play. For
+// WEIGHTING one pitcher's rates against another's that is adequate -- the
+// overcount is roughly proportional across pitchers and the weight only
+// has to rank sample reliability. It would NOT be adequate for anything
+// that needs a batted-ball count as a quantity. The column is named
+// sample_tbf rather than bip so nothing downstream can read it as one.
+const _BB_SAMPLE_KEYS = ['TBF', 'tbf'];
+
 
 function _pick(row, keys) {
   for (const k of keys) {
@@ -406,9 +423,15 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
       // payload id if FG ever adds one, otherwise fall back to the
       // caller-injected name resolver. The resolver is injected rather than
       // imported so this module keeps no database dependency.
+      // NOTE the panel carries `playerId` -- that is FANGRAPHS' own id and
+      // must never be read as an MLBAM id. Only the xMLBAMID spellings
+      // count here; everything else goes through the name resolver.
       let mlb_id = parseInt(_pick(r, ['xMLBAMID', 'MLBAMID', 'mlbamid']), 10);
       const fgName = _pick(r, ['PlayerName', 'Name', 'playerName']) || null;
-      const fgTeam = _pick(r, ['Team', 'team', 'TeamName']) || null;
+      // TeamNameAbb is what this panel actually calls it; without it every
+      // row resolved team-less and the name+team disambiguation in
+      // utils/fg-pitcher-id.js could never fire.
+      const fgTeam = _pick(r, ['TeamNameAbb', 'Team', 'team', 'TeamName']) || null;
       if (mlb_id) {
         fromPayload++;
       } else if (typeof o.resolveId === 'function') {
@@ -429,26 +452,21 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
       if (!isFinite(gbRaw) || !isFinite(fbRaw) || !isFinite(ldRaw)) { badShares++; continue; }
       const norm = _normaliseShares(gbRaw, fbRaw, ldRaw);
       if (!norm) { badShares++; continue; }
-      // BIP: prefer a stated count, else reconstruct from the three
-      // batted-ball counts. Without it the shares cannot be weighted, which
-      // is most of their value, so an absence is fatal rather than null.
-      let bip = parseFloat(_pick(r, _BB_BIP_KEYS));
-      if (!isFinite(bip)) {
-        const g = parseFloat(_pick(r, _BB_COUNT_KEYS.gb));
-        const f = parseFloat(_pick(r, _BB_COUNT_KEYS.fb));
-        const l = parseFloat(_pick(r, _BB_COUNT_KEYS.ld));
-        if (isFinite(g) && isFinite(f) && isFinite(l)) bip = g + f + l;
-      }
-      if (!isFinite(bip)) {
-        throw new Error('FG batted-ball split ' + sp.code + ': no BIP column and no GB/FB/LD'
-          + ' counts to reconstruct it from. Keys present: ' + Object.keys(sample).join(','));
+      // Sample size: TBF. No reconstruction is attempted -- the panel has
+      // no counts to reconstruct from, and guessing one would be inventing
+      // a quantity. Absent TBF is still fatal, because a rate with no
+      // weight cannot be combined across pitchers.
+      const sampleTbf = parseFloat(_pick(r, _BB_SAMPLE_KEYS));
+      if (!isFinite(sampleTbf)) {
+        throw new Error('FG batted-ball split ' + sp.code + ': no TBF column to weight by.'
+          + ' Keys present: ' + Object.keys(sample).join(','));
       }
       out.push({
         mlb_id: mlb_id,
         name: fgName,
         split: sp.split,
         gb_pct: norm.gb, fb_pct: norm.fb, ld_pct: norm.ld,
-        bip: Math.round(bip),
+        sample_tbf: Math.round(sampleTbf),
       });
     }
     const resolvedThisSplit = rows.length - noId - badShares;

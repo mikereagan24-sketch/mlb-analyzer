@@ -72,7 +72,7 @@ console.log('\n3. storage: splits kept apart, as-of cannot see the future');
 const mem = new Database(':memory:');
 mem.exec(`CREATE TABLE pitcher_batted_ball_snapshot (
   snapshot_date TEXT NOT NULL, mlb_id INTEGER NOT NULL, split TEXT NOT NULL,
-  name TEXT, gb_pct REAL, fb_pct REAL, ld_pct REAL, bip INTEGER,
+  name TEXT, gb_pct REAL, fb_pct REAL, ld_pct REAL, sample_tbf INTEGER,
   PRIMARY KEY (snapshot_date, mlb_id, split))`);
 const ins = mem.prepare('INSERT INTO pitcher_batted_ball_snapshot VALUES (?,?,?,?,?,?,?,?)');
 ins.run('2026-08-01', 700, 'vs_lhb', 'P', 0.55, 0.25, 0.20, 300);
@@ -165,7 +165,7 @@ console.log('\n9. as-of resolution across the prior/live boundary');
 const mem2 = new Database(':memory:');
 mem2.exec(`CREATE TABLE pitcher_batted_ball_snapshot (
   snapshot_date TEXT NOT NULL, mlb_id INTEGER NOT NULL, split TEXT NOT NULL,
-  name TEXT, gb_pct REAL, fb_pct REAL, ld_pct REAL, bip INTEGER, source TEXT,
+  name TEXT, gb_pct REAL, fb_pct REAL, ld_pct REAL, sample_tbf INTEGER, source TEXT,
   PRIMARY KEY (snapshot_date, mlb_id, split))`);
 const ins2 = mem2.prepare('INSERT INTO pitcher_batted_ball_snapshot VALUES (?,?,?,?,?,?,?,?,?)');
 // Pitcher 701: a 2025 profile plus a live capture in September.
