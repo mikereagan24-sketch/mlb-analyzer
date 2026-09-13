@@ -70,6 +70,11 @@ function todayPt() {
  *                   are behind the newest. Only meaningful for tables
  *                   upserted per entity (per catcher, per player, per
  *                   team), where a partial refresh leaves a stale tail.
+ *   awaitingDetail  OPTIONAL. Replaces the generic no-rows detail text on
+ *                   the awaitingFirstRun path. Needed when the table is
+ *                   NOT literally empty: pitcher_batted_ball_snapshot holds
+ *                   prior_season rows while awaiting its first live
+ *                   capture, and "no rows yet" would be false.
  *   awaitingFirstRun OPTIONAL. Table exists but has never been written.
  *                   Reports STALE rather than CRITICAL on the no-rows
  *                   path only, for a capture that ships before its first
@@ -315,13 +320,45 @@ const PIPELINES = [
     // as-of lookup that the interaction measurement depends on silently
     // reaches further back on a missing date rather than failing.
     key: 'pitcher_batted_ball_snapshot',
-    awaitingFirstRun: true,   // cleared by reality on the first sync; see the no-rows branch
-    sql: 'SELECT MAX(snapshot_date) v FROM pitcher_batted_ball_snapshot',
+    awaitingFirstRun: true,   // cleared by reality on the first LIVE sync; see the no-rows branch
+    // FRESHNESS COUNTS LIVE CAPTURES ONLY. (2026-09-13) The 2025 backfill
+    // writes 626 rows stamped snapshot_date 2026-03-31, source='prior_season'
+    // -- a fixed historical load, not a capture of what happened that day.
+    // An unfiltered MAX(snapshot_date) read it as the last arrival and
+    // reported CRITICAL +166d on /health the moment the backfill landed,
+    // which is a red row nothing can act on: no live sync has run yet, and
+    // none was late.
+    //
+    // The filter puts the pipeline back on the awaitingFirstRun path, which
+    // is the truth -- it shipped before its first cron fired. It still
+    // self-disarms on the first live row, and a prior_season row can no
+    // longer either satisfy the check or hold it red.
+    sql: "SELECT MAX(snapshot_date) v FROM pitcher_batted_ball_snapshot WHERE source = 'live'",
+    // ...and the empty-path message must not say 'no rows' while 626 sit in
+    // the table. A detail line that reads as a fact and is not one is the
+    // same defect as a column named bip holding batters faced.
+    // Worded to hold on a database where NEITHER job has run as well as on
+    // one carrying the backfill: a laptop copy has 0 rows in this table, so
+    // "the prior_season rows are present" would be the false half of a
+    // sentence whose other half is the thing being reported.
+    awaitingDetail: 'no LIVE capture yet -- awaiting the first wOBA-sync run. '
+        + "prior_season rows (snapshot_date 2026-03-31) do NOT count toward "
+        + 'freshness; the as-of lookup resolves to them where they exist',
     zone: 'PT-date', expectedLagDays: 0, warnDays: 2, critDays: 3,
     note: 'pitcher GB%/FB%/LD% freezes; the as-of lookup silently serves an older profile',
     gaps: {
       sql: snapshotGapSql('pitcher_batted_ball_snapshot'),
       recentDays: 7, warnCount: 1, critCount: 2,
+      // DELIBERATELY UNFILTERED, unlike the freshness query above. The era
+      // rule already excludes the prior_season date: the era starts at the
+      // first capture whose NEXT capture is within cadence, and 2026-03-31
+      // is ~166 days from the first live one. Measured on the real shape in
+      // test-snapshot-chain-gaps.js section 6 -- 0 phantom gaps. Adding a
+      // source predicate to the builder six tables share, to change
+      // nothing, is the second spelling the one-builder rule exists to
+      // prevent. The assumption it rests on -- no two prior_season dates
+      // within cadence of each other -- is asserted in that test, so a
+      // second historical load cannot break this quietly.
       note: 'a missing date makes getPitcherBattedBallAsOf reach further back, which is a '
           + 'quieter failure than an absent row -- the measurement still runs, on a staler profile',
     },
@@ -390,7 +427,8 @@ function checkPipelineFreshness(db, asOf) {
       rows.push({ key: p.key, last: null, lagDays: null, excess: null,
                   level: awaiting ? 'STALE' : 'CRITICAL',
                   detail: err ? ('query failed: ' + err)
-                    : (awaiting ? ('no rows yet -- awaiting its first run; ' + p.note)
+                    : (awaiting ? (p.awaitingDetail
+                                    || ('no rows yet -- awaiting its first run; ' + p.note))
                                 : ('no rows at all -- ' + p.note)) });
       continue;
     }

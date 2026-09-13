@@ -130,7 +130,13 @@ check('declared awaitingFirstRun', !!p.awaitingFirstRun, true);
 const liveRun = checkPipelineFreshness(db, '2026-09-12');
 const pbbRow = liveRun.rows.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
 check('empty table reports STALE', pbbRow.level, 'STALE');
-check('and says why', /awaiting its first run/.test(pbbRow.detail), true);
+// NOT PINNED TO THE SENTENCE (2026-09-13). This read /awaiting its first
+// run/ and broke when the detail changed to name the LIVE-capture filter
+// -- a red test whose message said nothing true about the code, which is
+// the fourth time a format-pinned assertion has cost a debug cycle here.
+// What must hold is that the line names what it is waiting for rather
+// than reporting a bare STALE.
+check('and says why', /awaiting/.test(pbbRow.detail) && pbbRow.detail.length > 30, true);
 check('the run has no criticals because of it', liveRun.crit, 0);
 // A dropped table and a job that never ran look identical downstream, so
 // only one of them is excused. Point the check at a DB with no such table.
