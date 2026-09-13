@@ -54,10 +54,19 @@ check('roof closed -> no badge, reason roof_closed',
 const tbBadge = wb.windBadge({ homeKey: 'tb', windDir: 263, windSpeed: 9, roofStatus: 'open' });
 check('fixed dome reports closed even when roof_status=open',
   [tbBadge.show, tbBadge.reason, tbBadge.label], [false, 'fixed_dome', 'Roof closed']);
-const milBadge = wb.windBadge({ homeKey: 'mil', windDir: 200, windSpeed: 11, roofStatus: 'open' });
-check('placeholder-bearing park: strength only, no invented direction',
+// Fixture repointed from mil to tor by batch 4a (2026-09-12): mil now has
+// a measured bearing (128°) and would fail a placeholder assertion. tor is
+// still a placeholder — and the assertion is written against the EXPORTED
+// set rather than a hardcoded key, so the next batch moves it again
+// without silently turning this check into a no-op.
+const placeholderKey = [...wb.PLACEHOLDER_BEARING_KEYS].filter((k) => k !== 'tb')[0];
+check('there is still an unmeasured retractable to test with', !!placeholderKey, true);
+const milBadge = wb.windBadge({ homeKey: placeholderKey, windDir: 200, windSpeed: 11, roofStatus: 'open' });
+check('placeholder-bearing park (' + placeholderKey + '): strength only, no invented direction',
   [milBadge.show, milBadge.direction, milBadge.bearing_measured, milBadge.strength],
   [true, null, false, 'moderate']);
+check('and a MEASURED retractable now gets a real direction',
+  wb.windBadge({ homeKey: 'mil', windDir: 200, windSpeed: 11, roofStatus: 'open' }).bearing_measured, true);
 check('no wind data -> no badge', wb.windBadge({ homeKey: 'chc', windSpeed: 0, roofStatus: 'open' }).show, false);
 
 console.log('\n3. the badge cannot read wind_factor');
@@ -96,13 +105,20 @@ console.log('\n4. pricing untouched — stored factors re-derive on prod-shaped 
 // the 15 open-air parks whose bearings did NOT move: any drift there would
 // have to come from the code.
 const db = new Database(process.env.MLB_DB || 'data/mlb.db', { readonly: true });
-const BATCH3_PARKS = new Set(['nym', 'min', 'atl', 'col', 'lad', 'laa', 'sd']);
+// Parks whose cfDir has ever moved, from the ONE definition in
+// utils/bearing-regimes.js. Their stored rows were computed under a
+// bearing the code no longer holds and cannot re-derive. Excluding them is
+// not weakening the check: the assertion is over the parks whose bearing
+// did NOT move, and that set is what proves the code changed nothing.
+const { BEARING_REGIME_PARKS } = require('../utils/bearing-regimes');
+const BATCH3_PARKS = BEARING_REGIME_PARKS;
 const rows = db.prepare(
   'SELECT game_date, game_id, roof_status, wind_speed, wind_dir, wind_factor FROM game_log '
   + "WHERE game_date >= '2026-08-13' AND game_date <= '2026-09-12' "
   + 'AND wind_speed IS NOT NULL AND wind_dir IS NOT NULL AND wind_factor IS NOT NULL'
 ).all();
 let mismatch = 0, domeRows = 0, domeNonZeroBefore = 0, stable = 0;
+const regimeParks = new Set();
 let skippedRoof = 0, bearingRegime = 0;
 for (const r of rows) {
   const key = (r.game_id.split('-')[1] || '').toLowerCase();
@@ -119,7 +135,7 @@ for (const r of rows) {
   if (r.roof_status === 'closed' || r.roof_status === 'partial') { skippedRoof++; continue; }
   const now = calcWindFactor(r.wind_dir, r.wind_speed, park);
   const drift = Math.abs(now - r.wind_factor) > 1e-9;
-  if (BATCH3_PARKS.has(key)) { if (drift) bearingRegime++; else stable++; continue; }
+  if (BATCH3_PARKS.has(key)) { if (drift) { bearingRegime++; regimeParks.add(key); } else stable++; continue; }
   if (drift) {
     mismatch++;
     if (mismatch <= 5) console.log('        drift ' + r.game_date + ' ' + r.game_id
@@ -132,8 +148,14 @@ console.log('     fixed-dome rows: ' + domeRows + ', of which ' + domeNonZeroBef
   + ' carried a non-zero factor before this change');
 check('no drift at any park whose bearing did not move', mismatch, 0);
 check('the founding instance is real: dome rows had non-zero factors', domeNonZeroBefore > 0, true);
-check('bearing-regime rows are all batch-3 parks (else the boundary is misdescribed)',
-  bearingRegime > 0 && bearingRegime <= 10, true);
+// The invariant, not a magic count: every non-re-deriving row must sit at a
+// park whose bearing actually moved. A count needs editing on every batch
+// and passes for the wrong reason when it does — batch 4a pushed the old
+// `<= 10` bound over without saying anything true about the boundary.
+check('every drifting park is a known bearing regime',
+  [...regimeParks].filter((k) => !BEARING_REGIME_PARKS.has(k)), []);
+check('and at least one drifting row exists, so the exclusion is not vacuous',
+  bearingRegime > 0, true);
 
 // The three named games, by name.
 console.log('\n5. founding instance, per game');

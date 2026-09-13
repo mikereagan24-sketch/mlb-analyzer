@@ -54,7 +54,7 @@ const rows = db.prepare(
   + "WHERE game_date >= '2026-08-13' AND game_date <= '2026-09-12' "
   + 'AND temp_f IS NOT NULL AND wind_speed IS NOT NULL AND wind_dir IS NOT NULL'
 ).all();
-const BATCH3 = new Set(['nym', 'min', 'atl', 'col', 'lad', 'laa', 'sd']);
+const { BEARING_REGIME_PARKS: BATCH3 } = require('../utils/bearing-regimes');
 let domeRows = 0, domeNonZero = 0, otherChecked = 0, otherDrift = 0, skippedBearing = 0;
 for (const r of rows) {
   const key = (r.game_id.split('-')[1] || '').toLowerCase();

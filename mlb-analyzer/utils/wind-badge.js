@@ -34,7 +34,12 @@ const STRENGTH_STRONG_MPH = 15;     // >= 15 strong
 // reports strength only rather than inventing a direction. Do NOT "fix"
 // these bearings to make a direction appear — that would undo a
 // deliberate choice from the three bearing batches.
-const PLACEHOLDER_BEARING_KEYS = new Set(['tor', 'mia', 'mil', 'ari', 'sea', 'tex', 'hou', 'tb']);
+// BATCH 4a (2026-09-12) removed sea and mil: both are measured now (48deg
+// and 128deg), so they get a real arrow. They were the two that most
+// needed it -- sea plays roof-open on 97% of home games and mil on 55%,
+// and mil's placeholder had the wind backwards on 5 of its 19 roof-open
+// windy games.
+const PLACEHOLDER_BEARING_KEYS = new Set(['tor', 'mia', 'ari', 'tex', 'hou', 'tb']);
 
 function angleDiffDeg(a, b) {
   const d = Math.abs(((a - b) % 360 + 360) % 360);
