@@ -8235,7 +8235,15 @@ async function runPitcherBattedBallJob(cookieValue) {
   const { fetchPitcherBattedBall } = require('./fangraphs');
   const dateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   try {
-    const rows = await fetchPitcherBattedBall(cookieValue);
+    // Name resolver injected: the Batted Ball panel carries no xMLBAMID,
+    // so ids come from the repo's existing name machinery against
+    // pitcher_game_log + team_rosters. See utils/fg-pitcher-id.js.
+    const fgId = require('../utils/fg-pitcher-id');
+    const idIndex = fgId.buildPitcherIdIndex(db);
+    const fetched = await fetchPitcherBattedBall(cookieValue, {
+      resolveId: (name, team) => fgId.resolvePitcherId(idIndex, name, team),
+    });
+    const rows = fetched.rows, resStats = fetched.stats;
     let applied = 0;
     const tx = db.transaction((rs) => {
       for (const r of rs) {
@@ -8252,10 +8260,12 @@ async function runPitcherBattedBallJob(cookieValue) {
     // row set, which the as-of lookup also serves.
     try { snapped = q.snapshotPitcherBattedBall(dateStr, rows, 'live'); }
     catch (e) { console.warn('[fg-bb] snapshot failed (non-fatal): ' + e.message); }
-    const msg = 'upserted ' + applied + ' row(s), snapshot ' + snapped + ' for ' + dateStr;
+    const msg = 'upserted ' + applied + ' row(s), snapshot ' + snapped + ' for ' + dateStr
+      + '; resolved ' + resStats.resolved + ' of ' + resStats.fetched
+      + ' (' + resStats.unresolved + ' unresolved)';
     console.log('[fg-bb] ' + msg);
     try { q.logCron.run('fg-batted-ball', dateStr, 'success', msg, applied); } catch (e) { /* non-fatal */ }
-    return { success: true, applied, snapped, snapshot_date: dateStr };
+    return { success: true, applied, snapped, snapshot_date: dateStr, resolution: resStats };
   } catch (e) {
     const msg = 'failed: ' + (e && e.message ? e.message : String(e));
     console.error('[fg-bb] ' + msg);

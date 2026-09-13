@@ -331,7 +331,9 @@ function parseCSV(buffer, isPitcher) {
     if (!name || isNaN(woba) || woba < minWoba || woba > 0.8) continue;
     // Normalize FanGraphs team abbr (KCR->KC, SDP->SD, etc.)
     const fgTeam = teamCol ? (r[teamCol]||'').trim().toUpperCase() : null;
-    const FG_MAP={'KCR':'KC','SDP':'SD','SFG':'SF','TBR':'TB','WSN':'WAS','CHW':'CWS'};
+    // ONE definition, shared with the batted-ball id resolver
+    // (utils/fg-pitcher-id.js). This was a local copy until 2026-09-13.
+    const { FG_TEAM_MAP: FG_MAP } = require('../utils/fg-pitcher-id');
     const team = fgTeam ? (FG_MAP[fgTeam]||fgTeam) : null;
     rows.push({ name, woba, sample, team });
   }

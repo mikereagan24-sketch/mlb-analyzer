@@ -65,10 +65,29 @@ registerBackfillTask({
     onProgress({ phase: 'planning', snapshot_date: SNAPSHOT_DATE, source: SOURCE,
       window: { from: PRIOR_SEASON_START, to: PRIOR_SEASON_END }, existing_rows: existing });
 
+    // THE DRY RUN NOW FETCHES AND RESOLVES, and writes nothing. (2026-09-13)
+    // The first live run failed on a shape problem a dry run could have
+    // caught for free: the Batted Ball panel carries no xMLBAMID, so all
+    // 362 rows resolved to no id. A dry run that only printed its own
+    // parameters could not see that. Now the expensive, fragile part --
+    // fetch, parse, unit-normalise, resolve ids -- happens in the dry run
+    // too, and 'resolved N of M' is in its output.
+    const { fetchPitcherBattedBall } = require('../fangraphs');
+    const fgId = require('../../utils/fg-pitcher-id');
+    const idIndex = fgId.buildPitcherIdIndex(db);
+    const fetched = await fetchPitcherBattedBall(cookieValue, {
+      start: PRIOR_SEASON_START, end: PRIOR_SEASON_END,
+      resolveId: (name, team) => fgId.resolvePitcherId(idIndex, name, team),
+    });
+    const rows = fetched.rows, resStats = fetched.stats;
+    onProgress({ phase: 'fetched', rows: rows.length, resolution: resStats });
+
     if (dryRun) {
       return {
         task: 'pitcher_batted_ball_prior_season',
         dry_run: true,
+        resolution: resStats,
+        would_write: rows.length,
         window: { from: PRIOR_SEASON_START, to: PRIOR_SEASON_END },
         snapshot_date: SNAPSHOT_DATE,
         source: SOURCE,
@@ -83,11 +102,6 @@ registerBackfillTask({
       };
     }
 
-    const { fetchPitcherBattedBall } = require('../fangraphs');
-    const rows = await fetchPitcherBattedBall(cookieValue, {
-      start: PRIOR_SEASON_START, end: PRIOR_SEASON_END,
-    });
-    onProgress({ phase: 'fetched', rows: rows.length });
 
     // Replace-the-date, so a re-run is idempotent rather than additive.
     // Only the current-state table is left alone -- see the dry-run note.
@@ -111,6 +125,7 @@ registerBackfillTask({
       snapshot_date: SNAPSHOT_DATE,
       source: SOURCE,
       fetched: rows.length,
+      resolution: resStats,
       written: written,
       by_split: bySplit,
       total_bip: bipSum,
