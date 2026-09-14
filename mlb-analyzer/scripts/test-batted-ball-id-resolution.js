@@ -52,20 +52,32 @@ gl.run('Luis Ortiz', 333, 'CLE');
 gl.run('Luis Ortiz', 444, 'PIT');
 mem.prepare("INSERT INTO team_rosters VALUES (?,?,?,'P')").run('Roster Only Guy', 555, 'SEA');
 const idx = fgId.buildPitcherIdIndex(mem);
-check('appearance-derived name resolves', fgId.resolvePitcherId(idx, 'Dustin May', 'LAD'),
-  { id: 111, how: 'name_team' });
-check('resolves without a team when unambiguous', fgId.resolvePitcherId(idx, 'Jack Flaherty', null),
-  { id: 222, how: 'name' });
+// NOT DEEP-EQUALITY ON THE WHOLE OBJECT (2026-09-14). These compared the
+// full return value, so adding ambiguous/candidates broke five assertions
+// for a reason that said nothing true about resolution. What each one is
+// about is the id and the path that found it.
+const idHow = (r) => ({ id: r.id, how: r.how });
+check('appearance-derived name resolves',
+  idHow(fgId.resolvePitcherId(idx, 'Dustin May', 'LAD')), { id: 111, how: 'name_team' });
+check('resolves without a team when unambiguous',
+  idHow(fgId.resolvePitcherId(idx, 'Jack Flaherty', null)), { id: 222, how: 'name' });
 check('roster-only pitcher resolves too', fgId.resolvePitcherId(idx, 'Roster Only Guy', 'SEA').id, 555);
 check('FG team abbreviation is normalised before matching',
   fgId.resolvePitcherId(idx, 'Jack Flaherty', 'DET').id, 222);
 // The ambiguity rule: two ids for one name is NOT a coin flip.
-check('ambiguous name + team disambiguates', fgId.resolvePitcherId(idx, 'Luis Ortiz', 'PIT'),
-  { id: 444, how: 'name_team' });
+check('ambiguous name + team disambiguates',
+  idHow(fgId.resolvePitcherId(idx, 'Luis Ortiz', 'PIT')), { id: 444, how: 'name_team' });
 check('ambiguous name with NO team resolves to null, never a guess',
-  fgId.resolvePitcherId(idx, 'Luis Ortiz', null), { id: null, how: null });
-check('unknown pitcher resolves to null', fgId.resolvePitcherId(idx, 'Nobody At All', 'LAD'),
-  { id: null, how: null });
+  idHow(fgId.resolvePitcherId(idx, 'Luis Ortiz', null)), { id: null, how: null });
+// ...and the refusal is now REPORTED as ambiguity rather than absence,
+// which is the distinction the caller counts on.
+check('...and it is reported as ambiguous, with the candidate count',
+  (function (r) { return [r.ambiguous, r.candidates]; })(
+    fgId.resolvePitcherId(idx, 'Luis Ortiz', null)), [true, 2]);
+check('unknown pitcher resolves to null',
+  idHow(fgId.resolvePitcherId(idx, 'Nobody At All', 'LAD')), { id: null, how: null });
+check('...and is absent, NOT ambiguous', 
+  fgId.resolvePitcherId(idx, 'Nobody At All', 'LAD').ambiguous, false);
 // Suffix / accent folding comes from the shared name machinery, not a
 // second implementation.
 check('suffixes and case fold via utils/names', fgId.resolvePitcherId(idx, 'dustin may jr.', 'LAD').id, 111);
