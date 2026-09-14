@@ -391,6 +391,56 @@ function _normaliseShares(gb, fb, ld) {
   return null;
 }
 
+// COLLAPSE (mlb_id, split) COLLISIONS AT INGEST. (2026-09-14)
+//
+// The panel returns MORE THAN ONE ROW PER PITCHER -- a traded pitcher
+// appears once per team stint -- and both rows resolve to the same
+// mlb_id. Measured on the first successful live run, 2026-09-14: 1451
+// resolved rows collapsing to 963 distinct (mlb_id, split) pairs, i.e.
+// 488 collisions, a third of the set.
+//
+// That broke two things. The snapshot write is a plain INSERT into a
+// table keyed (snapshot_date, mlb_id, split), so the first collision
+// threw UNIQUE constraint failed and rolled the whole transaction back
+// to zero rows -- which is why prod carried no live snapshot at all
+// while the cron row said success. And the live upsert survived only by
+// being last-write-wins, so a traded pitcher stored whichever stint
+// happened to come last rather than his season profile.
+//
+// LARGEST sample_tbf WINS, never last-write-wins. The owner ruling
+// (2026-09-14) is that a collision keeps the row with the most batters
+// faced. For a traded pitcher that is the stint he actually pitched most
+// of, which is the closest thing in this panel to his season profile.
+// Summing the stints is NOT done here: the panel gives percentages, and
+// a TBF-weighted mean of two rates is a different quantity from the
+// season rate, so inventing it would be the reconstruct-BIP mistake
+// again.
+//
+// FIXED AT INGEST rather than at either writer, per the
+// ingest-not-hot-path rule: one place, so the live table, the snapshot
+// and the prior-season backfill all receive the same deduped set and
+// cannot disagree. The snapshot INSERT is deliberately left as a plain
+// INSERT so a collision that ever slips past this THROWS instead of
+// silently replacing -- paired with the honest cron status in
+// services/jobs.js, that failure is now visible.
+function dedupeBattedBallRows(rows) {
+  const best = new Map();
+  let collisions = 0;
+  for (const r of rows || []) {
+    if (r == null || r.mlb_id == null) continue;
+    const k = r.mlb_id + "|" + r.split;
+    const prev = best.get(k);
+    if (!prev) { best.set(k, r); continue; }
+    collisions++;
+    const a = Number(prev.sample_tbf) || 0;
+    const b = Number(r.sample_tbf) || 0;
+    // Strictly greater, so an exact tie keeps the FIRST row and the
+    // result does not depend on panel ordering.
+    if (b > a) best.set(k, r);
+  }
+  return { rows: [...best.values()], collisions: collisions };
+}
+
 async function fetchPitcherBattedBall(cookieValue, opts) {
   const o = opts || {};
   const splits = o.splits || [{ code: 5, split: 'vs_lhb' }, { code: 6, split: 'vs_rhb' }];
@@ -495,7 +545,14 @@ async function fetchPitcherBattedBall(cookieValue, opts) {
         + unresolvedSample.slice(0, 5).map((u) => u.name + '/' + u.team).join(', ') : ''));
   }
   stats.unresolved_sample = unresolvedSample;
-  return { rows: out, stats: stats };
+  // Deduped before anything sees the rows, and the collision count is
+  // reported so "fetched 1451, wrote 963" reads as the intended collapse
+  // rather than as a silent loss of a third of the panel.
+  const dd = dedupeBattedBallRows(out);
+  stats.rows_before_dedupe = out.length;
+  stats.collisions_collapsed = dd.collisions;
+  stats.rows = dd.rows.length;
+  return { rows: dd.rows, stats: stats };
 }
 
 // --- Main orchestrator ---
@@ -981,4 +1038,4 @@ async function fetchPlayerBaserunningTrailing(startdate, enddate, cookieValue) {
   return out;
 }
 
-module.exports = { refreshAllFanGraphs, refreshFanGraphsActuals, fetchActualSplit, fetchPitcherBattedBall, _normaliseShares, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
+module.exports = { refreshAllFanGraphs, refreshFanGraphsActuals, fetchActualSplit, fetchPitcherBattedBall, _normaliseShares, dedupeBattedBallRows, fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing, jsonToProjectionCsv, jsonToCsv };
