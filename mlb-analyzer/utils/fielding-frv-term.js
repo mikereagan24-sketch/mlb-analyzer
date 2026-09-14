@@ -65,6 +65,14 @@ function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { retu
 //   resolveId    (team, name) -> mlb_id
 //   onWarn       optional (msg, detail) sink; defaults to console.warn
 //   label        optional prefix for warnings (game id, usually)
+//   asOfDate     optional YYYY-MM-DD. When set, FRV is read from
+//                fielding_frv_snapshot as of that date instead of from
+//                the current-state table -- the correct read for a
+//                REPLAY. Production leaves it unset, because for
+//                tonight's game current state IS the as-of value.
+//                A slot with no snapshot at or before the date falls
+//                back to current state and is COUNTED in
+//                out.asofFallback, never silently.
 //
 // Returns { value, fielders, resolved, exact, fallback, missing, details }
 // with value === null when nothing resolved.
@@ -76,7 +84,8 @@ function fieldingRunsPerGame(opts) {
   const warn = o.onWarn || ((m) => console.warn(m));
   const label = o.label ? (o.label + ' ') : '';
   const team = o.team || '';
-  const out = { value: null, fielders: 0, resolved: 0, exact: 0, fallback: 0, missing: 0, details: [] };
+  const out = { value: null, fielders: 0, resolved: 0, exact: 0, fallback: 0, missing: 0,
+                asOfDate: o.asOfDate || null, asofFallback: 0, details: [] };
   if (!q || !q.getFieldingFrvByIdPos || !arr.length) return out;
 
   const { FRV_MIN_OUTS } = require('../services/scraper');   // lazy: one definition, no cycle
@@ -96,11 +105,34 @@ function fieldingRunsPerGame(opts) {
         + ') did not resolve to an mlb_id — contributes nothing');
       continue;
     }
-    let row = q.getFieldingFrvByIdPos.get(mlbId, code);
+    // AS-OF or CURRENT STATE. The position-matching logic below is the
+    // same either way; only which table supplies the numbers changes.
+    const asOf = o.asOfDate || null;
+    const canAsOf = !!(asOf && q.getFieldingFrvAsOfIdPos);
+    let row = canAsOf ? q.getFieldingFrvAsOfIdPos.get(mlbId, code, asOf)
+                      : q.getFieldingFrvByIdPos.get(mlbId, code);
     let usedFallback = false;
     if (!row) {
-      row = q.getFieldingFrvPrimary ? q.getFieldingFrvPrimary.get(mlbId) : null;
+      row = canAsOf
+        ? (q.getFieldingFrvAsOfPrimary ? q.getFieldingFrvAsOfPrimary.get(mlbId, mlbId, asOf) : null)
+        : (q.getFieldingFrvPrimary ? q.getFieldingFrvPrimary.get(mlbId) : null);
       usedFallback = !!row;
+    }
+    // NO SNAPSHOT AT OR BEFORE THE DATE. Current state is the only thing
+    // left, and it is hindsight -- so it is used (a dropped slot would
+    // bias the team value harder than a stale one) and COUNTED. A silent
+    // fallback here would let an as-of run quietly be a current-state run.
+    let usedCurrentState = false;
+    if (!row && canAsOf) {
+      row = q.getFieldingFrvByIdPos.get(mlbId, code)
+        || (q.getFieldingFrvPrimary ? q.getFieldingFrvPrimary.get(mlbId) : null);
+      if (row) {
+        usedCurrentState = true;
+        out.asofFallback++;
+        warn('[defense] ' + label + team + ': fielder "' + p.name + '" (' + p.pos
+          + ') has no FRV snapshot at or before ' + asOf
+          + ' — used CURRENT STATE, which is hindsight for this game');
+      }
     }
     if (!row || !row.outs_total || row.outs_total < FRV_MIN_OUTS) {
       out.missing++;
@@ -118,12 +150,17 @@ function fieldingRunsPerGame(opts) {
     if (usedFallback) {
       out.fallback++;
       out.details.push({ name: p.name, pos: p.pos, mlb_id: mlbId, why: 'position_fallback',
-        used_position: row.position, outs: row.outs_total });
+        used_position: row.position, outs: row.outs_total,
+        vintage: usedCurrentState ? 'current_state' : (row.snapshot_date || null) });
       warn('[defense] ' + label + team + ': fielder "' + p.name + '" has no FRV row at ' + p.pos
         + ' (code ' + code + ') — falling back to his biggest-sample row, position '
         + row.position + ' (' + row.outs_total + ' outs)');
     } else {
       out.exact++;
+      if (usedCurrentState) {
+        out.details.push({ name: p.name, pos: p.pos, mlb_id: mlbId,
+          why: 'asof_missing_used_current_state', outs: row.outs_total });
+      }
     }
     sum += (row.total_runs / row.outs_total) * oppsPerGame;
     out.resolved++;
@@ -140,8 +177,12 @@ function fieldingRunsPerGame(opts) {
 
 // Thin wrapper matching the old three-copy signature, so call sites read
 // the same as before and only the internals moved.
-function teamFieldingRunsPerGame(q, team, lineupJson, settings, resolveId, label, onWarn) {
-  return fieldingRunsPerGame({ q, team, lineupJson, settings, resolveId, label, onWarn }).value;
+// asOfDate is the LAST parameter on purpose: every existing call site keeps
+// working unchanged and keeps reading current state, which is what
+// production wants. Only a replay passes it.
+function teamFieldingRunsPerGame(q, team, lineupJson, settings, resolveId, label, onWarn, asOfDate) {
+  return fieldingRunsPerGame({ q, team, lineupJson, settings, resolveId, label, onWarn,
+                               asOfDate }).value;
 }
 
 module.exports = { fieldingRunsPerGame, teamFieldingRunsPerGame, POS_CODE, DEFAULT_OPPS_PER_GAME };

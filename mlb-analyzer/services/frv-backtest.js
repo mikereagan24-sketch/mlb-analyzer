@@ -68,9 +68,22 @@ function computeFramingRvPerGame(team, lineupJson, settings) {
 // any row with outs_total > 0 while production applied FRV_MIN_OUTS.
 // harness-inputs.js wires calibration-ab.js here, so the gate's evidence
 // came from the looser term.
-function computeTeamFieldingRunsPerGame(team, lineupJson, settings) {
-  const { teamFieldingRunsPerGame } = require('../utils/fielding-frv-term');
-  return teamFieldingRunsPerGame(q, team, lineupJson, settings, resolveCatcherMlbId);
+// asOfDate added 2026-09-14. A harness replaying a June game must read the
+// FRV that existed in June; passing nothing keeps the old current-state
+// behaviour, which is why the parameter is optional rather than required.
+// The DETAIL form exists because the as-of read can fall back to current
+// state, and a caller that only sees .value cannot report how often that
+// happened -- which would let an as-of run quietly be a current-state run.
+// Both forms delegate to the one term; this is not a second copy.
+function computeTeamFieldingRunsDetail(team, lineupJson, settings, asOfDate) {
+  const { fieldingRunsPerGame } = require('../utils/fielding-frv-term');
+  return fieldingRunsPerGame({ q, team, lineupJson, settings,
+    resolveId: resolveCatcherMlbId, asOfDate: asOfDate || null,
+    onWarn: function () {} });
+}
+function computeTeamFieldingRunsPerGame(team, lineupJson, settings, asOfDate) {
+  const r = computeTeamFieldingRunsDetail(team, lineupJson, settings, asOfDate);
+  return r ? r.value : null;
 }
 
 function buildBacktestGame(gameRow, settings) {
@@ -504,4 +517,5 @@ function runFrvBacktest(opts) {
 // runmult-totals-backtest.js:106, temp-backtest.js:66 and
 // under-selection-diagnostic.js:57, with a sixth state-aware variant inline
 // in jobs.js:~700. Consolidating them is filed, not done here.
-module.exports = { runFrvBacktest, computeTeamFieldingRunsPerGame, computeFramingRvPerGame };
+module.exports = { runFrvBacktest, computeTeamFieldingRunsPerGame,
+  computeTeamFieldingRunsDetail, computeFramingRvPerGame };

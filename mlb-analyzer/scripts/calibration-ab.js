@@ -169,6 +169,10 @@ for (const g of games) {
   if (ph == null || pa == null || (ph + pa) <= 0) continue;
   rows.push({ g: w, idx, d: g.game_date, y: g.home_score > g.away_score ? 1 : 0, mkt: clamp(ph / (ph + pa)) });
 }
+// The FRV vintage belongs beside the weather filter for the same reason:
+// both change which numbers the arms are computed from, and a pasted
+// result has to carry them. (2026-09-14)
+try { console.log('  ' + hi.frvAsOfLine()); } catch (e) { console.log('  FRV read: ' + e.message); }
 console.log('=== corpus ===');
 console.log('  usable: ' + rows.length + '  (no-snapshot ' + noSnap + ', no-score ' + noScore + ', no-market ' + noMkt + ')');
 const base = rows.reduce((a, r) => a + r.y, 0) / rows.length;
