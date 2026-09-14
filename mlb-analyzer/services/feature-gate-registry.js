@@ -78,6 +78,25 @@ const PRECONDITIONS = {
   // both contamination reasons, decided result, a market ML, and a wOBA
   // snapshot for the date. A looser count would trip the trigger before the
   // design could actually resolve anything.
+  //
+  // EXPECT THIS TO UN-ARM WHEN THE PROD TAG BACKFILL RUNS. (2026-09-14)
+  // Measured on the 2026-09-13 prod snapshot: 984 before, 772 after
+  // market_contamination_post_first_pitch tags its 266 games, against a
+  // bar of 979. So this trigger is armed TODAY on prod and will not be
+  // armed afterwards.
+  //
+  // THAT IS THE CORRECT OUTCOME, NOT A REGRESSION. The comment above says
+  // the corpus definition matches the floor measurement exactly and that a
+  // LOOSER count would trip the trigger before the design could resolve
+  // anything. Prod has been running the looser count: the column it
+  // filters on was empty there, so `market_contamination_reason IS NULL`
+  // admitted every post-first-pitch-priced game. 984 was the loose number
+  // and 772 is the strict one. The analysis copy has read ~772 all along,
+  // which is why the local and prod answers to "has the evidence caught
+  // up" disagreed.
+  //
+  // Resolving 0.00055 needs 979 games of THIS corpus; at 772 that is ~207
+  // further games, not the ~0 prod currently implies.
   park_neutral_resolvable_979: (db) => scalar(db,
     'SELECT COUNT(*) v FROM game_log g WHERE g.weather_contamination_reason IS NULL '
     + 'AND g.market_contamination_reason IS NULL AND g.model_total IS NOT NULL '

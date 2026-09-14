@@ -142,9 +142,12 @@ echo "=== 5/5 re-applying local-only remediation ==="
 # ORDER IS LOAD-BEARING, and getting it wrong fails quietly rather than
 # loudly. Two dependencies:
 #
-#   first-pitch timestamps  ->  tag-post-start-pricing
+#   first-pitch timestamps  ->  (formerly tag-post-start-pricing)
 #       the tagging criterion IS the first-pitch comparison; with no
-#       timestamps it tags nothing and reports success.
+#       timestamps it tagged nothing and reported success. The tagger no
+#       longer runs here (see step 5), but backfill-first-pitch stays:
+#       first_pitch_utc is read by the post-start reporting scripts and by
+#       lineup-timing analysis, and a NULL there is still a silent zero.
 #
 #   bet-price migration     ->  regrade-stale-totals-pnl
 #       the re-grade prices each bet at what was struck, which lives in
@@ -156,7 +159,15 @@ echo "=== 5/5 re-applying local-only remediation ==="
 # fix-corrupt-totals-rows handles the 2 rows the migration REFUSES
 # (price-shaped bet_line with no usable market_line), so it follows it.
 "$NODE" scripts/backfill-first-pitch.js
-"$NODE" scripts/tag-post-start-pricing.js --apply
+# tag-post-start-pricing.js --apply WAS HERE, and is deliberately gone.
+# (2026-09-14) The tag is now written on PRODUCTION by the registered
+# backfill task market_contamination_post_first_pitch, so a refresh brings
+# it down with the rest of the data. Re-deriving it here would be a second
+# source of truth for one column -- the exact split that let the copy carry
+# 273 tagged games while prod carried 0, on byte-identical inputs, for
+# months. ONE SOURCE OF TRUTH: production computes it, the refresh copies
+# it. scripts/tag-post-start-pricing.js still reports, and still takes
+# --apply by hand for a copy that predates the prod backfill.
 "$NODE" scripts/backfill-pitcher-debut.js --apply
 "$NODE" scripts/backfill-totals-bet-price.js --apply
 "$NODE" scripts/fix-corrupt-totals-rows.js --apply
