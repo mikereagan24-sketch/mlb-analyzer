@@ -11,8 +11,14 @@
 // value. Only replay changes.
 //
 // THE THREE FAILURE MODES, each with an assertion below:
-//   1. a silent current-state fallback, which would let an as-of run be a
-//      current-state run while reporting as-of
+//   1. substituting current state for an as-of miss. Changed 2026-09-14:
+//      a miss now resolves as MISSING. "No as-of row" does not mean "data
+//      unavailable", it means the player had not crossed FRV_MIN_OUTS yet,
+//      and current state there is hindsight on exactly the slots where it
+//      is largest -- a player who qualified later is one whose sample grew
+//      most since. Measured on the 2026-09-14 hindsight run: 535 slot-
+//      instances over 1594 sides, 4.8%, all from snapshot roster growth
+//      (480 players on 06-16 to 521 on 09-12), none from missing dates.
 //   2. vintage mixing in the position fallback -- ordering by outs_total
 //      ACROSS dates can return a bigger-sample row from a LATER snapshot,
 //      which is hindsight sneaking in through the fallback branch
@@ -92,19 +98,22 @@ check('as-of June reads the JUNE row (sign flips)', Number(jun.value.toFixed(4))
 check('as-of September matches current state here', Number(sep.value.toFixed(4)), 0.1);
 check('asOfDate is reported back on the result', [cur.asOfDate, jun.asOfDate],
   [null, '2026-06-10']);
-check('no current-state fallback was needed', [jun.asofFallback, sep.asofFallback], [0, 0]);
+check('neither read had an as-of miss', [jun.asofMissing, sep.asofMissing], [0, 0]);
 
 console.log('');
-console.log('2. a date BEFORE the snapshot era falls back, and SAYS SO');
-// 2026-05-01 predates every snapshot row: current state is all there is.
+console.log('2. a date BEFORE the snapshot era resolves MISSING, not current state');
+// 2026-05-01 predates every snapshot row. Current state EXISTS for this
+// player (+0.10) and is deliberately not substituted.
 const pre = run(SS, '2026-05-01');
-check('value comes from current state', Number(pre.value.toFixed(4)), 0.1);
-check('and the fallback is COUNTED, not silent', pre.asofFallback, 1);
-check('the detail names why', (pre.details.filter(
-  (d) => d.why === 'asof_missing_used_current_state').length), 1);
-// A run whose fallback count equals its slot count is a current-state run
-// wearing an as-of label. That is the number a harness has to print.
-check('fallback count is comparable to the slot count', [pre.asofFallback, pre.fielders], [1, 1]);
+check('the side value is null, not the current-state 0.10', pre.value, null);
+check('the miss is counted', pre.asofMissing, 1);
+check('it counts as missing, so the team value scales over what resolved',
+  [pre.missing, pre.resolved], [1, 0]);
+check('the detail names why',
+  pre.details.filter((d) => d.why === 'asof_no_row_at_date').length, 1);
+// If current state had been consulted the slot would have landed in exact
+// or fallback. Neither may move.
+check('current state was not consulted at all', [pre.exact, pre.fallback], [0, 0]);
 
 console.log('');
 console.log('3. THE TRAP: the position fallback must not mix vintages');
@@ -125,8 +134,21 @@ check('September 3B start DOES use the September 3B row (exact match)',
 console.log('');
 console.log('4. a player absent from the snapshots entirely');
 const noSnap = run([{ name: 'No Snapshot', pos: '2B' }], '2026-09-12');
-check('uses current state and counts it', [Number(noSnap.value.toFixed(4)), noSnap.asofFallback],
-  [0.125, 1]);
+check('resolves missing even though current state has him at +0.125',
+  [noSnap.value, noSnap.asofMissing, noSnap.missing], [null, 1, 1]);
+
+console.log('');
+console.log('4b. a PARTIAL side scales over the slots that resolved');
+// The case the old current-state substitution hid: one resolvable slot,
+// one as-of miss. The team value must be the resolved slot mean scaled to
+// the full complement -- (0.10 / 1) * 2 = 0.20 -- and must NOT be the
+// two-slot sum that treats the missing fielder as league-average.
+const partial = run([{ name: 'Asof Tester', pos: 'SS' },
+                     { name: 'No Snapshot', pos: '2B' }], '2026-09-12');
+check('scaled over the resolved slot, not summed with an implied average',
+  Number(partial.value.toFixed(4)), 0.2);
+check('counts line up', [partial.fielders, partial.resolved, partial.missing,
+  partial.asofMissing], [2, 1, 1, 1]);
 
 console.log('');
 console.log('5. PRODUCTION STAYS ON CURRENT STATE');

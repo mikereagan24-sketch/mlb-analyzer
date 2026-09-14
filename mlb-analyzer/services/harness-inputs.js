@@ -73,15 +73,15 @@ function frvReadMode() {
 
 // Accumulated across a corpus build so a harness can print it. Reset by
 // resetFrvAsOfStats() if a script builds more than one corpus.
-let _frvStats = { sides: 0, asofFallback: 0, vintages: {} };
-function resetFrvAsOfStats() { _frvStats = { sides: 0, asofFallback: 0, vintages: {} }; }
+let _frvStats = { sides: 0, asofMissing: 0, vintages: {} };
+function resetFrvAsOfStats() { _frvStats = { sides: 0, asofMissing: 0, vintages: {} }; }
 function frvAsOfStats() { return _frvStats; }
 function frvAsOfLine() {
   const m = frvReadMode();
   let s = 'FRV read: ' + m.mode + (m.pinned ? ' @ ' + m.pinned : '');
   if (m.mode === 'current') return s + '   *** CURRENT STATE = HINDSIGHT for any past game ***';
-  s += '   sides ' + _frvStats.sides + ', slots with no snapshot <= date (current state used) '
-     + _frvStats.asofFallback;
+  s += '   sides ' + _frvStats.sides + ', slots with no snapshot <= date (resolved MISSING) '
+     + _frvStats.asofMissing;
   const vs = Object.keys(_frvStats.vintages).sort();
   if (vs.length) s += ', vintages ' + vs[0] + '..' + vs[vs.length - 1];
   return s;
@@ -116,7 +116,7 @@ function populateCallerInputs(wrapped, gameRow, settings) {
         wrapped[side + 'FieldingRunsPerGame'] = d ? d.value : null;
         if (d) {
           _frvStats.sides++;
-          _frvStats.asofFallback += d.asofFallback || 0;
+          _frvStats.asofMissing += d.asofMissing || 0;
           for (const det of d.details || []) {
             if (det.vintage && det.vintage !== 'current_state') {
               _frvStats.vintages[det.vintage] = 1;

@@ -70,9 +70,9 @@ function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { retu
 //                the current-state table -- the correct read for a
 //                REPLAY. Production leaves it unset, because for
 //                tonight's game current state IS the as-of value.
-//                A slot with no snapshot at or before the date falls
-//                back to current state and is COUNTED in
-//                out.asofFallback, never silently.
+//                A slot with no snapshot at or before the date resolves
+//                as MISSING -- null, scaled over the slots that did
+//                resolve -- and is counted in out.asofMissing.
 //
 // Returns { value, fielders, resolved, exact, fallback, missing, details }
 // with value === null when nothing resolved.
@@ -85,7 +85,7 @@ function fieldingRunsPerGame(opts) {
   const label = o.label ? (o.label + ' ') : '';
   const team = o.team || '';
   const out = { value: null, fielders: 0, resolved: 0, exact: 0, fallback: 0, missing: 0,
-                asOfDate: o.asOfDate || null, asofFallback: 0, details: [] };
+                asOfDate: o.asOfDate || null, asofMissing: 0, details: [] };
   if (!q || !q.getFieldingFrvByIdPos || !arr.length) return out;
 
   const { FRV_MIN_OUTS } = require('../services/scraper');   // lazy: one definition, no cycle
@@ -118,21 +118,40 @@ function fieldingRunsPerGame(opts) {
         : (q.getFieldingFrvPrimary ? q.getFieldingFrvPrimary.get(mlbId) : null);
       usedFallback = !!row;
     }
-    // NO SNAPSHOT AT OR BEFORE THE DATE. Current state is the only thing
-    // left, and it is hindsight -- so it is used (a dropped slot would
-    // bias the team value harder than a stale one) and COUNTED. A silent
-    // fallback here would let an as-of run quietly be a current-state run.
-    let usedCurrentState = false;
+    // NO SNAPSHOT AT OR BEFORE THE DATE RESOLVES AS MISSING. (2026-09-14)
+    //
+    // This branch used to read current state and count it. That was wrong
+    // about what the miss MEANS. Measured on the 2026-09-14 hindsight run:
+    // 535 slot-instances over 1594 team-sides, 4.8% of slots, and the
+    // cause is not missing dates -- the window sat inside the snapshot era
+    // throughout. It is PLAYER coverage: the snapshot roster grows across
+    // the season as fielders cross FRV_MIN_OUTS, 480 players on 2026-06-16
+    // to 521 on 09-12, with 42 players in the current table absent from the
+    // June snapshot.
+    //
+    // So "no as-of row" does not mean "data unavailable", it means THE
+    // PLAYER HAD NOT QUALIFIED YET -- which is exactly the missing-fielder
+    // case this term already handles by scaling over the resolved slots.
+    // Reading current state there imported hindsight for precisely the
+    // players whose numbers did not exist, and did it on the slots where
+    // the hindsight is largest, since a player who qualified later is one
+    // whose sample grew most since.
+    //
+    // Consequence worth knowing: a game before the snapshot era starts now
+    // resolves every slot as missing, so the side value is null and the
+    // term is inert for that game. That is the honest state -- there is no
+    // as-of FRV for 2026-05-20..06-03 -- and it is now VISIBLE as a null
+    // instead of silently scored off September numbers.
     if (!row && canAsOf) {
-      row = q.getFieldingFrvByIdPos.get(mlbId, code)
-        || (q.getFieldingFrvPrimary ? q.getFieldingFrvPrimary.get(mlbId) : null);
-      if (row) {
-        usedCurrentState = true;
-        out.asofFallback++;
-        warn('[defense] ' + label + team + ': fielder "' + p.name + '" (' + p.pos
-          + ') has no FRV snapshot at or before ' + asOf
-          + ' — used CURRENT STATE, which is hindsight for this game');
-      }
+      out.asofMissing++;
+      out.missing++;
+      out.details.push({ name: p.name, pos: p.pos, mlb_id: mlbId,
+        why: 'asof_no_row_at_date', as_of: asOf });
+      warn('[defense] ' + label + team + ': fielder "' + p.name + '" (' + p.pos
+        + ') has no FRV snapshot at or before ' + asOf
+        + ' — contributes nothing; current state is NOT substituted because it '
+        + 'would be hindsight for this game');
+      continue;
     }
     if (!row || !row.outs_total || row.outs_total < FRV_MIN_OUTS) {
       out.missing++;
@@ -151,16 +170,12 @@ function fieldingRunsPerGame(opts) {
       out.fallback++;
       out.details.push({ name: p.name, pos: p.pos, mlb_id: mlbId, why: 'position_fallback',
         used_position: row.position, outs: row.outs_total,
-        vintage: usedCurrentState ? 'current_state' : (row.snapshot_date || null) });
+        vintage: row.snapshot_date || null });
       warn('[defense] ' + label + team + ': fielder "' + p.name + '" has no FRV row at ' + p.pos
         + ' (code ' + code + ') — falling back to his biggest-sample row, position '
         + row.position + ' (' + row.outs_total + ' outs)');
     } else {
       out.exact++;
-      if (usedCurrentState) {
-        out.details.push({ name: p.name, pos: p.pos, mlb_id: mlbId,
-          why: 'asof_missing_used_current_state', outs: row.outs_total });
-      }
     }
     sum += (row.total_runs / row.outs_total) * oppsPerGame;
     out.resolved++;
