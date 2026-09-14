@@ -3141,6 +3141,32 @@ q.getFieldingFrvPrimary = db.prepare(
 q.getFieldingFrvById = db.prepare(
   "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end " +
   "FROM fielding_frv WHERE mlb_id=? ORDER BY outs_total DESC LIMIT 1");
+// AS-OF FRV, for REPLAY ONLY. (2026-09-14)
+//
+// The two queries above read fielding_frv, which is CURRENT STATE. That is
+// the correct value for tonight's game and the wrong one for a replay: a
+// June game scored from the current table is priced with FRV that already
+// knows how those fielders turned out. Measured hindsight horizon across
+// the five windows of the 2026 season run: 96-116 days in W1, 1-23 in W5.
+//
+// Same shape as the pair above -- exact (mlb_id, position) first, then the
+// biggest-sample row as the position fallback -- so the term's matching
+// logic is identical and only the vintage of the numbers changes. The
+// primary lookup pins the snapshot date FIRST and orders by outs_total
+// WITHIN that date; ordering across dates would mix vintages and could
+// return an older, larger-sample row than the as-of date had.
+//
+// FRV_MIN_OUTS still applies at the consumer, unchanged: the floor is the
+// producer's and a replay path may not be looser than the live one.
+q.getFieldingFrvAsOfIdPos = db.prepare(
+  "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end,snapshot_date " +
+  "FROM fielding_frv_snapshot WHERE mlb_id=? AND position=? AND snapshot_date<=? " +
+  "ORDER BY snapshot_date DESC LIMIT 1");
+q.getFieldingFrvAsOfPrimary = db.prepare(
+  "SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end,snapshot_date " +
+  "FROM fielding_frv_snapshot WHERE mlb_id=? AND snapshot_date=(" +
+  "  SELECT MAX(snapshot_date) FROM fielding_frv_snapshot WHERE mlb_id=? AND snapshot_date<=?" +
+  ") ORDER BY outs_total DESC LIMIT 1");
 q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,position,season_start,season_end,updated_at FROM fielding_frv ORDER BY total_runs DESC");
 // Position players for a team (for the abbreviated-lineup-name → mlb_id
 // resolver). Returns full names + ids; JS does accent-folded initial+last

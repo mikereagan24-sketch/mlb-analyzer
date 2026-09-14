@@ -30,12 +30,62 @@
  */
 
 let _frvForTeam = () => null;
+let _frvDetailForTeam = null;
 let _framingForTeam = () => null;
 try {
   const fb = require('./frv-backtest');
   _frvForTeam = fb.computeTeamFieldingRunsPerGame || _frvForTeam;
+  _frvDetailForTeam = fb.computeTeamFieldingRunsDetail || null;
   _framingForTeam = fb.computeFramingRvPerGame || _framingForTeam;
 } catch (e) { /* harness still runs; populate() reports zero coverage */ }
+
+// ── FRV READ MODE (2026-09-14) ─────────────────────────────────────────
+//
+// A harness replaying a past game must read the FRV that existed THEN.
+// Until now every harness read current state, so a June game was priced
+// with FRV that already knew how those fielders turned out; the horizon
+// was 96-116 days in W1 of the 2026 season run. Production is unchanged
+// and still reads current state, which for tonight IS the as-of value.
+//
+// THIS DEFAULT CHANGES EVERY HARNESS NUMBER, so the mode is echoed the
+// way WEATHER_FILTER is: a delta quoted without its FRV vintage is not
+// reproducible, and "asof" vs "current" is a regime boundary in the same
+// sense as the 2026-08-05 weather boundary.
+//
+//   FRV_READ=asof              (default) snapshot as of each game date
+//   FRV_READ=current           the pre-2026-09-14 behaviour, for comparison
+//   FRV_READ=asof:YYYY-MM-DD   every game at ONE vintage. This is the
+//                              hindsight-isolating arm: hold the term and
+//                              the row set fixed, vary only the date.
+//
+// An unrecognised value THROWS rather than falling through to a default,
+// because silently scoring current-state while the operator believes it is
+// as-of is the exact failure this switch exists to make visible.
+const _FRV_ASOF_DATE_RE = /^asof:(\d{4}-\d{2}-\d{2})$/;
+function frvReadMode() {
+  const v = String(process.env.FRV_READ || 'asof').trim().toLowerCase();
+  if (v === 'current') return { mode: 'current', pinned: null };
+  if (v === 'asof') return { mode: 'asof', pinned: null };
+  const m = v.match(_FRV_ASOF_DATE_RE);
+  if (m) return { mode: 'asof-pinned', pinned: m[1] };
+  throw new Error('FRV_READ must be "asof", "current" or "asof:YYYY-MM-DD"; got "' + v + '"');
+}
+
+// Accumulated across a corpus build so a harness can print it. Reset by
+// resetFrvAsOfStats() if a script builds more than one corpus.
+let _frvStats = { sides: 0, asofFallback: 0, vintages: {} };
+function resetFrvAsOfStats() { _frvStats = { sides: 0, asofFallback: 0, vintages: {} }; }
+function frvAsOfStats() { return _frvStats; }
+function frvAsOfLine() {
+  const m = frvReadMode();
+  let s = 'FRV read: ' + m.mode + (m.pinned ? ' @ ' + m.pinned : '');
+  if (m.mode === 'current') return s + '   *** CURRENT STATE = HINDSIGHT for any past game ***';
+  s += '   sides ' + _frvStats.sides + ', slots with no snapshot <= date (current state used) '
+     + _frvStats.asofFallback;
+  const vs = Object.keys(_frvStats.vintages).sort();
+  if (vs.length) s += ', vintages ' + vs[0] + '..' + vs[vs.length - 1];
+  return s;
+}
 
 /**
  * The fields runModel reads but never computes. Anything listed here is
@@ -57,8 +107,27 @@ const CALLER_POPULATED_FIELDS = [
 function populateCallerInputs(wrapped, gameRow, settings) {
   if (!wrapped || !gameRow) return wrapped;
   try {
-    wrapped.awayFieldingRunsPerGame = _frvForTeam(gameRow.away_team, gameRow.away_lineup_json, settings);
-    wrapped.homeFieldingRunsPerGame = _frvForTeam(gameRow.home_team, gameRow.home_lineup_json, settings);
+    const rm = frvReadMode();
+    const asOf = rm.mode === 'current' ? null : (rm.pinned || gameRow.game_date);
+    if (_frvDetailForTeam) {
+      for (const side of ['away', 'home']) {
+        const d = _frvDetailForTeam(gameRow[side + '_team'], gameRow[side + '_lineup_json'],
+          settings, asOf);
+        wrapped[side + 'FieldingRunsPerGame'] = d ? d.value : null;
+        if (d) {
+          _frvStats.sides++;
+          _frvStats.asofFallback += d.asofFallback || 0;
+          for (const det of d.details || []) {
+            if (det.vintage && det.vintage !== 'current_state') {
+              _frvStats.vintages[det.vintage] = 1;
+            }
+          }
+        }
+      }
+    } else {
+      wrapped.awayFieldingRunsPerGame = _frvForTeam(gameRow.away_team, gameRow.away_lineup_json, settings, asOf);
+      wrapped.homeFieldingRunsPerGame = _frvForTeam(gameRow.home_team, gameRow.home_lineup_json, settings, asOf);
+    }
   } catch (e) { /* leave undefined; coverage() will report it */ }
   try {
     // Each team's OWN catcher. model.js:1288 crosses the sides
@@ -172,4 +241,8 @@ module.exports = {
   coverage,
   coverageLine,
   missingEntirely,
+  frvReadMode,
+  frvAsOfStats,
+  frvAsOfLine,
+  resetFrvAsOfStats,
 };
