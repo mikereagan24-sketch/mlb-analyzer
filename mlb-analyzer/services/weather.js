@@ -382,7 +382,70 @@ function parkLocalHourIso(gameDate, gameTime, timeZone) {
 // 21 PT = 9 PM Sacramento = 78°F, when correct hour 18 PT = 92°F.
 // The naive-hour bug the 0e1e48f TZ fix was meant to cure was never
 // actually cured on the cron path — the cron never called fetchParkWind.
-async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel, cacheBust, archive }) {
+// VECTOR MEAN of a set of hourly wind readings. (2026-09-14)
+//
+// Wind direction is the bearing the wind blows FROM. Averaging that as a
+// SCALAR is wrong across north: 350 and 010 average to 180, a reversal
+// that never happened. So the components are averaged and the resultant
+// is read back out as a FROM bearing, which gives 000 for that pair.
+//
+// SPEED COMES FROM THE RESULTANT TOO, which is the requested definition
+// and has a consequence worth stating: the resultant magnitude is <= the
+// scalar mean speed, with equality only when every reading shares a
+// bearing. A window that is genuinely windy but VEERING therefore
+// reports a lower speed than any of its hours, and can fall under the
+// 8mph deadband in calcWindFactor while no hour was ever calm. That is
+// not a bug in the average -- it is what a vector mean means, a steady
+// net push rather than an amount of air moving -- but it is invisible
+// unless the scalar mean sits beside it. So scalarMeanSpeed is returned
+// as well, purely as the control: the gap between the two IS the
+// cancellation, and any measurement using this has to report it.
+function vectorMeanWind(readings) {
+  let u = 0, v = 0, n = 0, speedSum = 0, tempSum = 0, tempN = 0;
+  for (const r of readings || []) {
+    if (Number.isFinite(r.tempF)) { tempSum += r.tempF; tempN++; }
+    if (!Number.isFinite(r.windSpeed) || !Number.isFinite(r.windDir)) continue;
+    const rad = r.windDir * Math.PI / 180;
+    u += r.windSpeed * Math.sin(rad);
+    v += r.windSpeed * Math.cos(rad);
+    speedSum += r.windSpeed;
+    n++;
+  }
+  if (!n) return null;
+  u /= n; v /= n;
+  let dir = Math.atan2(u, v) * 180 / Math.PI;
+  if (dir < 0) dir += 360;
+  const resultant = Math.sqrt(u * u + v * v);
+  const scalarMean = speedSum / n;
+  // CONSTANCY = resultant / scalar mean, the standard steadiness ratio.
+  // 1.0 means every hour blew the same way; near 0 means the hours cancelled.
+  // It matters because windDir is atan2 of a near-zero resultant in that
+  // case, i.e. arbitrary: 000 and 180 at 10mph each return a heading of 090,
+  // which is not a wind that blew. A consumer must check constancy before
+  // trusting the heading, and a measurement must report its distribution.
+  return {
+    windSpeed: resultant,
+    windDir: dir,
+    scalarMeanSpeed: scalarMean,
+    constancy: scalarMean > 0 ? resultant / scalarMean : null,
+    tempF: tempN ? tempSum / tempN : null,
+    n: n,
+  };
+}
+
+// windowHours (2026-09-14, OPT-IN): when > 1, also return the hourly
+// readings from the first-pitch hour through first pitch + (n-1) hours,
+// and their vector mean. THE DEFAULT RETURN IS UNCHANGED -- no argument,
+// no `window` key, byte-identical output, asserted in
+// scripts/test-wind-window.js. wind_factor and temp_run_adj are still
+// computed by their existing callers from the single-point values, so
+// the pricing path does not move.
+//
+// No extra request: the URL already spans gameDate-1 .. gameDate+1, so a
+// 22:00 first pitch plus three hours is inside the array that was going
+// to be fetched anyway. A second fetcher for this would be the parallel
+// weather-fetch implementation this project has spent weeks removing.
+async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel, cacheBust, archive, windowHours }) {
   const label = sourceLabel || 'unknown';
   if (!tz) {
     console.warn(`[weather] mode1 no tz for ${label}; naive-hour fallback will fire — pass tz from PARK_TZ or override.tz`);
@@ -481,7 +544,41 @@ async function fetchWindAtCoords({ lat, lng, tz, gameDate, gameTime, sourceLabel
   }
 
   console.log(`[weather] ${label} ${gameDate} gameTime=${JSON.stringify(gameTime)} path=${wxPath} idx=${idx} hourly.time[idx]=${data.hourly.time[idx]}`);
-  return { windSpeed, windDir, tempF, precipProb };
+  const out = { windSpeed, windDir, tempF, precipProb };
+
+  // The windowed read is ADDITIVE and only appears when asked for, so
+  // every existing caller sees the object it saw before.
+  const wh = Number(windowHours);
+  if (Number.isFinite(wh) && wh > 1) {
+    const readings = [];
+    for (let k = 0; k < wh; k++) {
+      const j = idx + k;
+      if (j >= data.hourly.time.length) break;
+      readings.push({
+        iso: data.hourly.time[j],
+        windSpeed: data.hourly.wind_speed_10m?.[j],
+        windDir: data.hourly.wind_direction_10m?.[j],
+        tempF: data.hourly.temperature_2m?.[j],
+      });
+    }
+    const mean = vectorMeanWind(readings);
+    out.window = {
+      hours: wh,
+      // TRUNCATION IS REPORTED, not padded. A window running off the end
+      // of the array would otherwise average fewer hours than it claims,
+      // which reads as a windowed number and is not one.
+      readings: readings,
+      requested: wh,
+      usable: mean ? mean.n : 0,
+      complete: readings.length === wh && !!mean && mean.n === wh,
+      resultant: mean
+        ? { windSpeed: mean.windSpeed, windDir: mean.windDir, tempF: mean.tempF }
+        : null,
+      scalarMeanSpeed: mean ? mean.scalarMeanSpeed : null,
+      constancy: mean ? mean.constancy : null,
+    };
+  }
+  return out;
 }
 
 async function fetchParkWind(homeTeam, gameDate, gameTime) {
@@ -647,7 +744,7 @@ function computeEffectiveWeather({ windSpeed, windDir, tempF, roofStatus, venueI
 }
 
 module.exports = {
-  fetchParkWind, fetchWindAtCoords, calcWindFactor, PARKS,
+  fetchParkWind, fetchWindAtCoords, calcWindFactor, PARKS, vectorMeanWind,
   tempRunAdjFromTempF, computeEffectiveWeather, roofChannelMults,
   _internal: { PARK_TZ, etWallClockToUtcMs, parkLocalHourIso, parseGameTimeToEtHm, _shiftDate },
 };
