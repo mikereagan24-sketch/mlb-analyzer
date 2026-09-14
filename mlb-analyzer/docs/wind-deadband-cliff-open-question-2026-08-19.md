@@ -121,6 +121,64 @@ distributional argument** rather than empirical fit:
 Neither is urgent. Filed for reference when someone next revisits
 `calcWindFactor` or when the multi-year dataset accumulates.
 
+## Averaging does NOT answer this (2026-09-14)
+
+One route was tried and closed: if the 8 mph cliff hurts because a
+single first-pitch reading is a poor summary of the game, then a
+game-window average should price better. It does not.
+
+`fetchWindAtCoords` reads ONE hourly index at the park-local
+first-pitch hour -- `wind_factor` and `temp_run_adj` both come from it
+-- so a 4-hour alternative (first pitch through FP+3h, direction and
+speed from the vector resultant) was measured against it. Both arms
+were computed from the SAME ERA5 archive array, because the stored
+production values came from the forecast endpoint and comparing across
+endpoints would have moved two things at once.
+
+The factor does move. Over 2026-07-17..09-15, 781 non-dome games:
+
+```
+differ by > 0.01 factor (0.02 runs)   113   14.5%
+differ by > 0.05 factor (0.10 runs)    25    3.2%
+differ by > 0.10 factor (0.20 runs)     9    1.2%
+differ by > 0.25 factor (0.50 runs)     0    0.0%
+out <-> in sign flip (both non-zero)    2    0.3%
+point >= 8mph, window < 8mph           68    8.7%   <- 61 genuine easing,
+                                                       7 vector cancellation
+point < 8mph, window >= 8mph           20    2.6%
+```
+
+So 8.7% of games cross the deadband downward under a window, which
+looks like the cliff mattering. It does not survive scoring.
+
+**MEASURED +0.00001 log loss, 95% CI [-0.00059, +0.00069], n=798** on
+P(over), gate window 2026-06-16..09-10, `weatherFilter valid`,
+identical game set both arms, 3000-rep date-clustered bootstrap. 2 of 5
+windows favour the window. Restricted to the 201 games where the arms
+actually differ: +0.00004, so the null is not dilution from the 597
+identical games.
+
+The arithmetic for why: `WIND_SCALE` turns a 0.05 factor into 0.1 runs,
+and 0.1 runs against the totals sigma of 4.396 is a ~0.9pp shift in
+P(over). Mean |dP(over)| across the corpus was 0.00122. The wind channel
+is not large enough for a 4-hour average to register on this target at
+this n.
+
+**WHAT THIS DOES AND DOES NOT CLOSE.** It closes *averaging* as a route
+to the deadband question -- a smoother summary of the same hours prices
+the same. It says nothing about the cliff itself: the 5-8 mph
+discontinuity is a shape problem in `calcWindFactor`, and every game in
+the measurement above was priced through that same shape in both arms.
+The two "what would move this to actionable" routes below are unaffected.
+
+**And one instrument note, because it cost a detour.** This could not be
+measured on `scripts/calibration-ab.js`. That harness scores `mr.adjHW`
+against the home-win outcome, and in `services/model.js` `adjHW` is
+computed from aRuns/hRuns BEFORE `windFactor` is read -- `windFactor`
+feeds only `windRunAdj -> estTot`. So wind cannot move the ML target at
+all, and an ML-target A/B on any wind change reports the flag inert by
+construction. Any future wind measurement needs a totals target.
+
 ## Related
 
 - `services/weather.js:calcWindFactor` — the function in question.
