@@ -8258,14 +8258,37 @@ async function runPitcherBattedBallJob(cookieValue) {
     let snapped = 0;
     // Tagged 'live' so it is distinguishable from the 2025 prior-season
     // row set, which the as-of lookup also serves.
+    //
+    // THE ERROR IS CARRIED, NOT JUST LOGGED. (2026-09-14) This catch
+    // wrote a console.warn and left snapped at 0, and the cron row below
+    // still said 'success' with the failure encoded as a 0 in the middle
+    // of its message. That is exactly how prod ran for a day with a
+    // rolled-back snapshot and a green cron row: the UNIQUE-constraint
+    // throw from the (mlb_id, split) collisions was invisible.
+    let snapErr = null;
     try { snapped = q.snapshotPitcherBattedBall(dateStr, rows, 'live'); }
-    catch (e) { console.warn('[fg-bb] snapshot failed (non-fatal): ' + e.message); }
-    const msg = 'upserted ' + applied + ' row(s), snapshot ' + snapped + ' for ' + dateStr
+    catch (e) {
+      snapErr = (e && e.message) ? e.message : String(e);
+      console.warn('[fg-bb] snapshot failed: ' + snapErr);
+    }
+    let msg = 'upserted ' + applied + ' row(s), snapshot ' + snapped + ' for ' + dateStr
       + '; resolved ' + resStats.resolved + ' of ' + resStats.fetched
-      + ' (' + resStats.unresolved + ' unresolved)';
+      + ' (' + resStats.unresolved + ' unresolved)'
+      + (resStats.collisions_collapsed
+          ? '; collapsed ' + resStats.collisions_collapsed + ' (mlb_id,split) collision(s)'
+            + ' from ' + resStats.rows_before_dedupe + ' fetched rows'
+          : '');
+    // A run that upserted rows and snapshotted none did NOT succeed at
+    // what it exists to do -- the as-of lookup reads the snapshot. So the
+    // status says so, and the snapshot error text goes in the message
+    // where /health and the cron table can both see it.
+    const snapFailed = !!snapErr || (applied > 0 && snapped === 0);
+    if (snapFailed) msg += '; SNAPSHOT FAILED' + (snapErr ? ': ' + snapErr : ' (wrote 0 rows)');
     console.log('[fg-bb] ' + msg);
-    try { q.logCron.run('fg-batted-ball', dateStr, 'success', msg, applied); } catch (e) { /* non-fatal */ }
-    return { success: true, applied, snapped, snapshot_date: dateStr, resolution: resStats };
+    try { q.logCron.run('fg-batted-ball', dateStr, snapFailed ? 'partial' : 'success', msg, applied); }
+    catch (e) { /* non-fatal */ }
+    return { success: !snapFailed, applied, snapped, snapshot_date: dateStr,
+             snapshot_error: snapErr, resolution: resStats };
   } catch (e) {
     const msg = 'failed: ' + (e && e.message ? e.message : String(e));
     console.error('[fg-bb] ' + msg);
