@@ -198,15 +198,43 @@ fi
 
 echo "=== 1/5 downloading production -> ${SNAP} ==="
 echo "    host=${HOST}  header=X-Admin-Token  token from \$${TOKEN_VAR}"
-HTTP_CODE="$(curl -sS --max-time 1800 -H "X-Admin-Token: ${TOKEN}" \
-  -o "${SNAP}" -w '%{http_code}' \
-  "${HOST}/api/admin/download-db" || echo "000")"
-echo "    http=${HTTP_CODE} bytes=$(wc -c < "${SNAP}" 2>/dev/null || echo 0)"
+# GZIP ON THE WIRE, DECODED HERE. (2026-09-15)
+#
+# This endpoint was 4.96 of the month's 5.06GB of Render outbound. The
+# server now gzips when asked: the 834,355,200-byte 2026-09-14 snapshot
+# crosses the wire as 196,623,797 (23.6%). Re-run the measurement with
+#   node --max-old-space-size=1536 scripts/test-download-db-gzip.js --file data/mlb.db.prod-YYYYMMDD
+#
+# curl is deliberately NOT given --compressed. The compressed body is kept
+# as-is so `gzip -t` can check its CRC, which catches a truncated transfer
+# before anything is decompressed. The decompressed size is then compared
+# with the server's X-Uncompressed-Length. Both checks run before the
+# step-2 integrity check, and on any failure every partial file is removed.
+# A server that has not deployed this yet answers without Content-Encoding,
+# and that body is used as-is.
+DL="${SNAP}.download"
+HDRS="${SNAP}.headers"
+rm -f "${DL}" "${HDRS}"
+set +e
+CURL_OUT="$(curl -sS --max-time 1800 -H "X-Admin-Token: ${TOKEN}" -H "Accept-Encoding: gzip" \
+  -D "${HDRS}" -o "${DL}" -w '%{http_code} %{size_download}' \
+  "${HOST}/api/admin/download-db")"
+CURL_RC=$?
+set -e
+HTTP_CODE="${CURL_OUT%% *}"
+WIRE_BYTES="${CURL_OUT##* }"
+[ -n "${HTTP_CODE}" ] || HTTP_CODE="000"
+echo "    http=${HTTP_CODE} curl_exit=${CURL_RC} wire_bytes=${WIRE_BYTES:-0}"
+if [ "${HTTP_CODE}" = "200" ] && [ "${CURL_RC}" -ne 0 ]; then
+  rm -f "${DL}" "${HDRS}" "${SNAP}"
+  echo "DOWNLOAD FAILED MID-TRANSFER (curl exit ${CURL_RC}): nothing kept." >&2
+  exit 3
+fi
 # A 401 used to arrive as a bare curl failure under -f, which said nothing
 # about WHICH credential was rejected. Name it, and remove the partial file
 # so a rejected download can never be mistaken for a snapshot.
 if [ "${HTTP_CODE}" != "200" ]; then
-  rm -f "${SNAP}"
+  rm -f "${DL}" "${HDRS}" "${SNAP}"
   case "${HTTP_CODE}" in
     401) echo "DOWNLOAD REJECTED (401): the token in \$${TOKEN_VAR} is not what the server expects." >&2
          echo "  The server compares against its own DB_DOWNLOAD_TOKEN env var (Render dashboard)." >&2
@@ -215,6 +243,44 @@ if [ "${HTTP_CODE}" != "200" ]; then
     000) echo "DOWNLOAD FAILED: could not reach ${HOST}." >&2 ;;
     *)   echo "DOWNLOAD FAILED (http ${HTTP_CODE})." >&2 ;;
   esac
+  exit 3
+fi
+
+# Header value from the LAST response block, CR stripped; empty when absent.
+# The `|| true` is load-bearing: an absent header makes grep exit 1, and under
+# `set -euo pipefail` that silently killed the script on an identity response
+# -- i.e. against any server that has not deployed the gzip change yet.
+# scripts/test-download-db-gzip.js case 6 "identity" is the regression test.
+header_value() {
+  { grep -i "^$1:" "${HDRS}" || true; } | tail -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//; s/ *$//'
+}
+ENCODING="$(header_value content-encoding | tr '[:upper:]' '[:lower:]')"
+EXPECT_BYTES="$(header_value x-uncompressed-length)"
+if [ "${ENCODING}" = "gzip" ]; then
+  if ! gzip -t < "${DL}" 2>/dev/null; then
+    rm -f "${DL}" "${HDRS}" "${SNAP}"
+    echo "DOWNLOAD TRUNCATED: the gzip body failed its CRC/length integrity check. Nothing kept." >&2
+    exit 3
+  fi
+  if ! gunzip -c < "${DL}" > "${SNAP}"; then
+    rm -f "${DL}" "${HDRS}" "${SNAP}"
+    echo "DECOMPRESSION FAILED writing ${SNAP}. Nothing kept." >&2
+    exit 3
+  fi
+  rm -f "${DL}"
+elif [ -z "${ENCODING}" ] || [ "${ENCODING}" = "identity" ]; then
+  mv "${DL}" "${SNAP}"
+else
+  rm -f "${DL}" "${HDRS}" "${SNAP}"
+  echo "UNEXPECTED Content-Encoding '${ENCODING}': refusing to guess how to decode it." >&2
+  exit 3
+fi
+rm -f "${HDRS}"
+SNAP_BYTES="$(wc -c < "${SNAP}" | tr -d ' ')"
+echo "    encoding=${ENCODING:-identity} wire_bytes=${WIRE_BYTES} snapshot_bytes=${SNAP_BYTES}"
+if [ -n "${EXPECT_BYTES}" ] && [ "${EXPECT_BYTES}" != "${SNAP_BYTES}" ]; then
+  rm -f "${SNAP}"
+  echo "SIZE MISMATCH: server sent X-Uncompressed-Length ${EXPECT_BYTES}, got ${SNAP_BYTES}. Nothing kept." >&2
   exit 3
 fi
 
