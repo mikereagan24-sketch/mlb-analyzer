@@ -1467,6 +1467,10 @@ router.post('/games/upsert', requireAdminToken, async (req, res) => {
       game_time: g.game_time || null,
       away_sp: g.away_sp, away_sp_hand: g.away_sp_hand,
       home_sp: g.home_sp, home_sp_hand: g.home_sp_hand,
+      // MLBAM ids when the caller supplies them, else null (upsertGame
+      // requires both keys since #407).
+      away_sp_id: g.away_sp_id != null ? Number(g.away_sp_id) : null,
+      home_sp_id: g.home_sp_id != null ? Number(g.home_sp_id) : null,
       market_away_ml: g.market_away_ml, market_home_ml: g.market_home_ml,
       market_total: g.market_total, park_factor: g.park_factor || 1.0,
       model_away_ml: null, model_home_ml: null, model_total: null,

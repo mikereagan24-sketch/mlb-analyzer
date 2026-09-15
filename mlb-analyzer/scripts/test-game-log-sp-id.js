@@ -22,6 +22,28 @@ const Database = require(path.join(R, 'node_modules/better-sqlite3'));
 const { sameStarter } = require(path.join(R, 'services/backfill-tasks/game-log-sp-id'));
 const { getBackfillTask } = require(path.join(R, 'services/backfill-jobs'));
 
+// The object literal passed to the call starting at `at`: from the first '{'
+// after it to its matching '}', skipping braces inside string literals.
+// Returns null when there is no literal (e.g. a variable is passed).
+function objectLiteralAfter(src, at) {
+  const open = src.indexOf('{', at);
+  const paren = src.indexOf(')', at);
+  if (open < 0 || (paren >= 0 && paren < open)) return null;
+  let depth = 0, quote = null;
+  for (let i = open; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') quote = c;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return src.slice(open, i + 1);
+  }
+  return null;
+}
+
 let failures = 0;
 function check(label, got, want) {
   const ok = JSON.stringify(got) === JSON.stringify(want);
@@ -135,9 +157,39 @@ check('the task is registered', !!task, true);
   const scr = strip(fs.readFileSync(path.join(R, 'services/scraper.js'), 'utf8'));
   check('the scraper carries probablePitcher.id alongside the name',
     /away_sp:\s*aPP\s*\?\s*\{[^}]*id:\s*aPP\.id/.test(scr), true);
-  const jobs = strip(fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8'));
-  check('both upsert payload sites set away_sp_id',
-    (jobs.match(/away_sp_id:\s*g\.away_sp/g) || []).length, 2);
+  // EVERY upsertGame.run( PAYLOAD, NOT A COUNT OF TWO. (2026-09-15)
+  //
+  // This used to assert that exactly two sites in jobs.js set away_sp_id.
+  // There were four call sites -- two in jobs.js the count never looked at
+  // past the first two, and POST /games/upsert in routes/api.js -- and
+  // better-sqlite3 throws on any missing named parameter. The RotoWire
+  // site's omission failed every lineup pull from the #407 deploy onward.
+  // So: find every call, extract its object literal, check both keys.
+  const payloadSites = [];
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else if (ent.name.endsWith('.js')) {
+        const src = strip(fs.readFileSync(p, 'utf8'));
+        let at = src.indexOf('upsertGame.run(');
+        while (at >= 0) {
+          payloadSites.push({ file: path.relative(R, p).replace(/\\/g, '/'),
+            line: src.slice(0, at).split('\n').length, body: objectLiteralAfter(src, at) });
+          at = src.indexOf('upsertGame.run(', at + 1);
+        }
+      }
+    }
+  };
+  for (const d of ['services', 'routes', 'db', 'utils']) walk(path.join(R, d));
+  // A scanner that finds nothing passes every per-site check vacuously.
+  // 4 is today's call-site count; this is a floor on the scanner, not the
+  // property under test.
+  check('the scanner finds the known upsertGame.run( sites (>= 4)', payloadSites.length >= 4, true);
+  for (const s of payloadSites) {
+    check(s.file + ' (stripped line ' + s.line + ') payload carries away_sp_id and home_sp_id',
+      !!s.body && /(^|[\s,{])away_sp_id\s*:/.test(s.body) && /(^|[\s,{])home_sp_id\s*:/.test(s.body), true);
+  }
   const sch = strip(fs.readFileSync(path.join(R, 'db/schema.js'), 'utf8'));
   check('the columns are migrated', /ADD COLUMN away_sp_id INTEGER/.test(sch)
     && /ADD COLUMN home_sp_id INTEGER/.test(sch), true);
