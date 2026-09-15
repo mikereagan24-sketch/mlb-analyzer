@@ -2895,6 +2895,14 @@ async function runLineupJob(dateStr) {
         away_sp_hand: writeAwayHand,
         home_sp: writeHomeSp,
         home_sp_hand: writeHomeHand,
+        // RotoWire carries no MLBAM id, so null. The upsert's CASE keeps the
+        // stored id when the name is unchanged and clears it when a different
+        // name arrives. Omitting the keys instead threw "Missing named
+        // parameter away_sp_id" on every lineup pull from the #407 deploy
+        // (2026-09-15 01:30Z) -- 0/15 lineups on 09-15, weather wiped on 09-16.
+        // Re-run: node scripts/test-game-log-sp-id.js
+        away_sp_id: null,
+        home_sp_id: null,
         // Per-source SP capture: RotoWire writes its RAW value (rwAwaySp /
         // rwHomeSp), independent of the Option-B precedence merge above
         // that may have rejected it in favor of statsapi for away_sp /
