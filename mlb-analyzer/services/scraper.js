@@ -1313,8 +1313,13 @@ async function fetchSchedule(dateStr) {
       away_team: awayAbbr,
       home_team: homeAbbr,
       time: fmtET(g.gameDate),
-      away_sp: aPP ? { name: aPP.fullName || null, hand: handById[aPP.id] || null } : null,
-      home_sp: hPP ? { name: hPP.fullName || null, hand: handById[hPP.id] || null } : null,
+      // id carried alongside the name (2026-09-14). It was already in
+      // hand -- handById is keyed on it three lines up -- and throwing
+      // it away forced every consumer to re-derive it from "F. Last".
+      away_sp: aPP ? { name: aPP.fullName || null, id: aPP.id || null,
+                       hand: handById[aPP.id] || null } : null,
+      home_sp: hPP ? { name: hPP.fullName || null, id: hPP.id || null,
+                       hand: handById[hPP.id] || null } : null,
       away_lineup: [],
       home_lineup: [],
       lineup_status: 'projected',
