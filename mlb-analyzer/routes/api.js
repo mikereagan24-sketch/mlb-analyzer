@@ -7928,29 +7928,30 @@ router.get('/admin/download-db', requireAdminToken, async (req, res) => {
   }
 
   const fnameDate = stamp.slice(0, 10); // YYYY-MM-DD
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', 'attachment; filename="mlb-' + fnameDate + '.db"');
-  // Content-Length helps the client show progress; stat() can't fail
-  // here since db.backup() just produced the file.
+  // Streams the backup file above, gzipped when the client sends
+  // Accept-Encoding: gzip (2026-09-15; sizes and re-run command in
+  // utils/db-download-stream.js). Compression reads the finished side file,
+  // never the live DB, so the backup-then-stream WAL safety is unchanged.
+  // The helper reports completion, error and client abort through one
+  // callback, and every one of them unlinks the temp file.
+  const { streamDbFile } = require('../utils/db-download-stream');
   try {
-    const stat = fs.statSync(tempPath);
-    res.setHeader('Content-Length', String(stat.size));
-  } catch (e) { /* non-fatal — stream still works without Content-Length */ }
-
-  const stream = fs.createReadStream(tempPath);
-  stream.on('end', () => {
-    console.log('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=success path=' + DB_PATH);
-    cleanup();
-  });
-  stream.on('error', (e) => {
+    streamDbFile(req, res, tempPath, { filename: 'mlb-' + fnameDate + '.db' }, (r) => {
+      const detail = ' encoding=' + (r.gzip ? 'gzip' : 'identity')
+        + ' bytes_in=' + r.bytesIn + ' bytes_out=' + r.bytesOut;
+      if (r.ok) {
+        console.log('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=success' + detail + ' path=' + DB_PATH);
+      } else {
+        console.error('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=stream-error' + detail
+          + ' msg=' + (r.error && r.error.message));
+      }
+      cleanup();
+    });
+  } catch (e) {
     console.error('[admin-download-db] ' + stamp + ' ip=' + ip + ' result=stream-error msg=' + e.message);
-    if (!res.headersSent) res.status(500).json({ error: 'stream failed' });
-    else res.destroy(e);
     cleanup();
-  });
-  // If the client aborts mid-download, still cleanup the temp file.
-  res.on('close', () => { if (!res.writableEnded) cleanup(); });
-  stream.pipe(res);
+    if (!res.headersSent) res.status(500).json({ error: 'stream failed' });
+  }
 });
 
 module.exports = router;
