@@ -2123,6 +2123,11 @@ async function ensureScheduleBootstrap(dateStr) {
       away_sp_hand: g.away_sp ? g.away_sp.hand : null,
       home_sp: g.home_sp ? g.home_sp.name : null,
       home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+      // The id the schedule feed already gave us, persisted so joins do
+      // not have to re-derive it from an abbreviated name. Null when the
+      // feed had no probable pitcher; the name fallback covers those.
+      away_sp_id: g.away_sp && g.away_sp.id != null ? Number(g.away_sp.id) : null,
+      home_sp_id: g.home_sp && g.home_sp.id != null ? Number(g.home_sp.id) : null,
       // Per-source SP capture: bootstrap is the statsapi source. Persist
       // statsapi's probable SPs distinctly so they survive even if the
       // merged away_sp/home_sp gets a different value from a later pass.
@@ -2240,6 +2245,11 @@ async function runLineupJob(dateStr) {
           away_sp_hand: g.away_sp ? g.away_sp.hand : null,
           home_sp: g.home_sp ? g.home_sp.name : null,
           home_sp_hand: g.home_sp ? g.home_sp.hand : null,
+          // The id the schedule feed already gave us, persisted so joins do
+          // not have to re-derive it from an abbreviated name. Null when the
+          // feed had no probable pitcher; the name fallback covers those.
+          away_sp_id: g.away_sp && g.away_sp.id != null ? Number(g.away_sp.id) : null,
+          home_sp_id: g.home_sp && g.home_sp.id != null ? Number(g.home_sp.id) : null,
           // Per-source SP capture: bootstrap is the statsapi source. Same
           // pattern as ensureScheduleBootstrap above. deriveStatsapiSp
           // handles the backfill case (see helper definition near the top

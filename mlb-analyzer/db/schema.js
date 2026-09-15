@@ -1344,6 +1344,26 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN proj_lineup_captured_at TEXT"); }
 // and COALESCE in upsertGame preserves. sp_source_conflict /
 // sp_source_conflict_note are recomputed each lineup-job pass via a
 // separate UPDATE (q.updateSpSourceConflict) using the two raw values.
+// THE STARTER IDENTITY, not just his display name. (2026-09-14)
+//
+// game_log stored away_sp / home_sp as TEXT only, and statsapi gives
+// "F. Last" for some sides, so every consumer needing the pitcher had to
+// re-derive an id from an abbreviated name. That round trip was lossy by
+// choice: the schedule feed already hydrates probablePitcher and
+// services/scraper.js already read probablePitcher.id to look up pitch
+// hand -- it dropped the id on the floor immediately afterwards.
+//
+// Measured cost of not having it over 2026-08-16..09-15: 32 of 830 SP
+// appearances (3.9%) unresolvable by name even through the shared fuzzy
+// matcher, and 4 of those ambiguous beyond rescue -- "E. Rodriguez"
+// matches four pitchers in the index and carries no team key that
+// separates them. An id has no ambiguity to resolve.
+//
+// The NAME STAYS as the display value and the #406 name resolver stays as
+// the FALLBACK for rows whose feed carried no id. Additive: nothing reads
+// less than it did before.
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_sp_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_sp_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN statsapi_away_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN statsapi_home_sp TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN rotowire_away_sp TEXT"); } catch(e) {}
@@ -2347,6 +2367,7 @@ const q = {
     INSERT INTO game_log (
       game_date, game_id, away_team, home_team, game_time,
       away_sp, away_sp_hand, home_sp, home_sp_hand,
+      away_sp_id, home_sp_id,
       statsapi_away_sp, statsapi_home_sp,
       rotowire_away_sp, rotowire_home_sp,
       bulk_guy_away_announced, bulk_guy_home_announced,
@@ -2361,6 +2382,7 @@ const q = {
     ) VALUES (
       @game_date, @game_id, @away_team, @home_team, @game_time,
       @away_sp, @away_sp_hand, @home_sp, @home_sp_hand,
+      @away_sp_id, @home_sp_id,
       @statsapi_away_sp, @statsapi_home_sp,
       @rotowire_away_sp, @rotowire_home_sp,
       @bulk_guy_away_announced, @bulk_guy_home_announced,
@@ -2382,6 +2404,23 @@ const q = {
       away_sp_hand = COALESCE(excluded.away_sp_hand, game_log.away_sp_hand),
       home_sp = COALESCE(excluded.home_sp, game_log.home_sp),
       home_sp_hand = COALESCE(excluded.home_sp_hand, game_log.home_sp_hand),
+      -- THE ID MUST NEVER OUTLIVE THE NAME IT BELONGS TO.
+      -- A plain COALESCE would keep a stale id: the RotoWire enrichment
+      -- writes a CONFIRMED away_sp name and carries no id, so after a
+      -- late scratch the row would hold the new pitcher in away_sp and
+      -- the old one in away_sp_id -- a join key silently describing a
+      -- different pitcher than the display name. So: a supplied id
+      -- wins; otherwise, if this upsert supplies a DIFFERENT name, the
+      -- id is cleared and the name fallback takes over; otherwise the
+      -- existing id is kept.
+      away_sp_id = CASE
+        WHEN excluded.away_sp_id IS NOT NULL THEN excluded.away_sp_id
+        WHEN excluded.away_sp IS NOT NULL AND excluded.away_sp <> game_log.away_sp THEN NULL
+        ELSE game_log.away_sp_id END,
+      home_sp_id = CASE
+        WHEN excluded.home_sp_id IS NOT NULL THEN excluded.home_sp_id
+        WHEN excluded.home_sp IS NOT NULL AND excluded.home_sp <> game_log.home_sp THEN NULL
+        ELSE game_log.home_sp_id END,
       -- Per-source SP capture. Each source-owned column COALESCEs against
       -- itself so the writer for the OTHER source (passing null here) does
       -- not wipe a previously-captured value. Bootstrap writes statsapi_*;
