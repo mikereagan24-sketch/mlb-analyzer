@@ -40,7 +40,117 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NODE="${NODE_BIN:-node}"
+# ── PICK THE NODE THAT CAN ACTUALLY OPEN THE DATABASE ────────────────
+#
+# This was NODE="${NODE_BIN:-node}", i.e. whatever PATH resolved to. On
+# 2026-09-13 PATH resolved to Node 24 (v24.18.0, outside nvm), the step-2
+# integrity check died on better-sqlite3 NODE_MODULE_VERSION 115 vs 137,
+# and `set -euo pipefail` aborted the whole script -- AFTER the 560MB
+# download and BEFORE the step-4 backup and step-5 promote. The refresh
+# looked like it had run; the working copy was untouched, and a day of
+# measurement nearly went out against stale data.
+#
+# THE GATE IS "CAN IT OPEN A DATABASE", NOT A VERSION STRING. A pin can
+# be stale, a major can be right and the build still wrong (a rebuilt
+# native module, a different arch). The only thing this script needs is a
+# node that can require better-sqlite3, so that is what is checked -- and
+# it is checked BEFORE the download, so a version problem costs seconds
+# instead of aborting mid-refresh.
+#
+# AND THE PROBE CONSTRUCTS A DATABASE, because require() ALONE IS NOT
+# ENOUGH. Measured 2026-09-14: `node -e "require('better-sqlite3')"`
+# exits 0 on Node v24.18.0 -- the package loads its JS wrapper and only
+# binds the native .node file when a Database is constructed. A require
+# probe would therefore have selected the exact Node that broke the
+# 09-13 refresh. new Database(":memory:") forces the binding, needs no
+# file, and costs milliseconds: it FAILS on v24.18.0 and PASSES on
+# v20.20.2, which is the discrimination this resolver exists for.
+#
+# Resolution order:
+#   1. $NODE_BIN if set -- the explicit escape hatch, still honoured
+#   2. the exact version in .node-version, under the nvm layout
+#   3. the newest installed node with the SAME MAJOR as .node-version
+#      (warned, because the pin is then not what is running)
+#   4. PATH node -- last, not first, and only if it passes the gate
+ABI_PROBE='new (require("better-sqlite3"))(":memory:").close()'
+NODE_VERSION_FILE="$(dirname "$0")/../.node-version"
+PINNED=""
+[ -f "$NODE_VERSION_FILE" ] && PINNED="$(tr -d " \t\r\n" < "$NODE_VERSION_FILE")"
+PINNED_MAJOR="${PINNED%%.*}"
+
+# nvm-for-windows keeps versions at <root>/v<x.y.z>/node.exe; nvm on
+# POSIX uses ~/.nvm/versions/node/v<x.y.z>/bin/node. Both are tried so
+# this is not a Windows-only script.
+nvm_roots() {
+  [ -n "${NVM_HOME:-}" ] && printf "%s\n" "$NVM_HOME"
+  [ -n "${LOCALAPPDATA:-}" ] && printf "%s\n" "$LOCALAPPDATA/nvm"
+  printf "%s\n" "$HOME/AppData/Local/nvm"
+  printf "%s\n" "$HOME/.nvm/versions/node"
+}
+
+# Windows env vars arrive with backslashes; Git Bash needs forward.
+winpath() { printf "%s" "$1" | tr "\\\\" "/"; }
+
+candidates() {
+  [ -n "${NODE_BIN:-}" ] && printf "%s\n" "$NODE_BIN"
+  local root v
+  # exact pin first
+  if [ -n "$PINNED" ]; then
+    while read -r root; do
+      root="$(winpath "$root")"
+      printf "%s\n" "$root/v$PINNED/node.exe" "$root/v$PINNED/bin/node"
+    done < <(nvm_roots)
+  fi
+  # then the newest installed same-major
+  if [ -n "$PINNED_MAJOR" ]; then
+    while read -r root; do
+      root="$(winpath "$root")"
+      # READ, DO NOT SPLIT. `for v in $(ls ...)` word-splits on the space
+      # in "C:/Users/Mike Reagan/..." and emits two broken half-paths, so
+      # the same-major candidate never existed and the resolver fell through
+      # to PATH node -- the exact thing it is here to avoid.
+      while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        printf "%s\n" "$v/node.exe" "$v/bin/node"
+      done < <(ls -1d "$root"/v"$PINNED_MAJOR".* 2>/dev/null | sort -V -r)
+    done < <(nvm_roots)
+  fi
+  printf "%s\n" "node"
+}
+
+NODE=""
+while read -r cand; do
+  [ -z "$cand" ] && continue
+  # "node" is a PATH lookup, not a file; everything else must exist.
+  if [ "$cand" != "node" ] && [ ! -x "$cand" ]; then continue; fi
+  command -v "$cand" >/dev/null 2>&1 || [ -x "$cand" ] || continue
+  if "$cand" -e "$ABI_PROBE" >/dev/null 2>&1; then
+    NODE="$cand"
+    break
+  fi
+done < <(candidates)
+
+if [ -z "$NODE" ]; then
+  echo "NO USABLE NODE. No candidate could open a better-sqlite3 database." >&2
+  echo "  .node-version pins: ${PINNED:-<absent>}" >&2
+  echo "  PATH node:          $(node --version 2>/dev/null || echo none)" >&2
+  echo "  tried: $(candidates | tr '\n' ' ')" >&2
+  echo "" >&2
+  echo "  better-sqlite3 here is built for NODE_MODULE_VERSION 115 (Node 20)." >&2
+  echo "  Fix one of:" >&2
+  echo "    nvm install ${PINNED:-20.20.2} && nvm use ${PINNED:-20.20.2}" >&2
+  echo "    NODE_BIN=/path/to/node20 bash scripts/refresh-analysis-db.sh --promote" >&2
+  echo "    npm rebuild better-sqlite3   # if you MEANT to move to a new major" >&2
+  exit 4
+fi
+
+NODE_ACTUAL="$("$NODE" --version 2>/dev/null)"
+echo "=== node: ${NODE_ACTUAL} (${NODE}) ==="
+if [ -n "$PINNED" ] && [ "$NODE_ACTUAL" != "v$PINNED" ]; then
+  echo "    NOTE .node-version pins v${PINNED}, which is not what is running." >&2
+  echo "    Same major, better-sqlite3 loads, so this run is fine -- but the pin" >&2
+  echo "    is stale. Either install v${PINNED} or update .node-version." >&2
+fi
 HOST="${MLB_HOST:-https://mlb-analyzer.onrender.com}"
 STAMP="$(date +%Y%m%d)"
 SNAP="data/mlb.db.prod-${STAMP}"
