@@ -241,7 +241,13 @@ const GATES = [
         + 'unabated_total alternative, so a Poly total with no Kalshi line prices off liquidity '
         + 'and is counted per pass in the odds cron_log message. The removal gate was the '
         + '2026-09-16 slate: phi-nym and det-cws priced=yes agree=yes via liquidity_fallback; '
-        + 'ath-tb and sd-col kalshi_exact.' },
+        + 'ath-tb and sd-col kalshi_exact.\n'
+        + 'ANCHOR STORAGE FIXED 2026-09-17: both rung anchors (this writer\'s sticky rung and '
+        + 'the Poly one) read game_log.kalshi_anchor_total, written on every Kalshi-priced pass '
+        + 'and never cleared by another source. They previously inferred it from '
+        + 'total_source=\'kalshi\', which a Poly-priced pass erased -- so the next Kalshi-silent '
+        + 'pass moved the line with no market reason. Backfill migration '
+        + 'kalshi-anchor-total-backfill-001.' },
 
   { id: 'signal_edge_cap_enabled', key: 'signal_edge_cap_enabled', on_expected: true,
     criterion: 'Suppress signals at edge >= hard cap; flag [soft,hard).',
