@@ -105,6 +105,27 @@ const MIGRATIONS = [
       + ") "
       + "WHERE cohort = 'v5' AND signal_type = 'ML';\n",
   },
+  {
+    name: 'kalshi-anchor-total-backfill-001',
+    description:
+      'Seed game_log.kalshi_anchor_total (added 2026-09-17) from the rows '
+      + 'where Kalshi is still the recorded totals source. The column is the '
+      + 'Kalshi rung both rung anchors now read, replacing the inference from '
+      + 'total_source that a Poly-priced pass erased. Without this backfill '
+      + 'every row written before the column existed has a NULL anchor, so '
+      + 'the first Kalshi-silent pass on an in-flight slate would fall to '
+      + 'liquidity exactly as before. Rows whose totals came from Poly get '
+      + 'nothing -- their Kalshi rung is genuinely unknown, and inventing one '
+      + 'from market_total would record a Poly strike as a Kalshi anchor. '
+      + 'Idempotent twice over: the IS NULL filter cannot match a row it '
+      + 'already filled, and the migrations_applied gate stops a rerun.',
+    sql:
+      "UPDATE game_log "
+      + "SET kalshi_anchor_total = market_total "
+      + "WHERE kalshi_anchor_total IS NULL "
+      + "  AND total_source = 'kalshi' "
+      + "  AND market_total IS NOT NULL;\n",
+  },
 ];
 
 // Ensure the bookkeeping table exists. Schema:

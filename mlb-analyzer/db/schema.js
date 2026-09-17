@@ -1377,6 +1377,22 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN sp_source_conflict_note TEXT"); }
 // Kalshi-direct totals: implied "fair" total (observation-only, see
 // runOddsJob's totals override block).
 try { db.exec("ALTER TABLE game_log ADD COLUMN kalshi_implied_total REAL"); } catch(e) {}
+// THE KALSHI ANCHOR LINE. (2026-09-17)
+//
+// The bettable Kalshi rung (a strike: 7.5, 8.5, ...) written on every pass
+// Kalshi prices the game, and never cleared by another source. It exists
+// because both rung anchors used to be inferred from
+// `total_source = 'kalshi' AND market_total`, and a Poly-priced pass sets
+// total_source = 'polymarket' -- which ERASED the anchor. The next pass with
+// Kalshi silent then found nothing and fell to Poly's most-liquid rung, so a
+// priced line could move 9.5 -> 8.5 with no market reason
+// (scripts/test-odds-job-no-unabated.js pinned that as KNOWN GAP).
+//
+// NOT kalshi_implied_total: that is the CONTINUOUS de-vigged fair total
+// (8.24), not a rung, so anchoring on it would re-snap through a
+// nearest-within-0.5 search and can land on a strike Kalshi never priced.
+// This column holds the strike itself.
+try { db.exec("ALTER TABLE game_log ADD COLUMN kalshi_anchor_total REAL"); } catch(e) {}
 // opener_override.opener_name (piece 1 of feat/opener-name-override).
 // Allows a manual override to pin the OPENER's name into
 // away_sp/home_sp, not just is_opener/bulk_guy. Existing override rows

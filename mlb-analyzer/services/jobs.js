@@ -5087,6 +5087,7 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       under_price=COALESCE(?, under_price),
       total_source=COALESCE(?, total_source),
       kalshi_implied_total=COALESCE(?, kalshi_implied_total),
+      kalshi_anchor_total=COALESCE(?, kalshi_anchor_total),
       ml_source=COALESCE(?, ml_source),
       market_away_spread=COALESCE(?, market_away_spread),
       market_home_spread=COALESCE(?, market_home_spread),
@@ -5101,6 +5102,7 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       .run(o.market_away_ml, o.market_home_ml,
            o.market_total, o.over_price, o.under_price, o.total_source || null,
            o.kalshi_implied_total != null ? o.kalshi_implied_total : null,
+           o.kalshi_anchor_total != null ? o.kalshi_anchor_total : null,
            o.ml_source || null,
            _awaySpread, _homeSpread,
            _awaySpreadPrice, _homeSpreadPrice,
@@ -5857,9 +5859,16 @@ async function runOddsJob(dateStr, opts) {
             // The snapshot uses the same pick, so it lines up with what was
             // priced. ALWAYS produces a rung so snapshot coverage is
             // independent of override fate.
+            //
+            // THE ANCHOR IS kalshi_anchor_total, NOT total_source. (2026-09-17)
+            // This read was `total_source === 'kalshi' AND market_total`, and a
+            // Poly-priced pass writes total_source='polymarket' -- erasing the
+            // anchor for every later pass. kalshi_anchor_total is written
+            // whenever Kalshi prices and is never cleared by another source, so
+            // a Poly pass in between cannot lose it.
             const existing = q.getGameById.get(dateStr, gameId);
-            const persistedKalshiLine = (existing && existing.total_source === 'kalshi'
-              && existing.market_total != null) ? existing.market_total : null;
+            const persistedKalshiLine = (existing && existing.kalshi_anchor_total != null)
+              ? existing.kalshi_anchor_total : null;
             let candidateRung = null;
             if (persistedKalshiLine != null) {
               candidateRung = k.ladder.find(r => r.strike === persistedKalshiLine) || null;
@@ -5931,6 +5940,10 @@ async function runOddsJob(dateStr, opts) {
             o.over_price = overFeeMl;
             o.under_price = underFeeMl;
             o.total_source = 'kalshi';
+            // The anchor for every later pass, this game only. Written on
+            // every Kalshi-priced pass; COALESCE'd in the UPDATE, so a
+            // Poly-priced pass afterwards preserves it.
+            o.kalshi_anchor_total = chosenRung.strike;
             passStats.kalshiRung[candidateRung ? 'persisted' : 'auto']++;
             overridden++;
           }
@@ -6072,18 +6085,25 @@ async function runOddsJob(dateStr, opts) {
           // days. PR 3 would have shipped a regression on any pass where
           // Kalshi came back empty.
           //
-          // So the anchor now falls back to the PERSISTED Kalshi line for
-          // the same game -- market_total from an earlier pass today, where
-          // total_source says Kalshi wrote it. Same book, same slate, same
-          // line; only the pass differs. It also covers the case where
-          // KALSHI_DIRECT_TOTALS_ENABLED is off entirely, which the
-          // same-pass map cannot.
+          // So the anchor falls back to the PERSISTED Kalshi line for the same
+          // game. Same book, same slate, same line; only the pass differs. It
+          // also covers the case where KALSHI_DIRECT_TOTALS_ENABLED is off
+          // entirely, which the same-pass map cannot.
+          //
+          // THE PERSISTED READ IS kalshi_anchor_total, NOT total_source.
+          // (2026-09-17) It was `total_source === 'kalshi' AND market_total`,
+          // and THIS BLOCK is what erased it: pricing a game from the
+          // persisted line writes total_source='polymarket', so the NEXT
+          // Kalshi-silent pass found no anchor and fell to the most-liquid
+          // rung -- moving a priced line with no market reason. The test's
+          // sea-ath case went 9.5 -> 8.5 on exactly that path.
+          // kalshi_anchor_total is written only by a Kalshi-priced pass and
+          // never cleared by another source, so a Poly pass cannot lose it.
           let kalshiLine = kalshiLineByGid.has(p.game_id)
             ? kalshiLineByGid.get(p.game_id) : null;
           let kalshiLineSrc = kalshiLine != null ? 'pass' : null;
-          if (kalshiLine == null && existing
-              && existing.total_source === 'kalshi' && existing.market_total != null) {
-            kalshiLine = existing.market_total;
+          if (kalshiLine == null && existing && existing.kalshi_anchor_total != null) {
+            kalshiLine = existing.kalshi_anchor_total;
             kalshiLineSrc = 'persisted';
           }
           const nw = pickFrom(kalshiLine, 'kalshi_exact', 'kalshi_nearest');

@@ -114,16 +114,22 @@ game forever, and a warn-severity warn marks the slate "degraded".
 The same bracket is appended to the odds `cron_log` message. That is the only
 place a per-pass anchor count persists, because Render logs roll.
 
-## Known gap, found by the slate test, not fixed here
+## Known gap, found by the slate test — FIXED 2026-09-17
 
-The persisted-Kalshi anchor (#369) reads `existing.total_source === 'kalshi'`.
-When Poly prices a game from that persisted line, it writes
-`total_source='polymarket'`, which **erases the marker**. On the next pass
-with Kalshi still silent, the anchor is gone and Poly falls to liquidity. In
-the test, sea-ath flips 9.5 → 8.5 on the second pass.
-`scripts/test-odds-job-no-unabated.js` pins this as `KNOWN GAP`, so a fix has
-to update it. It predates this change, but with Unabated gone this anchor is
-the only reference, so it matters more.
+The persisted-Kalshi anchor (#369) read `existing.total_source === 'kalshi'`.
+When Poly priced a game from that persisted line it wrote
+`total_source='polymarket'`, which **erased the marker**. On the next pass
+with Kalshi still silent the anchor was gone and Poly fell to liquidity: in
+the test, sea-ath flipped 9.5 → 8.5 on the second pass. Kalshi's own sticky
+rung had the same defect, from the other side — once Poly owned the row it
+fell back to the auto rung.
+
+Fixed by `game_log.kalshi_anchor_total`: the Kalshi rung, written on every
+Kalshi-priced pass, never cleared by another source, and read by **both**
+anchors. `total_source` is no longer read for this. Existing rows are seeded
+by migration `kalshi-anchor-total-backfill-001`. The test now asserts sea-ath
+**holds 9.5 across three passes** and that pass 3 keeps Kalshi on the 8.5 rung
+on a row Poly owned.
 
 ## Verification
 

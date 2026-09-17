@@ -21,15 +21,23 @@
 //
 // THE SLATE, four games, each built to exercise one path:
 //   nyy-bos  Kalshi ML + totals + 1.5 spreads; Poly quotes ML + total.
-//            A Kalshi line 8.5 is PERSISTED from an earlier pass while this
-//            pass's auto rung is 9.5 -> sticky rung holds 8.5.
+//            kalshi_anchor_total 8.5 from an earlier pass while the auto rung
+//            is 9.5 -> sticky rung holds 8.5.
 //            Pre-seeded unabated_total/xcheck_total must be left untouched.
 //   lad-sf   Kalshi ML + totals, auto rung 7.5; Poly does not quote it;
 //            its 1.5 spread price is insane -> runline refused.
-//   hou-tex  Kalshi silent; Poly ML + total, no Kalshi line anywhere ->
+//   hou-tex  Kalshi silent; Poly ML + total, no Kalshi anchor anywhere ->
 //            liquidity_fallback, NO KALSHI ANCHOR warning.
-//   sea-ath  Kalshi silent this pass but a Kalshi total 9.5 is persisted ->
-//            Poly anchors on it (persisted), not on liquidity.
+//   sea-ath  Kalshi silent; kalshi_anchor_total 9.5 -> Poly anchors on it.
+//
+// THREE PASSES, because the anchor bug only showed up on the pass AFTER a
+// Poly-priced one:
+//   1  Kalshi totals + spreads available.
+//   2  Kalshi silent on BOTH -> every anchor must come from
+//      kalshi_anchor_total, and the runline must survive by COALESCE.
+//   3  Kalshi totals return with auto rung 9.5 on nyy-bos, a row Poly now
+//      owns. The sticky rung must still hold 8.5 -- the case the old
+//      total_source read could not see, because Poly had overwritten it.
 
 const fs = require('fs');
 const os = require('os');
@@ -68,7 +76,7 @@ const GAMES = [
   { game_id: 'sea-ath', away_team: 'SEA', home_team: 'ATH' },
 ];
 const START_TXT = '7:05 PM ET', START_HHMM = '1905', START_ISO = DATE + 'T23:05:00Z';
-let spreadsSilent = false;
+let spreadsSilent = false, totalsSilent = false;
 
 const scraper = require(path.join(R, 'services/scraper'));
 scraper.fetchSchedule = async () => {
@@ -90,6 +98,7 @@ kalshi.getKalshiMlbLines = async () => {
 };
 kalshi.getKalshiMlbTotals = async () => {
   calls.kalshiTotals++;
+  if (totalsSilent) return [];
   return [
     { game_id: 'nyy-bos', away_team: 'NYY', home_team: 'BOS', line: 9.5, implied_total: 9.4,
       over: { ask_dollars: 0.50 }, under: { ask_dollars: 0.52 },
@@ -141,31 +150,44 @@ const release = () => Object.assign(console, real);
     db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('kalshi_direct_totals_enabled','true')").run();
     // Earlier-pass state: persisted Kalshi totals, plus Unabated-era reference
     // values that nothing may touch now.
+    // kalshi_anchor_total is what an earlier Kalshi-priced pass leaves behind.
     const seed = db.prepare("INSERT INTO game_log (game_date, game_id, away_team, home_team, game_time, "
-      + "market_total, over_price, under_price, total_source, unabated_total, xcheck_total) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
-    seed.run(DATE, 'nyy-bos', 'NYY', 'BOS', START_TXT, 8.5, -115, -105, 'kalshi', 99, 42);
-    seed.run(DATE, 'sea-ath', 'SEA', 'ATH', START_TXT, 9.5, -110, -110, 'kalshi', null, null);
+      + "market_total, over_price, under_price, total_source, kalshi_anchor_total, unabated_total, xcheck_total) "
+      + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+    seed.run(DATE, 'nyy-bos', 'NYY', 'BOS', START_TXT, 8.5, -115, -105, 'kalshi', 8.5, 99, 42);
+    seed.run(DATE, 'sea-ath', 'SEA', 'ATH', START_TXT, 9.5, -110, -110, 'kalshi', 9.5, null, null);
 
     const row = (id) => db.prepare('SELECT * FROM game_log WHERE game_date=? AND game_id=?').get(DATE, id);
     runResult1 = await jobs.runOddsJob(DATE, { skipChainedMorningCapture: true });
     const pass1Logs = logs.length;
     // Pass-1 state, read BEFORE pass 2 runs.
     const a1 = row('nyy-bos'), b1 = row('lad-sf'), c1 = row('hou-tex'), d1 = row('sea-ath');
-    spreadsSilent = true;
+    // PASS 2: Kalshi goes silent on BOTH totals and spreads. Every anchor now
+    // has to come from kalshi_anchor_total.
+    spreadsSilent = true; totalsSilent = true;
     runResult2 = await jobs.runOddsJob(DATE, { skipChainedMorningCapture: true });
+    const pass2Logs = logs.length;
+    const a2t = row('nyy-bos'), d2t = row('sea-ath');
+    // PASS 3: Kalshi totals come back, auto rung 9.5 on nyy-bos, whose row
+    // Poly now owns (total_source='polymarket'). The sticky rung must still
+    // hold 8.5 -- the case the old total_source read could not see.
+    totalsSilent = false;
+    const runResult3 = await jobs.runOddsJob(DATE, { skipChainedMorningCapture: true });
 
     release();
     const log1 = logs.slice(0, pass1Logs);
-    const log2 = logs.slice(pass1Logs);
+    const log2 = logs.slice(pass1Logs, pass2Logs);
+    const log3 = logs.slice(pass2Logs);
+    check('pass 3 succeeded too', runResult3 && runResult3.success, true);
     const has = (re, arr) => (arr || logs).some(l => re.test(l));
 
     console.log('1. the stubs were reached and nothing Unabated remains');
-    check('schedule / kalshi lines / totals / spreads / poly were each called on both passes',
-      [calls.schedule >= 2, calls.kalshiLines, calls.kalshiTotals, calls.kalshiSpreads, calls.poly], [true, 2, 2, 2, 2]);
+    check('schedule / kalshi lines / totals / spreads / poly were each called on all three passes',
+      [calls.schedule >= 3, calls.kalshiLines, calls.kalshiTotals, calls.kalshiSpreads, calls.poly], [true, 3, 3, 3, 3]);
     check('services/unabated.js is gone from the tree', fs.existsSync(path.join(R, 'services/unabated.js')), false);
     check('and was never loaded', Object.keys(require.cache).some(k => /[\\/]unabated\.js$/.test(k)), false);
     check('no Unabated fetch was attempted', netCalls.filter(u => /unabated/i.test(u)), []);
-    check('both passes succeeded', [runResult1 && runResult1.success, runResult2 && runResult2.success], [true, true]);
+    check('passes 1 and 2 succeeded', [runResult1 && runResult1.success, runResult2 && runResult2.success], [true, true]);
 
     console.log('');
     console.log('2. ML: Kalshi first, Poly second, cross-check on the Poly quote');
@@ -188,22 +210,42 @@ const release = () => Object.assign(console, real);
     check('...and not for sea-ath', has(/NO KALSHI ANCHOR for sea-ath/, log1), false);
     check('per-row anchor line names the source', has(/\[poly-anchor-row\] sea-ath .*kalshi_line=9\.5\(persisted\)/, log1), true);
     const cron = db.prepare("SELECT message FROM cron_log WHERE job_type='odds' AND run_date=? ORDER BY id").all(DATE);
-    check('two odds cron rows', cron.length, 2);
+    check('three odds cron rows', cron.length, 3);
     check('pass-1 cron message carries the anchor counts',
       /poly totals by anchor: kalshi pass=0 persisted=1 liquidity_fallback=1; kalshi totals rung: persisted=1 auto=1/.test(cron[0] && cron[0].message), true);
     check('[odds] pass summary logged with the NO KALSHI ANCHOR count', has(/\[odds\] pass summary 2026-10-20: .*PRICED WITH NO KALSHI ANCHOR/, log1), true);
     check('no xcheck totals arm is logged', has(/arm=xcheck/), false);
 
-    // KNOWN GAP, pre-existing (#369), pinned so a fix must update this test.
-    // The persisted-Kalshi anchor reads existing.total_source === 'kalshi'.
-    // Pass 1 prices sea-ath from that persisted 9.5 and writes it with
-    // total_source 'polymarket' -- which ERASES the marker. Pass 2, Kalshi
-    // still silent, finds no persisted Kalshi line and falls to liquidity:
-    // the line flips 9.5 -> 8.5. With Unabated gone this anchor is the only
-    // reference, so the gap matters more than it did. Not fixed here.
-    const d2 = row('sea-ath');
-    check('KNOWN GAP: sea-ath pass 2 loses the persisted anchor once Poly owned the row (9.5 -> 8.5)',
-      [d2.market_total, d2.total_source, has(/NO KALSHI ANCHOR for sea-ath/, log2)], [8.5, 'polymarket', true]);
+    // THE GAP THAT WAS: the persisted anchor read total_source === 'kalshi',
+    // so pricing sea-ath from the persisted 9.5 wrote total_source
+    // 'polymarket' and ERASED its own anchor. Pass 2 then fell to Poly's
+    // most-liquid rung and the line moved 9.5 -> 8.5 with no market reason.
+    // Fixed 2026-09-17: both anchors read kalshi_anchor_total, which only a
+    // Kalshi-priced pass writes and no other source clears.
+    console.log('');
+    console.log('3b. the anchor survives a Poly-priced pass (was the KNOWN GAP)');
+    check('sea-ath HOLDS 9.5 across all three passes (liquidity would have said 8.5)',
+      [d1.market_total, d2t.market_total, row('sea-ath').market_total], [9.5, 9.5, 9.5]);
+    check('...and never warns NO KALSHI ANCHOR',
+      [has(/NO KALSHI ANCHOR for sea-ath/, log1), has(/NO KALSHI ANCHOR for sea-ath/, log2),
+       has(/NO KALSHI ANCHOR for sea-ath/, log3)], [false, false, false]);
+    check('a Poly-priced pass does NOT erase the anchor column',
+      [d1.total_source, d1.kalshi_anchor_total, d2t.total_source, d2t.kalshi_anchor_total],
+      ['polymarket', 9.5, 'polymarket', 9.5]);
+    check('pass 2 anchors nyy-bos on the column (8.5), not Poly liquidity (9.5)',
+      [a2t.market_total, a2t.total_source, a2t.kalshi_anchor_total], [8.5, 'polymarket', 8.5]);
+    check('pass 2 logs the persisted source for both',
+      [has(/\[poly-anchor-row\] sea-ath .*kalshi_line=9\.5\(persisted\)/, log2),
+       has(/\[poly-anchor-row\] nyy-bos .*kalshi_line=8\.5\(persisted\)/, log2)], [true, true]);
+    // Kalshi's OWN sticky rung had the same defect: after Poly owned the row,
+    // total_source was no longer 'kalshi', so it fell back to its auto rung.
+    const a3 = row('nyy-bos');
+    check('pass 3: Kalshi holds the 8.5 rung on a row Poly owned, not its auto 9.5',
+      [a3.market_total, a3.total_source, a3.kalshi_anchor_total], [8.5, 'kalshi', 8.5]);
+    check('pass 3 counts it as a persisted rung, not auto',
+      has(/Kalshi-direct totals: \d+ overridden \[rung: persisted=2, auto=0\]/, log3), true);
+    check('the anchor is read from kalshi_anchor_total, never total_source',
+      /existing\.total_source === 'kalshi'/.test(fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8')), false);
     check('nyy-bos: Poly comparison runs against Kalshi (not single-source total)',
       /single-source total/.test(a1.odds_flag_reason || ''), false);
 

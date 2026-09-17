@@ -37,11 +37,19 @@ const src = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');
 // ---- wiring ---------------------------------------------------------
 ok('same-pass map is still tried first',
    src.indexOf('let kalshiLine = kalshiLineByGid.has(p.game_id)') !== -1);
-ok('falls back to the PERSISTED Kalshi line',
-   src.indexOf("existing.total_source === 'kalshi' && existing.market_total != null") !== -1);
-ok('the fallback only accepts a Kalshi-sourced total',
-   src.indexOf("existing.total_source === 'kalshi'") !== -1
-   && src.indexOf("existing.total_source === 'polymarket'") === -1);
+// The persisted read moved to game_log.kalshi_anchor_total on 2026-09-17.
+// It was inferred from total_source='kalshi', which a Poly-priced pass
+// overwrote -- erasing the anchor it had just priced from, so the next
+// Kalshi-silent pass moved the line. The column is written only by a
+// Kalshi-priced pass and cleared by nothing.
+ok('falls back to the PERSISTED Kalshi anchor column',
+   src.indexOf('existing && existing.kalshi_anchor_total != null') !== -1
+   && src.indexOf('kalshiLine = existing.kalshi_anchor_total;') !== -1);
+ok('the anchor is never inferred from total_source again',
+   src.indexOf("existing.total_source === 'kalshi'") === -1);
+ok('a Kalshi-priced pass writes the column, and the UPDATE preserves it',
+   src.indexOf('o.kalshi_anchor_total = chosenRung.strike;') !== -1
+   && src.indexOf('kalshi_anchor_total=COALESCE(?, kalshi_anchor_total)') !== -1);
 ok('the anchor source is recorded and logged',
    src.indexOf('kalshiLineSrc') !== -1
    && src.indexOf("'(' + (kalshiLineSrc || 'none') + ')'") !== -1);
@@ -78,8 +86,8 @@ const liquidity = l => l.reduce((b, r) =>
   (r.market_liquidity_clob || 0) > (b ? (b.market_liquidity_clob || 0) : -1) ? r : b, null);
 const anchorOf = (passMap, gid, existing) => {
   if (passMap.has(gid)) return { line: passMap.get(gid), src: 'pass' };
-  if (existing && existing.total_source === 'kalshi' && existing.market_total != null) {
-    return { line: existing.market_total, src: 'persisted' };
+  if (existing && existing.kalshi_anchor_total != null) {
+    return { line: existing.kalshi_anchor_total, src: 'persisted' };
   }
   return { line: null, src: null };
 };
@@ -103,26 +111,34 @@ ok('with NO anchor at all, liquidity wins (the 09-08 behaviour)',
    noAnchor.tier === 'liquidity_fallback' && noAnchor.rung.strike === 7.5,
    'picks 7.5, while unabated_exact said 8.5 — the observed disagreement');
 
-const persisted = cascade(L, empty, 'cle-bal', { total_source: 'kalshi', market_total: 8.5 });
-ok('with a PERSISTED Kalshi line, the anchor wins over liquidity',
+const persisted = cascade(L, empty, 'cle-bal', { kalshi_anchor_total: 8.5 });
+ok('with a PERSISTED Kalshi anchor, it wins over liquidity',
    persisted.tier === 'kalshi_exact' && persisted.rung.strike === 8.5
    && persisted.src === 'persisted',
    'picks 8.5 — matches unabated_exact, agree=yes');
 
+// THE GAP THAT WAS (fixed 2026-09-17): the anchor used to be read off
+// total_source, so a Poly-priced pass erased it. The column survives a row
+// Poly owns, which is the whole point.
+const polyOwned = cascade(L, empty, 'cle-bal', { total_source: 'polymarket', market_total: 7.5, kalshi_anchor_total: 8.5 });
+ok('a row Poly already priced KEEPS its Kalshi anchor',
+   polyOwned.tier === 'kalshi_exact' && polyOwned.rung.strike === 8.5 && polyOwned.src === 'persisted',
+   'total_source is polymarket, anchor column is 8.5 -> holds 8.5, not liquidity 7.5');
+
 const pass = cascade(L, new Map([['cle-bal', 8.5]]), 'cle-bal',
-  { total_source: 'kalshi', market_total: 7.5 });
+  { kalshi_anchor_total: 7.5 });
 ok('the same-pass line takes precedence over the persisted one',
    pass.rung.strike === 8.5 && pass.src === 'pass',
    'fresher line wins when both exist');
 
-ok('a persisted POLY total is NOT used as a Kalshi anchor',
-   cascade(L, empty, 'x', { total_source: 'polymarket', market_total: 8.5 })
+ok('a Poly-only total is NOT used as a Kalshi anchor',
+   cascade(L, empty, 'x', { total_source: 'polymarket', market_total: 8.5, kalshi_anchor_total: null })
      .tier === 'liquidity_fallback',
-   'otherwise Poly would anchor on itself');
+   'Kalshi never priced it, so the column is null -- otherwise Poly would anchor on itself');
 
-ok('nearest-within-0.5 still applies to the persisted line',
+ok('nearest-within-0.5 still applies to the persisted anchor',
    cascade([{ strike: 9.0, market_liquidity_clob: 1 }], empty, 'x',
-     { total_source: 'kalshi', market_total: 8.6 }).tier === 'kalshi_nearest');
+     { kalshi_anchor_total: 8.6 }).tier === 'kalshi_nearest');
 
 // ---- would the fallback have had data? ------------------------------
 // The honest question: on games Poly actually priced, was a Kalshi line
