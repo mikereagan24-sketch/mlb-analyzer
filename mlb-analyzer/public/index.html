@@ -594,8 +594,8 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row"><label title="wOBA assigned to active roster pitchers with no FanGraphs projection — typically injury callups. Higher = more conservative (0.335 default).">Unknown pitcher wOBA</label><input type="number" id="s-unknown-pitcher-woba" step="0.001" min="0.250" max="0.450"></div>
       <div class="setting-row"><label title="Park-neutralize wOBA inputs so the game-time park factor is the only place park enters the model. Actuals-only neutralization (PR #144): projections aren't touched (Steamer is already park-neutral). Deflates extreme-park hitter actuals ~2-3% for COL/ATH, inflates SEA/SD ~1%. Toggle OFF is byte-identical.">Park-neutralize wOBA inputs</label><input type="checkbox" id="s-park-neutral" style="margin-left:4px"></div>
       <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Evaluate signal edges against the best net at-size price across Poly + Kalshi (services/odds-comparison.js). Requires fillable-at-stake; partial-fill books fall back to Kalshi with venue_stale=1. Cohort stays v7 (see 2026-07-08 amendment in the v7 birth cert). Default OFF — byte-identical to Kalshi-only.">Venue-aware signal edges</label><input type="checkbox" id="s-signal-venue-aware" style="margin-left:4px"></div>
-      <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Kalshi-direct MLB moneylines. When ON, fetch pre-game MLB moneylines directly from Kalshi and OVERRIDE market_away_ml/market_home_ml on any oddsRaw row Kalshi covers. Post-#230 this is the SOLE writer of ML market baselines (was: Kalshi override of Unabated primary; Unabated now routes to unabated_* reference-only). Locked games skipped. Fee-adjusted for the all-in price the bettor pays.">Kalshi-direct ML override</label><input type="checkbox" id="s-kalshi-direct-primary" style="margin-left:4px"></div>
-      <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Kalshi-direct MLB totals. When ON, fetch pre-game MLB totals from Kalshi and populate market_total + fee-adjusted over/under_price. Post-#230 this is the SOLE writer of totals market baselines — leave OFF and Totals signals are suppressed slate-wide (model.js primary-only gate). Rung selection anchors on unabated_total (reference-only) when present; falls back to Kalshi's auto-picked rung. Locked games skipped.">Kalshi-direct totals override</label><input type="checkbox" id="s-kalshi-direct-totals" style="margin-left:4px"></div>
+      <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Kalshi-direct MLB moneylines. When ON, fetch pre-game MLB moneylines directly from Kalshi and OVERRIDE market_away_ml/market_home_ml on any oddsRaw row Kalshi covers. Polymarket fills games Kalshi does not cover; there is no other ML source (the Unabated fetch was removed 2026-09-17). Locked games skipped. Fee-adjusted for the all-in price the bettor pays.">Kalshi-direct ML override</label><input type="checkbox" id="s-kalshi-direct-primary" style="margin-left:4px"></div>
+      <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Kalshi-direct MLB totals. When ON, fetch pre-game MLB totals from Kalshi and populate market_total + fee-adjusted over/under_price. Post-#230 this is the SOLE writer of totals market baselines — leave OFF and Totals signals are suppressed slate-wide (model.js primary-only gate). Rung: the line an earlier Kalshi pass persisted for the game today, if still on the ladder within 0.5; otherwise Kalshi's auto-picked rung. Locked games skipped.">Kalshi-direct totals override</label><input type="checkbox" id="s-kalshi-direct-totals" style="margin-left:4px"></div>
       <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7"></div>
       <div class="setting-row"><label title="Lower bound for win probability clamp. Caps extreme ML output. Default 0.25 (cap ≈ ±300).">Win prob clamp lo</label><input type="number" id="s-wp-clamp-lo" step="0.01" min="0.05" max="0.45"></div>
       <div class="setting-row"><label title="Upper bound for win probability clamp. Caps extreme ML output. Default 0.75 (cap ≈ ±300).">Win prob clamp hi</label><input type="number" id="s-wp-clamp-hi" step="0.01" min="0.55" max="0.95"></div>
@@ -882,30 +882,18 @@ function spBpRatio(g, side){
   return '';
 }
 // Render the bettable totals pair (O/U line + over/under juice). User
-// bets at the primary venue, so the UI shows ONLY the primary by
-// default. xcheck data is still in the API response and still drives
-// the divergence flag in services/jobs.js — it just isn't rendered as
-// a second price. When primary is null we fall back to xcheck so the
-// slot always shows a bettable line if any source quoted one. Both
-// null → 'O/U —'.
+// bets at the primary venue (Kalshi / Poly), so only the primary shows.
+// No primary → 'O/U —'.
+//
+// The two '(ref)' fallbacks that used to sit here -- xcheck_* and then
+// unabated_* -- are gone (2026-09-17). Only the Unabated fetch wrote those
+// columns, and it was removed; on new rows they are always null, and on
+// rows captured before the removal a '(ref)' line would show a sportsbook
+// number next to a game with no bettable total. A dash is the honest state.
 function fmtTotalsBlock(g) {
-  // Show primary (bettable = Kalshi/Poly) totals when available. When
-  // absent, fall back to Unabated (xcheck / unabated_*) tagged '(ref)'
-  // so the reader knows it is NOT a bettable line — per the
-  // feat/demote-unabated ruling, Unabated must never be presented as
-  // if it feeds signals. Signals are already suppressed for these
-  // games server-side; this label is defense-in-depth on the UI.
-  var line = function(total, over, under) {
-    if (total == null) return 'O/U —';
-    return 'O/U ' + total + (over != null ? ' ('+fmtML(over)+'/'+fmtML(under)+')' : '');
-  };
   var havePrimary = g.market_total != null && g.over_price != null && g.under_price != null;
-  if (havePrimary) return line(g.market_total, g.over_price, g.under_price);
-  var haveXcheck  = g.xcheck_total != null && g.xcheck_over_price != null && g.xcheck_under_price != null;
-  if (haveXcheck) return line(g.xcheck_total, g.xcheck_over_price, g.xcheck_under_price) + ' (ref)';
-  var haveUnabated = g.unabated_total != null && g.unabated_over_price != null && g.unabated_under_price != null;
-  if (haveUnabated) return line(g.unabated_total, g.unabated_over_price, g.unabated_under_price) + ' (ref)';
-  return 'O/U —';
+  if (!havePrimary) return 'O/U —';
+  return 'O/U ' + g.market_total + ' (' + fmtML(g.over_price) + '/' + fmtML(g.under_price) + ')';
 }
 function fmtDate(d){return d?d.slice(0,10):'';}
 function todayStr(){return new Date().toLocaleDateString('en-CA');}
@@ -1316,7 +1304,7 @@ function renderHealthPanel() {
     return;
   }
   var d = _healthData;
-  var sumKeys = ['games_total','games_with_sp','games_with_lineups_confirmed','games_with_ml','games_with_totals_primary','games_with_totals_xcheck','games_flagged'];
+  var sumKeys = ['games_total','games_with_sp','games_with_lineups_confirmed','games_with_ml','games_with_totals_primary','games_flagged'];
   var sumLine = sumKeys.map(function(k){ return k.replace(/_/g,' ') + ': ' + d.summary[k]; }).join(' · ');
   var rows = (d.checks || []).map(function(c) {
     var color = c.status === 'pass' ? '#16a34a' : c.status === 'warn' ? '#d97706' : '#dc2626';
@@ -2392,7 +2380,8 @@ function renderGameResult(g){
     return '<span title="' + tt.replace(/"/g, '&quot;') + '" style="color:' + col
       + ';font-size:9px;font-weight:500">' + scoreText + '</span>';
   };
-  // Spread (runline) row — Step 1 ingest from Unabated. Display only;
+  // Spread (runline) row — from Kalshi's spread ladder (was Unabated until
+  // 2026-09-17). Display only;
   // Mike isn't betting these yet. Shows "—" for missing sides rather
   // than hiding the row, so a glance reveals which games carry spread
   // data. Format: "Spread: AWAY -1.5 (-140) / HOME +1.5 (+120) · src"
@@ -4506,7 +4495,7 @@ function renderSignalTracking(signals) {
   }
   // Per-row runline companion trailer. Renders only on ML rows that
   // actually carry a captured spread snapshot (most pre-Step-2 rows
-  // and rows where Unabated had no clean ±1.5 source will get nothing
+  // and rows with no clean ±1.5 pair from the source will get nothing
   // — width budget stays clean for those). Outcome icon: ✓ win, ✗
   // loss, ⏳ still-pending (graded later by runScoreJob).
   function rlTrail(s) {

@@ -219,12 +219,29 @@ const GATES = [
   { id: 'kalshi_direct_primary_enabled', key: 'kalshi_direct_primary_enabled', on_expected: true,
     criterion: 'Kalshi-direct ML as primary over Unabated/OddsAPI.',
     criterion_type: 'mechanism', window_end: null,
-    decision: { date: '2026-07-10', outcome: 'enabled', ref: 'docs/demote-unabated-from-betting-path-2026-07-10.md' } },
+    decision: { date: '2026-07-10', outcome: 'enabled', ref: 'docs/demote-unabated-from-betting-path-2026-07-10.md' },
+    note: 'AMENDED 2026-09-17: THE UNABATED FETCH IS REMOVED, not just demoted '
+        + '(docs/unabated-fetch-removed-2026-09-17.md). The criterion above describes the '
+        + '2026-07-10 state. Kalshi is now the first of two ML writers; Polymarket fills games '
+        + 'Kalshi does not cover, and there is no third. Turning this flag OFF now leaves ML '
+        + 'to Poly alone, not to a backup feed. The ML cross-check book is the direct Poly '
+        + 'quote (#366), and a Poly-primary row is single-source by construction.' },
 
   { id: 'kalshi_direct_totals_enabled', key: 'kalshi_direct_totals_enabled', on_expected: true,
     criterion: 'Replacement writer for market_total after Unabated demotion.',
     criterion_type: 'mechanism', window_end: null,
-    decision: { date: '2026-07-10', outcome: 'enabled', ref: 'CLAUDE.md demotion-pre-flight rule' } },
+    decision: { date: '2026-07-10', outcome: 'enabled', ref: 'CLAUDE.md demotion-pre-flight rule' },
+    note: 'AMENDED 2026-09-17: THE UNABATED FETCH IS REMOVED (docs/unabated-fetch-removed-2026-09-17.md). '
+        + 'Two things this writer read from it changed. (1) Its RUNG ANCHOR was unabated_total; '
+        + 'it is now the line an earlier Kalshi pass persisted for the game today (exact, else '
+        + 'nearest within 0.5), else the auto rung -- owner ruling, chosen after measuring that '
+        + 'the auto rung differs by one run on an estimated 82 of 416 games (0 of 148 where the '
+        + 'fair total sits on a rung, 44 of 80 within 0.1 of a whole run) against 7 of 7 agreeing '
+        + 'live on 2026-09-17. (2) The Poly totals anchor it feeds no longer has an '
+        + 'unabated_total alternative, so a Poly total with no Kalshi line prices off liquidity '
+        + 'and is counted per pass in the odds cron_log message. The removal gate was the '
+        + '2026-09-16 slate: phi-nym and det-cws priced=yes agree=yes via liquidity_fallback; '
+        + 'ath-tb and sd-col kalshi_exact.' },
 
   { id: 'signal_edge_cap_enabled', key: 'signal_edge_cap_enabled', on_expected: true,
     criterion: 'Suppress signals at edge >= hard cap; flag [soft,hard).',

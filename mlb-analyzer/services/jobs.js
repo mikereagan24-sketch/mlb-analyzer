@@ -3,9 +3,8 @@
 const cron = require('node-cron');
 const crypto = require('crypto');
 const { q, db } = require('../db/schema');
-const { FRV_MIN_OUTS, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchOddsAPI, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
+const { FRV_MIN_OUTS, fetchLineups, fetchLineupsRaw, parseLineupsHtml, fetchScores, fetchScoresRaw, parseScoresJson, fetchKalshiDirect, makeGameId, fetchActiveRosters, fetchSeasonRosters, fetchCatcherFraming, fetchCatcherFramingHistorical, fetchFieldingFrv, fetchSchedule, pickVenueOverride } = require('./scraper');
 const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrailing } = require('./fangraphs');
-const { fetchUnabatedOdds, fetchUnabatedRaw, fetchUnabatedRawDetailed, parseUnabatedOdds, sliceForSnapshot } = require('./unabated');
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
@@ -13,8 +12,8 @@ const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, foreca
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx } = require('../utils/names');
 const { calcCLV, clvForSignal } = require('./clv');
-const { writeSnapshot, readSnapshot, findMostRecentSnapshot } = require('./snapshot');
-const { checkMarketMLPairSanity } = require('../utils/market-sanity');
+const { writeSnapshot } = require('./snapshot');
+const { checkMarketMLPairSanity, isSaneSpreadPrice } = require('../utils/market-sanity');
 const {
   parseEtWallClockStringMin,
   parseKalshiHhmmMin,
@@ -4157,7 +4156,8 @@ function _mb(n) { return (n / 1048576).toFixed(1) + 'MB'; }
 // A quiet peak line does not prove there was no spike; it proves there was
 // no spike the loop was idle enough to observe. To measure a synchronous
 // region, take explicit checkpoints between its steps
-// (scripts/measure-odds-snapshot-cost.js is the template).
+// (scripts/measure-odds-snapshot-cost.js was the template -- removed with the
+// Unabated fetch 2026-09-17; `git show 4077069` has it).
 //
 // Emitted as its own [job-peak] line rather than folded into the END line:
 // scripts/analyze-mem-log.js parses END with a regex requiring
@@ -4307,7 +4307,8 @@ function _cronFire(label, p) {
 // looked like good news.
 //
 // To measure a synchronous region, take explicit checkpoints between its
-// steps instead. scripts/measure-odds-snapshot-cost.js is the template.
+// steps instead. scripts/measure-odds-snapshot-cost.js was the template (removed
+// 2026-09-17 with the Unabated fetch; `git show 4077069` has it).
 let _memPeakRss = 0, _memPeakHeap = 0;
 function _memSample() {
   const m = process.memoryUsage();
@@ -4811,17 +4812,18 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
   // (bal-bos-g2, min-cle 2026-07-22 UI regression). odds_flagged /
   // odds_flag_reason stay direct-write — they're recomputed every
   // pass and are meant to reflect this pass's state.
+  // xcheck_ml_source / xcheck_total_source are no longer written by anything
+  // (the Unabated merge was their only writer, removed 2026-09-17). The
+  // columns stay, holding what was captured before that date.
   const refreshLockedLabels = db.prepare(`UPDATE game_log SET
     ml_source=COALESCE(?, ml_source),
-    xcheck_ml_source=COALESCE(?, xcheck_ml_source),
     total_source=COALESCE(?, total_source),
-    xcheck_total_source=COALESCE(?, xcheck_total_source),
     odds_flagged=?, odds_flag_reason=?,
     updated_at=datetime('now')
     WHERE game_date=? AND game_id=?`);
 
   for (const o of odds) {
-    console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' xcheck=' + o.xcheck_away_ml + '/' + o.xcheck_home_ml + '(' + o.xcheck_ml_source + ')');
+    console.log('[odds-xcheck] ' + o.game_id + ': primary=' + o.market_away_ml + '/' + o.market_home_ml + '(' + o.ml_source + ')' + ' poly=' + (o.poly_away_ml == null ? '-' : o.poly_away_ml + '/' + o.poly_home_ml));
     const existing = q.getGameById.get(dateStr, o.game_id);
 
     // Effective values: fall back to existing DB values when this pass
@@ -4838,7 +4840,17 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
     const _effUnderP = o.under_price   != null ? o.under_price   : (existing && existing.under_price);
 
     const haveMarket = _effAwayMl != null && _effHomeMl != null;
-    const singleSource = haveMarket && (!o.xcheck_ml_source || o.xcheck_ml_source === o.ml_source);
+    // CROSS-CHECK BOOK: the direct Polymarket quote. (2026-09-17)
+    //
+    // This keyed off xcheck_ml_source, which only the Unabated merge wrote.
+    // With that fetch gone the label is null on every row, so keying on it
+    // would mark EVERY game single-source and skip checkBookDivergence
+    // entirely -- the guard would go dark without a line of it changing.
+    // Poly was already the xcheck book on 322 of 332 Kalshi-primary rows
+    // (97.0%, 30 days to 2026-09-06). A Poly-primary row has no second
+    // book, which is what single-source means.
+    const _xSrc = o.poly_away_ml != null && o.poly_home_ml != null ? 'polymarket' : null;
+    const singleSource = haveMarket && (!_xSrc || _xSrc === o.ml_source);
     const reasons = [];
     // DH-crossed writes rejected upstream get stamped FIRST so they
     // surface even when the row also has other reasons (or when the
@@ -4854,26 +4866,14 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       reasons.push('single-source, no cross-check available');
     } else {
       const sanityReason = checkOddsSanity(o.market_away_ml, o.market_home_ml);
-      // CROSS-CHECK BOOK: direct Polymarket first, xcheck as fallback.
-      // (2026-09-06)
-      //
-      // xcheck_*_ml comes from the Unabated feed and loses its writer when
-      // that fetch is removed. It was already Polymarket on 322 of 332
-      // Kalshi-primary rows (97.0%) over the 30 days to 2026-09-06, so
-      // preferring the DIRECT Poly quote is the same book by a surviving
-      // source rather than a different comparison.
-      //
-      // The fallback stays while Unabated still runs: on a pass where the
-      // Poly fetch failed, xcheck is still a real second opinion and
-      // dropping to no check at all would be worse. It becomes dead code
-      // when the fetch is deleted in PR 3, at which point the guard simply
-      // returns null on rows Poly did not quote.
-      const _xAway = o.poly_away_ml != null ? o.poly_away_ml : o.xcheck_away_ml;
-      const _xHome = o.poly_home_ml != null ? o.poly_home_ml : o.xcheck_home_ml;
-      const _xSrc  = o.poly_away_ml != null ? 'polymarket' : o.xcheck_ml_source;
+      // Second opinion is the direct Poly quote only. The xcheck fallback
+      // (2026-09-06) was for passes where the Poly fetch failed while
+      // Unabated still ran; with the fetch deleted it could never be
+      // non-null, so a row Poly did not quote is single-source above and
+      // never reaches here.
       const divergenceReason = checkBookDivergence(
         o.market_away_ml, o.market_home_ml,
-        _xAway, _xHome, _xSrc
+        o.poly_away_ml, o.poly_home_ml, _xSrc
       );
       if (sanityReason) reasons.push(sanityReason);
       if (divergenceReason) reasons.push(divergenceReason);
@@ -4882,7 +4882,7 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
     // Totals plausibility gate. Refuse to surface an implausible
     // market_total (and the prices reported alongside it) — null both
     // sides so the existing "no sane totals" flag fires through the
-    // unchanged haveTot path below. Applied symmetrically to xcheck.
+    // unchanged haveTot path below.
     // Source-agnostic: this catches a bad value regardless of which
     // book the feed sourced it from.
     if (o.market_total != null
@@ -4893,15 +4893,6 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       o.market_total = null;
       o.over_price = null;
       o.under_price = null;
-    }
-    if (o.xcheck_total != null
-        && (o.xcheck_total < TOTAL_MIN_PLAUSIBLE || o.xcheck_total > TOTAL_MAX_PLAUSIBLE)) {
-      console.warn('[odds] rejecting implausible xcheck total for ' + o.game_id
-        + ': ' + o.xcheck_total + ' (outside ['
-        + TOTAL_MIN_PLAUSIBLE + ', ' + TOTAL_MAX_PLAUSIBLE + ']) — treating as missing');
-      o.xcheck_total = null;
-      o.xcheck_over_price = null;
-      o.xcheck_under_price = null;
     }
 
     // Same effective-value logic as haveMarket above — check the fresh
@@ -4914,17 +4905,24 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
     const _effOverPost   = o.over_price    != null ? o.over_price    : (existing && existing.over_price);
     const _effUnderPost  = o.under_price   != null ? o.under_price   : (existing && existing.under_price);
     const haveTot = _effTotalPost != null && _effOverPost != null && _effUnderPost != null;
-    const haveXcheckTot = o.xcheck_total != null && o.xcheck_over_price != null && o.xcheck_under_price != null;
-    if (!haveTot && !haveXcheckTot) {
+    // TOTALS CROSS-CHECK BOOK: the direct Polymarket total. (2026-09-17)
+    //
+    // Was xcheck_total, a SPORTSBOOK (fanduel / betmgm) that only the
+    // Unabated merge delivered. With the fetch deleted it is null on every
+    // row, which would have marked every priced total single-source and
+    // skipped the comparison below entirely. Poly is a prediction market,
+    // not the same book, so the comparison it feeds stays OBSERVATION ONLY
+    // (arm=poly, NOFLAG) exactly as #367 shipped it. The flagging arm
+    // (arm=xcheck) had no book left and is gone. Promoting the Poly arm to
+    // a flag would be a new rule on a different book, and is not done here.
+    // A Poly-priced total has no second book.
+    const havePolyTot = o.poly_total != null && o.poly_over_price != null && o.poly_under_price != null
+      && o.total_source !== 'polymarket';
+    if (!haveTot) {
       reasons.push('no sane totals: no source provided matching-line O/U');
-    } else if (!haveTot && haveXcheckTot) {
-      // Post-#230: model.js suppresses the Totals signal entirely when
-      // primary is null — xcheck is stored/displayed only, never anchors
-      // an edge. Flag text updated to reflect suppression, not xcheck-fallback.
-      reasons.push('no primary totals; Totals signal SUPPRESSED (xcheck reference-only)');
-    } else if (haveTot && !haveXcheckTot) {
+    } else if (!havePolyTot) {
       reasons.push('single-source total, no cross-check available');
-    } else if (haveTot && haveXcheckTot) {
+    } else {
       // NULL-ARITHMETIC BUG, FIXED 2026-09-06.
       //
       // haveTot is computed from _effTotalPost, which falls back to the
@@ -4954,7 +4952,8 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       const impP = x => x < 0 ? Math.abs(x)/(Math.abs(x)+100) : 100/(x+100);
       const _passIso = nowPtIso();
 
-      // Shared rule so both arms are provably the same comparison.
+      // One rule function. It had two callers while the xcheck arm existed;
+      // it keeps its shape so the effective-value fix above stays asserted.
       const divergence = (pTot, pOver, pUnder, bTot, bOver, bUnder) => {
         if (pTot == null || pOver == null || pUnder == null) return null;
         if (bTot == null || bOver == null || bUnder == null) return null;
@@ -4964,37 +4963,11 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
         return { d: Math.max(dO, dU), sameLine: pTot === bTot };
       };
 
-      // ARM A -- the flagging arm. Primary vs the xcheck book, on the
-      // EFFECTIVE values, matching the gate that let us in here.
-      const a = divergence(_effTotalPost, _effOverPost, _effUnderPost,
-                           o.xcheck_total, o.xcheck_over_price, o.xcheck_under_price);
-      if (a && a.d > 0.08) {
-        const pSrc = o.total_source || 'primary';
-        const bSrc = o.xcheck_total_source || 'xcheck';
-        const pTxt = _effTotalPost + '@' + _effOverPost + '/' + _effUnderPost;
-        const bTxt = o.xcheck_total + '@' + o.xcheck_over_price + '/' + o.xcheck_under_price;
-        reasons.push(a.sameLine
-          ? 'totals juice divergence: ' + pSrc + '=' + _effOverPost + '/' + _effUnderPost
-            + ', ' + bSrc + '=' + o.xcheck_over_price + '/' + o.xcheck_under_price
-            + ' (Δp=' + a.d.toFixed(3) + ')'
-          : 'totals divergence: ' + pSrc + '=' + pTxt + ', ' + bSrc + '=' + bTxt
-            + ' (Δp=' + a.d.toFixed(3) + ')');
-        // THE STORED COLUMN KEEPS LAST STATE; THIS LOG KEEPS THE RATE.
-        console.log('[tot-divergence] arm=xcheck  ' + dateStr + '/' + o.game_id
-          + '  pass=' + _passIso
-          + '  primary=' + pSrc + ':' + pTxt
-          + '  book=' + bSrc + ':' + bTxt
-          + '  dp=' + a.d.toFixed(3)
-          + '  kind=' + (a.sameLine ? 'juice' : 'line'));
-      }
-
-      // ARM B -- observation only, no flag written. Kalshi total vs the
-      // direct Polymarket total, same rule, tagged separately. Poly is a
-      // prediction market and the xcheck is a sportsbook, so this is a
-      // DIFFERENT comparison, not a channel swap -- which is why it does
-      // not write a reason. When the Unabated fetch goes, arm A loses its
-      // book and this becomes the only comparison available; the decision
-      // to keep or drop the flag is made from these two rates.
+      // Observation only, no flag written. Primary total vs the direct
+      // Polymarket total on the EFFECTIVE values. The flagging arm against
+      // the xcheck sportsbook was removed with the Unabated fetch
+      // (2026-09-17) -- there is no sportsbook left to compare against.
+      // THE LOG KEEPS THE RATE; nothing is stored.
       const b = divergence(_effTotalPost, _effOverPost, _effUnderPost,
                            o.poly_total, o.poly_over_price, o.poly_under_price);
       if (b && b.d > 0.08) {
@@ -5014,8 +4987,8 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
 
     if (existing && existing.odds_locked_at) {
       refreshLockedLabels.run(
-        o.ml_source || null, o.xcheck_ml_source || null,
-        o.total_source || null, o.xcheck_total_source || null,
+        o.ml_source || null,
+        o.total_source || null,
         oddsFlagged, oddsReason,
         dateStr, o.game_id
       );
@@ -5054,23 +5027,28 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
         } catch(e) { /* audit failure must not block lifecycle */ }
       }
       refreshLockedLabels.run(
-        o.ml_source || null, o.xcheck_ml_source || null,
-        o.total_source || null, o.xcheck_total_source || null,
+        o.ml_source || null,
+        o.total_source || null,
         oddsFlagged, oddsReason,
         dateStr, o.game_id
       );
       continue;
     }
-    // Null-write rule (PR #10 pattern): values flow through transparently so
-    // a transient null isn't masked. Pre-lock provenance labels (ml_source,
-    // xcheck_ml_source, xcheck_total_source) keep COALESCE so a single null
-    // fetch on a near-locked game doesn't lose the correct source label.
-    // Step 1 runline ingest (PR #spread-ingest): write market_*_spread,
-    // *_spread_price, *_spread_quality, market_spread_src in the same
-    // odds-write transaction. Quality flips to 'fresh' on a non-null
-    // write and falls back to null otherwise so a transient miss doesn't
-    // mask staleness. The 0→null cleanup mirrors the lineup-job pattern
-    // for ML — an American-odds value of 0 doesn't exist; treat as null.
+    // Runline ingest: write market_*_spread, *_spread_price,
+    // *_spread_quality, market_spread_src in the same odds-write
+    // transaction. Quality flips to 'fresh' on a non-null write and falls
+    // back to null otherwise, so a miss is visible. The 0→null cleanup
+    // mirrors the lineup-job pattern for ML — an American-odds value of 0
+    // doesn't exist; treat as null.
+    //
+    // THE VALUES ARE NOW COALESCE'D (2026-09-17), like market_*_ml. The
+    // source moved from the Unabated merge to Kalshi's spread ladder, and
+    // getKalshiMlbSpreads drops a game 15 minutes before first pitch
+    // (GAME_START_BUFFER_MIN) while the odds lock fires at T-10. A pass in
+    // that 5-minute window would otherwise NULL a good runline right
+    // before processGameSignals snapshots it as the companion spread --
+    // the pit-nyy-g2 shape, on a different column. Quality still drops to
+    // null on such a pass, so the staleness stays visible.
     const _awaySpread       = o.market_away_spread != null ? o.market_away_spread : null;
     const _homeSpread       = o.market_home_spread != null ? o.market_home_spread : null;
     const _awaySpreadPrice  = (o.market_away_spread_price != null && o.market_away_spread_price !== 0) ? o.market_away_spread_price : null;
@@ -5110,17 +5088,10 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       total_source=COALESCE(?, total_source),
       kalshi_implied_total=COALESCE(?, kalshi_implied_total),
       ml_source=COALESCE(?, ml_source),
-      xcheck_ml_source=COALESCE(?, xcheck_ml_source),
-      xcheck_away_ml=?, xcheck_home_ml=?,
-      xcheck_total=?,
-      xcheck_over_price=?,
-      xcheck_under_price=?,
-      xcheck_total_source=COALESCE(?, xcheck_total_source),
-      unabated_away_ml=?, unabated_home_ml=?, unabated_ml_source=?,
-      unabated_total=?, unabated_over_price=?, unabated_under_price=?,
-      unabated_total_source=?,
-      market_away_spread=?, market_home_spread=?,
-      market_away_spread_price=?, market_home_spread_price=?,
+      market_away_spread=COALESCE(?, market_away_spread),
+      market_home_spread=COALESCE(?, market_home_spread),
+      market_away_spread_price=COALESCE(?, market_away_spread_price),
+      market_home_spread_price=COALESCE(?, market_home_spread_price),
       market_away_spread_quality=?, market_home_spread_quality=?,
       market_spread_src=COALESCE(?, market_spread_src),
       odds_flagged=?, odds_flag_reason=?,
@@ -5131,20 +5102,6 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
            o.market_total, o.over_price, o.under_price, o.total_source || null,
            o.kalshi_implied_total != null ? o.kalshi_implied_total : null,
            o.ml_source || null,
-           o.xcheck_ml_source || null,
-           o.xcheck_away_ml != null ? o.xcheck_away_ml : null,
-           o.xcheck_home_ml != null ? o.xcheck_home_ml : null,
-           o.xcheck_total != null ? o.xcheck_total : null,
-           o.xcheck_over_price != null ? o.xcheck_over_price : null,
-           o.xcheck_under_price != null ? o.xcheck_under_price : null,
-           o.xcheck_total_source || null,
-           o.unabated_away_ml != null ? o.unabated_away_ml : null,
-           o.unabated_home_ml != null ? o.unabated_home_ml : null,
-           o.unabated_ml_source || null,
-           o.unabated_total != null ? o.unabated_total : null,
-           o.unabated_over_price != null ? o.unabated_over_price : null,
-           o.unabated_under_price != null ? o.unabated_under_price : null,
-           o.unabated_total_source || null,
            _awaySpread, _homeSpread,
            _awaySpreadPrice, _homeSpreadPrice,
            _awaySpreadQual, _homeSpreadQual,
@@ -5206,17 +5163,28 @@ async function runOddsJob(dateStr, opts) {
     // to game_log.market_*_ml at all — it fed processGameSignals'
     // in-memory venue baseline but never round-tripped to the row.
     //
-    // New sequencing:
+    // Sequencing:
     //   1. SEED oddsRaw from scheduleRows — statsapi defines the universe.
-    //   2. Fetch Unabated (or fall back to Odds-API) into unabatedRows.
-    //   3. MERGE Unabated into pre-seeded oddsRaw, writing ONLY to the
-    //      unabated_*/xcheck_* columns per the demote ruling. Never
-    //      touches market_*_ml.
-    //   4. Kalshi-direct override (below) writes market_*_ml from Kalshi.
-    //   5. Poly-direct override (new, below) writes market_*_ml from
-    //      Poly for any row Kalshi didn't cover.
+    //   2. Kalshi-direct override (below) writes market_*_ml from Kalshi.
+    //   3. Poly-direct override (below) writes market_*_ml from Poly for
+    //      any row Kalshi didn't cover.
+    //   4. Kalshi spreads fill the runline columns (market_*_spread).
+    //   5. Kalshi then Poly totals.
     //   6. Coverage instrumentation logs any scheduled game with NULL
-    //      market_*_ml after all overrides (permanent visibility).
+    //      market_*_ml or market_total after all overrides.
+    //
+    // THE UNABATED FETCH IS GONE (2026-09-17). It used to sit between 1
+    // and 2 and fill unabated_* / xcheck_* / the runline columns. Nothing
+    // it supplied was a betting-path price after the 2026-07-10 demote;
+    // what it still carried moved to surviving sources first:
+    //   - ML cross-check book      -> direct Poly quote (#366)
+    //   - Poly totals rung anchor  -> Kalshi line, pass or persisted (#365, #369)
+    //   - runline columns          -> Kalshi's spread ladder (this change)
+    //   - totals sportsbook arm    -> none; the Poly arm logs, NOFLAG (#367)
+    // Removal gate met on the 2026-09-16 slate: phi-nym and det-cws
+    // priced=yes agree=yes via liquidity_fallback; ath-tb and sd-col
+    // kalshi_exact. The unabated_* / xcheck_* columns stay, holding what
+    // was captured before this date; nothing writes them now.
     //
     // The old "demote loop" (NULL market_*_ml on Unabated rows) and the
     // "statsapi-authoritative gate" (drop Unabated rows not in schedule)
@@ -5235,21 +5203,7 @@ async function runOddsJob(dateStr, opts) {
       under_price:           null,
       ml_source:             null,
       total_source:          null,
-      // xcheck_* + unabated_* + spread — filled from Unabated below.
-      xcheck_away_ml:        null,
-      xcheck_home_ml:        null,
-      xcheck_total:          null,
-      xcheck_over_price:     null,
-      xcheck_under_price:    null,
-      xcheck_ml_source:      null,
-      xcheck_total_source:   null,
-      unabated_away_ml:      null,
-      unabated_home_ml:      null,
-      unabated_ml_source:    null,
-      unabated_total:        null,
-      unabated_over_price:   null,
-      unabated_under_price:  null,
-      unabated_total_source: null,
+      // Runline — filled from Kalshi's spread ladder below.
       market_away_spread:    null,
       market_home_spread:    null,
       market_away_spread_price: null,
@@ -5258,132 +5212,11 @@ async function runOddsJob(dateStr, opts) {
     }));
     console.log('[odds] seeded oddsRaw from ' + scheduleRows.length + ' scheduled games');
 
-    // Fetch Unabated (or fall back to Odds-API). unabatedRows carry the
-    // pre-demote market_*_ml — routed into unabated_*/xcheck_* on merge.
-    let unabatedRows = [];
-    try {
-      console.log('[odds] Fetching from Unabated...');
-      // SLICE FIRST, THEN DROP THE FULL FEED. (2026-09-04)
-      //
-      // This block used to snapshot and parse the entire 88.3MB Unabated
-      // feed. writeSnapshot does JSON.stringify + gzipSync on what it is
-      // given, both synchronous and both alive at once: measured 89.5MB of
-      // string, ~198MB of external buffers, and 2721ms of blocked event
-      // loop per call -- and runOddsJob runs TWICE per morning-capture
-      // chain. Peak rss for one runOddsJob was 485.4MB from a 58.4MB base,
-      // which is what OOM-killed the 512MB instance at 8PM, 11PM and 7AM.
-      //
-      // sliceForSnapshot keeps only what parseUnabatedOdds reads and shares
-      // (does not copy) those sub-objects, so nulling unabatedRawJson makes
-      // the other 116 leagues unreachable immediately rather than at some
-      // later GC -- specifically before the chained morning capture runs a
-      // second full odds pass on top of this frame.
-      //
-      // Re-measure: node scripts/measure-odds-snapshot-cost.js
-      // STREAMED. fetchUnabatedRawDetailed returns the MLB slice only -- the
-      // other 116 leagues are discarded as they pass through the parser and
-      // are never materialised. sliceForSnapshot is idempotent on that shape
-      // and is kept so the snapshot contract stays stated in one place.
-      const ub = await fetchUnabatedRawDetailed();
-      let unabatedMlb = sliceForSnapshot(ub.data);
-
-      // ZERO-RESULT GUARD. (2026-09-06)
-      //
-      // A streaming extractor can succeed structurally and still yield
-      // nothing -- an upstream key rename, a truncated body, a silently
-      // changed league id. The old full-parse code could not fail this way
-      // for a *subset* reason, so this is a NEW failure mode introduced by
-      // this change and it gets its own guard rather than relying on the
-      // "0 games" throw below.
-      //
-      // The condition is deliberately joint: zero MLB events is normal on a
-      // dark date. Zero events WHILE statsapi says games are scheduled is
-      // not, and that is the only case that fires.
-      if (ub.events === 0 && scheduleRows.length > 0) {
-        console.error('[odds] ZERO MLB EVENTS after consuming '
-          + ub.bytes + ' bytes (gzipped=' + ub.gzipped + ') while '
-          + scheduleRows.length + ' game(s) are scheduled for ' + dateStr
-          + '. NOT snapshotting and NOT pricing from this response --'
-          + ' a snapshot of an empty feed would poison replay, and pricing'
-          + ' from it would blank every market line on the slate.');
-        const fb = findMostRecentSnapshot('odds', dateStr);
-        if (fb) {
-          console.error('[odds] falling back to the previous odds snapshot: '
-            + fb.date + '/' + fb.filename + ' captured ' + fb.captured_at
-            + '. Lines from this pass are STALE by construction; the next'
-            + ' successful pass overwrites them.');
-          unabatedMlb = sliceForSnapshot(readSnapshot(fb.date, fb.filename));
-        } else {
-          throw new Error('Unabated returned 0 MLB events for ' + dateStr
-            + ' (' + ub.bytes + ' bytes consumed) and no snapshot exists to'
-            + ' fall back to');
-        }
-      } else {
-        writeSnapshot('odds', dateStr, unabatedMlb);
-      }
-      unabatedRows = parseUnabatedOdds(unabatedMlb, dateStr);
-      console.log('[odds] Unabated returned '+unabatedRows.length+' games');
-      if (!unabatedRows.length) throw new Error('Unabated returned 0 games');
-    } catch(e) {
-      console.log('[odds] Unabated failed: '+e.message+' → falling back to Odds API');
-      try {
-        unabatedRows = await fetchOddsAPI(getOddsApiKey(), dateStr);
-      } catch(e2) {
-        console.log('[odds] Odds API also failed: '+e2.message);
-        unabatedRows = []; // proceed with pure-Kalshi/Poly slate
-      }
-    }
-
-    // Merge Unabated data into seeded oddsRaw by game_id. Only writes to
-    // unabated_*/xcheck_* + reference spread fields — never touches
-    // market_*_ml, per demote. Phantom game_ids (in Unabated but not
-    // statsapi) get rejected — replaces the old validIds gate.
-    {
-      const seededById = new Map();
-      for (const o of oddsRaw) seededById.set(o.game_id, o);
-      let mergedCount = 0, phantomCount = 0;
-      for (const u of unabatedRows) {
-        const o = seededById.get(u.game_id);
-        if (!o) {
-          console.warn('[unabated] rejecting phantom matchup not in statsapi: ' + u.game_id);
-          phantomCount++;
-          continue;
-        }
-        o.unabated_away_ml     = u.market_away_ml != null ? u.market_away_ml : null;
-        o.unabated_home_ml     = u.market_home_ml != null ? u.market_home_ml : null;
-        o.unabated_ml_source   = u.ml_source || null;
-        o.unabated_total       = u.market_total != null ? u.market_total : null;
-        o.unabated_over_price  = u.over_price != null ? u.over_price : null;
-        o.unabated_under_price = u.under_price != null ? u.under_price : null;
-        o.unabated_total_source = u.total_source || null;
-        // xcheck_* — Unabated's second-priority sportsbook. Preserved so
-        // the totals-divergence flag in processOddsArray still fires
-        // against Kalshi/Poly-primary.
-        o.xcheck_away_ml      = u.xcheck_away_ml != null ? u.xcheck_away_ml : null;
-        o.xcheck_home_ml      = u.xcheck_home_ml != null ? u.xcheck_home_ml : null;
-        o.xcheck_total        = u.xcheck_total != null ? u.xcheck_total : null;
-        o.xcheck_over_price   = u.xcheck_over_price != null ? u.xcheck_over_price : null;
-        o.xcheck_under_price  = u.xcheck_under_price != null ? u.xcheck_under_price : null;
-        o.xcheck_ml_source    = u.xcheck_ml_source || null;
-        o.xcheck_total_source = u.xcheck_total_source || null;
-        // Runline / spread reference — Unabated is the current source.
-        o.market_away_spread       = u.market_away_spread != null ? u.market_away_spread : null;
-        o.market_home_spread       = u.market_home_spread != null ? u.market_home_spread : null;
-        o.market_away_spread_price = u.market_away_spread_price != null ? u.market_away_spread_price : null;
-        o.market_home_spread_price = u.market_home_spread_price != null ? u.market_home_spread_price : null;
-        o.market_spread_src        = u.market_spread_src || null;
-        mergedCount++;
-      }
-      console.log('[odds] Unabated merged into ' + mergedCount + ' scheduled game(s)'
-        + (phantomCount ? ', ' + phantomCount + ' phantom(s) rejected' : ''));
-    }
-
     // Kalshi-direct ML override (gated). When kalshi_direct_primary_enabled
     // is on, fetch pre-game MLB moneylines directly from Kalshi and
-    // OVERRIDE the ML fields of any oddsRaw row Kalshi covers. The
-    // Unabated/OddsAPI rows remain in oddsRaw with their totals/spreads
-    // intact — Kalshi-direct is ML-only for now. Games Kalshi doesn't
-    // cover flow through unmodified, so the existing fetch IS the backup.
+    // fill the ML fields of any oddsRaw row Kalshi covers. Games Kalshi
+    // doesn't cover keep NULL ML here; the Poly-direct block below is the
+    // only other writer.
     //
     // Guardrails:
     //   - Locked rows (odds_locked_at set) are skipped — locked line wins.
@@ -5507,9 +5340,8 @@ async function runOddsJob(dateStr, opts) {
               _dhFlagByGid[gameId] = (_dhFlagByGid[gameId] ? _dhFlagByGid[gameId] + ' | ' : '') + _dhMismatch;
               continue;  // do not write Kalshi's price to this game_id
             }
-            // ML override only. Totals, spreads, sources for non-ML markets,
-            // and every other field stay as Unabated/OddsAPI set them. ML
-            // values are FEE-ADJUSTED (see CLV note above the helper).
+            // ML fields only. Totals and spreads have their own blocks below.
+            // ML values are FEE-ADJUSTED (see CLV note above the helper).
             o.market_away_ml = awayFeeMl;
             o.market_home_ml = homeFeeMl;
             o.ml_source = 'kalshi';
@@ -5517,7 +5349,7 @@ async function runOddsJob(dateStr, opts) {
           }
           const backupCount = oddsRaw.length - overridden;
           console.log('[odds] Kalshi-direct: ' + overridden + ' game(s) overridden, '
-            + backupCount + ' from backup (unabated/oddsapi)'
+            + backupCount + ' not covered by Kalshi'
             + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
             + (missingFromOdds ? ', ' + missingFromOdds + ' kalshi-only (skipped, not in oddsRaw)' : ''));
           if (overridden === 0 && missingFromOdds > 0) {
@@ -5629,16 +5461,14 @@ async function runOddsJob(dateStr, opts) {
           //
           // checkBookDivergence needs a second opinion on rows where
           // Kalshi IS primary -- which is exactly the rows this block used
-          // to skip before computing anything. Its current second opinion
-          // is xcheck_*_ml, which arrives via the Unabated feed and dies
-          // with it. Measured over the 30 days to 2026-09-06,
-          // xcheck_ml_source was 'polymarket' on 322 of 332 Kalshi-primary
-          // rows (97.0%), so this is the same book by a source that
-          // survives -- not a new comparison.
+          // to skip before computing anything. Its second opinion was
+          // xcheck_*_ml from the Unabated feed, which was 'polymarket' on
+          // 322 of 332 Kalshi-primary rows (97.0%, 30 days to 2026-09-06),
+          // so this is the same book by a source that survives. Since the
+          // fetch was removed (2026-09-17) it is the ONLY second opinion.
           //
           // Computed BEFORE the skip and stored on the row as poly_*_ml.
-          // These are in-memory only; nothing persists them, and
-          // processOddsArray prefers them over xcheck when present.
+          // These are in-memory only; nothing persists them.
           const awayTopPrice = p.away && p.away.top_ask && p.away.top_ask.price;
           const homeTopPrice = p.home && p.home.top_ask && p.home.top_ask.price;
           const awayMl = polyFeeAdjustAmerican(awayTopPrice);
@@ -5696,12 +5526,12 @@ async function runOddsJob(dateStr, opts) {
     // Kalshi-direct SPREADS ingest. Independent of the ML / Totals
     // overrides above — runs every odds-job regardless of the
     // KALSHI_DIRECT_PRIMARY_ENABLED / KALSHI_DIRECT_TOTALS_ENABLED
-    // flags. INGEST ONLY: rows land in kalshi_spread_markets and a
-    // PT-anchored snapshot mirror; nothing in the model consumes
-    // them. Pulling the full Kalshi spread ladder per game (~10-12
-    // markets per event) is forward prep for value analysis once
-    // the model supports margin distributions. Non-fatal: a Kalshi
-    // hiccup must not abort the rest of runOddsJob.
+    // flags. The full ladder lands in kalshi_spread_markets and a
+    // PT-anchored snapshot mirror (~10-12 markets per event). Since
+    // 2026-09-17 the +/-1.5 pair from that ladder ALSO fills the game_log
+    // runline columns (market_*_spread), which the Unabated merge used to
+    // supply -- see utils/kalshi-runline.js for the rule and its
+    // measurement. Non-fatal: a Kalshi hiccup must not abort runOddsJob.
     try {
       const kalshiSpreads = await getKalshiMlbSpreads(dateStr);
       if (!kalshiSpreads.length) {
@@ -5758,6 +5588,33 @@ async function runOddsJob(dateStr, opts) {
         insertTx(projectedRows);
         console.log('[odds] Kalshi-direct spreads: ' + spreadsInserted
           + ' market(s) upserted across ' + new Set(projectedRows.map(s => s.game_id)).size + ' game(s)');
+
+        // Runline columns from the fee-adjusted ladder. In-memory on
+        // oddsRaw; processOddsArray writes them (COALESCE'd) with the rest
+        // of the row. Locked rows are skipped there, as for every price.
+        const { pickKalshiRunline } = require('../utils/kalshi-runline');
+        const spreadRowsByGid = new Map();
+        for (const s of projectedRows) {
+          if (!spreadRowsByGid.has(s.game_id)) spreadRowsByGid.set(s.game_id, []);
+          spreadRowsByGid.get(s.game_id).push(s);
+        }
+        let runlineWritten = 0;
+        const runlineRefused = [];
+        for (const o of oddsRaw) {
+          const rows = spreadRowsByGid.get(o.game_id);
+          if (!rows) continue;
+          const rl = pickKalshiRunline(rows, o.awayTeam, o.homeTeam);
+          if (rl.refused) { runlineRefused.push(o.game_id + ' (' + rl.refused + ')'); continue; }
+          o.market_away_spread       = rl.away_spread;
+          o.market_home_spread       = rl.home_spread;
+          o.market_away_spread_price = rl.away_price;
+          o.market_home_spread_price = rl.home_price;
+          o.market_spread_src        = rl.src;
+          runlineWritten++;
+        }
+        console.log('[odds] Kalshi runline: ' + runlineWritten + '/' + oddsRaw.length
+          + ' scheduled game(s) got a +/-1.5 pair'
+          + (runlineRefused.length ? '; refused: ' + runlineRefused.join(', ') : ''));
 
         // PT-anchored snapshot — matches the wOBA / framing / FRV
         // snapshot timezone convention (America/Los_Angeles since
@@ -5864,18 +5721,13 @@ async function runOddsJob(dateStr, opts) {
 
     // Kalshi-direct TOTALS override (gated). Mirrors the ML override above:
     // when kalshi_direct_totals_enabled is on, fetch pre-game MLB totals
-    // from Kalshi and OVERRIDE over_price / under_price on any oddsRaw row
-    // Kalshi covers. We do NOT change market_total — the LINE stays from
-    // the Unabated/OddsAPI backup (which the model's existing edge calc
-    // expects); Kalshi supplies fee-adjusted PRICES for that same line.
+    // from Kalshi and write market_total + fee-adjusted over/under prices
+    // for every oddsRaw row Kalshi covers. Kalshi is the first totals
+    // source; Poly fills what it leaves NULL.
     //
-    // Line matching:
-    //   - Look up the existing market_total in Kalshi's strike ladder.
-    //   - Exact match → use that rung's over_ask / under_ask.
-    //   - No exact match → nearest, but only if within 0.5 of market_total
-    //     (a half-run gap). >0.5 apart means Kalshi and the consensus
-    //     disagree on the line itself; safer to leave on backup than to
-    //     paper over a real disagreement with a different-line price.
+    // Line matching: the rung the persisted Kalshi line points at (exact,
+    // else nearest within 0.5), else Kalshi's auto rung. See RUNG
+    // SELECTION below for the measurement behind it.
     //
     // Observation field: kalshi_implied_total holds Kalshi's auto-pick
     // (the rung whose over_ask is closest to $0.50). Always populated when
@@ -5903,11 +5755,10 @@ async function runOddsJob(dateStr, opts) {
     // KALSHI LINE, CARRIED FORWARD FOR THE POLY RUNG ANCHOR. (2026-09-06)
     //
     // The Poly totals block ~200 lines down anchors its rung pick on a
-    // reference line. That reference is being moved off unabated_total,
-    // which loses its writer when the Unabated fetch is removed. Kalshi's
-    // own line is the replacement: over the last 30 days market_total
-    // equalled unabated_total on 422 of 422 rows, so anchoring to Kalshi
-    // reaches the same line by a source that survives.
+    // reference line. It was unabated_total until #365 moved it to Kalshi's
+    // own line: over the 30 days to 2026-09-06 market_total equalled
+    // unabated_total on 422 of 422 rows, so anchoring to Kalshi reaches the
+    // same line by a source that survives the Unabated removal.
     //
     // Declared out here because kalshiTotals is scoped inside the
     // KALSHI_DIRECT_TOTALS_ENABLED try block and the Poly block is a
@@ -5915,6 +5766,17 @@ async function runOddsJob(dateStr, opts) {
     // the Poly path only runs where Kalshi left market_total NULL, so a
     // line without a priced total is exactly the case that needs it.
     const kalshiLineByGid = new Map();
+    // Per-pass counts for the [odds] pass summary and the cron_log message,
+    // which is the only place they persist. (2026-09-17)
+    //   kalshiRung   Kalshi-priced totals: rung held from a persisted Kalshi
+    //                line vs Kalshi's auto rung
+    //   polyAnchor   Poly-priced totals, by anchor source: this pass's Kalshi
+    //                line, the persisted one, or no Kalshi line at all
+    //                (liquidity_fallback -- the NO KALSHI ANCHOR case)
+    const passStats = {
+      kalshiRung: { persisted: 0, auto: 0 },
+      polyAnchor: { pass: 0, persisted: 0, liquidity_fallback: 0 },
+    };
     if (settings.KALSHI_DIRECT_TOTALS_ENABLED) {
       try {
         const kalshiTotals = await getKalshiMlbTotals(dateStr);
@@ -5969,24 +5831,42 @@ async function runOddsJob(dateStr, opts) {
             // the Poly block ever sees.
             if (k.line != null) kalshiLineByGid.set(gameId, k.line);
 
-            // === SNAPSHOT rung selection (independent observation) ===
-            // Prefer the rung matching unabated_total (exact, then nearest
-            // within 0.5) so the snapshot lines up with the reference-only
-            // display. Falls back to Kalshi's default chosen rung when
-            // no reference exists. ALWAYS produces a rung so snapshot
-            // coverage is independent of override fate.
+            // === RUNG SELECTION: sticky on the persisted Kalshi line ===
+            // (2026-09-17, owner ruling)
             //
-            // Pre-#230: anchored on o.market_total (Unabated). Post-#230:
-            // market_total is Kalshi-only, so the anchor moved to
-            // o.unabated_total (reference-only column) with the same 0.5-
-            // line-gap semantics preserved for observation.
+            // This anchored on o.unabated_total -- the rung matching the
+            // Unabated consensus line, else Kalshi's auto rung (over ask
+            // nearest $0.50). That column has no writer now. Measured before
+            // choosing a replacement:
+            //   live 2026-09-17 slate    auto rung == unabated_total on 7/7
+            //   30-day estimate (nearest half-run to kalshi_implied_total,
+            //   2026-08-15..09-14)        differs by one run on 82/416 (70 of
+            //                            them Kalshi-priced), and ONLY where
+            //                            the fair total sits between rungs:
+            //                            44/80 within 0.1 of a whole run,
+            //                            28/104 at 0.1-0.2, 10/84 at 0.2-0.3,
+            //                            0/148 at 0.3+.
+            // Auto-only would let a between-rungs game flip 7.5 <-> 8.5 across
+            // passes, moving the priced line and the spread-cell total axis
+            // (8.25 / 8.75). So the anchor is now the line an EARLIER KALSHI
+            // PASS persisted for this game today -- the same pass->persisted
+            // idea as the Poly anchor (#369) -- else the auto rung. The first
+            // pass of the day takes the auto rung; later passes hold it while
+            // it is still on the ladder within 0.5.
+            //
+            // The snapshot uses the same pick, so it lines up with what was
+            // priced. ALWAYS produces a rung so snapshot coverage is
+            // independent of override fate.
+            const existing = q.getGameById.get(dateStr, gameId);
+            const persistedKalshiLine = (existing && existing.total_source === 'kalshi'
+              && existing.market_total != null) ? existing.market_total : null;
             let candidateRung = null;
-            let nearestRung = null, nearestDist = Infinity;
-            if (o && o.unabated_total != null) {
-              candidateRung = k.ladder.find(r => r.strike === o.unabated_total);
+            if (persistedKalshiLine != null) {
+              candidateRung = k.ladder.find(r => r.strike === persistedKalshiLine) || null;
               if (!candidateRung) {
+                let nearestRung = null, nearestDist = Infinity;
                 for (const r of k.ladder) {
-                  const d = Math.abs(r.strike - o.unabated_total);
+                  const d = Math.abs(r.strike - persistedKalshiLine);
                   if (d < nearestDist) { nearestRung = r; nearestDist = d; }
                 }
                 if (nearestRung && nearestDist <= 0.5) candidateRung = nearestRung;
@@ -6010,7 +5890,6 @@ async function runOddsJob(dateStr, opts) {
               missingFromOdds++;
               continue;
             }
-            const existing = q.getGameById.get(dateStr, gameId);
             if (existing && existing.odds_locked_at) {
               skippedLocked++;
               continue;
@@ -6023,15 +5902,13 @@ async function runOddsJob(dateStr, opts) {
             // bracket pOver=0.50 (k.implied_total null in that case).
             o.kalshi_implied_total = (k.implied_total != null) ? k.implied_total : k.line;
             // Pick the rung to write:
-            //   - candidateRung set → Unabated reference line matched a
-            //     Kalshi rung within 0.5 (best when they agree on the line)
-            //   - Otherwise use Kalshi's own auto-picked rung (k.line +
-            //     over/under). Post-#230 we DO write in this fallback path
-            //     rather than skipping — the ruling says totals baseline
-            //     must be Kalshi/Poly, so Kalshi's own preferred line IS
-            //     the correct answer when there's no agreement or no
-            //     reference at all. Pre-#230 the code left the row on
-            //     Unabated here; that path is gone.
+            //   - candidateRung set → the line an earlier Kalshi pass
+            //     persisted today is still on the ladder (exact or within
+            //     0.5); hold it
+            //   - Otherwise Kalshi's own auto-picked rung (k.line +
+            //     over/under). Kalshi and Poly are the only totals sources,
+            //     so Kalshi's preferred line IS the answer when nothing is
+            //     persisted.
             const chosenLine = candidateRung
               ? candidateRung.strike
               : k.line;
@@ -6054,11 +5931,13 @@ async function runOddsJob(dateStr, opts) {
             o.over_price = overFeeMl;
             o.under_price = underFeeMl;
             o.total_source = 'kalshi';
+            passStats.kalshiRung[candidateRung ? 'persisted' : 'auto']++;
             overridden++;
           }
           const backupCount = oddsRaw.length - overridden;
-          console.log('[odds] Kalshi-direct totals: ' + overridden + ' overridden, '
-            + backupCount + ' backup'
+          console.log('[odds] Kalshi-direct totals: ' + overridden + ' overridden'
+            + ' [rung: persisted=' + passStats.kalshiRung.persisted + ', auto=' + passStats.kalshiRung.auto + '], '
+            + backupCount + ' not priced by Kalshi'
             + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
             + (skippedLineGap ? ', ' + skippedLineGap + ' line-gap >0.5 (skipped)' : '')
             + (skippedNoExistingTotal ? ', ' + skippedNoExistingTotal + ' no existing total' : '')
@@ -6096,21 +5975,19 @@ async function runOddsJob(dateStr, opts) {
     // first at the block ~120 lines up, Poly fills any oddsRaw row Kalshi
     // left market_total NULL.
     //
-    // RUNG-PICK RULE (explicit — Mike's request):
-    //   1. Anchor to o.unabated_total (the reference-only line the demote
-    //      moved into unabated_*). Exact match on strike → use that rung.
-    //   2. Nearest within 0.5 of unabated_total → use that rung.
-    //   3. Otherwise fall back to Poly's highest-liquidity rung
-    //      (market_liquidity_clob) — no external reference exists, so
-    //      trader activity is the best proxy for "which strike is the
-    //      real market."
+    // RUNG-PICK RULE (explicit — Mike's request; anchor moved #365/#369):
+    //   1. Anchor to Kalshi's line for the same game -- this pass's, else
+    //      the one persisted by an earlier Kalshi pass. Exact strike →
+    //      use that rung.
+    //   2. Nearest within 0.5 of that line → use that rung.
+    //   3. Otherwise Poly's highest-liquidity rung (market_liquidity_clob)
+    //      — no reference exists, so trader activity is the best proxy.
+    //      Warns as NO KALSHI ANCHOR and is counted per pass.
     //
-    // The 0.5-cutoff matches Kalshi's totals path (line ~4249): if Poly
-    // and the consensus disagree on the LINE itself, we'd rather write
-    // the most-traded rung than paper over the disagreement with a
-    // random mismatched strike. Anchor tier is logged per game so we
-    // can grep for "liquidity_fallback" and audit whether those picks
-    // are sane vs xcheck / unabated in retrospect.
+    // The 0.5-cutoff matches Kalshi's totals path: if the two disagree on
+    // the LINE itself, write the most-traded rung rather than paper over the
+    // disagreement with a mismatched strike. The anchor tier is logged per
+    // game so "liquidity_fallback" picks can be audited.
     //
     // PER-SIDE FEE ADJUSTMENT: over_price and under_price are
     // independent — each side's raw ladder ask (0-1 dollar) goes through
@@ -6125,7 +6002,7 @@ async function runOddsJob(dateStr, opts) {
         for (const o of oddsRaw) oddsById.set(o.game_id, o);
         let wrote = 0, skippedLocked = 0, skippedHaveKalshi = 0, skippedNoLadder = 0, skippedFeeFail = 0;
         const anchorCounts = { kalshi_exact: 0, kalshi_nearest: 0, liquidity_fallback: 0 };
-        let abAgree = 0, abDisagree = 0, noAnchorPriced = 0, noTotalAnySource = 0;
+        let rowLines = 0, noAnchorPriced = 0, noTotalAnySource = 0;
         for (const p of polyRows) {
           if (!p.game_id) continue;
           const o = oddsById.get(p.game_id);
@@ -6138,18 +6015,15 @@ async function runOddsJob(dateStr, opts) {
           // POLY'S TOTAL IS RECORDED EVEN WHEN KALSHI WINS THE SLOT.
           // (2026-09-06)
           //
-          // The totals divergence check needs a second opinion on rows
-          // where Kalshi IS primary -- which is exactly the rows this block
-          // skipped before computing anything. Its current second opinion
-          // is xcheck_total, a sportsbook (fanduel 257 / betmgm 165 /
-          // bet365 1 over the 30 days to 2026-09-06) delivered by the
-          // Unabated feed, which dies with it.
+          // The totals comparison in processOddsArray needs a second opinion
+          // on rows where Kalshi IS primary -- which is exactly the rows this
+          // block skipped before computing anything. Since the Unabated
+          // fetch was removed (2026-09-17) Poly is the only second opinion;
+          // the sportsbook one (xcheck_total) went with it.
           //
-          // Unlike the ML case, this is NOT the same book: Poly is a
-          // prediction market, the current xcheck is a sportsbook. So the
-          // Poly arm is computed and LOGGED but writes no flag -- the
-          // decision to keep, drop, or switch the comparison is made from
-          // the logged rates once both arms have run on live slates.
+          // Poly is a prediction market, not the sportsbook that arm
+          // replaced, so the comparison is LOGGED (arm=poly, NOFLAG) and
+          // writes no flag.
           //
           // The ladder and the rung cascade move ABOVE the Kalshi skip so
           // poly_total is populated on every quoted game. In-memory only;
@@ -6159,25 +6033,16 @@ async function runOddsJob(dateStr, opts) {
             skippedNoLadder++;
             continue;
           }
-          // RUNG-PICK CASCADE, ANCHOR MOVED TO KALSHI. (2026-09-06)
+          // RUNG-PICK CASCADE, ANCHOR ON KALSHI. (2026-09-06)
           //
-          // Was: anchor on o.unabated_total. That column loses its writer
-          // when the Unabated fetch is removed, so the anchor moves to
-          // Kalshi's own line for the same game -- the same line by a
-          // source that survives. Measured over the 30 days to 2026-09-06:
-          // market_total == unabated_total on 422 of 422 rows, and
-          // unabated_total was NULL on 0 of them, so the old fallback was
-          // never exercised in production and the two anchors should agree
-          // essentially always.
-          //
-          // "Should" is why both are computed. The old anchor is still
-          // available while the Unabated fetch runs, so every row logs
-          // OLD vs NEW and whether they picked the same strike. That is
-          // the evidence for the removal PR; without it the switch would
-          // be argued from a retrospective count rather than observed on
-          // live slates.
-          //
-          // Only the NEW anchor prices. The old one is observation.
+          // Was: anchor on o.unabated_total. Moved to Kalshi's own line for
+          // the same game, the same line by a source that survives: over the
+          // 30 days to 2026-09-06 market_total == unabated_total on 422 of
+          // 422 rows. Both anchors ran side by side ([poly-anchor-ab]) until
+          // the removal gate was met on the 2026-09-16 slate -- phi-nym and
+          // det-cws priced=yes agree=yes via liquidity_fallback, ath-tb and
+          // sd-col kalshi_exact. The old arm was deleted with the fetch
+          // (2026-09-17).
           const pickFrom = (anchorLine, exactTier, nearTier) => {
             if (anchorLine == null) return { rung: null, tier: null };
             const exact = ladder.find(r => Math.abs(r.strike - anchorLine) < 0.001);
@@ -6222,7 +6087,6 @@ async function runOddsJob(dateStr, opts) {
             kalshiLineSrc = 'persisted';
           }
           const nw = pickFrom(kalshiLine, 'kalshi_exact', 'kalshi_nearest');
-          const old = pickFrom(o.unabated_total, 'unabated_exact', 'unabated_nearest');
 
           let picked = nw.rung, anchorTier = nw.tier;
           if (!picked) {
@@ -6239,40 +6103,25 @@ async function runOddsJob(dateStr, opts) {
             continue;
           }
 
-          // OLD vs NEW, per row. Greppable as [poly-anchor-ab]. `agree` is
-          // on the STRIKE, not the tier: kalshi_exact and unabated_nearest
-          // landing on the same rung is a match, because the rung is what
-          // gets priced. `old=none` means the old anchor would have fallen
-          // through to liquidity -- which, given unabated_total was never
-          // NULL in 30 days, should itself be rare and is worth seeing.
-          // priced= ANSWERS "why did the A/B log for every game". #367
-          // moved the Kalshi-primary skip BELOW this log so poly_total
-          // could be recorded for the divergence comparison on every game
-          // Poly quotes. That was deliberate for poly_total and an
-          // accident for this line, which now runs on rows Poly never
-          // prices. Rather than move the log back and lose the comparison,
-          // each row says whether Poly actually owns the total.
-          //
-          // Only priced=yes rows can mis-price. A disagreement on a
-          // priced=no row is informational.
-          const oldStrike = old.rung ? old.rung.strike : null;
-          const agree = oldStrike != null && Math.abs(oldStrike - picked.strike) < 0.001;
+          // ONE LINE PER QUOTED GAME, greppable as [poly-anchor-row]. It
+          // replaces the [poly-anchor-ab] OLD-vs-NEW line, whose OLD arm
+          // (unabated_total) went with the fetch. priced= says whether Poly
+          // owns the total: #367 moved the Kalshi-primary skip BELOW this
+          // point so poly_total is recorded on every quoted game, so this
+          // line also runs on rows Poly does not price. Only priced=yes
+          // rows can mis-price.
           const willPrice = o.market_total == null;
-          if (oldStrike == null || !agree) abDisagree++;
-          else abAgree++;
-          console.log('[poly-anchor-ab] ' + p.game_id
-            + '  new=' + anchorTier + ':' + picked.strike
-            + '  old=' + (old.tier || 'none') + ':' + (oldStrike == null ? '-' : oldStrike)
+          rowLines++;
+          console.log('[poly-anchor-row] ' + p.game_id
+            + '  anchor=' + anchorTier + ':' + picked.strike
             + '  kalshi_line=' + (kalshiLine == null ? '-' : kalshiLine)
             + '(' + (kalshiLineSrc || 'none') + ')'
-            + '  unabated_total=' + (o.unabated_total == null ? '-' : o.unabated_total)
-            + '  priced=' + (willPrice ? 'yes' : 'no')
-            + '  agree=' + (agree ? 'yes' : 'NO'));
+            + '  priced=' + (willPrice ? 'yes' : 'no'));
 
           // NO ANCHOR ON A ROW WE ARE ABOUT TO PRICE is the condition that
           // made 2026-09-08 look fine in aggregate while two rows moved.
           // It must not be silent: liquidity is a last resort, not a
-          // reference, and PR 3 removes the only alternative reference.
+          // reference, and with Unabated gone there is no other reference.
           if (willPrice && anchorTier === 'liquidity_fallback') {
             noAnchorPriced++;
             console.warn('[poly-anchor] NO KALSHI ANCHOR for ' + p.game_id
@@ -6308,17 +6157,17 @@ async function runOddsJob(dateStr, opts) {
           o.under_price  = underMl;
           o.total_source = 'polymarket';
           anchorCounts[anchorTier] = (anchorCounts[anchorTier] || 0) + 1;
+          passStats.polyAnchor[anchorTier === 'liquidity_fallback' ? 'liquidity_fallback' : kalshiLineSrc]++;
           wrote++;
           console.log('[odds] Poly-direct totals: ' + p.game_id
             + ' anchor=' + anchorTier
             + ' strike=' + picked.strike
-            + ' over/under=' + overMl + '/' + underMl
-            + (o.unabated_total != null ? ' (unabated_total=' + o.unabated_total + ')' : ''));
+            + ' over/under=' + overMl + '/' + underMl);
         }
 
-        // FULL SLATE ACCOUNTING FOR THE A/B. (2026-09-09)
+        // FULL SLATE ACCOUNTING. (2026-09-09)
         //
-        // The A/B line lives inside this loop, which iterates polyRows --
+        // The per-row line lives inside this loop, which iterates polyRows --
         // games POLY QUOTED. On the 2026-09-08 3PM slate that produced 10
         // lines against 13 games in oddsRaw, and the 3 missing ones were
         // read as "the rows where the anchor decides a price". They are
@@ -6326,7 +6175,7 @@ async function runOddsJob(dateStr, opts) {
         //
         // But that had to be INFERRED from two log lines that do not
         // mention each other, which is the actual defect. Every game in
-        // oddsRaw now appears exactly once, either as a [poly-anchor-ab]
+        // oddsRaw now appears exactly once, either as a [poly-anchor-row]
         // line above or as a [poly-anchor-none] line here with the reason
         // it produced none. 13 games in, 13 lines out.
         const quoted = new Set(polyRows.map(p => p.game_id).filter(Boolean));
@@ -6346,18 +6195,16 @@ async function runOddsJob(dateStr, opts) {
         if (noTotalAnySource) {
           console.warn('[poly-anchor] ' + noTotalAnySource + ' game(s) on ' + dateStr
             + ' have NO total from Kalshi or Poly. Totals signals are suppressed'
-            + ' for them regardless of the anchor, and removing the Unabated'
-            + ' fetch does not change that -- total_source has only ever been'
-            + ' kalshi or polymarket.');
+            + ' for them regardless of the anchor -- total_source has only ever'
+            + ' been kalshi or polymarket.');
         }
 
         console.log('[odds] Poly-direct totals: ' + wrote + ' game(s) written'
           + ' [anchors: kalshi_exact=' + (anchorCounts.kalshi_exact || 0)
           + ', kalshi_nearest=' + (anchorCounts.kalshi_nearest || 0)
           + ', liquidity_fallback=' + (anchorCounts.liquidity_fallback || 0) + ']'
-          + ' [anchor A/B vs unabated: agree=' + abAgree + ', differ=' + abDisagree + ']'
           + (noAnchorPriced ? ' *** ' + noAnchorPriced + ' PRICED WITH NO KALSHI ANCHOR ***' : '')
-          + ' [slate: ' + oddsRaw.length + ' games, ' + (abAgree+abDisagree) + ' A/B lines, ' + noTotalAnySource + ' with no total]'
+          + ' [slate: ' + oddsRaw.length + ' games, ' + rowLines + ' row lines, ' + noTotalAnySource + ' with no total]'
           + (skippedLocked ? ', ' + skippedLocked + ' locked (skipped)' : '')
           + (skippedHaveKalshi ? ', ' + skippedHaveKalshi + ' had Kalshi (skipped)' : '')
           + (skippedNoLadder ? ', ' + skippedNoLadder + ' no ladder/rung (skipped)' : '')
@@ -6389,21 +6236,31 @@ async function runOddsJob(dateStr, opts) {
       for (const o of mlMisses) {
         console.warn('[odds-coverage] ML MISS ' + dateStr + '/' + o.game_id
           + ' — market_away_ml=' + o.market_away_ml
-          + ' market_home_ml=' + o.market_home_ml
-          + ' unabated_away_ml=' + o.unabated_away_ml
-          + ' unabated_home_ml=' + o.unabated_home_ml);
+          + ' market_home_ml=' + o.market_home_ml);
       }
       for (const o of totalsMisses) {
         console.warn('[odds-coverage] TOTALS MISS ' + dateStr + '/' + o.game_id
-          + ' — market_total=' + o.market_total
-          + ' unabated_total=' + o.unabated_total);
+          + ' — market_total=' + o.market_total);
       }
     }
 
     const result = processOddsArray(dateStr, oddsRaw, settings, { dhFlagByGid: _dhFlagByGid });
     const updated = result.updated;
     const sourceLabel = result.source;
-    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + sourceLabel, updated);
+    // PER-PASS ANCHOR SUMMARY. (2026-09-17) With Unabated gone there is no
+    // reference line besides Kalshi's, so how often a total was priced
+    // WITHOUT one is the number to watch. It goes into the cron_log
+    // message as well as the log, because cron_log is the only place a
+    // per-pass count survives -- Render logs roll, and nothing else
+    // persists which anchor path priced a row.
+    const _pa = passStats.polyAnchor, _kr = passStats.kalshiRung;
+    const _anchorTxt = 'poly totals by anchor: kalshi pass=' + _pa.pass + ' persisted=' + _pa.persisted
+      + ' liquidity_fallback=' + _pa.liquidity_fallback
+      + '; kalshi totals rung: persisted=' + _kr.persisted + ' auto=' + _kr.auto;
+    console.log('[odds] pass summary ' + dateStr + ': updated ' + updated + '; ' + _anchorTxt
+      + (_pa.liquidity_fallback ? '   *** ' + _pa.liquidity_fallback + ' PRICED WITH NO KALSHI ANCHOR ***' : ''));
+    q.logCron.run('odds', dateStr, 'success', 'Updated ' + updated + ' game(s) from ' + sourceLabel
+      + ' [' + _anchorTxt + ']', updated);
 
     // Tail refresh (feat/upsert-signal-refresh, 2026-07-08). After the
     // odds cron persists fresh market_*_ml into game_log, re-anchor

@@ -257,7 +257,9 @@ Applying it:
    what a reader actually reads. `parseUnabatedOdds` reads exactly
    `data.teams` and `data.gameOddsEvents[MLB_KEY]`, so the snapshot now
    holds only those: 88.3MB → 4.9MB with byte-identical replay output.
-   Verify: `node scripts/test-unabated-snapshot-slice.js`.
+   (The Unabated fetch, this snapshot and its test were removed entirely on
+   2026-09-17 — `docs/unabated-fetch-removed-2026-09-17.md`. The lesson
+   stands; the example is now history.)
 2. **An upstream payload you do not control is a moving target.** This one
    more than doubled in three weeks with no change on our side, and the
    incident had no diff behind it. Any unbounded `JSON.parse` /
