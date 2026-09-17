@@ -106,23 +106,38 @@ Not significant either way, and not a verdict. The point estimate moves
 from -0.00020 to -0.00058 once the term is the value the model actually
 priced with.
 
-### The bullpen figure this was expected to reproduce did not reproduce
+### The earlier bullpen figure: a different corpus, same direction
 
-The request cited the bullpen group as measured at **+0.0022 log loss on
-both arms, edge slope to -0.025**. Neither corpus reproduces that
-direction:
+**Corrected 2026-09-17.** This section first recorded the bullpen figure as
+"+0.0022 on both arms" whose source was unidentified. Both halves of that were
+wrong:
+
+- **The figure is -0.0022**, a log-loss reduction. The "+" came from how
+  the request was written, not from the measurement.
+- **Its source is known:** the 2026-09-05 scratchpad run, 2026-06-01 ->
+  08-07, **n=439**, the **pre-#382** weather filter (tag, before
+  `weather_inputs_valid`), and the **legacy FRV term** (one summed row per
+  player, before the 2026-09-12 position split).
+
+On the current filters it is smaller and points the same way:
 
 ```
-corpus                                      OFF (legacy -> +bullpen)   ON (legacy -> +bullpen)   slope OFF / ON
-valid, FRV asof, n=658                      0.69010 -> 0.68917          0.68921 -> 0.68848        +0.009->+0.063 / +0.130->+0.191
-WEATHER_FILTER=tag, FRV_READ=current, n=349 0.69451 -> 0.69272          0.69277 -> 0.69106        -0.597->-0.474 / -0.363->-0.206
+corpus                                          bullpen effect on log loss, OFF / ON
+2026-09-05 run: n=439, pre-#382, legacy FRV    -0.0022 (both arms)
+tag filter, FRV_READ=current, n=349 (today)    -0.00179 / -0.00171   (0.69451 -> 0.69272, 0.69277 -> 0.69106)
+valid, FRV asof, n=658 (current filters)       -0.0009  / -0.0007    (0.69010 -> 0.68917, 0.68921 -> 0.68848)
 ```
 
-On both, the persisted bullpen **lowers** log loss and **raises** the edge
-slope. The 2026-09-04 commit that added `calibration-ab-inputs.js` recorded
-only deltas (none -0.00206, bullpen -0.00194 at n=439), which match
-neither figure's shape. The source of +0.0022 / -0.025 is unidentified; it
-is not quoted in code.
+So this is **not a lost source**. It is the same measurement on a different
+corpus, and the magnitude shrinks as the corpus moves to the current filters.
+Of the three, only the 658-game row is on the corpus the harness now scores.
+
+The tag-filter corpus is 349 today, not 439, because
+`market_contamination_reason` tagging has grown since 2026-09-05. So even
+that row does not reproduce the 09-05 corpus exactly. The edge-slope figure
+quoted alongside the original (-0.025) is not reconciled here. On both
+re-runs above the slope rises with the bullpen (+0.009 -> +0.063 / +0.130 ->
++0.191 at n=658).
 
 ## Settings that act only through a frozen input
 
