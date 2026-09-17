@@ -528,7 +528,16 @@ const GATES = [
     criterion_type: 'roi', window_end: null,
     decision: { date: '2026-07-05', outcome: 'deliberately_dark', ref: 'settings-schema help text' },
     note: 'Genuinely decided, and the decision is recorded — but the evidence was ROI-based and is therefore '
-        + 'selection-contaminated. Worth re-deriving on a calibration target before treating "no edge in overs" as settled.' },
+        + 'selection-contaminated. Worth re-deriving on a calibration target before treating "no edge in overs" as settled.\n'
+        + 'AMENDED 2026-09-17 — THE GATE DOES NOT DESCRIBE BETTING. 13 over bets are logged in '
+        + 'bet_signals with bet_line IS NOT NULL (continuous-edge era, median emit edge 5.23pp). '
+        + 'With overs_enabled=false this gate can never admit an over at any edge, so those 13 '
+        + 'bets are direct evidence that what the gate surfaces and what gets bet are different '
+        + 'populations. That does not make the "no edge in overs" decision wrong — it makes the '
+        + 'gate the wrong instrument for reading betting behaviour, which is why the replay '
+        + 'harnesses now report a by_category_bet bucket keyed on bet_line IS NOT NULL instead of '
+        + 'approximating bets with a display floor. See utils/logged-bets.js and '
+        + 'docs/highlight-gate-consolidation-2026-09-17.md.' },
 
   { id: 'ui_highlight_symmetric_floor', key: 'ui_highlight_ml_fav_min_pp', on_expected: false,
     criterion: 'Replace fav 2.0 / dog 4.5 with FAV FLOOR 3.5pp and DOG BAND 2.0-4.5pp. '
@@ -544,8 +553,17 @@ const GATES = [
     // single settings key per row; the dog half is specified in the
     // criterion and must not be read off `key`.
     note: 'PROPOSAL ONLY — no behaviour change. Nothing in this row alters the shipped gate, '
-        + 'which remains fav 2.0 / dog 4.5 / under 7.0 / overs never, hardcoded in '
-        + 'public/index.html and settings-driven in the four backtest harnesses.\n'
+        + 'which remains fav 2.0 / dog 4.5 / under 7.0 / overs never. (AMENDED 2026-09-17: those '
+        + 'values are no longer hardcoded in public/index.html — every site reads app_settings '
+        + 'through utils/highlight-gate.js. The numbers are unchanged; only their source is.)\n'
+        + 'AMENDED 2026-09-17 — WHAT THE PROPOSED FLOORS WOULD EXCLUDE FROM ACTUAL BETS. Of the '
+        + 'continuous-edge bets the operator logged (bet_line IS NOT NULL), 5 of 107 favs and 33 '
+        + 'of 100 dogs sit BELOW the proposed admitted regions. A third of logged dogs falling '
+        + 'outside a dog band means this proposal, if adopted as a betting rule, would disagree '
+        + 'with a third of the dog bets already placed. It is a DISPLAY proposal and the criterion '
+        + 'is calibration, so that is not an objection to it — but it must be stated before anyone '
+        + 'reads the row as a description of betting. The by_category_bet bucket in the replay '
+        + 'harnesses (2026-09-17) exists so this population can be measured directly.\n'
         + 'FOUNDING MEASUREMENT 2026-09-05. Whole season, contamination-filtered, continuous-edge '
         + 'rows only (signal_label IS NULL), P(model) from the frozen emit-time model_line, '
         + 'outcome from final scores. NO ROI USED — ROI over emitted signals measures selection, '
@@ -580,8 +598,16 @@ const GATES = [
     window_end: '2026-10-31', decision: null,
     corpus_size: 355,
     note: 'PROPOSAL ONLY — no behaviour change. The shipped gate remains under >= 7.0pp, '
-        + 'overs never, hardcoded in public/index.html and settings-driven via '
-        + 'ui_highlight_tot_under_min_pp in the four backtest harnesses.\n'
+        + 'overs never. (AMENDED 2026-09-17: no longer hardcoded in public/index.html — the page '
+        + 'and all four harnesses read ui_highlight_tot_under_min_pp through '
+        + 'utils/highlight-gate.js. Same value, one source.)\n'
+        + 'AMENDED 2026-09-17 — CORROBORATION FROM THE BET LOG. 25 of the 29 logged continuous-edge '
+        + 'under bets (bet_line IS NOT NULL) sit BELOW the current 7.0pp floor, median emit edge '
+        + '2.49pp — i.e. the operator has been betting almost exclusively inside the band this row '
+        + 'proposes to admit, and the current floor excludes 86% of what was actually bet. This is '
+        + 'independent of the calibration table above and does not substitute for it (betting '
+        + 'behaviour is not a calibration measurement), but it is consistent with the same '
+        + 'conclusion: the 7.0 floor describes neither the calibrated band nor the bets.\n'
         + 'MEASURED 2026-09-06 on a copy refreshed from production, scored through 2026-09-04 '
         + '(1159 clean completed games). Contamination-filtered on both reasons, continuous-edge '
         + 'rows only, pushes dropped. corpus_size 355 = all under signals in the measurement; the '

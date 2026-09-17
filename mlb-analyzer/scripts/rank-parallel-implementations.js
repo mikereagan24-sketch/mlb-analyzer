@@ -42,8 +42,30 @@ const src = {};
 for (const f of ALL) { try { src[f] = fs.readFileSync(path.join(R, f), 'utf8'); } catch (e) {} }
 
 const isProd = f => !f.startsWith('scripts/') && !f.startsWith('tmp/');
-const PRICING = f => /^(services\/(model|jobs)\.js|db\/schema\.js|utils\/)/.test(f)
-  || (isProd(f) && /^services\//.test(f));
+
+// WHAT "PRICING" MEANS HERE, AND WHAT IT USED TO CLAIM. (fixed 2026-09-17)
+//
+// This predicate doubles a finding's risk radius because a drifted copy
+// "can misprice". It used to match ALL of utils/ and ALL of services/,
+// which made the claim untrue for a whole class of files: the highlight
+// gate (utils/highlight-gate.js and the four backtest harnesses in
+// services/) was reported as sitting on the pricing path and does not.
+// Nothing in it gates a price, a signal write or a bet. Emission is
+// governed by SIGNAL_EMIT_FLOOR_PP in services/model.js getSignals;
+// the gate decides what the card colours green and which rows land in
+// a harness's above_ui_floor reporting bucket.
+//
+// The correction is to name the pricing path rather than infer it from
+// a directory. REPORT_ONLY lists files that re-score or display and
+// cannot write a price: the backtest harnesses (report-only by
+// construction, no DB writes), the sweep engine, and the gate itself.
+// Everything else under the true pricing modules still counts.
+const REPORT_ONLY = /^(services\/(frv|temp|runmult-totals)-backtest\.js|services\/parameter-sweep\.js|utils\/(highlight-gate|logged-bets)\.js)$/;
+const PRICING = (f) => {
+  if (REPORT_ONLY.test(f)) return false;
+  return /^(services\/(model|jobs)\.js|db\/schema\.js|utils\/)/.test(f)
+    || (isProd(f) && /^services\//.test(f));
+};
 
 // Extract a function body by brace matching from its declaration.
 function bodyOf(text, startIdx) {
@@ -102,21 +124,29 @@ for (const [name, copies] of Object.entries(defs)) {
   //
   //   ~0%    identical copies -- a maintenance smell, not a live bug
   //   20-60% THE DANGER ZONE: one rule, copied, and already diverged.
-  //          isHighlightedSignal sits here: four copies across four
-  //          backtest harnesses, 32% apart, so the four are measuring
-  //          different populations.
-  //          COUNT REVISED 2026-09-04: six, not four. The scanner only
-  //          sees services/*.js, so it missed two in public/index.html --
-  //          signalMeetsHighlightThreshold, plus an inline copy inside
-  //          renderGameResult's vd(). The vd() copy has since been folded
-  //          into signalMeetsHighlightThreshold, leaving FIVE: the four
-  //          harnesses (settings-driven, ui_highlight_* from app_settings)
-  //          and the client (hardcoded 2.0/4.5/7.0). Those two families
-  //          agree today -- 0.02/0.045/0.07/overs-false -- so nothing is
-  //          drifting yet, but an operator changing a setting would move
-  //          the backtests and not the UI. Unifying them is the remaining
-  //          consolidation and is NOT done: it changes the published
-  //          population of every result the harnesses have produced.
+  //          isHighlightedSignal was the worked example here, and the
+  //          count was revised twice before it was right:
+  //            2026-08  "four copies, four harnesses, 32% apart"
+  //            2026-09-04  "six, not four" -- the scanner only reads
+  //                    services/*.js, so it missed public/index.html
+  //            2026-09-17  EIGHT. Four harnesses, and four in the page:
+  //                    signalMeetsHighlightThreshold (hardcoded
+  //                    2.0/4.5/7.0), _shouldHighlight (settings x100),
+  //                    _bktThresholds (the same settings, for bucket
+  //                    indices), and the manual-bet preview's inline
+  //                    floors. A scanner that greps for `function NAME`
+  //                    could not find the last two: they are not
+  //                    same-named functions, they are the same RULE
+  //                    under different names. That is this tool's real
+  //                    blind spot, and it is why the eventual fix
+  //                    shipped with a grep-based no-duplicates test
+  //                    (scripts/test-highlight-gate.js) rather than
+  //                    relying on this ranking.
+  //          RESOLVED 2026-09-17: all eight now call
+  //          utils/highlight-gate.js. It is no longer an example of
+  //          live drift; it is an example of a rule that agreed by
+  //          coincidence (prod app_settings equalled the client's
+  //          literals) while being free to disagree at any time.
   //   >75%   almost certainly UNRELATED functions sharing a common name.
   //          projectAgg scored 93% and is two different functions -- one
   //          projects CLV stats, the other projects buckets.

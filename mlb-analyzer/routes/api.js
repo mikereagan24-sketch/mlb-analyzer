@@ -2716,12 +2716,16 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     //   minMlSample: low_sample threshold on favs+dogs count (default 30).
     //   trainFraction: 0 < x < 1 (default 0.7); whole-day partition.
     //   topN: top-K combos to re-score on TEST (default 10).
-    //   betSelection: 'emit_floor' | 'ui_highlight' (default 'emit_floor').
-    //     Which aggregate drives ranking. Both are always computed and
-    //     reported side-by-side per combo (target_emit + target_highlight).
-    //     emit_floor matches prior sweep behavior (every signal >=
-    //     SIGNAL_EMIT_FLOOR_PP); ui_highlight ranks by ROI over the
-    //     subset the user actually bets (UI-highlighted picks only).
+    //   betSelection: 'emit_floor' | 'above_ui_floor' (default
+    //     'emit_floor'; 'ui_highlight' still accepted as the legacy
+    //     name, normalised below). Which aggregate drives ranking. Both
+    //     are always computed and reported side-by-side per combo
+    //     (target_emit + target_highlight). emit_floor matches prior
+    //     sweep behavior (every signal >= SIGNAL_EMIT_FLOOR_PP);
+    //     above_ui_floor ranks by ROI over the subset clearing the UI
+    //     floors. That is NOT the subset the operator bets — the old
+    //     comment here said it was; 76 of 249 logged continuous-edge
+    //     bets fall below those floors (corrected 2026-09-17).
     const optimizeFor = (b.optimizeFor || 'all').toLowerCase();
     if (!['totals', 'ml', 'all'].includes(optimizeFor)) {
       return res.status(400).json({ error: 'optimizeFor must be "totals", "ml", or "all"' });
@@ -2742,9 +2746,13 @@ router.post('/admin/parameter-sweep', requireAdminToken, async (req, res) => {
     if (!Number.isFinite(topN) || topN < 1) {
       return res.status(400).json({ error: 'topN must be a positive integer' });
     }
-    const betSelection = (b.betSelection || 'emit_floor').toLowerCase();
-    if (!['emit_floor', 'ui_highlight'].includes(betSelection)) {
-      return res.status(400).json({ error: 'betSelection must be "emit_floor" or "ui_highlight"' });
+    const betSelectionRaw = (b.betSelection || 'emit_floor').toLowerCase();
+    // Legacy alias: the value was named 'ui_highlight' until 2026-09-17
+    // and two stored runs' params carry it. Accept and normalise rather
+    // than 400 on a request that used to be valid.
+    const betSelection = betSelectionRaw === 'ui_highlight' ? 'above_ui_floor' : betSelectionRaw;
+    if (!['emit_floor', 'above_ui_floor'].includes(betSelection)) {
+      return res.status(400).json({ error: 'betSelection must be "emit_floor" or "above_ui_floor"' });
     }
 
     // In-flight dedupe. Render's single instance can't run two sweeps
@@ -2985,11 +2993,35 @@ function summarizeSweepRunRow(row, paramFilter) {
   envelope.elapsed_ms             = results.elapsed_ms;
   envelope.notes                  = results.notes;
 
+  // THE TWO JUNE SWEEPS ARE MARKED HERE, ON THE RUNS THEMSELVES.
+  // (2026-09-17)
+  //
+  // run_id 66790616 (2026-06-10 12:16, ml, 05-20..06-04) and 8c6bac11
+  // (2026-06-10 12:34, ml, 05-20..06-09) were ranked with
+  // betSelection='ui_highlight'. That aggregate was documented at the
+  // time as "what the user actually bets". It is not: 76 of 249 logged
+  // continuous-edge bets fall below those floors (33 of 100 dogs, 25 of
+  // 29 unders, all 13 overs). So those two runs ranked combos on a
+  // DISPLAY population, not a bet population.
+  //
+  // Not re-run, and their numbers are not restated — they remain valid
+  // above-floor rankings. The caveat rides on any read of them instead,
+  // which is the only way a stored result can carry a correction: the
+  // rows live in the prod DB and this code is the thing that reads them.
+  if (envelope.bet_selection === 'above_ui_floor' || envelope.bet_selection === 'ui_highlight') {
+    envelope.bet_selection_caveat =
+      'Ranked on the above-UI-floor population, NOT on bets placed. '
+      + '76 of 249 logged continuous-edge bets sit below these floors '
+      + '(33/100 dogs, 25/29 unders, 13/13 overs, which the gate can never admit). '
+      + 'Read the ranking as "best under the display floor", not "best for what is bet". '
+      + 'See docs/highlight-gate-consolidation-2026-09-17.md.';
+  }
+
   // Baseline: keep both emit + highlight targets on both train+test,
   // each enriched with wins/losses summed across the target buckets
   // (target_emit / target_highlight returned by runParameterSweep
   // carry bets/pnl/wagered/roi_pct only — wins/losses live on the
-  // per-category buckets at by_category_{emit,highlight}.{bucket}).
+  // per-category buckets at by_category_{emit,above_ui_floor}.{bucket}).
   if (results.baseline) {
     envelope.baseline = {
       settings: results.baseline.settings,
@@ -3015,11 +3047,11 @@ function summarizeSweepRunRow(row, paramFilter) {
         low_sample:  !!r.low_sample,
         train: {
           target_emit:      summarizeTargetWithWL(r.train_target_emit,      r.train?.by_category_emit),
-          target_highlight: summarizeTargetWithWL(r.train_target_highlight, r.train?.by_category_highlight),
+          target_highlight: summarizeTargetWithWL(r.train_target_highlight, aboveFloorBuckets(r.train)),
         },
         test: r.test ? {
           target_emit:      summarizeTargetWithWL(r.test.target_emit,      r.test.by_category_emit),
-          target_highlight: summarizeTargetWithWL(r.test.target_highlight, r.test.by_category_highlight),
+          target_highlight: summarizeTargetWithWL(r.test.target_highlight, aboveFloorBuckets(r.test)),
         } : null,
       }))
       .sort((a, b) => {
@@ -3049,16 +3081,29 @@ function summarizeSweepRunRow(row, paramFilter) {
       low_sample:  !!r.low_sample,
       train: {
         target_emit:      summarizeTargetWithWL(r.train_target_emit,      r.train?.by_category_emit),
-        target_highlight: summarizeTargetWithWL(r.train_target_highlight, r.train?.by_category_highlight),
+        target_highlight: summarizeTargetWithWL(r.train_target_highlight, aboveFloorBuckets(r.train)),
       },
       test: r.test ? {
         target_emit:      summarizeTargetWithWL(r.test.target_emit,      r.test.by_category_emit),
-        target_highlight: summarizeTargetWithWL(r.test.target_highlight, r.test.by_category_highlight),
+        target_highlight: summarizeTargetWithWL(r.test.target_highlight, aboveFloorBuckets(r.test)),
       } : null,
     };
   });
 
   return envelope;
+}
+
+// The above-UI-floor per-category aggregate of a stored train|test
+// block. The key was renamed by_category_highlight ->
+// by_category_above_ui_floor on 2026-09-17; runs stored before that
+// carry the old name, and their summaries must keep resolving (both
+// June sweeps are in that set). Reading either is the whole reason
+// this helper exists — a bare `block.by_category_above_ui_floor`
+// would silently hand summarizeTargetWithWL undefined and report a
+// record of 0-0 for those runs.
+function aboveFloorBuckets(block) {
+  if (!block) return null;
+  return block.by_category_above_ui_floor || block.by_category_highlight || null;
 }
 
 // Compact projection of one train|test block from baseline or a
@@ -3069,7 +3114,7 @@ function summarizeTrainOrTestBlock(block) {
   if (!block) return null;
   return {
     target_emit:      summarizeTargetWithWL(block.target_emit,      block.by_category_emit),
-    target_highlight: summarizeTargetWithWL(block.target_highlight, block.by_category_highlight),
+    target_highlight: summarizeTargetWithWL(block.target_highlight, aboveFloorBuckets(block)),
   };
 }
 
@@ -3548,7 +3593,7 @@ router.get('/admin/temp-backtest', requireAdminToken, (req, res) => {
 // signals are filtered out. Substrate: framing per production live
 // state, FRV explicitly off.
 //
-// Reports per RUN_MULT: emit_floor + ui_highlight (all/tot_over/
+// Reports per RUN_MULT: emit_floor + above_ui_floor (all/tot_over/
 // tot_under separately), over-minus-under ROI gap, all-totals net
 // pnl, mean(model_total - actual_total) accuracy metric, signal-mix
 // composition. Headline reads: accuracy-optimal RUN_MULT (closest to

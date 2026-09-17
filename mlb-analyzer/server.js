@@ -159,6 +159,27 @@ app.use(express.static(path.join(__dirname, 'public'), {
   }
 }));
 
+// THE HIGHLIGHT GATE, served to the browser from the SAME FILE the
+// server requires. (2026-09-17)
+//
+// public/index.html loads this as <script src="/highlight-gate.js">.
+// Copying the file into public/ would have re-created exactly the
+// problem the consolidation removes -- two files, one rule, free to
+// drift -- so the module stays in utils/ and is served from there.
+// utils/highlight-gate.js carries a UMD footer for this reason: the
+// same bytes define module.exports under require() and window
+// .HighlightGate in the page.
+//
+// no-store matches index.html's policy. The page and the gate must
+// never be served from different generations of a deploy: a cached
+// gate with an old threshold rule against a fresh page is precisely
+// the drift this replaces.
+app.get('/highlight-gate.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.sendFile(path.join(__dirname, 'utils', 'highlight-gate.js'));
+});
+
 // Version endpoint
 app.get('/api/version', (req, res) => res.json({
   build: '2026-04-11T14:20:01.140Z',

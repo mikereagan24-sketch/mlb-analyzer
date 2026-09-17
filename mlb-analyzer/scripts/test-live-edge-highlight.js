@@ -9,10 +9,15 @@
  *
  * This asserts the behaviour on production-shaped rows rather than
  * fixtures, per the ingest-not-hot-path rule's "prod-shaped fixtures or
- * it doesn't ship". The functions under test are the ones in the page:
- * they are re-declared here because index.html is not requireable, and
- * the test asserts the page still contains them so the copy cannot
- * silently drift from the original.
+ * it doesn't ship".
+ *
+ * UPDATED 2026-09-17. This file used to RE-DECLARE the gate, making it
+ * one more copy of the rule it was policing -- the failure mode it was
+ * written to catch. It now requires utils/highlight-gate.js, the same
+ * module the page loads via <script src="/highlight-gate.js">, so an
+ * equivalence test here is a test of the shipped code. liveEdgePpML is
+ * still mirrored: it reads opener-aware columns and lives inside the
+ * page, which is not requireable.
  *
  * Run: node scripts/test-live-edge-highlight.js
  */
@@ -37,6 +42,15 @@ ok('page gate accepts a raw live pp',
 ok('vd() inline threshold copy is gone -- folded into the shared gate',
    page.indexOf('isHighlight = score >= 2.0') === -1
    && page.indexOf('isHighlight = score >= 4.5') === -1);
+// 2026-09-17: the page must DELEGATE, not carry the rule.
+ok('page loads the shared gate module',
+   page.indexOf('<script src="/highlight-gate.js"></script>') !== -1);
+ok('the page gate delegates to it',
+   page.indexOf('HighlightGate.highlightsForDisplay(s, _uiFloors()') !== -1);
+ok('no hardcoded floor literals survive in the page gate',
+   page.indexOf('return score >= 2.0') === -1
+   && page.indexOf('return score >= 4.5') === -1
+   && page.indexOf('return score >= 7.0') === -1);
 ok('ML boxes print the LIVE market',
    page.indexOf("mkt '+fmtML(g.market_away_ml)") !== -1
    && page.indexOf("mkt '+fmtML(g.market_home_ml)") !== -1);
@@ -68,24 +82,17 @@ const liveEdgePpML = (s, g) => {
   if (a == null || b == null) return null;
   return (a - b) * 100;
 };
-const gate = (s, rawLivePp) => {
-  if (!s) return false;
-  if (s.signal_label !== null && s.signal_label !== undefined) {
-    return s.signal_label === '2★' || s.signal_label === '3★';
-  }
-  const useRaw = typeof rawLivePp === 'number' && isFinite(rawLivePp);
-  const score = useRaw ? rawLivePp : Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
-  if (s.signal_type === 'ML') {
-    if (s.market_line < 0) return score >= 2.0;
-    if (s.market_line > 0) return score >= 4.5;
-    return false;
-  }
-  if (s.signal_type === 'Total') {
-    if (s.signal_side === 'under') return score >= 7.0;
-    return false;
-  }
-  return false;
-};
+// THE SHIPPED GATE, not a copy of it. Thresholds come from the same
+// app_settings rows the page and the harnesses read, so the floors in
+// the assertions below are prod's, not literals.
+const HighlightGate = require(path.join(R, 'utils/highlight-gate'));
+const T = HighlightGate.loadThresholds(db);
+const FAV_PP = T.fav_min_pp * 100, DOG_PP = T.dog_min_pp * 100;
+console.log('  thresholds from app_settings: fav ' + FAV_PP.toFixed(1)
+  + 'pp  dog ' + DOG_PP.toFixed(1) + 'pp  under '
+  + (T.under_min_pp * 100).toFixed(1) + 'pp  overs '
+  + (T.overs_enabled ? 'on' : 'off'));
+const gate = (s, rawLivePp) => HighlightGate.highlightsForDisplay(s, T, { rawLivePp });
 
 // ---- the named case ---------------------------------------------------
 const rowFor = gid => db.prepare(
@@ -110,20 +117,20 @@ if (!mn) {
   console.log('  mil-nym away: emit ' + emitPp.toFixed(2) + 'pp'
     + '  live-vs-live ' + live.toFixed(4) + 'pp'
     + '  live-vs-frozen ' + frozenPp.toFixed(2) + 'pp'
-    + '  dir ' + (mn.market_line < 0 ? 'FAV floor 2.0' : 'DOG floor 4.5'));
+    + '  dir ' + (mn.market_line < 0 ? 'FAV floor ' + FAV_PP.toFixed(1) : 'DOG floor ' + DOG_PP.toFixed(1)));
   ok('mil-nym uses the LIVE-vs-LIVE figure, not live-vs-frozen',
      Math.abs(live - frozenPp) > 0.2, 'they differ by '
        + Math.abs(live - frozenPp).toFixed(2) + 'pp, so the basis is distinguishable');
   ok('mil-nym away renders NOT green', gate(mn, live) === false,
-     'raw ' + live.toFixed(4) + 'pp < 2.0 floor');
+     'raw ' + live.toFixed(4) + 'pp < ' + FAV_PP.toFixed(1) + ' floor');
   ok('mil-nym would have been GREEN under the old 0.5-rounded basis',
      gate(mn, undefined) === true,
-     'rounded emit ' + (Math.round(emitPp / 0.5) * 0.5).toFixed(1) + 'pp >= 2.0 -- this is the change');
+     'rounded emit ' + (Math.round(emitPp / 0.5) * 0.5).toFixed(1) + 'pp >= ' + FAV_PP.toFixed(1) + ' -- this is the change');
   // Was: asserted it prints "2.0PP" while not green. That was the defect
   // two decimals fixes -- a raw 1.9854 displayed AS its floor and did not
   // green, which reads as a broken highlight rather than a near miss.
   ok('two-decimal display no longer reads as the floor it misses',
-     live.toFixed(2) !== '2.00' && Number(live.toFixed(2)) < 2.0
+     Number(live.toFixed(2)) !== FAV_PP && Number(live.toFixed(2)) < FAV_PP
      && gate(mn, live) === false,
      'prints ' + live.toFixed(2) + 'PP, not green (one decimal gave '
        + live.toFixed(1) + ')');
@@ -145,7 +152,7 @@ for (const s of all) {
   checked++;
   const g = gate(s, live);
   if (g) greens++;
-  const floor = s.market_line < 0 ? 2.0 : s.market_line > 0 ? 4.5 : Infinity;
+  const floor = s.market_line < 0 ? FAV_PP : s.market_line > 0 ? DOG_PP : Infinity;
   if (g !== (live >= floor)) viol++;
 }
 ok('every ML row greens iff its raw live pp clears its own floor',
@@ -158,7 +165,7 @@ let mis1 = 0, mis2 = 0, worst = null;
 for (const s of all) {
   const live = liveEdgePpML(s, s);
   if (live == null) continue;
-  const floor = s.market_line < 0 ? 2.0 : s.market_line > 0 ? 4.5 : null;
+  const floor = s.market_line < 0 ? FAV_PP : s.market_line > 0 ? DOG_PP : null;
   if (floor == null) continue;
   const green = live >= floor;
   if ((Number(live.toFixed(1)) >= floor) !== green) {

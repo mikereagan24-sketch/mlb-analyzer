@@ -192,39 +192,15 @@ function buildBacktestGame(gameRow, settings) {
 }
 
 // ============================================================
-// UI-highlight + aggregation helpers.
+// UI floor + aggregation helpers. The floor rule and its settings
+// loader were byte-for-byte copies of frv-backtest.js's until
+// 2026-09-17; both now come from utils/highlight-gate.js.
 // ============================================================
 
-function loadUiHighlightThresholds() {
-  let rows = [];
-  try {
-    rows = db.prepare(
-      "SELECT key, value FROM app_settings WHERE key IN ("
-      + "'ui_highlight_ml_fav_min_pp','ui_highlight_ml_dog_min_pp',"
-      + "'ui_highlight_tot_under_min_pp','ui_highlight_tot_overs_enabled')"
-    ).all();
-  } catch (e) { /* table missing → defaults */ }
-  const m = {};
-  for (const r of rows) m[r.key] = r.value;
-  return {
-    fav_min_pp:    m['ui_highlight_ml_fav_min_pp']    != null ? Number(m['ui_highlight_ml_fav_min_pp'])    : 0.02,
-    dog_min_pp:    m['ui_highlight_ml_dog_min_pp']    != null ? Number(m['ui_highlight_ml_dog_min_pp'])    : 0.045,
-    under_min_pp:  m['ui_highlight_tot_under_min_pp'] != null ? Number(m['ui_highlight_tot_under_min_pp']) : 0.07,
-    overs_enabled: m['ui_highlight_tot_overs_enabled'] === 'true',
-  };
-}
-
-function isHighlightedSignal(sig, t) {
-  const rounded = Math.round(Number(sig.edge) * 200) / 200;
-  if (sig.type === 'ML') {
-    return Number(sig.marketLine) < 0
-      ? rounded >= t.fav_min_pp
-      : rounded >= t.dog_min_pp;
-  }
-  if (sig.side === 'over')  return !!t.overs_enabled;
-  if (sig.side === 'under') return rounded >= t.under_min_pp;
-  return false;
-}
+const gate = require('../utils/highlight-gate');
+const { loadLoggedBetKeys, wasBet } = require('../utils/logged-bets');
+const loadUiHighlightThresholds = () => gate.loadThresholds(db);
+const isHighlightedSignal = (sig, t) => gate.highlightsOnFrozenEdge(sig, t);
 
 function wageredFor(sig) {
   if (sig.type === 'ML') {
@@ -293,8 +269,9 @@ function newAccBucket() {
 
 function newCfgAgg() {
   return {
-    emit_floor:   newTotsBuckets(),
-    ui_highlight: newTotsBuckets(),
+    emit_floor:      newTotsBuckets(),
+    above_ui_floor:  newTotsBuckets(),
+    by_category_bet: newTotsBuckets(),
     // Accuracy accumulators: per-game (model_total - actual_total)
     // averaged across the scored game set. Same game set across all
     // configs (apples-to-apples), so the difference between cfg means
@@ -328,10 +305,18 @@ function projectCfgAgg(a) {
       tot_over:  projectBucket(a.emit_floor.tot_over),
       tot_under: projectBucket(a.emit_floor.tot_under),
     },
-    ui_highlight: {
-      all:       projectBucket(a.ui_highlight.all),
-      tot_over:  projectBucket(a.ui_highlight.tot_over),
-      tot_under: projectBucket(a.ui_highlight.tot_under),
+    above_ui_floor: {
+      all:       projectBucket(a.above_ui_floor.all),
+      tot_over:  projectBucket(a.above_ui_floor.tot_over),
+      tot_under: projectBucket(a.above_ui_floor.tot_under),
+    },
+    // The bets actually placed (bet_line IS NOT NULL), intersected
+    // with this config's emitted signals. n is small; read it before
+    // the ROI. See utils/logged-bets.js.
+    by_category_bet: {
+      all:       projectBucket(a.by_category_bet.all),
+      tot_over:  projectBucket(a.by_category_bet.tot_over),
+      tot_under: projectBucket(a.by_category_bet.tot_under),
     },
     model_accuracy:       projectAcc(a.accuracy),
     model_accuracy_by_side: {
@@ -384,6 +369,7 @@ function runRunMultTotalsBacktest(opts) {
   ).all(fromDate, toDate);
 
   const uiThresholds = loadUiHighlightThresholds();
+  const loggedBetKeys = loadLoggedBetKeys(db, fromDate, toDate);
 
   const aggs = {};
   for (const c of cfgs) aggs[c.run_mult] = newCfgAgg();
@@ -439,7 +425,9 @@ function runRunMultTotalsBacktest(opts) {
 
         accumulateTots(agg.emit_floor, s, graded);
         const hi = isHighlightedSignal(s, uiThresholds);
-        if (hi) accumulateTots(agg.ui_highlight, s, graded);
+        if (hi) accumulateTots(agg.above_ui_floor, s, graded);
+        const bet = wasBet(loggedBetKeys, gameRow, s);
+        if (bet) accumulateTots(agg.by_category_bet, s, graded);
 
         if (includeDetail) {
           plays.push({
@@ -450,7 +438,8 @@ function runRunMultTotalsBacktest(opts) {
             model_total: Number(estTot.toFixed(4)),
             actual_total: actualTotal,
             outcome: graded.outcome, pnl: Number(graded.pnl) || 0,
-            highlighted: hi,
+            above_ui_floor: hi,
+            was_bet: bet,
           });
         }
       }
@@ -480,11 +469,11 @@ function runRunMultTotalsBacktest(opts) {
     const r = results[c.run_mult];
     r.over_minus_under_gap_pp = {
       emit_floor:   gapPp(r.emit_floor.tot_over,   r.emit_floor.tot_under),
-      ui_highlight: gapPp(r.ui_highlight.tot_over, r.ui_highlight.tot_under),
+      above_ui_floor: gapPp(r.above_ui_floor.tot_over, r.above_ui_floor.tot_under),
     };
     r.net_totals = {
       emit_floor:   { pnl_units: r.emit_floor.all.pnl,   roi_pct: r.emit_floor.all.roi_pct },
-      ui_highlight: { pnl_units: r.ui_highlight.all.pnl, roi_pct: r.ui_highlight.all.roi_pct },
+      above_ui_floor: { pnl_units: r.above_ui_floor.all.pnl, roi_pct: r.above_ui_floor.all.roi_pct },
     };
   }
 
@@ -509,22 +498,22 @@ function runRunMultTotalsBacktest(opts) {
     run_mult: c.run_mult,
     tot_under_roi_pct: {
       emit_floor:   results[c.run_mult].emit_floor.tot_under.roi_pct,
-      ui_highlight: results[c.run_mult].ui_highlight.tot_under.roi_pct,
+      above_ui_floor: results[c.run_mult].above_ui_floor.tot_under.roi_pct,
     },
     tot_under_signals: {
       emit_floor:   results[c.run_mult].emit_floor.tot_under.signals,
-      ui_highlight: results[c.run_mult].ui_highlight.tot_under.signals,
+      above_ui_floor: results[c.run_mult].above_ui_floor.tot_under.signals,
     },
   }));
   const over_roi_trajectory = cfgs.map(c => ({
     run_mult: c.run_mult,
     tot_over_roi_pct: {
       emit_floor:   results[c.run_mult].emit_floor.tot_over.roi_pct,
-      ui_highlight: results[c.run_mult].ui_highlight.tot_over.roi_pct,
+      above_ui_floor: results[c.run_mult].above_ui_floor.tot_over.roi_pct,
     },
     tot_over_signals: {
       emit_floor:   results[c.run_mult].emit_floor.tot_over.signals,
-      ui_highlight: results[c.run_mult].ui_highlight.tot_over.signals,
+      above_ui_floor: results[c.run_mult].above_ui_floor.tot_over.signals,
     },
   }));
 
@@ -543,15 +532,15 @@ function runRunMultTotalsBacktest(opts) {
     };
   });
 
-  // 4. Signal-mix shift across configs (emit-floor and ui_highlight).
+  // 4. Signal-mix shift across configs (emit-floor and above_ui_floor).
   const signal_mix_trajectory = cfgs.map(c => {
     const ef = results[c.run_mult].emit_floor;
-    const ui = results[c.run_mult].ui_highlight;
+    const ui = results[c.run_mult].above_ui_floor;
     return {
       run_mult: c.run_mult,
       emit_floor:   { over_n: ef.tot_over.signals, under_n: ef.tot_under.signals,
                       over_minus_under: ef.tot_over.signals - ef.tot_under.signals },
-      ui_highlight: { over_n: ui.tot_over.signals, under_n: ui.tot_under.signals,
+      above_ui_floor: { over_n: ui.tot_over.signals, under_n: ui.tot_under.signals,
                       over_minus_under: ui.tot_over.signals - ui.tot_under.signals },
     };
   });
@@ -560,11 +549,11 @@ function runRunMultTotalsBacktest(opts) {
   const small_sample_flags = [];
   for (const c of cfgs) {
     const ef = results[c.run_mult].emit_floor;
-    const ui = results[c.run_mult].ui_highlight;
+    const ui = results[c.run_mult].above_ui_floor;
     if (ef.tot_over.signals  < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'emit_floor',   side: 'over',  n: ef.tot_over.signals  });
     if (ef.tot_under.signals < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'emit_floor',   side: 'under', n: ef.tot_under.signals });
-    if (ui.tot_over.signals  < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'ui_highlight', side: 'over',  n: ui.tot_over.signals  });
-    if (ui.tot_under.signals < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'ui_highlight', side: 'under', n: ui.tot_under.signals });
+    if (ui.tot_over.signals  < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'above_ui_floor', side: 'over',  n: ui.tot_over.signals  });
+    if (ui.tot_under.signals < 50) small_sample_flags.push({ run_mult: c.run_mult, track: 'above_ui_floor', side: 'under', n: ui.tot_under.signals });
   }
 
   // 6. tot_under emit-floor noise band — the resolution test the brief
