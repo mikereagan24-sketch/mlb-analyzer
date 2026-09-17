@@ -45,6 +45,32 @@ const STATUS = {
   OPEN_DECISION: 'open_decision',        // criterion written, decision deliberately deferred
 };
 
+// RE-BASELINE EVENTS (2026-09-16)
+//
+// A change to what an offline harness feeds runModel changes every number
+// that harness produces, so a recorded figure has to say which side of the
+// change it was measured on. A row carrying `evidence_predates: { event }`
+// quotes evidence measured BEFORE the named event. That is informational,
+// not a verdict: the evidence is not wrong, it is about a different input
+// set, and it has not been re-run. evaluateGates passes the field through
+// and logGateHealth lists the rows every morning until they are re-run and
+// the field is removed WITH the new figures.
+//
+// `reproduce` is how to get the old figure back exactly, so a before/after
+// is always possible.
+const REBASELINE_EVENTS = {
+  harness_inputs_persisted: {
+    date: '2026-09-16',
+    summary: 'services/harness-inputs.js populateCallerInputs went from 4 of the 21 caller-populated '
+      + 'fields (FRV as-of, framing RECOMPUTED from current state) to every field with a persisted '
+      + 'emit-time source: bullpen x6 and framing x2 read from game_log, opener x6 and tandem x2 '
+      + 'copied (value-identical; preScreenGame already carried them). Roster x2 and availability '
+      + 'have no source and stay absent. Before this, every harness priced both bullpens at the '
+      + 'league constant on both arms.',
+    reproduce: 'HARNESS_INPUTS=legacy',
+  },
+};
+
 // Preconditions are functions of the db so the check reflects reality
 // rather than a stale note. Return true when the stated blocker has
 // cleared.
@@ -156,6 +182,14 @@ const GATES = [
              + 'paired A/B becomes resolvable at 979 clean scorable games (currently 801).',
     criterion_type: 'mechanism',
     reeval_precondition: 'park_neutral_resolvable_979',
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-30', harness: 'scripts/park-neutral-paired-floor.js',
+      figures: 'paired half-width +/-0.000608 at n=801, point estimate -0.00055, and the 979-game '
+        + 'trigger derived from them',
+      detail: 'Re-running under persisted inputs changes the arms, not just the level: the bullpen '
+        + 'column was written with neutralization ON since 2026-08-31, so both arms now carry a '
+        + 'neutralized bullpen and only the batter/SP half of this flag varies. '
+        + 'PARK_NEUTRAL_INPUTS_ENABLED is flagged PARTIAL by the harness guard for that reason.' },
     window_end: null,
     decision: { date: '2026-08-30', outcome: 'on_for_mechanism_trigger_registered',
                 ref: 'docs/park-neutral-resolvability-2026-08-30.md' },
@@ -196,6 +230,11 @@ const GATES = [
     criterion: 'Suppress signals at edge >= hard cap; flag [soft,hard).',
     criterion_type: 'roi', window_end: null,
     decision: { date: '2026-07-13', outcome: 'enabled', ref: 'docs/ship-hard-cap-0.08-2026-07-13.md' },
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-22', harness: 'scripts/edge-honesty-scope.js',
+      figures: 'the edge-honesty finding quoted in the note (above-cap honesty not worse than below-cap)',
+      detail: 'The DECISION is ROI-based and unaffected; the note\'s calibration finding re-scored '
+        + 'runModel through populateCallerInputs and predates the persisted inputs.' },
     note: 'Decision was ROI-based. The 2026-08-22 edge-honesty scope found NO independent support for the 8pp level '
         + '(above-cap honesty is not worse than below-cap). The cap may still be right; its stated basis is contaminated.' },
 
@@ -237,6 +276,11 @@ const GATES = [
     criterion: 'Default OFF — "requires the fielding_frv table to be populated".',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
     window_end: '2026-09-30', decision: null,
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-23', harness: 'scripts/calibration-ab.js',
+      figures: 'delta log loss -0.00087 CI [-0.00211, +0.00065], ALL FIVE metrics, edge slope -0.313 -> -0.218',
+      detail: 'Already closed on its evidence by the 2026-09-12 term split; listed because the figures '
+        + 'are still quoted here.' },
     note: 'PRECONDITION CLEARED (fielding_frv populated; the key is not even in app_settings, so it runs on the '
         + 'schema default). EVALUATION WRITTEN AND RUN 2026-08-23 rather than flipping: scripts/calibration-ab.js '
         + 'DEFENSE_FRV_ENABLED false true. Result — the flag moves p(home) on 100% of games (mean |dp| 0.0083) and '
@@ -274,6 +318,12 @@ const GATES = [
              + 'knows how those fielders turned out.',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
     window_end: '2026-10-31', decision: null,
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-09-13..09-14', harness: 'scripts/calibration-ab.js',
+      figures: 'gate window -0.00154 [-0.00334, +0.00003] n=797; season -0.00066 [-0.00216, +0.00078] '
+        + 'n=1158; hindsight -0.00010 [-0.00061, +0.00039]; n-matched resamples -0.00058/-0.00075/-0.00091; '
+        + 'the 950-game and 1200-game reachability arithmetic built on those half-widths',
+      detail: 'Every figure in the note, including the superseded-scope ones kept with their n.' },
     // corpus_size CORRECTED 2026-09-13 (1078 -> 797, see the chain below), then set
     // NULL the same day when the criterion scope was pinned to the as-of window:
     // under that scope there is no qualifying measurement yet, and 797 describes a
@@ -415,6 +465,13 @@ const GATES = [
              + 'sign-test p <= 0.05, >=4 of 5 metrics favourable, pooled CI upper bound < +0.001 log loss.',
     criterion_type: 'none', precondition: 'hand_conditional_shadow_accumulating',
     window_end: null, decision: null,
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-22..08-23', harness: 'scripts/calibration-ab.js',
+      figures: 'delta log loss +0.00009 [-0.00032, +0.00054] and +0.00008 [-0.00040, +0.00059], '
+        + 'sign test 2/5, directionally worse on all five metrics, TIER 4',
+      detail: 'This flag is the BATTER-side handedness weight (SP_WEIGHT, not SP_PIT_WEIGHT; see '
+        + 'CLAUDE.md) and does not touch the bullpen term. What predates the change is the model both '
+        + 'arms were scored on: league-constant bullpens and recomputed framing on each side.' },
     // blocked_reason CLEARED 2026-08-23 — the three keys are now mapped in
     // getSettings() and the flag activates (789/790 games change, was
     // 0/790). Wiring verified byte-identical on the live path.
@@ -770,6 +827,11 @@ const GATES = [
     criterion: 'Hard suppression threshold. Shipped at 0.08 (schema default 0.25).',
     criterion_type: 'roi', window_end: null,
     decision: { date: '2026-07-13', outcome: 'shipped_at_0.08', ref: 'docs/ship-hard-cap-0.08-2026-07-13.md' },
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-22', harness: 'scripts/edge-honesty-scope.js',
+      figures: 'the edge-honesty finding cited in the note',
+      detail: 'Same as signal_edge_cap_enabled: the ROI decision is unaffected, the cited calibration '
+        + 'scope predates the persisted inputs.' },
     note: 'See docs/edge-honesty-scope-2026-08-22.md — this analysis found no independent support for the level.' },
 
   { id: 'signal_edge_soft_cap_pp', key: 'signal_edge_soft_cap_pp', numeric: true,
@@ -897,6 +959,12 @@ const GATES = [
     window_end: null,
     decision: { date: '2026-08-31', outcome: 'extended_on_mechanism',
                 ref: 'docs/bullpen-park-neutral-2026-08-31.md' },
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-31', harness: 'scripts/bullpen-neutral-ab.js',
+      figures: 'paired d log loss +0.000019 against +/-0.000217, and the ~105,000-game resolvability figure',
+      detail: 'Narrower than the others: that script supplies both bullpen arms itself and overrides '
+        + 'the populated values, so the term under test is unchanged. What moves is everything else '
+        + 'the arms share, framing above all (recomputed then, persisted now).' },
     note: 'CLOSED 2026-08-31 by extending neutralization to the bullpen actuals term. '
         + 'Same transform, same park_factors.woba_factor table, actuals-only, and the '
         + 'same PA/TBF stint weighting for traded relievers. '
@@ -1058,6 +1126,12 @@ function evaluateGates(db, opts) {
       reeval_met: reevalMet,
       decision: g.decision || null,
       blocked_reason: g.blocked_reason || null,
+      // Informational, never needs_attention on its own: the evidence is not
+      // wrong, it was measured on an input set that has since changed.
+      evidence_predates: g.evidence_predates
+        ? Object.assign({ event_date: (REBASELINE_EVENTS[g.evidence_predates.event] || {}).date || null },
+            g.evidence_predates)
+        : null,
       status,
       needs_attention: status === STATUS.ELAPSED_NO_DECISION || status === STATUS.REEVAL_DUE
         || status === STATUS.AWAITING_DECISION
@@ -1118,6 +1192,21 @@ function logGateHealth(db, opts) {
   } else {
     console.log('[gate-health] corpus_size OK — ' + (cs.total - cs.grandfathered)
       + ' row(s) under the standard, ' + cs.grandfathered + ' grandfathered');
+  }
+
+  // One quiet line per re-baseline event, until each row is re-run and the
+  // field removed. Not an attention item: nobody should flip or un-flip a
+  // gate because of it, only avoid quoting the old figure as current.
+  const predates = {};
+  for (const g of r.gates) {
+    if (!g.evidence_predates) continue;
+    (predates[g.evidence_predates.event] = predates[g.evidence_predates.event] || []).push(g.id);
+  }
+  for (const ev of Object.keys(predates)) {
+    const E = REBASELINE_EVENTS[ev] || {};
+    console.log('[gate-health] ' + predates[ev].length + ' gate(s) quote evidence measured before the '
+      + (E.date || '?') + ' ' + ev + ' re-baseline, not yet re-run (reproduce old figures with '
+      + (E.reproduce || '?') + '): ' + predates[ev].join(', '));
   }
 
   const open = r.gates.filter(g => g.status === STATUS.OPEN_DECISION);
@@ -1214,4 +1303,4 @@ function checkCorpusSize(gates) {
 }
 
 module.exports = { GATES, STATUS, evaluateGates, logGateHealth, PRECONDITIONS,
-  checkCorpusSize, CORPUS_SIZE_GRANDFATHERED };
+  checkCorpusSize, CORPUS_SIZE_GRANDFATHERED, REBASELINE_EVENTS };
