@@ -13,10 +13,15 @@
 // comparison the rerun brief asked for, and dropped the A/D configs
 // to halve the runModel call count per game. Helpers
 // (resolveCatcherMlbId import, computeFramingRvPerGame,
-// computeTeamFieldingRunsPerGame, buildBacktestGame, accumulate,
-// isHighlightedSignal, loadUiHighlightThresholds) are byte-for-byte
-// copies of the script's versions — if the script's reference logic
-// ever drifts, mirror here.
+// computeTeamFieldingRunsPerGame, buildBacktestGame, accumulate) are
+// byte-for-byte copies of the script's versions — if the script's
+// reference logic ever drifts, mirror here.
+//
+// The two exceptions: isHighlightedSignal and
+// loadUiHighlightThresholds were two of EIGHT copies of the highlight
+// gate and now come from utils/highlight-gate.js (2026-09-17). The
+// reported bucket is named above_ui_floor, because that is what it
+// measures -- see the header of that module.
 //
 // ⚠ HINDSIGHT BIAS ⚠
 //   catcher_framing.rv_tot and fielding_frv.total_runs are
@@ -138,39 +143,13 @@ function buildBacktestGame(gameRow, settings) {
   });
 }
 
-// UI-highlight thresholds — mirrors services/empirical-spread-roi.js
-// and the original script. Defaults match services/settings-schema.js.
-function loadUiHighlightThresholds() {
-  let rows = [];
-  try {
-    rows = db.prepare(
-      "SELECT key, value FROM app_settings WHERE key IN ("
-      + "'ui_highlight_ml_fav_min_pp','ui_highlight_ml_dog_min_pp',"
-      + "'ui_highlight_tot_under_min_pp','ui_highlight_tot_overs_enabled')"
-    ).all();
-  } catch (e) { /* table missing → defaults */ }
-  const m = {};
-  for (const r of rows) m[r.key] = r.value;
-  return {
-    fav_min_pp:    m['ui_highlight_ml_fav_min_pp']    != null ? Number(m['ui_highlight_ml_fav_min_pp'])    : 0.02,
-    dog_min_pp:    m['ui_highlight_ml_dog_min_pp']    != null ? Number(m['ui_highlight_ml_dog_min_pp'])    : 0.045,
-    under_min_pp:  m['ui_highlight_tot_under_min_pp'] != null ? Number(m['ui_highlight_tot_under_min_pp']) : 0.07,
-    overs_enabled: m['ui_highlight_tot_overs_enabled'] === 'true',
-  };
-}
-
-// edge*200 → round → /200 rounds to nearest 0.005pp; e.g. raw 0.0445 → 0.045.
-function isHighlightedSignal(sig, t) {
-  const rounded = Math.round(Number(sig.edge) * 200) / 200;
-  if (sig.type === 'ML') {
-    return Number(sig.marketLine) < 0
-      ? rounded >= t.fav_min_pp
-      : rounded >= t.dog_min_pp;
-  }
-  if (sig.side === 'over')  return !!t.overs_enabled;
-  if (sig.side === 'under') return rounded >= t.under_min_pp;
-  return false;
-}
+// The UI floor — one implementation, shared with the other three
+// harnesses and the browser. isHighlightedSignal lived here as a
+// byte-for-byte copy until 2026-09-17.
+const gate = require('../utils/highlight-gate');
+const { loadLoggedBetKeys, wasBet } = require('../utils/logged-bets');
+const loadUiHighlightThresholds = () => gate.loadThresholds(db);
+const isHighlightedSignal = (sig, t) => gate.highlightsOnFrozenEdge(sig, t);
 
 // MOVED 2026-08-23 to utils/wagered.js -- see the note there on the
 // flat-110 totals defect this replaces.
@@ -281,13 +260,22 @@ function runFrvBacktest(opts) {
   ).all(fromDate, toDate);
 
   const uiThresholds = loadUiHighlightThresholds();
+  // The bets the operator actually placed, for the same window. A third
+  // population beside emit-floor and above-UI-floor — see
+  // utils/logged-bets.js for why the floor was a bad proxy for it.
+  const loggedBetKeys = loadLoggedBetKeys(db, fromDate, toDate);
 
   // Emit-floor aggregators
   const aggB = newAgg();
   const aggC = newAgg();
-  // UI-highlight aggregators
+  // Above-UI-floor aggregators (renamed from "highlight" 2026-09-17:
+  // the floor is what this measures; highlighting is a display decision
+  // no harness can replay).
   const aggBhi = newAgg();
   const aggChi = newAgg();
+  // Logged-bet aggregators
+  const aggBbet = newAgg();
+  const aggCbet = newAgg();
   // FRV-delta split (emit-floor)
   const aggB_largeFrv = newAgg();
   const aggB_smallFrv = newAgg();
@@ -343,6 +331,7 @@ function runFrvBacktest(opts) {
         const splitHi = frvLarge ? aggBhi_largeFrv : aggBhi_smallFrv;
         accumulate(splitHi, s, graded);
       }
+      if (wasBet(loggedBetKeys, gameRow, s)) accumulate(aggBbet, s, graded);
     }
 
     const sigsC = model.getSignals(game, mrC, cfgC);
@@ -358,6 +347,7 @@ function runFrvBacktest(opts) {
         const splitHi = frvLarge ? aggChi_largeFrv : aggChi_smallFrv;
         accumulate(splitHi, s, graded);
       }
+      if (wasBet(loggedBetKeys, gameRow, s)) accumulate(aggCbet, s, graded);
     }
 
     for (const [k, v] of localsB) {
@@ -391,7 +381,8 @@ function runFrvBacktest(opts) {
           pnl: Number(graded.pnl) || 0,
           frv_delta: Number(frvDelta.toFixed(4)),
           frv_large: frvLarge,
-          highlighted: isHighlightedSignal(s, uiThresholds),
+          above_ui_floor: isHighlightedSignal(s, uiThresholds),
+          was_bet: wasBet(loggedBetKeys, gameRow, s),
         });
       }
       for (const [, v] of localsB) pushPlay('B', v.sig, v.graded);
@@ -440,7 +431,11 @@ function runFrvBacktest(opts) {
         tot_under:deltaPp(roiPct(aggB.tot_under),roiPct(aggC.tot_under)),
       },
     },
-    ui_highlight: {
+    // Renamed from ui_highlight 2026-09-17. Same population, honest
+    // name: it is the set clearing the UI's floor, which is NOT the set
+    // that was highlighted (stars bypass it, live ML edges move it) and
+    // NOT the set that was bet (see by_category_bet).
+    above_ui_floor: {
       B: projectAgg(aggBhi),
       C: projectAgg(aggChi),
       delta_pp_B_minus_C: {
@@ -450,6 +445,23 @@ function runFrvBacktest(opts) {
         tot_over: deltaPp(roiPct(aggBhi.tot_over), roiPct(aggChi.tot_over)),
         tot_under:deltaPp(roiPct(aggBhi.tot_under),roiPct(aggChi.tot_under)),
       },
+    },
+    // The bets actually placed, intersected with each config's signals.
+    // n is small and NOT a re-scoring population: a bet the operator
+    // placed exists once, and config B or C either re-emits that
+    // (date, game, type, side) or does not. Read the counts before the
+    // ROI -- at these n a single blowout moves it.
+    by_category_bet: {
+      B: projectAgg(aggBbet),
+      C: projectAgg(aggCbet),
+      delta_pp_B_minus_C: {
+        all:      deltaPp(roiPct(aggBbet.all),      roiPct(aggCbet.all)),
+        ml_fav:   deltaPp(roiPct(aggBbet.ml_fav),   roiPct(aggCbet.ml_fav)),
+        ml_dog:   deltaPp(roiPct(aggBbet.ml_dog),   roiPct(aggCbet.ml_dog)),
+        tot_over: deltaPp(roiPct(aggBbet.tot_over), roiPct(aggCbet.tot_over)),
+        tot_under:deltaPp(roiPct(aggBbet.tot_under),roiPct(aggCbet.tot_under)),
+      },
+      logged_bets_in_window: loggedBetKeys.size,
     },
     frv_delta_split: {
       // Emit-floor, B vs C, split by per-game |FRV delta|.
@@ -469,7 +481,7 @@ function runFrvBacktest(opts) {
           delta_pp_B_minus_C_all: deltaPp(roiPct(aggB_largeFrv.all), roiPct(aggC_largeFrv.all)),
         },
       },
-      ui_highlight: {
+      above_ui_floor: {
         small: {
           B: projectAgg(aggBhi_smallFrv),
           C: projectAgg(aggChi_smallFrv),

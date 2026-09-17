@@ -152,40 +152,15 @@ function buildBacktestGame(gameRow, settings) {
 }
 
 // ============================================================
-// UI-highlight + aggregation helpers (mirrors services/frv-backtest.js
-// + services/empirical-spread-roi.js).
+// UI floor + aggregation helpers. The floor rule and its settings
+// loader were copies of frv-backtest.js's until 2026-09-17; both now
+// come from utils/highlight-gate.js, the single implementation.
 // ============================================================
 
-function loadUiHighlightThresholds() {
-  let rows = [];
-  try {
-    rows = db.prepare(
-      "SELECT key, value FROM app_settings WHERE key IN ("
-      + "'ui_highlight_ml_fav_min_pp','ui_highlight_ml_dog_min_pp',"
-      + "'ui_highlight_tot_under_min_pp','ui_highlight_tot_overs_enabled')"
-    ).all();
-  } catch (e) { /* table missing → defaults */ }
-  const m = {};
-  for (const r of rows) m[r.key] = r.value;
-  return {
-    fav_min_pp:    m['ui_highlight_ml_fav_min_pp']    != null ? Number(m['ui_highlight_ml_fav_min_pp'])    : 0.02,
-    dog_min_pp:    m['ui_highlight_ml_dog_min_pp']    != null ? Number(m['ui_highlight_ml_dog_min_pp'])    : 0.045,
-    under_min_pp:  m['ui_highlight_tot_under_min_pp'] != null ? Number(m['ui_highlight_tot_under_min_pp']) : 0.07,
-    overs_enabled: m['ui_highlight_tot_overs_enabled'] === 'true',
-  };
-}
-
-function isHighlightedSignal(sig, t) {
-  const rounded = Math.round(Number(sig.edge) * 200) / 200;
-  if (sig.type === 'ML') {
-    return Number(sig.marketLine) < 0
-      ? rounded >= t.fav_min_pp
-      : rounded >= t.dog_min_pp;
-  }
-  if (sig.side === 'over')  return !!t.overs_enabled;
-  if (sig.side === 'under') return rounded >= t.under_min_pp;
-  return false;
-}
+const gate = require('../utils/highlight-gate');
+const { loadLoggedBetKeys, wasBet } = require('../utils/logged-bets');
+const loadUiHighlightThresholds = () => gate.loadThresholds(db);
+const isHighlightedSignal = (sig, t) => gate.highlightsOnFrozenEdge(sig, t);
 
 function wageredFor(sig) {
   if (sig.type === 'ML') {
@@ -295,8 +270,9 @@ function newTotsBuckets() {
 
 function newConfigAgg() {
   return {
-    emit_floor:   newTotsBuckets(),
-    ui_highlight: newTotsBuckets(),
+    emit_floor:      newTotsBuckets(),
+    above_ui_floor:  newTotsBuckets(),
+    by_category_bet: newTotsBuckets(),
   };
 }
 
@@ -313,8 +289,9 @@ function projectTotsBuckets(b) {
 
 function projectConfigAgg(a) {
   return {
-    emit_floor:   projectTotsBuckets(a.emit_floor),
-    ui_highlight: projectTotsBuckets(a.ui_highlight),
+    emit_floor:      projectTotsBuckets(a.emit_floor),
+    above_ui_floor:  projectTotsBuckets(a.above_ui_floor),
+    by_category_bet: projectTotsBuckets(a.by_category_bet),
   };
 }
 
@@ -337,8 +314,9 @@ function buildDeltasVsProd(cfgRes, prodRes) {
     return out;
   }
   return {
-    emit_floor:   delForTrack('emit_floor'),
-    ui_highlight: delForTrack('ui_highlight'),
+    emit_floor:      delForTrack('emit_floor'),
+    above_ui_floor:  delForTrack('above_ui_floor'),
+    by_category_bet: delForTrack('by_category_bet'),
   };
 }
 
@@ -373,6 +351,7 @@ function runTempBacktest(opts) {
   ).all(fromDate, toDate);
 
   const uiThresholds = loadUiHighlightThresholds();
+  const loggedBetKeys = loadLoggedBetKeys(db, fromDate, toDate);
 
   const aggs = {};
   for (const c of TEMP_CONFIGS) aggs[c.key] = newConfigAgg();
@@ -436,12 +415,23 @@ function runTempBacktest(opts) {
         accumulateFlat(agg.emit_floor.by_temp[tBucket], s, graded);
         if (isHotOpen) accumulateFlat(agg.emit_floor.by_temp.hot_85plus_open, s, graded);
 
-        // UI-highlight track
+        // Above-UI-floor track
         const hi = isHighlightedSignal(s, uiThresholds);
         if (hi) {
-          accumulateTots(agg.ui_highlight, s, graded);
-          accumulateFlat(agg.ui_highlight.by_temp[tBucket], s, graded);
-          if (isHotOpen) accumulateFlat(agg.ui_highlight.by_temp.hot_85plus_open, s, graded);
+          accumulateTots(agg.above_ui_floor, s, graded);
+          accumulateFlat(agg.above_ui_floor.by_temp[tBucket], s, graded);
+          if (isHotOpen) accumulateFlat(agg.above_ui_floor.by_temp.hot_85plus_open, s, graded);
+        }
+
+        // Logged-bet track. Note what this DOESN'T say: the bet was
+        // placed once, against production settings. Its appearance
+        // under config c means only that c re-emits the same
+        // (date, game, type, side) -- not that c would have been bet.
+        const bet = wasBet(loggedBetKeys, gameRow, s);
+        if (bet) {
+          accumulateTots(agg.by_category_bet, s, graded);
+          accumulateFlat(agg.by_category_bet.by_temp[tBucket], s, graded);
+          if (isHotOpen) accumulateFlat(agg.by_category_bet.by_temp.hot_85plus_open, s, graded);
         }
 
         if (includeDetail) {
@@ -453,7 +443,8 @@ function runTempBacktest(opts) {
             side: s.side, edge: Number(s.edge),
             market_total: gameRow.market_total,
             outcome: graded.outcome, pnl: Number(graded.pnl) || 0,
-            highlighted: hi,
+            above_ui_floor: hi,
+            was_bet: bet,
             temp_bucket: tBucket,
           });
         }

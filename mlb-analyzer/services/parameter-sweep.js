@@ -201,47 +201,26 @@ function categoryFor(signal) {
   return signal.side === 'over' ? 'overs' : 'unders';
 }
 
-// UI-highlight thresholds. These live in app_settings but aren't on
+// The UI floor. These thresholds live in app_settings but aren't on
 // the in-memory settings object that getSettings() builds — see the
 // note in services/jobs.js:83-87 documenting that the model doesn't
-// consume them. The sweep DOES consume them (so it can compute the
-// "actually bet" aggregate alongside the full above-emit-floor set),
-// so we load them once per run directly from the DB. Defaults match
-// the schema at services/settings-schema.js:166-178.
-function loadUiHighlightThresholds(db) {
-  const rows = db.prepare(
-    "SELECT key, value FROM app_settings WHERE key IN ("
-    + "'ui_highlight_ml_fav_min_pp','ui_highlight_ml_dog_min_pp',"
-    + "'ui_highlight_tot_under_min_pp','ui_highlight_tot_overs_enabled')"
-  ).all();
-  const m = {};
-  for (const r of rows) m[r.key] = r.value;
-  return {
-    fav_min_pp:    m['ui_highlight_ml_fav_min_pp']    != null ? Number(m['ui_highlight_ml_fav_min_pp'])    : 0.02,
-    dog_min_pp:    m['ui_highlight_ml_dog_min_pp']    != null ? Number(m['ui_highlight_ml_dog_min_pp'])    : 0.045,
-    under_min_pp:  m['ui_highlight_tot_under_min_pp'] != null ? Number(m['ui_highlight_tot_under_min_pp']) : 0.07,
-    overs_enabled: m['ui_highlight_tot_overs_enabled'] === 'true',
-  };
-}
-
-// Mirrors the UI's highlight gate (settings-schema.js:157-159 comment):
-// "Comparison is against the ROUNDED 0.5pp score
-// (Math.round(edge*100/0.5)*0.5/100), not the raw edge, so the UI
-// display and highlight condition stay consistent." Math: edge×200,
-// rounded to integer, divided by 200 → nearest 0.005pp. A raw
-// edge=0.0445 rounds to 0.045 and clears the dog threshold; raw
-// 0.0440 rounds to 0.045 too; raw 0.0424 rounds to 0.04 and does not.
-// Production tot_overs_enabled=false → every over is excluded
-// regardless of edge (backtest finding: "no edge in overs").
-function isHighlightedSignal(signal, t) {
-  const cat = categoryFor(signal);
-  const rounded = Math.round(Number(signal.edge) * 200) / 200;
-  if (cat === 'favs')   return rounded >= t.fav_min_pp;
-  if (cat === 'dogs')   return rounded >= t.dog_min_pp;
-  if (cat === 'unders') return rounded >= t.under_min_pp;
-  if (cat === 'overs')  return !!t.overs_enabled;
-  return false;
-}
+// consume them. The sweep DOES consume them, so we load them once per
+// run. Both the loader and the rule were copies until 2026-09-17; they
+// now come from utils/highlight-gate.js, which documents the rounding
+// (edge×200 → round → /200, nearest 0.005) and the overs gate.
+//
+// WHAT THIS AGGREGATE IS NOT: earlier comments here described it as the
+// "actually bet" population. It never was — 76 of 249 logged
+// continuous-edge bets sit BELOW these floors (25 of 29 unders; all 13
+// overs, which the gate can never pass). The bucket is named
+// above_ui_floor for that reason, and the sweep deliberately does NOT
+// grow a by_category_bet like the three replay harnesses: a sweep
+// scores counterfactual settings, and the real bets were placed under
+// production settings, so intersecting them would credit a config with
+// choices it never produced.
+const gate = require('../utils/highlight-gate');
+const loadUiHighlightThresholds = (db) => gate.loadThresholds(db);
+const isHighlightedSignal = (signal, t) => gate.highlightsOnFrozenEdge(signal, t);
 
 function emptyCategoryBucket() {
   return { bets: 0, wins: 0, losses: 0, pushes: 0, pnl: 0, wagered: 0 };
@@ -535,12 +514,18 @@ function safeJson(s) {
 //   - by_category_emit:      every signal >= SIGNAL_EMIT_FLOOR_PP
 //                            (current behavior; what the model "would
 //                            persist" as a signal row in production).
-//   - by_category_highlight: only signals the UI would surface as a
-//                            highlighted pick — fav >= fav_min_pp,
-//                            dog >= dog_min_pp, under >= under_min_pp,
-//                            overs included only if overs_enabled.
-//                            This is what the user actually bets.
-//   - signals: [{game_id, category, edge_pp, outcome, pnl, highlighted}]
+//   - by_category_above_ui_floor: signals clearing the UI's floors —
+//                            fav >= fav_min_pp, dog >= dog_min_pp,
+//                            under >= under_min_pp, overs only if
+//                            overs_enabled. Called by_category_highlight
+//                            before 2026-09-17, and described there as
+//                            "what the user actually bets" — it is not:
+//                            76 of 249 logged continuous-edge bets fall
+//                            below these floors. Stored runs from before
+//                            the rename carry the old key; the summary
+//                            endpoints read either.
+//   - signals: [{game_id, category, edge_pp, outcome, pnl, above_ui_floor}]
+//              (that last field was `highlighted` before 2026-09-17)
 //              every emit-floor signal so completed runs can be
 //              re-filtered to ANY threshold post-hoc (e.g. trying
 //              fav_min=0.025 instead of 0.02 without re-running).
@@ -549,7 +534,7 @@ function safeJson(s) {
 // baseline / top-K re-score steps.
 function scoreGames(settings, games, uiThresholds) {
   const byCatEmit      = emptyByCategory();
-  const byCatHighlight = emptyByCategory();
+  const byCatAboveFloor = emptyByCategory();
   const signals        = [];
   for (const sg of games) {
     // quiet=true: see note in preScreenGame. Without this, a 58-combo
@@ -576,7 +561,7 @@ function scoreGames(settings, games, uiThresholds) {
       be.wagered += wagered;
 
       if (highlighted) {
-        const bh = byCatHighlight[cat];
+        const bh = byCatAboveFloor[cat];
         bh.bets++;
         if (r.outcome === 'win')  bh.wins++;
         if (r.outcome === 'loss') bh.losses++;
@@ -599,13 +584,13 @@ function scoreGames(settings, games, uiThresholds) {
         outcome:     r.outcome,
         pnl:         Math.round(pnl * 100) / 100,
         wagered:     Math.round(wagered * 100) / 100,
-        highlighted: !!highlighted,
+        above_ui_floor: !!highlighted,
       });
     }
   }
   rollUpRoi(byCatEmit);
-  rollUpRoi(byCatHighlight);
-  return { by_category_emit: byCatEmit, by_category_highlight: byCatHighlight, signals };
+  rollUpRoi(byCatAboveFloor);
+  return { by_category_emit: byCatEmit, by_category_above_ui_floor: byCatAboveFloor, signals };
 }
 
 // ---------------------------------------------------------------------
@@ -834,14 +819,20 @@ function isLowSample(byCat, optimizeFor, minTotalsSample, minMlSample) {
 //   opts.trainFraction    0 < x < 1                  (default 0.7)
 //   opts.topN             Number                     (default 10) —
 //                         how many top-ranked combos to re-score on TEST.
-//   opts.betSelection     'emit_floor' | 'ui_highlight'  (default 'emit_floor')
-//                         Which aggregate drives ranking. 'emit_floor'
-//                         ranks by ROI over every signal >=
-//                         SIGNAL_EMIT_FLOOR_PP (the old behavior).
-//                         'ui_highlight' ranks by ROI over the UI-
-//                         highlighted subset only — what the user
-//                         actually bets. Both aggregates are computed
-//                         and reported per combo regardless of choice.
+//   opts.betSelection     'emit_floor' | 'above_ui_floor'
+//                         (default 'emit_floor'; 'ui_highlight' is
+//                         accepted as a legacy alias so the params of
+//                         the two June runs stored with that value keep
+//                         resolving). Which aggregate drives ranking.
+//                         'emit_floor' ranks by ROI over every signal
+//                         >= SIGNAL_EMIT_FLOOR_PP. 'above_ui_floor'
+//                         ranks by ROI over the subset clearing the UI
+//                         floors — NOT "what the user actually bets",
+//                         which is how this was described until
+//                         2026-09-17 (76 of 249 logged continuous-edge
+//                         bets are below those floors). Both aggregates
+//                         are computed and reported per combo
+//                         regardless of choice.
 async function runParameterSweep(db, baseSettings, opts) {
   const start = Date.now();
   const mode = opts.mode;
@@ -852,7 +843,13 @@ async function runParameterSweep(db, baseSettings, opts) {
   const minMlSample     = (opts.minMlSample     != null) ? Number(opts.minMlSample)     : 30;
   const trainFraction  = (opts.trainFraction != null)  ? Number(opts.trainFraction)  : 0.7;
   const topN           = (opts.topN != null)           ? Number(opts.topN)           : 10;
-  const betSelection   = (opts.betSelection || 'emit_floor').toLowerCase();
+  // 'ui_highlight' was the value's name until 2026-09-17. Two stored
+  // runs carry it in their params; normalising here keeps them
+  // reproducible instead of failing validation on re-run.
+  const betSelection   = (() => {
+    const v = (opts.betSelection || 'emit_floor').toLowerCase();
+    return v === 'ui_highlight' ? 'above_ui_floor' : v;
+  })();
   if (!mode || (mode !== 'univariate' && mode !== 'joint')) {
     throw new Error('mode must be "univariate" or "joint"');
   }
@@ -860,8 +857,8 @@ async function runParameterSweep(db, baseSettings, opts) {
   if (!['totals', 'ml', 'all'].includes(optimizeFor)) {
     throw new Error('optimizeFor must be one of "totals", "ml", "all"');
   }
-  if (!['emit_floor', 'ui_highlight'].includes(betSelection)) {
-    throw new Error('betSelection must be "emit_floor" or "ui_highlight"');
+  if (!['emit_floor', 'above_ui_floor'].includes(betSelection)) {
+    throw new Error('betSelection must be "emit_floor" or "above_ui_floor"');
   }
   if (!(trainFraction > 0 && trainFraction < 1)) {
     throw new Error('trainFraction must be strictly between 0 and 1');
@@ -869,7 +866,7 @@ async function runParameterSweep(db, baseSettings, opts) {
 
   // UI-highlight thresholds: read once from app_settings at the top so
   // every combo's scoreGames call uses the same threshold definition.
-  // Required input to the by_category_highlight aggregate even when
+  // Required input to the by_category_above_ui_floor aggregate even when
   // betSelection='emit_floor' — the highlight numbers ride along in
   // every result row regardless, since the brief mandates side-by-side
   // reporting of both selections.
@@ -945,7 +942,7 @@ async function runParameterSweep(db, baseSettings, opts) {
       swept_param: combo.sweptParam,
       train: {
         by_category_emit:      trainScored.by_category_emit,
-        by_category_highlight: trainScored.by_category_highlight,
+        by_category_above_ui_floor: trainScored.by_category_above_ui_floor,
         signals:               trainScored.signals,
       },
     });
@@ -971,25 +968,33 @@ async function runParameterSweep(db, baseSettings, opts) {
   // Stage 4: rank STRICTLY by the train target metric of the chosen
   // betSelection aggregate. For betSelection='emit_floor' we rank by
   // the same ROI the prior sweeps used (every signal >=
-  // SIGNAL_EMIT_FLOOR_PP); for 'ui_highlight' we rank by the ROI of
-  // the picks the user actually bets. Both aggregates are always
-  // computed so the response can show emit vs highlight side-by-side
-  // regardless of which one drove the rank.
+  // SIGNAL_EMIT_FLOOR_PP); for 'above_ui_floor' we rank by the ROI of
+  // the subset clearing the UI floors. Both aggregates are always
+  // computed so the response can show them side-by-side regardless of
+  // which one drove the rank.
+  //
+  // WHAT 'above_ui_floor' RANKING DOES NOT DO (corrected 2026-09-17):
+  // it does not rank on the population the operator bets. The two
+  // June sweeps run under this selection ranked combos on a
+  // non-bet population — 76 of 249 logged continuous-edge bets sit
+  // below these floors, and all 13 logged overs are unreachable by a
+  // gate with overs_enabled=false. Their rankings stand as
+  // above-floor rankings and are labelled that way in the registry.
   //
   // No other bucket's ROI may influence rank. Sample-size gating is
   // target-AND-selection-aware too: a combo whose ranked-aggregate
   // target-bucket bet count is under threshold (minTotalsSample for
   // totals, minMlSample for ml, both required for 'all') gets
   // low_sample=true and sorts to the bottom regardless of how
-  // favourable its ROI looks. Under 'ui_highlight' selection this
+  // favourable its ROI looks. Under 'above_ui_floor' selection this
   // matters more: many combos that look healthy under emit-floor
-  // will have far fewer highlighted bets (the user's actual play
-  // volume) and should not float to the top off a tiny n.
+  // will have far fewer above-floor signals and should not float to
+  // the top off a tiny n.
   for (const r of results) {
     r.train_target_emit      = targetMetric(r.train.by_category_emit,      optimizeFor);
-    r.train_target_highlight = targetMetric(r.train.by_category_highlight, optimizeFor);
-    const ranked = betSelection === 'ui_highlight' ? r.train.by_category_highlight : r.train.by_category_emit;
-    r.train_target = betSelection === 'ui_highlight' ? r.train_target_highlight    : r.train_target_emit;
+    r.train_target_highlight = targetMetric(r.train.by_category_above_ui_floor, optimizeFor);
+    const ranked = betSelection === 'above_ui_floor' ? r.train.by_category_above_ui_floor : r.train.by_category_emit;
+    r.train_target = betSelection === 'above_ui_floor' ? r.train_target_highlight    : r.train_target_emit;
     r.low_sample   = isLowSample(ranked, optimizeFor, minTotalsSample, minMlSample);
   }
   results.sort((a, b) => {
@@ -1014,17 +1019,17 @@ async function runParameterSweep(db, baseSettings, opts) {
     settings: baseEffectiveSettings(baseSettings),
     train: {
       by_category_emit:      baselineTrainScored.by_category_emit,
-      by_category_highlight: baselineTrainScored.by_category_highlight,
+      by_category_above_ui_floor: baselineTrainScored.by_category_above_ui_floor,
       signals:               baselineTrainScored.signals,
       target_emit:           targetMetric(baselineTrainScored.by_category_emit,      optimizeFor),
-      target_highlight:      targetMetric(baselineTrainScored.by_category_highlight, optimizeFor),
+      target_highlight:      targetMetric(baselineTrainScored.by_category_above_ui_floor, optimizeFor),
     },
     test: {
       by_category_emit:      baselineTestScored.by_category_emit,
-      by_category_highlight: baselineTestScored.by_category_highlight,
+      by_category_above_ui_floor: baselineTestScored.by_category_above_ui_floor,
       signals:               baselineTestScored.signals,
       target_emit:           targetMetric(baselineTestScored.by_category_emit,      optimizeFor),
-      target_highlight:      targetMetric(baselineTestScored.by_category_highlight, optimizeFor),
+      target_highlight:      targetMetric(baselineTestScored.by_category_above_ui_floor, optimizeFor),
     },
   };
 
@@ -1034,10 +1039,10 @@ async function runParameterSweep(db, baseSettings, opts) {
     const testScored = scoreGames(settings, testGames, uiThresholds);
     r.test = {
       by_category_emit:      testScored.by_category_emit,
-      by_category_highlight: testScored.by_category_highlight,
+      by_category_above_ui_floor: testScored.by_category_above_ui_floor,
       signals:               testScored.signals,
       target_emit:           targetMetric(testScored.by_category_emit,      optimizeFor),
-      target_highlight:      targetMetric(testScored.by_category_highlight, optimizeFor),
+      target_highlight:      targetMetric(testScored.by_category_above_ui_floor, optimizeFor),
     };
     await new Promise((rr) => setImmediate(rr));
   }

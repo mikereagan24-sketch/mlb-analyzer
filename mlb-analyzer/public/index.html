@@ -95,8 +95,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .rbox{border-radius:var(--r-md);padding:7px 8px;text-align:center;background:var(--bg);border:.5px solid var(--border)}
 .rbox.s1{background:var(--yellow-bg);border-color:var(--yellow-border)}.rbox.s2{background:var(--green-bg);border-color:var(--green-border)}.rbox.s3{background:#e8f0ff;border-color:#4477cc}
 /* Per-bet-box tinted-green highlight for signals that meet their
-   direction-specific threshold (favs >=2.0pp, dogs >=4.5pp,
-   unders >=7.0pp; legacy 2★/3★ also qualify). Background only —
+   direction-specific floor from app_settings (prod: favs >=2.0pp,
+   dogs >=4.5pp, unders >=7.0pp; legacy 2★/3★ also qualify). Background only —
    borders, font color, and other rbox properties unchanged. For
    legacy 2★/3★ rows the vc()-applied .rbox.s2/.s3 class already
    provides a tinted background; .bet-box-highlight is a no-op in
@@ -627,6 +627,14 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 </div>
 
 </div>
+<!-- The highlight gate, served from utils/highlight-gate.js by the
+     route in server.js. NOT a copy: the browser and the four backtest
+     harnesses execute the same file, which is the point -- the client
+     used to carry hardcoded 2.0/4.5/7.0 floors that silently matched
+     app_settings, so changing a setting moved the harnesses and left
+     the game card behind. Must load BEFORE the main script block,
+     which calls it during the first render. -->
+<script src="/highlight-gate.js"></script>
 <script>
 
   // Lineup-order PA weights used by the Matchup-tab preview renders.
@@ -782,7 +790,9 @@ function liveEdgePpML(s, g) {
 // (renderGameResult). Legacy rows: only 2★/3★ qualify — 1★ was always
 // low-emphasis pre-cutover and shouldn't trigger the box tint. New
 // continuous-edge rows: the score must clear a direction-specific
-// threshold (favs ≥2.0pp, dogs ≥4.5pp, unders ≥7.0pp; overs never).
+// floor read from app_settings (prod: favs ≥2.0pp, dogs ≥4.5pp,
+// unders ≥7.0pp; overs never). The numbers are NOT in this file any
+// more -- see _uiFloors below.
 //
 // TWO COMPARISON BASES, AND THE DIFFERENCE IS DELIBERATE. (2026-09-04)
 //
@@ -809,25 +819,32 @@ function liveEdgePpML(s, g) {
 // 2.0 floor even if the market later flips it to a dog; re-deciding the
 // floor from the live line would silently move the bar under a bet the
 // operator already placed.
-function signalMeetsHighlightThreshold(s, rawLivePp) {
-  if (!s) return false;
-  if (s.signal_label !== null && s.signal_label !== undefined) {
-    return s.signal_label === '2★' || s.signal_label === '3★';
-  }
-  const useRaw = typeof rawLivePp === 'number' && isFinite(rawLivePp);
-  const score = useRaw
-    ? rawLivePp
-    : Math.round((s.edge_pct || 0) * 100 / 0.5) * 0.5;
+// THRESHOLDS NOW COME FROM SETTINGS, NOT FROM LITERALS. (2026-09-17)
+// This function used to hardcode 2.0 / 4.5 / 7.0. Those numbers happened
+// to equal prod app_settings (0.02 / 0.045 / 0.07), so nothing looked
+// wrong -- but an operator editing a UI-highlight setting moved the four
+// backtest harnesses and three other client call sites while the game
+// card kept the literals. _uiFloors() reads the same app_settings values
+// the harnesses read, via window._appSettings (populated by
+// loadSettings; defaults until it lands, which match the schema).
+function _uiFloors() {
+  return HighlightGate.thresholdsFrom(window._appSettings || {});
+}
+// Floor for one signal, in pp, for tooltips and previews. Direction is
+// the FROZEN emit-time line, as in the gate itself.
+function _uiFloorPpFor(s) {
+  const t = _uiFloors();
+  if (!s) return null;
   if (s.signal_type === 'ML') {
-    if (s.market_line < 0) return score >= 2.0;
-    if (s.market_line > 0) return score >= 4.5;
-    return false;
+    if (s.market_line < 0) return t.fav_min_pp * 100;
+    if (s.market_line > 0) return t.dog_min_pp * 100;
+    return null;
   }
-  if (s.signal_type === 'Total') {
-    if (s.signal_side === 'under') return score >= 7.0;
-    return false; // overs never highlight
-  }
-  return false;
+  if (s.signal_type === 'Total') return s.signal_side === 'under' ? t.under_min_pp * 100 : null;
+  return null;
+}
+function signalMeetsHighlightThreshold(s, rawLivePp) {
+  return HighlightGate.highlightsForDisplay(s, _uiFloors(), { rawLivePp: rawLivePp });
 }
 // v4 cohort + PR B (opener-mode redesign): render the pitching-weight
 // breakdown next to each pitcher's name. Three display modes based on
@@ -1515,7 +1532,7 @@ function renderGameGrid(games,date){
   // continuous-edge rows carry signal_label=null and edge_pct as a
   // decimal pp, and render as a rounded 0.5pp score with class s2
   // (highlighted) when the rounded score meets the direction-
-  // specific threshold (fav>=2.0pp, dog>=4.5pp, under>=7.0pp; overs
+  // specific floor from app_settings (prod: fav>=2.0, dog>=4.5, under>=7.0pp; overs
   // never highlight), else s1. Pre-cutover .toUpperCase() on null
   // crashed the whole grid render.
   // EMIT-TIME vs LIVE. (2026-09-03)
@@ -2306,7 +2323,7 @@ function renderGameResult(g){
   // edge rows (signal_label=null). Legacy rows still render their
   // star label uppercased with the tier-coded color; new rows
   // render the rounded 0.5pp score, green when the direction-
-  // specific highlight threshold is met (fav>=2.0pp, dog>=4.5pp,
+  // specific floor from app_settings is met (prod: fav>=2.0pp, dog>=4.5pp,
   // under>=7.0pp; overs never), yellow otherwise.
   //
   // vd now accepts (sig, type, side) so the fall-through can look
@@ -2339,9 +2356,11 @@ function renderGameResult(g){
       return '<span style="color:' + col + ';font-size:9px;font-weight:500">' + sig.signal_label.toUpperCase() + '</span>';
     }
     // FOLDED INTO THE SHARED GATE. (2026-09-04) This block used to carry
-    // its own copy of the fav/dog/under thresholds -- a sixth copy of a
-    // rule that already had five. It now calls
-    // signalMeetsHighlightThreshold like every other caller.
+    // its own copy of the fav/dog/under thresholds. It now calls
+    // signalMeetsHighlightThreshold like every other caller. (The count
+    // in the original note -- "a sixth copy of a rule that already had
+    // five" -- was an undercount: there were EIGHT sites in total, four
+    // here and four server-side. All eight now call one module.)
     //
     // ML boxes show the CURRENT edge: live model vs live market, the two
     // numbers printed directly above this verdict. Totals keep the
@@ -2373,7 +2392,9 @@ function renderGameResult(g){
         + ' Emit-time edge was ' + emitPpTxt + 'pp at market '
         + (sig.market_line != null ? sig.market_line : '?') + ' -- see the chip on the badge.'
         + ' Green requires the current edge to clear this signal’s floor ('
-        + (sig.market_line < 0 ? 'favourite, 2.0pp' : sig.market_line > 0 ? 'dog, 4.5pp' : 'n/a')
+        + (sig.market_line < 0 ? 'favourite, ' + _uiFloorPpFor(sig).toFixed(1) + 'pp'
+           : sig.market_line > 0 ? 'dog, ' + _uiFloorPpFor(sig).toFixed(1) + 'pp'
+           : 'n/a')
         + '), compared unrounded.'
       : 'Emit-time edge ' + emitPpTxt + 'pp, rounded to 0.5pp. No current edge is'
         + ' computed for totals: TOT_SLOPE and the clamp band live server-side.';
@@ -2447,30 +2468,21 @@ function analyzeGame(gameId,date){
     if (edge == null || isNaN(edge)) return null;
     return Math.round(Number(edge) * 100 / 0.5) * 0.5;
   }
+  // One of the four client copies folded into the shared module on
+  // 2026-09-17. It read the same settings keys and applied the same
+  // rounding, so behaviour is unchanged; the one difference worth
+  // naming is that it treated a FALSY label (empty string) as "no
+  // label" while the gate treats any non-null label as legacy. No row
+  // in bet_signals carries an empty label (labels present: 1★ 314,
+  // 2★ 104, 3★ 37, plus 6 mojibake and 2 'unrated' -- see
+  // docs/mojibake-star-labels-open-question-2026-09-17.md), so the
+  // difference cannot fire on real data.
+  //
+  // No live figure here: this is the matchup comparison panel, which
+  // shows emit-time scores. Passing no rawLivePp keeps the rounded
+  // emit-time basis it always used.
   function _shouldHighlight(sig, settings) {
-    if (!sig) return false;
-    if (sig.signal_label) {
-      // Legacy row: 2★ and 3★ historically highlighted; preserve.
-      return sig.signal_label === '2★' || sig.signal_label === '3★';
-    }
-    const score = _roundScorePp(sig.edge_pct);
-    if (score == null) return false;
-    const overs = settings && (settings.ui_highlight_tot_overs_enabled === 'true'
-                            || settings.ui_highlight_tot_overs_enabled === true
-                            || settings.ui_highlight_tot_overs_enabled === '1');
-    if (sig.signal_type === 'ML') {
-      const mkt = Number(sig.market_line);
-      const thr = mkt < 0
-        ? Number((settings && settings.ui_highlight_ml_fav_min_pp) || 0.02) * 100
-        : Number((settings && settings.ui_highlight_ml_dog_min_pp) || 0.045) * 100;
-      return score >= thr;
-    }
-    if (sig.signal_type === 'Total') {
-      if (sig.signal_side === 'over') return overs ? true : false; // overs highlight gated entirely off by default
-      const thr = Number((settings && settings.ui_highlight_tot_under_min_pp) || 0.07) * 100;
-      return score >= thr;
-    }
-    return false;
+    return HighlightGate.highlightsForDisplay(sig, HighlightGate.thresholdsFrom(settings || {}), {});
   }
   function setComp(boxId,lId,mId,mktId,edgId,label,modelVal,mktVal,sig){
     document.getElementById(lId).textContent=label;
@@ -4692,16 +4704,14 @@ function aggregateBuckets(signals, typeMatch, categoryMatch){
 // entirely (no threshold is defined for them; the backtest showed no
 // edge band where overs paid out).
 //
-// Thresholds come from window._appSettings (ui_highlight_ml_fav_min_pp
-// etc., the same values the game-card highlight gate uses). Hardcoded
-// defaults are the fallback when _appSettings hasn't loaded yet.
+// Thresholds come from window._appSettings, now via the shared gate's
+// thresholdsFrom (2026-09-17) so this reader cannot drift from the
+// predicate. This site needed the NUMBERS, not the boolean -- it maps
+// each floor to a bucket index -- which is why the gate exports
+// thresholdsFrom separately from the two predicates.
 function _bktThresholds() {
-  var ap = window._appSettings || {};
-  return {
-    favPp:   Number(ap.ui_highlight_ml_fav_min_pp     || 0.02),
-    dogPp:   Number(ap.ui_highlight_ml_dog_min_pp     || 0.045),
-    underPp: Number(ap.ui_highlight_tot_under_min_pp  || 0.07),
-  };
+  var t = HighlightGate.thresholdsFrom(window._appSettings || {});
+  return { favPp: t.fav_min_pp, dogPp: t.dog_min_pp, underPp: t.under_min_pp };
 }
 
 // Sum bucket aggregates for indices >= thresholdBucketIndex. Used both
@@ -5509,9 +5519,15 @@ function calcManualEdge(){
   // Continuous-edge preview (feat/continuous-edge-score).
   // No tier labels — show raw pp + rounded score, gated by
   // direction-specific highlight thresholds from app settings.
+  // The fourth and last client site to fold into the shared gate
+  // (2026-09-17). This one computes its OWN edge from the form fields
+  // -- there is no persisted signal to pass -- so it calls the core
+  // predicate with a synthetic signal rather than reimplementing the
+  // floors. Rounding comes from the module too, so the previewed score
+  // and the gate decision cannot disagree.
   var edgeTxt = '', scoreTxt = '', catTxt = '';
-  var ap = window._appSettings || {};
-  function roundScore(e){ return Math.round(e * 100 / 0.5) * 0.5; }
+  var _t = HighlightGate.thresholdsFrom(window._appSettings || {});
+  function roundScore(e){ return HighlightGate.roundedScorePp(e); }
   if (type === 'ML') {
     // Use effective (opener-aware) model line — matches every other UI
     // read path (row boxes / expanded card / conf mode / helpers at
@@ -5525,10 +5541,9 @@ function calcManualEdge(){
     var score = roundScore(e);
     var isFav = betLine < 0;
     catTxt = isFav ? 'fav' : 'dog';
-    var thr = isFav
-      ? Number(ap.ui_highlight_ml_fav_min_pp || 0.02) * 100
-      : Number(ap.ui_highlight_ml_dog_min_pp || 0.045) * 100;
-    var hl = score >= thr ? ' (highlight)' : '';
+    var hl = HighlightGate.highlightsOnFrozenEdge(
+      { signal_type: 'ML', signal_side: side, edge_pct: e, market_line: betLine }, _t
+    ) ? ' (highlight)' : '';
     edgeTxt = 'bet ' + (betLine > 0 ? '+' : '') + betLine + ' vs model ' + (modelLine > 0 ? '+' : '') + modelLine + ' = raw ' + (e * 100).toFixed(2) + 'pp';
     scoreTxt = score.toFixed(1) + 'pp' + hl;
   } else {
@@ -5543,10 +5558,16 @@ function calcManualEdge(){
     var e = Math.max(0, modelP - mktP);
     var score = roundScore(e);
     catTxt = side;
-    var oversEnabled = ap.ui_highlight_tot_overs_enabled === 'true' || ap.ui_highlight_tot_overs_enabled === true || ap.ui_highlight_tot_overs_enabled === '1';
+    var _totHl = HighlightGate.highlightsOnFrozenEdge(
+      { signal_type: 'Total', signal_side: side, edge_pct: e, market_line: betPrice }, _t
+    );
     var hl;
-    if (side === 'over') hl = oversEnabled ? ' (highlight)' : ' (overs gated off)';
-    else hl = score >= Number(ap.ui_highlight_tot_under_min_pp || 0.07) * 100 ? ' (highlight)' : '';
+    // "overs gated off" is preserved as its own message: an over that
+    // fails because the gate excludes overs entirely is a different
+    // thing from one that missed a floor, and the operator should see
+    // which it was.
+    if (side === 'over') hl = _totHl ? ' (highlight)' : ' (overs gated off)';
+    else hl = _totHl ? ' (highlight)' : '';
     edgeTxt = 'Model ' + modelTot.toFixed(2) + ' vs bet ' + side + ' ' + betTot + (betPrice > 0 ? '+' : '') + betPrice + ' raw ' + (e * 100).toFixed(2) + 'pp';
     scoreTxt = score.toFixed(1) + 'pp' + hl;
   }
