@@ -69,6 +69,24 @@ const callerInputsFor = (param) => {
 const hi = require('../services/harness-inputs');
 const baseSettings = jobs.getSettings();
 
+// FROZEN-INPUT GUARD (2026-09-16). The companion to the table above, for
+// the opposite shape: the bullpen and framing inputs are now READ from their
+// persisted emit-time values, so a setting that acts only inside those
+// computations (BULLPEN_W_PROJ, BP_*, CATCHER_FRAMING_TAKES_PER_GAME, ...)
+// cannot differ between arms. Refuse it up front rather than report
+// "inert". A setting read both there and by runModel runs, labelled PARTIAL.
+{
+  const frozen = hi.persistedInputConflict(PARAM);
+  if (frozen && frozen.whole) {
+    console.log('=== calibration A/B: ' + PARAM + ' ===');
+    console.log('  *** HARNESS CANNOT TEST THIS FLAG ***');
+    console.log('      ' + frozen.reason);
+    console.log('      Both arms would be identical for a HARNESS reason. Aborting.');
+    process.exit(2);
+  }
+  if (frozen) console.log('  *** PARTIAL: ' + frozen.reason + ' ***');
+}
+
 let _s = 20260823;
 const rnd = () => { _s = (_s * 1103515245 + 12345) & 0x7fffffff; return _s / 0x7fffffff; };
 const clamp = (q) => Math.min(1 - EPS, Math.max(EPS, q));
@@ -161,7 +179,9 @@ for (const g of games) {
   // game.{away,home}FieldingRunsPerGame, which services/jobs.js builds
   // before calling it. preScreenGame does not, so without this a
   // DEFENSE_FRV_ENABLED A/B silently produces IDENTICAL arms and reports a
-  // false "flag is inert". Populate it the same way prod does.
+  // false "flag is inert". Populate it the same way prod does. Since
+  // 2026-09-16 this also reads bullpen and framing from their persisted
+  // emit-time columns; the echo line below says which input set ran.
   try {
     hi.populateCallerInputs(w, g, baseSettings);
   } catch (e) { /* leave null; the guard below reports it */ }
@@ -173,6 +193,9 @@ for (const g of games) {
 // both change which numbers the arms are computed from, and a pasted
 // result has to carry them. (2026-09-14)
 try { console.log('  ' + hi.frvAsOfLine()); } catch (e) { console.log('  FRV read: ' + e.message); }
+// Same reason as the FRV line: HARNESS_INPUTS changes which numbers both
+// arms are computed from, so a pasted result has to carry it. (2026-09-16)
+console.log('  ' + hi.harnessInputsLine());
 console.log('=== corpus ===');
 console.log('  usable: ' + rows.length + '  (no-snapshot ' + noSnap + ', no-score ' + noScore + ', no-market ' + noMkt + ')');
 const base = rows.reduce((a, r) => a + r.y, 0) / rows.length;

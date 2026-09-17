@@ -1,29 +1,50 @@
 #!/usr/bin/env node
 /**
  * calibration-ab.js, with a chosen group of caller-populated inputs swapped
- * in from their persisted emit-time values.  (2026-09-04)
+ * in from their persisted emit-time values.  (2026-09-04, re-based 2026-09-16)
  *
  * WHY THIS EXISTS
  * ---------------
- * runModel reads 41 fields off `game`. It COMPUTES none of them -- the
+ * runModel reads 21 fields off `game` that it does not compute -- the
  * caller does, and services/jobs.js is the caller in production. Offline
  * harnesses build their game object with parameter-sweep.preScreenGame(),
- * which populates a subset. Every field it misses arrives as `undefined`
- * and runModel silently takes a constant fallback, so the feature under
- * test is priced against league average on BOTH arms.
+ * which spreads the game_log row, so any field that is not a column arrives
+ * as `undefined` and runModel silently takes a constant fallback.
  *
  * This is not hypothetical. It has produced two wrong readings already:
  *
  *   DEFENSE_FRV_ENABLED reported inert, 0 of 790 games changed. The cause
  *   was {away,home}FieldingRunsPerGame arriving null, not the flag doing
- *   nothing. Reported as-is it would have read "FRV does nothing, leave it
- *   off forever" -- backwards from what the data says once wired.
+ *   nothing.
  *
  *   CATCHER_FRAMING_MUTE, same shape, 0 of 790.
  *
- * harness-inputs.populateCallerInputs was added to close those two. It
- * still covers only 4 of the 21 fields production sets, so the same class
- * of false-inert reading is live for every group listed below.
+ * WHAT CHANGED ON 2026-09-16
+ * --------------------------
+ * harness-inputs.populateCallerInputs now reads EVERY field with a persisted
+ * source by default, so the groups below are already in every harness. This
+ * script is kept to reproduce the per-group measurement that justified that:
+ * it pins HARNESS_INPUTS=legacy (the 4-field harness) as its baseline, and
+ * `<group>` adds one group on top of it. `none` is the legacy harness.
+ *
+ * Measured 2026-09-16, DEFENSE_FRV_ENABLED false/true, 2026-06-01..08-07,
+ * weather filter valid, FRV read asof, 658 games (full table in
+ * docs/harness-inputs-persisted-2026-09-16.md):
+ *
+ *   group     OFF logLoss  ON logLoss  edge slope OFF/ON  d(ON-OFF) [95% CI]
+ *   none        0.69010     0.68921     +0.009 / +0.130   -0.00088 [-0.00237, +0.00067]
+ *   bullpen     0.68917     0.68848     +0.063 / +0.191   -0.00069 [-0.00222, +0.00091]
+ *   framing     0.68972     0.68880     +0.061 / +0.180   -0.00092 [-0.00241, +0.00063]
+ *   opener      identical to none on every result line
+ *   tandem      identical to none on every result line
+ *   all         0.68874     0.68800     +0.125 / +0.250   -0.00074 [-0.00227, +0.00086]
+ *
+ * `all` is NOT byte-identical to the persisted default (0.68877 / 0.68803,
+ * +0.120 / +0.245, CI [-0.00229, +0.00086]). hi.injectGroup copies a framing
+ * NULL when emit recorded a state; the 2026-09-04 group map copied only
+ * non-null values and so kept the recompute on 47 sides / 46 games. Every
+ * differing game is one of those 46.
+ * Re-run: node --max-old-space-size=1536 scripts/calibration-ab-inputs.js <group> DEFENSE_FRV_ENABLED false true 2026-06-01 2026-08-07
  *
  * WHAT IT DOES NOT DO
  * -------------------
@@ -36,96 +57,62 @@
  *   node scripts/calibration-ab-inputs.js --selftest
  *   node scripts/calibration-ab-inputs.js <group> [PARAM] [OFF] [ON] [FROM] [TO]
  *
- * <group> is one of the keys below, `none` for the untouched baseline, or
- * `all` for every group that has a persisted source. Remaining arguments
- * are handed to calibration-ab.js unchanged, so a paired before/after is:
- *
- *   node scripts/calibration-ab-inputs.js none    DEFENSE_FRV_ENABLED false true 2026-06-01 2026-08-07
- *   node scripts/calibration-ab-inputs.js bullpen DEFENSE_FRV_ENABLED false true 2026-06-01 2026-08-07
+ * <group> is one of the keys below, `none` for the legacy baseline, or
+ * `all` for every group that has a persisted source -- which equals the
+ * default (persisted) harness.
  *
  * READ THE INJECTION SUMMARY, NOT JUST THE DELTA. A group whose persisted
  * columns are null across the corpus injects nothing, and the run is then
  * a baseline wearing a group's name. The summary prints per-field
  * populated counts and exits 1 if the selected group injected zero.
  */
+// PIN THE BASELINE BEFORE ANYTHING READS IT. The groups are defined as
+// additions to the legacy harness; run against the persisted default, `none`
+// would already contain every group and each delta would read as zero.
+if (process.env.HARNESS_INPUTS && process.env.HARNESS_INPUTS !== 'legacy') {
+  console.error('calibration-ab-inputs measures groups against HARNESS_INPUTS=legacy; got "'
+    + process.env.HARNESS_INPUTS + '". Unset it, or use scripts/calibration-ab.js for the persisted harness.');
+  process.exit(2);
+}
+process.env.HARNESS_INPUTS = 'legacy';
+
 const path = require('path');
 const R = path.join(__dirname, '..');
 const fs = require('fs');
 const NL = String.fromCharCode(10);
 
 const hi = require(path.join(R, 'services/harness-inputs'));
-const { q, db } = require(path.join(R, 'db/schema'));
+const { db } = require(path.join(R, 'db/schema'));
 
 // --- group table -----------------------------------------------------
 //
-// `columns` groups are a straight copy off the raw game_log row, which
-// loadGames selects with `SELECT *` -- so the value is already in hand and
-// preScreenGame simply does not carry it across. `derive` groups need a
-// helper because the persisted shape differs from what runModel reads.
-
-const GROUPS = {
-  bullpen: {
-    label: 'bullpen strength',
-    source: 'game_log.{away,home}_bullpen_woba{,_vs_l,_vs_r}',
-    fields: ['awayBullpenWoba', 'awayBullpenVsL', 'awayBullpenVsR',
-             'homeBullpenWoba', 'homeBullpenVsL', 'homeBullpenVsR'],
-    derive: function (w, g, settings, tally) {
-      for (const side of ['away', 'home']) {
-        const t = hi.bullpenTermForReplay(q, g, side, settings, {});
-        if (!t || t.woba == null) continue;
-        set(w, side + 'BullpenWoba', t.woba, tally);
-        if (t.vsLHB != null) set(w, side + 'BullpenVsL', t.vsLHB, tally);
-        if (t.vsRHB != null) set(w, side + 'BullpenVsR', t.vsRHB, tally);
-      }
-    },
-  },
-  opener: {
-    label: 'opener / bulk forecast',
-    source: 'game_log, same column names',
-    columns: {
-      away_opener_forecast_ip: 'away_opener_forecast_ip',
-      home_opener_forecast_ip: 'home_opener_forecast_ip',
-      away_bulk_forecast_ip:   'away_bulk_forecast_ip',
-      home_bulk_forecast_ip:   'home_bulk_forecast_ip',
-      bulk_guy_away:           'bulk_guy_away',
-      bulk_guy_home:           'bulk_guy_home',
-    },
-  },
-  tandem: {
-    label: 'tandem subtype',
-    source: 'game_log, same column names',
-    columns: {
-      tandem_subtype_away: 'tandem_subtype_away',
-      tandem_subtype_home: 'tandem_subtype_home',
-    },
-  },
-  framing: {
-    label: 'catcher framing (persisted rather than recomputed)',
-    source: 'game_log.{away,home}_catcher_framing_rv_per_game',
-    columns: {
-      awayCatcherFramingRvPerGame: 'away_catcher_framing_rv_per_game',
-      homeCatcherFramingRvPerGame: 'home_catcher_framing_rv_per_game',
-    },
-  },
-  roster: {
-    label: 'roster membership sets',
-    fields: ['awayRosterSet', 'homeRosterSet'],
-    unavailable: 'no persisted column. jobs.js builds these from the live '
-      + 'roster tables, which hold TODAY state and are not snapshotted per '
-      + 'game date, so there is nothing to replay. Reconstructing them needs '
-      + 'a new emit-time capture, not a harness change.',
-  },
-  availability: {
-    label: 'bullpen availability',
-    fields: ['bullpenAvailability'],
-    unavailable: 'no persisted column. Same reason as roster: derived at '
-      + 'emit time from recent usage and never written to game_log.',
-  },
+// Fields, sources and injection all come from harness-inputs.FIELD_SOURCES
+// and hi.injectGroup -- ONE table, ONE implementation. This used to carry
+// its own column map, which is the copy that would have drifted.
+//
+// NOTE ON opener AND tandem: preScreenGame spreads the whole game_log row,
+// so these columns already reached runModel under the legacy harness. The
+// injection changed 0 of 658 games' values on 2026-06-01..08-07 and the
+// runs reproduce the baseline to every printed digit. They are listed
+// because the question was asked, not because they move anything.
+const LABELS = {
+  bullpen: 'bullpen strength',
+  framing: 'catcher framing (persisted rather than recomputed)',
+  opener: 'opener / bulk forecast',
+  tandem: 'tandem subtype',
+  roster: 'roster membership sets',
+  availability: 'bullpen availability',
 };
-
-function set(w, field, value, tally) {
-  w[field] = value;
-  tally[field] = (tally[field] || 0) + 1;
+const GROUPS = {};
+for (const g of hi.INPUT_GROUPS) {
+  if (g === 'frv') continue;   // computed as-of in every mode; not a swap
+  const rows = hi.FIELD_SOURCES.filter(f => f.group === g);
+  GROUPS[g] = {
+    label: LABELS[g] || g,
+    fields: rows.map(f => f.field),
+    source: rows.filter(f => f.column).map(f => 'game_log.' + f.column).join(', '),
+    unavailable: rows.every(f => f.unavailable) ? rows[0].unavailable : null,
+  };
 }
 
 // --- selftest --------------------------------------------------------
@@ -154,6 +141,7 @@ function selftest() {
      && src.indexOf('populateCallerInputs,') === -1);
   ok('consumer passes the patched object to runModel',
      src.indexOf('rows.push({ g: w') !== -1 && src.indexOf('runModel(rows[i].g') !== -1);
+  ok('this process is pinned to the legacy baseline', hi.harnessInputsMode() === 'legacy');
 
   const ps = require(path.join(R, 'services/parameter-sweep'));
   const jobs = require(path.join(R, 'services/jobs'));
@@ -179,14 +167,14 @@ function selftest() {
      row ? row.game_date + ' ' + row.game_id + '  (of ' + cands.length + ' candidates)' : 'none');
   if (!before) { console.log(NL + 'selftest FAILED'); process.exit(1); }
   hi.populateCallerInputs(before, row, settings);
-  ok('baseline really is missing the bullpen fields (the defect is real)',
+  ok('legacy baseline really is missing the bullpen fields',
      before.awayBullpenWoba === undefined && before.homeBullpenWoba === undefined,
      'away=' + JSON.stringify(before.awayBullpenWoba));
 
   const tally = {};
   const after = ps.preScreenGame(row, idx, settings);
   hi.populateCallerInputs(after, row, settings);
-  GROUPS.bullpen.derive(after, row, settings, tally);
+  hi.injectGroup(after, row, 'bullpen', tally);
   ok('injection sets the fields runModel reads',
      after.awayBullpenWoba != null && after.homeBullpenWoba != null,
      'away=' + after.awayBullpenWoba + ' home=' + after.homeBullpenWoba);
@@ -218,21 +206,22 @@ const arg = process.argv[2];
 
 if (arg === '--list' || !arg) {
   console.log('=== input groups ===');
-  console.log('  runModel reads 41 fields off `game`; the offline harness supplies 24.');
-  console.log('  These are the groups it does not, and what stands in instead.');
+  console.log('  runModel reads ' + hi.CALLER_POPULATED_FIELDS.length + ' fields it does not compute.');
+  console.log('  The legacy harness (the baseline here) supplies 12: FRV x2 (as-of), framing x2');
+  console.log('  (recomputed), and opener x6 / tandem x2 via the row spread. The persisted default');
+  console.log('  supplies 18. These are the swappable groups and their sources.');
   console.log('');
   for (const k of Object.keys(GROUPS)) {
     const G = GROUPS[k];
-    const fields = G.fields || Object.keys(G.columns);
     console.log('  ' + k.padEnd(14) + G.label);
-    console.log('  ' + ''.padEnd(14) + 'fields : ' + fields.join(', '));
+    console.log('  ' + ''.padEnd(14) + 'fields : ' + G.fields.join(', '));
     console.log('  ' + ''.padEnd(14) + (G.unavailable
       ? 'NO SOURCE: ' + G.unavailable
       : 'source : ' + G.source));
     console.log('');
   }
-  console.log('  none   baseline, nothing swapped -- run this for the before half');
-  console.log('  all    every group above that has a persisted source');
+  console.log('  none   the legacy baseline, nothing swapped -- run this for the before half');
+  console.log('  all    every group above that has a persisted source (= the persisted default)');
   process.exit(0);
 }
 
@@ -262,14 +251,7 @@ if (wanted.length) {
   hi.populateCallerInputs = function (w, g, settings) {
     const r = ORIG.apply(this, arguments);
     gamesTouched++;
-    for (const k of wanted) {
-      const G = GROUPS[k];
-      if (G.derive) { G.derive(w, g, settings, tally); continue; }
-      for (const field of Object.keys(G.columns)) {
-        const v = g[G.columns[field]];
-        if (v != null) set(w, field, v, tally);
-      }
-    }
+    for (const k of wanted) hi.injectGroup(w, g, k, tally);
     return r;
   };
 }
@@ -279,7 +261,7 @@ process.on('exit', function (code) {
   const out = [];
   out.push('');
   out.push('=== injection summary ===');
-  out.push('  group(s): ' + (wanted.length ? wanted.join(', ') : 'none (baseline)'));
+  out.push('  group(s): ' + (wanted.length ? wanted.join(', ') : 'none (legacy baseline)'));
   if (!wanted.length) {
     // Do not print a games counter here. Nothing is patched on this path, so
     // the counter would read 0 and invite "the harness saw no games" -- which
@@ -290,10 +272,7 @@ process.on('exit', function (code) {
   }
   out.push('  games passed through populateCallerInputs: ' + gamesTouched);
   const all = [];
-  for (const k of wanted) {
-    const G = GROUPS[k];
-    for (const f of (G.fields || Object.keys(G.columns))) all.push(f);
-  }
+  for (const k of wanted) for (const f of GROUPS[k].fields) all.push(f);
   out.push('  field                            games populated');
   let total = 0;
   for (const f of all) {

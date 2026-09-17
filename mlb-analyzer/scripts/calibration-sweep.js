@@ -29,9 +29,11 @@
 const path = require('path');
 const Database = require('better-sqlite3');
 const ps = require('../services/parameter-sweep');
-// Caller-populated model inputs (FRV, catcher framing). Without this the
-// scored model is missing both defensive inputs and the absolute figures
-// describe a model that never runs in production. See services/harness-inputs.js.
+// Caller-populated model inputs: FRV as-of, and since 2026-09-16 every field
+// with a persisted emit-time source (bullpen, framing, opener, tandem).
+// Without them the absolute figures describe a model that never runs in
+// production. See services/harness-inputs.js; HARNESS_INPUTS=legacy
+// reproduces a figure recorded before that date.
 const hi = require('../services/harness-inputs');
 const { runModel, impliedP } = require('../services/model');
 const jobs = require('../services/jobs');
@@ -50,6 +52,31 @@ const N_FOLDS = 5, N_BOOT = 2000, TRAIN_FRACTION = 0.7, VAL_FIT_MAX = 1.5;
 
 const db = new Database(path.join(__dirname, '..', 'data', 'mlb.db'), { readonly: true });
 const baseSettings = jobs.getSettings();
+
+// FROZEN-INPUT GUARD (2026-09-16). The bullpen and framing inputs are read
+// from their persisted emit-time values, so a setting that acts only inside
+// those computations cannot move either end of the grid, and the sweep would
+// report a flat curve for a harness reason. A sweep key can be a composite
+// that applySweepOverrides expands, so the check runs over the SETTINGS the
+// grid actually changes, not just the name typed.
+{
+  const lo = ps.applySweepOverrides(baseSettings, { [PARAM]: GRID[0] });
+  const hiEnd = ps.applySweepOverrides(baseSettings, { [PARAM]: GRID[GRID.length - 1] });
+  const changed = Object.keys(Object.assign({}, lo, hiEnd)).filter(k => lo[k] !== hiEnd[k]);
+  const keys = [...new Set(changed.length ? changed : [PARAM])];
+  const conflicts = keys.map(k => hi.persistedInputConflict(k)).filter(Boolean);
+  const whole = conflicts.filter(c => c.whole);
+  // Refuse only when EVERY changed setting is whole-frozen; a composite with
+  // one runModel-read half is a valid, partial run and is labelled below.
+  if (whole.length && whole.length === keys.length) {
+    console.log('=== calibration sweep: ' + PARAM + ' ===');
+    console.log('  *** HARNESS CANNOT TEST THIS PARAMETER ***');
+    for (const c of whole) console.log('      ' + c.reason);
+    console.log('      Every grid point would score the same frozen input. Aborting.');
+    process.exit(2);
+  }
+  for (const c of conflicts) console.log('  *** PARTIAL: ' + c.reason + ' ***');
+}
 
 let _s = 20260822;
 const rnd = () => { _s = (_s * 1103515245 + 12345) & 0x7fffffff; return _s / 0x7fffffff; };
@@ -103,6 +130,8 @@ for (const g of games) {
     y: g.home_score > g.away_score ? 1 : 0,
     mktHome: g.market_home_ml, mktAway: g.market_away_ml });
 }
+try { console.log('  ' + hi.frvAsOfLine()); } catch (e) { console.log('  FRV read: ' + e.message); }
+console.log('  ' + hi.harnessInputsLine());
 console.log('=== corpus ===');
 console.log('  loaded=' + games.length + '  usable=' + scoreable.length
   + '  (no-snapshot ' + noSnap + ', no-score ' + noScore + ', no-market ' + noMkt + ', suppressed ' + preSup + ')');
