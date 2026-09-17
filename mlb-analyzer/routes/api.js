@@ -48,10 +48,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
-const { runParkFactorsJob, runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, processOddsArray, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
+const { runParkFactorsJob, runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
 const { legOf } = require('../utils/dh-leg');
 const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats, weightOr } = require('../services/model');
-const { parseUnabatedOdds } = require('../services/unabated');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
@@ -5272,45 +5271,10 @@ function loadSnapshotForReplay(req, jobtype) {
   return { date, filename, raw };
 }
 
-router.post('/replay/odds', requireAdminToken, async (req, res) => {
-  try {
-    const { date, filename, raw } = loadSnapshotForReplay(req, 'odds');
-    const settings = getSettings();
-    const parsed = parseUnabatedOdds(raw, date);
-    const dryRun = req.body && req.body.dry_run === true;
-
-    if (dryRun) {
-      // Return parsed games without persisting. Used for diagnosing parser
-      // behavior against captured snapshots without mutating live DB —
-      // added during the 2026-05-05 timezone-bug investigation when calling
-      // this endpoint to inspect parser output was itself contaminating
-      // the diagnostic ("looking changed it").
-      res.json({
-        success: true,
-        dry_run: true,
-        replayed_from: filename,
-        date,
-        games_in_snapshot: parsed.length,
-        games: parsed,
-      });
-      return;
-    }
-
-    const result = processOddsArray(date, parsed, settings);
-    res.json({
-      success: true,
-      dry_run: false,
-      replayed_from: filename,
-      date,
-      updated: result.updated,
-      source: result.source,
-      games_in_snapshot: parsed.length,
-    });
-  } catch (err) {
-    const status = /required|not found|no .+ snapshot|invalid|missing/.test(err.message) ? 400 : 500;
-    res.status(status).json({ error: err.message });
-  }
-});
+// POST /replay/odds WAS HERE. (2026-09-17) It re-parsed a captured Unabated
+// feed snapshot through parseUnabatedOdds. The Unabated fetch, its parser
+// and the odds snapshot write were all removed together, so there is nothing
+// left to replay. Lineups and scores replay below are unaffected.
 
 router.post('/replay/lineups', requireAdminToken, async (req, res) => {
   try {
@@ -7250,7 +7214,7 @@ router.get('/health/:date', (req, res) => {
       "SELECT game_id, away_team, home_team, away_sp, home_sp, " +
       "  away_lineup_status, home_lineup_status, " +
       "  market_away_ml, market_home_ml, market_total, " +
-      "  xcheck_total, total_source, xcheck_total_source, " +
+      "  total_source, " +
       "  odds_flagged, odds_flag_reason, updated_at, odds_locked_at, " +
       "  odds_quality_at, lineups_quality_at, weather_quality_at, scores_quality_at " +
       "FROM game_log WHERE game_date=? AND COALESCE(is_removed, 0) = 0 ORDER BY game_id"
@@ -7264,7 +7228,6 @@ router.get('/health/:date', (req, res) => {
       ).length,
       games_with_ml: games.filter(g => g.market_away_ml != null && g.market_home_ml != null).length,
       games_with_totals_primary: games.filter(g => g.market_total != null).length,
-      games_with_totals_xcheck: games.filter(g => g.xcheck_total != null).length,
       games_flagged: games.filter(g => g.odds_flagged === 1).length,
     };
 
@@ -7320,19 +7283,14 @@ router.get('/health/:date', (req, res) => {
       });
     }
 
-    // ---- check 5: totals_xcheck ----
-    {
-      const missing = games.filter(g => g.xcheck_total == null).map(g => g.game_id);
-      checks.push({
-        id: 'totals_xcheck',
-        status: missing.length === 0 ? 'pass' : 'warn',
-        severity: 'warn',
-        message: missing.length === 0
-          ? 'All ' + games.length + ' games have xcheck totals'
-          : missing.length + ' game(s) missing xcheck totals',
-        ...(missing.length ? { affected_games: cap(missing) } : {}),
-      });
-    }
+    // ---- check 5: totals_xcheck -- RETIRED 2026-09-17 ----
+    // Counted games with an xcheck (sportsbook) total. Only the Unabated
+    // merge wrote xcheck_total, and that fetch is gone, so the check would
+    // warn on every game of every slate from now on -- and a warn-severity
+    // warn marks the whole slate 'degraded'. A check that can never pass
+    // trains the reader to ignore the badge (CLAUDE.md, "scope a check to
+    // what it can act on"). The totals cross-check now lives in the odds
+    // job's [tot-divergence] arm=poly log, which is observation only.
 
     // ---- check 6: odds_flags (categorize by reason) ----
     {
@@ -7699,23 +7657,21 @@ router.get('/health/:date', (req, res) => {
       // xcheck_ml_source are now persisted (added in fix/persist-ml-source)
       // but extending the check to include them is left for a follow-up so
       // the persistence change can be validated in isolation.
-      const totSrc = {}, xchTotSrc = {};
+      // xcheck-totals dropped 2026-09-17: nothing writes xcheck_total_source
+      // since the Unabated fetch was removed.
+      const totSrc = {};
       for (const g of games) {
         if (g.total_source) totSrc[g.total_source] = (totSrc[g.total_source] || 0) + 1;
-        if (g.xcheck_total_source) xchTotSrc[g.xcheck_total_source] = (xchTotSrc[g.xcheck_total_source] || 0) + 1;
       }
       const totParts = Object.entries(totSrc).map(([k, v]) => k + '×' + v);
-      const xchParts = Object.entries(xchTotSrc).map(([k, v]) => k + '×' + v);
       checks.push({
         id: 'sources_active',
         status: 'pass',
         severity: 'info',
-        message: 'totals: ' + (totParts.join(', ') || 'none')
-          + ' · xcheck-totals: ' + (xchParts.join(', ') || 'none'),
+        message: 'totals: ' + (totParts.join(', ') || 'none'),
         detail: {
           totals: totSrc,
-          totals_xcheck: xchTotSrc,
-          note: 'this check counts totals sources only; ml_source / xcheck_ml_source are now persisted but not yet aggregated here',
+          note: 'this check counts totals sources only; ml_source is persisted but not yet aggregated here',
         },
       });
     }
@@ -7725,8 +7681,11 @@ router.get('/health/:date', (req, res) => {
       const yest = new Date(date + 'T00:00:00Z');
       yest.setUTCDate(yest.getUTCDate() - 1);
       const yestStr = yest.toISOString().slice(0, 10);
+      // Totals sources only. xcheck_total_source was dropped 2026-09-17:
+      // it would have reported the sportsbooks as "missing" for the first
+      // day after the Unabated removal, and nothing writes it now.
       const yestRows = db.prepare(
-        "SELECT total_source, xcheck_total_source FROM game_log WHERE game_date=?"
+        "SELECT total_source FROM game_log WHERE game_date=?"
       ).all(yestStr);
       if (yestRows.length === 0) {
         checks.push({ id: 'sources_missing', status: 'pass', severity: 'info',
@@ -7735,12 +7694,10 @@ router.get('/health/:date', (req, res) => {
         const todaySrcSet = new Set();
         for (const g of games) {
           if (g.total_source) todaySrcSet.add(g.total_source);
-          if (g.xcheck_total_source) todaySrcSet.add(g.xcheck_total_source);
         }
         const yestSrcSet = new Set();
         for (const r of yestRows) {
           if (r.total_source) yestSrcSet.add(r.total_source);
-          if (r.xcheck_total_source) yestSrcSet.add(r.xcheck_total_source);
         }
         const missing = [...yestSrcSet].filter(s => !todaySrcSet.has(s));
         checks.push({

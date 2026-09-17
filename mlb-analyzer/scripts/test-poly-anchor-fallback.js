@@ -45,12 +45,21 @@ ok('the fallback only accepts a Kalshi-sourced total',
 ok('the anchor source is recorded and logged',
    src.indexOf('kalshiLineSrc') !== -1
    && src.indexOf("'(' + (kalshiLineSrc || 'none') + ')'") !== -1);
-ok('every A/B row says whether Poly actually prices it',
+ok('every anchor row says whether Poly actually prices it',
    src.indexOf("'  priced=' + (willPrice ? 'yes' : 'no')") !== -1);
 ok('pricing with no anchor warns loudly',
    src.indexOf('NO KALSHI ANCHOR for') !== -1 && src.indexOf('noAnchorPriced++') !== -1);
 ok('the run summary carries the no-anchor count',
    src.indexOf('PRICED WITH NO KALSHI ANCHOR') !== -1);
+// 2026-09-17: with Unabated gone there is no reference besides Kalshi, so
+// the fallback count is per PASS and persisted in the odds cron_log message.
+ok('priced Poly totals are counted by anchor source (pass / persisted / liquidity_fallback)',
+   src.indexOf("passStats.polyAnchor[anchorTier === 'liquidity_fallback' ? 'liquidity_fallback' : kalshiLineSrc]++") !== -1);
+ok('the [odds] pass summary carries the fallback count',
+   src.indexOf("console.log('[odds] pass summary ' + dateStr") !== -1
+   && src.indexOf("' liquidity_fallback=' + _pa.liquidity_fallback") !== -1);
+ok('the odds cron_log message carries it too (the only place it persists)',
+   src.indexOf("+ ' [' + _anchorTxt + ']', updated);") !== -1);
 
 // ---- the cascade ----------------------------------------------------
 const pickFrom = (ladder, line, exactTier, nearTier) => {
@@ -137,7 +146,7 @@ ok('most Poly-priced rows sit on dates where Kalshi priced other games',
      + ' — Kalshi was reachable on those dates, so a persisted line is plausible');
 
 // ---- full-slate accounting (2026-09-09) -----------------------------
-// The A/B line lives inside the polyRows loop, so a game Poly never quoted
+// The per-row line lives inside the polyRows loop, so a game Poly never quoted
 // produced no line at all -- 10 lines against 13 games on the 2026-09-08
 // slate, and the 3 silent ones were read as the rows where the anchor
 // decides a price. Every oddsRaw game must now appear exactly once.
@@ -149,7 +158,7 @@ ok('it distinguishes locked / kalshi-priced / no-total-at-all',
    src.indexOf("'locked'") !== -1 && src.indexOf('NO TOTAL FROM ANY SOURCE') !== -1);
 ok('a game with no total from any source warns',
    src.indexOf('have NO total from Kalshi or Poly') !== -1);
-ok('the summary reconciles slate size against A/B line count',
+ok('the summary reconciles slate size against the per-row line count',
    src.indexOf("' [slate: ' + oddsRaw.length") !== -1);
 ok('the no-quote scan skips games Poly DID quote (no double-count)',
    src.indexOf('if (quoted.has(o.game_id)) continue;') !== -1);

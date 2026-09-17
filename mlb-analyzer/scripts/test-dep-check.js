@@ -33,15 +33,28 @@ ok('the current tree passes', r.problems.length === 0,
    r.problems.length ? r.problems.map(p => p.name).join(', ') : r.deps.length + ' deps');
 
 // ---- the shapes that mattered ---------------------------------------
+// stream-json / stream-chain -- the #364 packages -- were REMOVED on
+// 2026-09-17 with the Unabated fetch, their only consumer. The pin checks
+// that lived here become an absence check: a dependency nothing requires is
+// an outage surface with no benefit. The DETECTOR SELFTEST below still
+// reconstructs the #364 shape, so the checker itself keeps its teeth.
 const byName = Object.fromEntries(r.deps.map(d => [d.name, d]));
-ok('stream-json is pinned to the CommonJS line',
-   byName['stream-json'] && byName['stream-json'].resolvesToEsm === false,
-   'resolves to ' + (byName['stream-json'] || {}).type);
-ok('stream-chain is pinned to the CommonJS line',
-   byName['stream-chain'] && byName['stream-chain'].resolvesToEsm === false);
-ok('stream-chain no longer declares an engines floor above the target',
-   !byName['stream-chain'].issues.length,
-   'engines=' + (byName['stream-chain'].engines || 'none'));
+const pkg = JSON.parse(fs.readFileSync(path.join(R, 'package.json'), 'utf8'));
+ok('stream-json is no longer a dependency', !(pkg.dependencies || {})['stream-json']);
+ok('stream-chain is no longer a dependency', !(pkg.dependencies || {})['stream-chain']);
+{
+  const users = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!e.name.endsWith('.js')) continue;
+      if (/require\(\s*['"]stream-(json|chain)/.test(fs.readFileSync(p, 'utf8'))) users.push(path.relative(R, p));
+    }
+  };
+  for (const d of ['services', 'routes', 'utils', 'db', 'scripts']) walk(path.join(R, d));
+  ok('nothing in the tree still requires them', users.length === 0, users.join(', '));
+}
 
 // ---- FALSE POSITIVES: type:module with a CJS require condition -------
 // The first version of this checker flagged cheerio and csv-parse purely

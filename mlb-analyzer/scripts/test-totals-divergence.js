@@ -39,22 +39,28 @@ ok('impP(NaN) is NaN, so a NaN guard would NOT have caught it',
    Number.isNaN(impP(NaN)) && impP(null) === 1);
 
 // ---- the fix is wired to the effective values ------------------------
-ok('arm A uses _effTotalPost / _effOverPost / _effUnderPost',
-   src.indexOf('const a = divergence(_effTotalPost, _effOverPost, _effUnderPost,') !== -1);
-ok('the flag text uses the effective values too, not o.*',
-   src.indexOf("const pTxt = _effTotalPost + '@' + _effOverPost + '/' + _effUnderPost;") !== -1);
+// 2026-09-17: arm A (the flagging arm, against the xcheck sportsbook) was
+// removed with the Unabated fetch -- no sportsbook is left. The Poly arm is
+// the only comparison and stays observation only.
+ok('the xcheck arm is gone', src.indexOf('const a = divergence(') === -1
+   && src.indexOf("'[tot-divergence] arm=xcheck") === -1);
+ok('the Poly arm uses _effTotalPost / _effOverPost / _effUnderPost',
+   src.indexOf('const b = divergence(_effTotalPost, _effOverPost, _effUnderPost,') !== -1);
 ok('no surviving o.market_total in the divergence arithmetic',
    src.indexOf('const lineDelta = o.market_total - o.xcheck_total;') === -1);
-ok('both arms share ONE rule function', (src.match(/const divergence = \(/g) || []).length === 1);
-ok('arm B is tagged and writes no flag',
+ok('ONE rule function', (src.match(/const divergence = \(/g) || []).length === 1);
+ok('the Poly arm is tagged and writes no flag',
    src.indexOf("'[tot-divergence] arm=poly") !== -1 && src.indexOf("NOFLAG") !== -1);
-ok('arm B pushes no reason',
+ok('the Poly arm pushes no reason',
    src.indexOf('reasons.push') !== -1
    && src.slice(src.indexOf('const b = divergence(')).indexOf('reasons.push') === -1);
-ok('every genuine fire logs pass time, both sides, dp and kind',
+ok('the totals cross-check book is Poly, and a Poly-priced total has none',
+   src.indexOf("&& o.total_source !== 'polymarket';") !== -1
+   && src.indexOf('haveXcheckTot') === -1);
+ok('every logged comparison carries pass time, both sides, dp and kind',
    src.indexOf("'  pass=' + _passIso") !== -1
-   && src.indexOf("'  dp=' + a.d.toFixed(3)") !== -1
-   && src.indexOf("'  kind=' + (a.sameLine ? 'juice' : 'line')") !== -1);
+   && src.indexOf("'  dp=' + b.d.toFixed(3)") !== -1
+   && src.indexOf("'  kind=' + (b.sameLine ? 'juice' : 'line')") !== -1);
 ok('poly total is recorded before the Kalshi-primary skip',
    src.indexOf('o.poly_total       = picked.strike;')
    < src.indexOf('// Kalshi wrote first — only fill market_total when it left it NULL.'));

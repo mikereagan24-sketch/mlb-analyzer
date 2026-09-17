@@ -145,10 +145,27 @@ function isSaneML(price) {
   return Math.abs(n) <= MAX_ABS_ML;
 }
 
+// Single-price sanity for a runline (+/-1.5) price. (2026-09-17)
+//
+// Hoisted from services/unabated.js when that module was deleted: the
+// runline columns now come from Kalshi's spread ladder, and the bound still
+// applies. Real MLB runline juice rarely exceeds +/-300; |price| > 400 is
+// rejected. Tighter than isSaneML, whose bound has to admit -350+ favourites.
+const SPREAD_MAX_ABS_PRICE = 400;
+function isSaneSpreadPrice(price) {
+  if (price == null) return false;
+  const n = Number(price);
+  if (!Number.isFinite(n)) return false;
+  if (n === 0) return false;
+  return Math.abs(n) <= SPREAD_MAX_ABS_PRICE;
+}
+
 module.exports = {
   checkMarketMLPairSanity,
   IMPLIED_SUM_MIN,
   IMPLIED_SUM_MAX,
   MAX_ABS_ML,
   isSaneML,
+  SPREAD_MAX_ABS_PRICE,
+  isSaneSpreadPrice,
 };

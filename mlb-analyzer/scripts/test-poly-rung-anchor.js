@@ -2,8 +2,9 @@
 /**
  * Poly totals rung anchor: Kalshi's line, liquidity fallback. (2026-09-06)
  *
- * The anchor moved off unabated_total, which loses its writer when the
- * Unabated fetch is removed. Kalshi's own line is the replacement.
+ * The anchor moved off unabated_total (#365). The Unabated fetch was then
+ * removed (2026-09-17), and the OLD-vs-NEW comparison arm went with it, so
+ * these assertions now check it is GONE rather than observation-only.
  *
  * The cascade is inline in runOddsJob and not separately exported, so the
  * SHAPE is asserted against the source and the BEHAVIOUR is asserted
@@ -35,15 +36,17 @@ ok('the map is populated from k.line before any skip/override decision',
 ok('the PRICED pick comes from the Kalshi anchor',
    src.indexOf("const nw = pickFrom(kalshiLine, 'kalshi_exact', 'kalshi_nearest');") !== -1
    && src.indexOf('let picked = nw.rung, anchorTier = nw.tier;') !== -1);
-ok('the unabated anchor is still computed, for comparison only',
-   src.indexOf("const old = pickFrom(o.unabated_total, 'unabated_exact', 'unabated_nearest');") !== -1);
-ok('old anchor never assigns picked (it cannot price)',
-   src.indexOf('picked = old.rung') === -1);
-ok('every row logs OLD vs NEW', src.indexOf("'[poly-anchor-ab] '") !== -1);
-ok('the run summary carries the A/B tally',
-   src.indexOf("[anchor A/B vs unabated: agree='") !== -1
-   || src.indexOf("' [anchor A/B vs unabated: agree=' + abAgree") !== -1);
-ok('anchor tiers renamed to kalshi_*',
+{
+  // Code lines only: the comments record where the anchor came from.
+  const code = src.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n');
+  ok('the unabated anchor is GONE (no writer since the fetch was removed)',
+     code.indexOf('unabated_total') === -1 && code.indexOf("'unabated_exact'") === -1);
+}
+ok('the OLD-vs-NEW line is gone and a per-row anchor line replaces it',
+   src.indexOf("'[poly-anchor-ab] '") === -1 && src.indexOf("'[poly-anchor-row] '") !== -1);
+ok('the run summary no longer carries an A/B tally',
+   src.indexOf('anchor A/B vs unabated') === -1);
+ok('anchor tiers are kalshi_*',
    src.indexOf('kalshi_exact: 0, kalshi_nearest: 0, liquidity_fallback: 0') !== -1);
 
 // ---- behaviour: the cascade itself -----------------------------------
@@ -96,13 +99,6 @@ ok('tie on liquidity is deterministic (first wins, not undefined)',
               { strike: 8.5, market_liquidity_clob: 5 }]).strike === 7.5);
 ok('a rung with null liquidity is treated as zero, not skipped',
    liquidity([{ strike: 7.5 }]).strike === 7.5);
-
-// ---- the A/B is meaningful: agreement is on STRIKE, not tier ---------
-const nw = pickFrom(L, 8.5, 'kalshi_exact', 'kalshi_nearest');
-const old = pickFrom(L, 8.6, 'unabated_exact', 'unabated_nearest');
-ok('different tiers landing on the same rung counts as AGREE',
-   nw.rung.strike === old.rung.strike && nw.tier !== old.tier,
-   'kalshi_exact 8.5 vs unabated_nearest 8.5 -- same priced rung');
 
 console.log('');
 console.log(failures ? 'FAILED (' + failures + ')' : 'OK');

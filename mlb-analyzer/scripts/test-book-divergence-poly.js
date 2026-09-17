@@ -3,7 +3,8 @@
  * checkBookDivergence's cross-check book moves to a DIRECT Polymarket
  * quote. (2026-09-06)
  *
- * PR 2a of the Unabated removal. The guard's second opinion was
+ * PR 2a of the Unabated removal; the fetch itself went on 2026-09-17, and
+ * the xcheck fallback with it. The guard's second opinion was
  * xcheck_*_ml, which arrives via the Unabated feed. Measured over the 30
  * days to 2026-09-06, xcheck_ml_source was 'polymarket' on 322 of 332
  * Kalshi-primary rows (97.0%) -- so this is the same book by a surviving
@@ -40,10 +41,18 @@ ok('Poly ML is recorded even when Kalshi wins the slot',
 ok('recorded BEFORE the Kalshi-primary skip',
    src.indexOf('o.poly_away_ml = awayMl;')
    < src.indexOf('// Kalshi wrote first — only fill when it left the field NULL.'));
-ok('divergence prefers poly, falls back to xcheck',
-   src.indexOf('const _xAway = o.poly_away_ml != null ? o.poly_away_ml : o.xcheck_away_ml;') !== -1);
-ok('the source label follows the value',
-   src.indexOf("const _xSrc  = o.poly_away_ml != null ? 'polymarket' : o.xcheck_ml_source;") !== -1);
+// 2026-09-17: the Unabated fetch is removed, so the xcheck fallback is gone
+// and the Poly quote is the ONLY second opinion. The single-source test must
+// key on it too -- keyed on xcheck_ml_source (now never written) it would
+// mark every row single-source and skip the guard entirely.
+ok('divergence uses the Poly quote only, no xcheck fallback',
+   src.indexOf('o.poly_away_ml, o.poly_home_ml, _xSrc') !== -1
+   && src.indexOf('o.xcheck_away_ml') === -1);
+ok('single-source is keyed on the Poly quote, not xcheck_ml_source',
+   src.indexOf("const _xSrc = o.poly_away_ml != null && o.poly_home_ml != null ? 'polymarket' : null;") !== -1
+   && src.indexOf('const singleSource = haveMarket && (!_xSrc || _xSrc === o.ml_source);') !== -1);
+ok('a Poly-primary row counts as single-source (no second book)',
+   src.indexOf('_xSrc === o.ml_source') !== -1);
 ok('poly_*_ml is in-memory only (never persisted)',
    src.indexOf('poly_away_ml=?') === -1 && src.indexOf('poly_away_ml INTEGER') === -1);
 

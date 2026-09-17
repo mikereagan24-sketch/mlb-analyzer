@@ -272,14 +272,14 @@ const SETTINGS_SCHEMA = {
   signal_venue_aware_enabled: { type: 'boolean', default: false,
     help: 'Evaluate signal edges against the best net at-size price across Poly + Kalshi (services/odds-comparison.js) with fillable-at-stake guard. Default OFF — byte-identical to Kalshi-only. When ON, records price_venue per emitted ML signal; cohort stays v7 (see v7 birth cert amendment for the small pre-amendment heterogeneity note).' },
 
-  // --- Kalshi-direct moneyline (override Unabated/OddsAPI ML primary) -------
+  // --- Kalshi-direct moneyline (first ML writer; Poly fills the rest) -------
   kalshi_direct_primary_enabled: { type: 'boolean', default: false,
-    help: 'When ON, fetch MLB moneylines directly from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE the ML on any oddsRaw row that Kalshi covers. The Unabated/OddsAPI fetch still runs and supplies (a) ML for games Kalshi does not cover and (b) totals/spreads for every game (Kalshi-direct is ML-only for now). Locked games are skipped. Default OFF — dormant.' },
+    help: 'When ON, fetch MLB moneylines directly from Kalshi (services/kalshi.js, pre-game only) and write market_away_ml/market_home_ml, fee-adjusted, on every game Kalshi covers. Polymarket fills games Kalshi does not cover; there is no other ML source (the Unabated fetch was removed 2026-09-17). Locked games are skipped. OFF leaves ML to Polymarket alone.' },
 
-  // --- Kalshi-direct totals (override Unabated/OddsAPI over/under prices) ---
+  // --- Kalshi-direct totals (first totals writer; Poly fills the rest) ------
   // Independent of the ML flag so totals can be toggled separately.
   kalshi_direct_totals_enabled: { type: 'boolean', default: false,
-    help: 'When ON, fetch MLB totals from Kalshi (services/kalshi.js, pre-game only) and OVERRIDE over_price/under_price on any oddsRaw row Kalshi covers. The total LINE (market_total) is preserved from the Unabated/OddsAPI backup; Kalshi only supplies fee-adjusted prices for that line. If Kalshi has no rung within 0.5 of market_total, the override is skipped (game stays on backup). Kalshi-implied fair total is recorded in kalshi_implied_total for divergence observation regardless. Locked games are skipped. Default OFF — dormant.' },
+    help: 'When ON, fetch MLB totals from Kalshi (services/kalshi.js, pre-game only) and write market_total plus fee-adjusted over/under prices on every game Kalshi covers. Rung: the line an earlier Kalshi pass persisted for the game today, if still on the ladder within 0.5; otherwise Kalshi\'s auto rung (over ask nearest $0.50). Polymarket fills games Kalshi does not price. Kalshi-implied fair total is recorded in kalshi_implied_total regardless. Locked games are skipped. OFF leaves totals to Polymarket alone.' },
   tot_slope: { type: 'number', min: 0.05, max: 0.15, default: 0.08,
     help: 'Total-runs slope in over/under conversion.' },
 
