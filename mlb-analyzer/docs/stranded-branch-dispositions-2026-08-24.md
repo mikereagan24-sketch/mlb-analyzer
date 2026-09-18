@@ -84,3 +84,59 @@ have moved past.
 
 I have not deleted anything. Every SHA above is recoverable from this
 page for as long as the objects survive gc.
+
+
+---
+
+## ACTIONED 2026-09-18
+
+The sentence above — "I have not deleted anything" — was true when
+written and is no longer. Thirteen branches were deleted, local and
+remote, after re-verifying every one against `main` rather than trusting
+this page: a month had passed, and two of its claims had drifted.
+
+**Archived first.** The seven whose work is genuinely absent from `main`
+were tagged and the tags pushed BEFORE any deletion:
+
+| tag | sha |
+|---|---|
+| `archive/feat-baserunning-trailing-stint-tracking` | `6927914` |
+| `archive/chore-flag-mesa-contaminated-signals` | `a21f3f1` |
+| `archive/docs-sea-tandem-analysis` | `b2afab5` |
+| `archive/docs-weight-sensitivity-2026-07` | `a8e54a2` |
+| `archive/fix-complete-demote-seed-oddsraw-from-schedule` | `c161de4` |
+| `archive/feat-total-vs-line-backtest` | `ce751ef` |
+| `archive/feat-woba-blend-breakdown` | `88206dd` |
+
+This page said every sha was "recoverable ... for as long as the objects
+survive gc". Deleting the branch ref is precisely what ends that: nothing
+would have anchored the objects, and a sha with no object behind it is a
+dead reference. The tags are what make the recovery claim true.
+Recover with `git show archive/<name>` or
+`git checkout -b restored archive/<name>`.
+
+**Six needed no archive** — their work is in `main`:
+`ad0c8e2`, `4b14cfa`, `29f9973` (superseded, `git cherry` shows 0 ahead),
+plus three re-landed under a different sha: `85d011a` → `63472d4`
+(**297 of 297 diff lines identical**), `e54b0c6` → `0e6cf3f` (297 of 332;
+the remaining 35 are the 2-year-window rationale comment, present in main
+at `services/fangraphs.js:194`), and `0cccab4`, superseded by the v2
+criterion merged as PR #376.
+
+**Two cases this page got wrong**, both because it reasoned about remote
+branches while the verifier reads local ones (505 local refs vs 480
+remote at the time):
+
+- `feat/total-vs-line-backtest` had **no remote ref at all**. A remote-only
+  delete would have been a no-op and it would still be in the count.
+- `fix/complete-demote-seed-oddsraw-from-schedule` had a **merged remote
+  tip** (`5546ffe`) and a **stranded local tip** (`c161de4`). The commit
+  this page names lived only on the local ref, so the archive tag was cut
+  from the local tip. Deleting only the remote would have discarded
+  nothing and preserved nothing.
+
+**Still outstanding: 7 commits on 7 branches**, listed by name with their
+current state in CLAUDE.md under "When to re-run the landed-commit
+verifier". Four remain undecided (`2f29110`, `cb92b6e`, `37014c0`,
+`9649e92`), one is dispositioned to land (`44dd2ce`), and two were never
+dispositioned by this page at all (`ada0bd8`, `32e43f1`).

@@ -1478,10 +1478,43 @@ run, and it is unresolved.
 node scripts/verify-commits-landed.js
 ```
 
-Exit 1 if anything is stranded. Expected output today is 15 commits on 15
-branches, all of them the April-to-August tail dispositioned in
-`docs/stranded-branch-dispositions-2026-08-24.md`. **Anything with a
-recent date is a regression** — that is the whole signal.
+Exit 1 if anything is stranded. **Expected output today is 7 commits on 7
+branches, and zero "likely re-landed".** Anything else — and especially
+**anything with a recent date** — is a regression. That is the whole signal.
+
+The seven, with what is still owed on each (2026-09-18):
+
+| branch | sha | state |
+|---|---|---|
+| `fix/park-factor-updates` | `2f29110` | **undecided** — April FanGraphs constants; both it and main are stale. Superseded in practice by the Savant `index_runs` sourcing decision of 2026-08-25, so refresh from Savant rather than landing this |
+| `docs/ingest-not-hot-path-rule` | `cb92b6e` | **undecided** — a CLAUDE.md rule with no behaviour change. The rule text is already in this file; the branch is the unmerged original |
+| `docs/runs-term-recalibration` | `37014c0` | **undecided** — RUN_MULT=50 totals backtest. ROI-as-pricing-evidence, which §"Sweep ROI measures selection" invalidates. Land only with a banner, or drop |
+| `feat/total-residual-diagnostic` | `9649e92` | **undecided** — 286-line tool measuring model bias by park/temp/wind. Overlaps the 2026-08-06 skewed-residual work. Land only if the tool is wanted |
+| `feat/sweep-pyth-exp` | `44dd2ce` | **dispositioned to LAND** — a recorded negative result plus a retraction of a misleading proxy analysis. The kind worth keeping |
+| `feat/framing-frv-backtest-corrected-substrate` | `ada0bd8` | **still open** — never dispositioned in the 2026-08-24 sweep |
+| `fix/odds-job-followups` | `32e43f1` | **still open** — never dispositioned in the 2026-08-24 sweep |
+
+Thirteen branches were deleted on 2026-09-18 after individual verification.
+Six carried work already in `main` (three superseded, three re-landed
+under a different sha — `docs/rookie-roi-prediction` matched its twin on
+297 of 297 diff lines). The other seven were genuinely abandoned, so they
+were tagged **`archive/<branch-with-dashes>`** and the tags pushed
+**before** deletion: a branch ref was the only thing keeping those objects
+alive, and a sha recorded in a doc is useless once the object is gc'd.
+Recover one with `git show archive/<name>` or
+`git checkout -b restored archive/<name>`.
+
+Two cases that a bulk delete would have got wrong, both worth remembering
+because the verifier reads **local** branches (`git branch --no-merged`)
+while deletion is usually thought of as a remote operation — there were
+505 local refs against 480 remote:
+
+- `feat/total-vs-line-backtest` existed **locally only**; a remote-only
+  delete would have left it, and it would still be in this count.
+- `fix/complete-demote-seed-oddsraw-from-schedule` had a **merged remote
+  tip** (`5546ffe`) and a **stranded local tip** (`c161de4`). The
+  interesting commit lived only on the local ref, so the archive tag was
+  cut from the local tip, not the remote one.
 
 It uses `git cherry`, not `git log`, so a commit that was cherry-picked
 onto a new branch and merged is correctly **not** reported: its original
