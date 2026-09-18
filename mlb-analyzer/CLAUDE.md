@@ -1454,6 +1454,7 @@ current tree.**
 | **A logged bet vanishing from a card** | `node scripts/test-logged-bet-visibility.js` | the log filtered by `is_active` — a record of what was DONE hidden because the model changed its mind; 146 of 394 were invisible when found |
 | **Auth failures naming the wrong credential** | `node scripts/test-api-401-handler.js` | a 401 handler that prompts for a credential the server never checks — the old one asked for an "app password" on a rejected admin token and recursed forever |
 | **Capture horizon logic** | `node scripts/test-lineup-capture.js` | a horizon mislabelled across the ET/PT midnight gap or a DST boundary — an 11PM PT same-day pull is already the next ET day |
+| **Emit-time numbers rendered unlabelled** | `node scripts/test-emit-time-provenance.js` | a frozen pp figure printed beside live model/market numbers with nothing saying so — BOS@BAL read 3.5PP against a -130/-124 pair that reconciles to 1.16pp. **This test was red for 13 days** because it located page helpers by an indentation-sensitive anchor and nothing invoked it; both fixed 2026-09-17 |
 | **A bar inside the noise floor** | `node scripts/resolution-floor.js --n <n> --bar <bar>` | a pre-registered test that could not have resolved either way — run it **before** writing the bar, not after reading the result |
 
 ### When to re-run the freshness check
