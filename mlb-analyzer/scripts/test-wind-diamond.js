@@ -12,7 +12,6 @@
 //       a subset of the display allowlist, checked against origin/main.
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
 const wb = require('../utils/wind-badge');
 const { PARKS } = require('../services/weather');
 
@@ -123,63 +122,27 @@ check('every leaf element self-closes',
 check('helper has no wind_factor in code',
   /wind_factor|windFactor/.test(read('utils/wind-badge.js').split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n')), false);
 
-console.log('\n7. no pricing file changed on this branch');
-// The allowlist is DISPLAY ONLY. utils/wind-badge.js is display logic with
-// no pricing consumer; routes/api.js is touched only to pass temp_f into
-// the descriptor. Anything else appearing here is a scope error.
-const ALLOWED = new Set([
-  'mlb-analyzer/public/index.html',
-  'mlb-analyzer/utils/wind-badge.js',
-  'mlb-analyzer/routes/api.js',
-  'mlb-analyzer/scripts/test-wind-diamond.js',
-  'mlb-analyzer/docs/wind-diamond-2026-09-12.md',
-]);
-const PRICING = [/services\/model\.js$/, /services\/weather\.js$/, /db\/schema\.js$/,
-  /services\/jobs\.js$/, /services\/parameter-sweep\.js$/, /services\/roof-prior\.js$/,
-  /baserunning-backtest|frv-backtest|calibration-ab|calibration-sweep/];
-// `git diff --name-only origin/main` compares the WORKING TREE to main, so
-// it sees the change whether or not it has been committed yet. The earlier
-// form (origin/main...HEAD) returned an empty list before the commit and
-// both assertions below passed on nothing -- a checker that prints OK
-// because it looked at nothing, which is the failure mode CLAUDE.md calls
-// out. Hence the emptiness guard: no diff means this check is INERT and
-// that is a failure, not a pass.
-let changed = null;
-try {
-  changed = execFileSync('git', ['diff', '--name-only', 'origin/main'],
-    { cwd: path.join(__dirname, '..', '..'), encoding: 'utf8' })
-    .split('\n').map((s) => s.trim()).filter(Boolean);
-} catch (e) {
-  failures++;
-  console.log('  FAIL  git unavailable, so this check cannot run: ' + e.message.split('\n')[0]);
-}
-if (changed) {
-  console.log('     changed vs origin/main: ' + (changed.length ? changed.join(', ') : '(none)'));
-  // REMOVED 2026-09-12, and worth recording why rather than quietly
-  // deleting. These two assertions compared the CURRENT BRANCH against
-  // main, which made them a statement about one pull request rather than
-  // about the code. They did their job reviewing #384 and then became a
-  // trap: the very next PR to touch a pricing file for a legitimate reason
-  // — batch 4a, which changes two cfDir values in services/weather.js —
-  // fails a test named "wind diamond" for reasons that have nothing to do
-  // with the diamond.
-  //
-  //   check('no pricing-path file changed', pricingHits, []);
-  //   check('every changed file is on the display allowlist', outsideAllow, []);
-  //
-  // The durable form of the same guarantee is the CODE-level checks in
-  // section 6: the diamond block reads no wind_factor, computes no angle of
-  // its own, and pulls its rotation from the helper. Those hold for every
-  // future branch; a diff against main does not.
-  check('the diff check still has something to inspect', changed.length > 0, true);
-  const pricingHits = changed.filter((f) => PRICING.some((rx) => rx.test(f)));
-  const outsideAllow = changed.filter((f) => !ALLOWED.has(f));
-  if (pricingHits.length || outsideAllow.length) {
-    console.log('     NOTE this branch touches files outside the display set: '
-      + [...new Set(pricingHits.concat(outsideAllow))].join(', '));
-    console.log('     That is reported, not failed — see the comment above.');
-  }
-}
+// SECTION 7 REMOVED 2026-09-18 -- a one-PR claim wearing a test's name.
+//
+// What stood here ran `git diff --name-only origin/main` and asserted
+// the result was NON-EMPTY, so the test FAILED ON MAIN BY CONSTRUCTION:
+// a clean checkout has no diff, so the suite was red on the default
+// branch every time anyone ran it, for a reason with nothing to do with
+// the wind diamond.
+//
+// This is the SECOND removal from this section, and the shape is
+// identical both times. On 2026-09-12 two assertions ('no pricing-path
+// file changed', 'every changed file is on the display allowlist') were
+// deleted for being statements about one pull request rather than about
+// the code. The emptiness guard added in their place inherited the same
+// defect: it too could only be true while a specific branch was checked
+// out. A guard against a vacuous pass is worth having, but not when the
+// thing it guards is itself a property of the working tree.
+//
+// The durable form of the same guarantee is section 6, which asserts
+// against the CODE: the diamond block reads no wind_factor, computes no
+// angle of its own, and takes its rotation from the shared helper. Those
+// hold on every branch and on main, which is what a test should do.
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

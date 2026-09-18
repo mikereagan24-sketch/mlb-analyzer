@@ -18,11 +18,12 @@ if (!fs.existsSync(DB_PATH)) {
 }
 const db = new Database(DB_PATH, { readonly: true });
 
-function normName(n) {
-  return (n||'').toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
-}
+// SHARED NORMALIZER, not a local copy. (2026-09-18) The copy that was
+// here lacked utils/names' NORM_TRANSLIT fold, so "Bjørn" normalized to
+// "bjrn" here and "bjorn" everywhere else -- a silent lookup miss rather
+// than an error. Inert on today's corpus (0 of 12,870 distinct names
+// carry such a character); pinned by scripts/test-normalizer-single-source.js.
+const { normName, stripSfx } = require('../utils/names');
 
 const games = db.prepare(
   'SELECT game_id, away_team, home_team, away_sp, home_sp FROM game_log WHERE game_date=? ORDER BY game_id'
@@ -52,7 +53,7 @@ function lookupWoba(key, name, teamAbbr) {
   if (tl && idx[key][nm+' '+tl]) return idx[key][nm+' '+tl];
   if (idx[key][nm]) return idx[key][nm];
   // Try without suffix stripping generational markers
-  const stripped = nm.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();
+  const stripped = stripSfx(nm);
   if (stripped !== nm) {
     if (tl && idx[key][stripped+' '+tl]) return idx[key][stripped+' '+tl];
     if (idx[key][stripped]) return idx[key][stripped];

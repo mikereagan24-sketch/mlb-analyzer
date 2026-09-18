@@ -45,8 +45,12 @@ const S = {
 };
 console.log('settings: minBF=' + S.minBF + '  global=' + S.wProj + '/' + S.wAct
   + '  bullpen=' + S.bpWP + '/' + S.bpWA + '  downweightStarters=' + S.dws);
-const norm = s => String(s || '').toLowerCase().normalize('NFD')
-  .replace(/[̀-ͯ]/g, '').replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+// SHARED normalizer (2026-09-18). This was a local copy missing
+// utils/names' NORM_TRANSLIT fold, so a name carrying o-slash / ae /
+// l-stroke keyed differently HERE than in the report this script exists
+// to diff -- a normalizer copy inside a tool whose whole job is finding
+// disagreement between two sources.
+const { normName: norm } = require('../utils/names');
 
 const mk = t => (n, raw) => {
   try {

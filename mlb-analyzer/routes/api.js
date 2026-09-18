@@ -6389,7 +6389,14 @@ router.get('/debug/bullpen', (req, res) => {
     const sp   = req.query.sp||'';
     const hand = req.query.hand||'rhb';
     if (!team) return res.json({ error: 'team required' });
-    const norm = n=>(n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim();
+    // SHARED NORMALIZER. (2026-09-18) This was a local copy that SHADOWED
+    // the module-level normName imported at the top of this file, and it
+    // lacked the NORM_TRANSLIT fold -- "Bjørn" normalized to "bjrn" here
+    // and "bjorn" in every production lookup, so this endpoint would have
+    // reported a missing act match for a pitcher the model matches fine.
+    // An alias rather than a rename so the ~20 call sites below are
+    // untouched; the implementation is now the one in utils/names.
+    const norm = normName;
     const projRows = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?").all('pit-proj-'+hand,'% '+team);
     const actRows  = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=?").all('pit-act-'+hand);
     // Apply pitcher_woba_override entries to projRows. The raw SQL above
@@ -6419,32 +6426,17 @@ router.get('/debug/bullpen', (req, res) => {
       const nameClean=proj.player_name.replace(/ [A-Z]{2,3}$/,'');
       const pNorm=norm(nameClean); const lastName=pNorm.split(' ').pop();
       const isStarter=!!starterLast&&pNorm.includes(starterLast);
-      // fuzzyLookupAct — mirrors model.js fuzzyLookup (requires first initial + last name match)
-      function stripSfxA(n){return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim();}
-      function fuzzyLookupAct(name, teamHint) {
-        const k=norm(name), parts=k.split(' '), isAbbrev=parts.length>=2&&parts[0].length===1;
-        if(teamHint){const tk=k+' '+teamHint.toLowerCase();if(actIdx[tk])return actIdx[tk];}
-        if(actIdx[k])return actIdx[k];
-        const kS=stripSfxA(k);
-        if(kS!==k){
-          if(teamHint&&actIdx[kS+' '+teamHint.toLowerCase()])return actIdx[kS+' '+teamHint.toLowerCase()];
-          if(actIdx[kS])return actIdx[kS];
-        }
-        for(const sfx of['jr','sr','ii','iii','iv']){
-          if(teamHint&&actIdx[k+' '+sfx+' '+teamHint.toLowerCase()])return actIdx[k+' '+sfx+' '+teamHint.toLowerCase()];
-          if(actIdx[k+' '+sfx])return actIdx[k+' '+sfx];
-        }
-        if(isAbbrev){
-          const initial=parts[0],last=parts[parts.length-1];
-          if(teamHint){const tl=teamHint.toLowerCase();const e=Object.entries(actIdx).find(([n])=>{if(!n.endsWith(' '+tl))return false;const base=n.slice(0,n.length-tl.length-1).trim();const p=stripSfxA(base).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});if(e)return e[1];}
-          const matches=Object.entries(actIdx).filter(([n])=>{if(/\s[a-z]{2,3}$/.test(n))return false;const p=stripSfxA(n).split(' ');return p[p.length-1]===last&&p[0]&&p[0][0]===initial;});
-          if(matches.length===1)return matches[0][1];
-        }
-        const sk=stripSfxA(k);
-        if(teamHint&&actIdx[sk+' '+teamHint.toLowerCase()])return actIdx[sk+' '+teamHint.toLowerCase()];
-        const e2=Object.entries(actIdx).find(([n])=>!/\s[a-z]{2,3}$/.test(n)&&stripSfxA(n)===sk);
-        return e2?e2[1]:null;
-      }
+      // SHARED fuzzyLookup, not a fourth staging copy. (2026-09-18)
+      //
+      // What stood here re-implemented stages 1-5 and 7 of
+      // utils/names fuzzyLookup, inline and minified, and was MISSING
+      // stage 6 compound-surname fallback and stage 6.5 (full-name
+      // lookup against an abbrev-form index). Verified identical on
+      // 7,581 proj rows across both hands and all 30 teams before the
+      // swap -- 0 gained, 0 lost, 0 different -- so this endpoint
+      // reports what it reported yesterday, minus the drift surface.
+      // Re-run: node scripts/test-normalizer-single-source.js
+      const fuzzyLookupAct = (name, teamHint) => fuzzyLookup(actIdx, name, teamHint);
       const actMatch = fuzzyLookupAct(pNorm, team);      const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
       return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ'+proj.woba.toFixed(4)+' + '+WA+'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
     });

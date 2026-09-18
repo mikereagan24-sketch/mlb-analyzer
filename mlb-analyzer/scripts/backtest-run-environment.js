@@ -19,8 +19,26 @@ var model = require('../services/model');
 var jobs  = require('../services/jobs');
 
 function tryParse(s){ try { return s ? JSON.parse(s) : null; } catch(e){ return null; } }
-function normName(n){ return (n||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
-function stripSfx(n){ return n.replace(/\b(jr|sr|ii|iii|iv)\b/g,'').replace(/\s+/g,' ').trim(); }
+
+// SHARED NORMALIZER, not a local copy. (2026-09-18)
+//
+// This file carried its own normName + stripSfx, identical to
+// utils/names.js except for the piece that matters: the NORM_TRANSLIT
+// fold. utils/names maps \u00f8 \u00e6 \u0153 \u00df \u0111 \u0142 \u0131 BEFORE NFD, because NFD does not
+// decompose them -- they survive the combining-mark strip and are then
+// deleted outright by [^a-z\s]. So the copy here turned "Bjørn" into
+// "bjrn" while every production path turned it into "bjorn", and a
+// lineup feed spelling "Bjorn" against a roster spelling "Bjørn" would
+// match in production and silently miss in this script.
+//
+// Inert on today's corpus -- 0 of 12,870 distinct names in woba_data /
+// team_rosters / team_rosters_season, 0 of 798 lineup names and 0 of
+// 370 SP names currently contain such a character, so no number this
+// script has produced moves. That is why this is drift prevention
+// rather than a bug fix, and why the Bjørn case is pinned by a test
+// instead of left to the next person to rediscover.
+// Re-run: node scripts/test-normalizer-single-source.js
+const { normName, stripSfx } = require('../utils/names');
 
 // name → mlb_id via team POS roster (accent+suffix folded, initial+last)
 var _rosterCache = {};
