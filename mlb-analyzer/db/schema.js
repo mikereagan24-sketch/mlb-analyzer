@@ -72,6 +72,15 @@ db.exec(`
     market_home_ml INTEGER,
     market_total REAL,
     park_factor REAL DEFAULT 1.0,
+    -- Declared HERE as well as in the ALTER below (2026-09-18). The ALTER
+    -- patches existing databases; this line is what a FRESH one gets, and
+    -- it has to exist before the prepared statements are built ~2300 lines
+    -- down. upsertGame began binding park_factor_source on 2026-09-18 and
+    -- a fresh DB died at require with "table game_log has no column named
+    -- park_factor_source" -- the ALTER runs several hundred lines AFTER
+    -- the prepare. Any late-added column a prepared statement references
+    -- needs both halves.
+    park_factor_source TEXT,
     proj_model_away_ml INTEGER,
   proj_market_away_ml INTEGER,
   proj_market_home_ml INTEGER,
@@ -2396,7 +2405,7 @@ const q = {
       away_sp_forecast_n_priors, home_sp_forecast_n_priors,
       away_bulk_forecast_ip, home_bulk_forecast_ip,
       away_opener_forecast_ip, home_opener_forecast_ip,
-      market_away_ml, market_home_ml, market_total, park_factor,
+      market_away_ml, market_home_ml, market_total, park_factor, park_factor_source,
       model_away_ml, model_home_ml, model_total, lineup_source,
       venue_id, venue_name, game_number, game_pk, updated_at
     ) VALUES (
@@ -2411,7 +2420,7 @@ const q = {
       @away_sp_forecast_n_priors, @home_sp_forecast_n_priors,
       @away_bulk_forecast_ip, @home_bulk_forecast_ip,
       @away_opener_forecast_ip, @home_opener_forecast_ip,
-      @market_away_ml, @market_home_ml, @market_total, @park_factor,
+      @market_away_ml, @market_home_ml, @market_total, @park_factor, @park_factor_source,
       @model_away_ml, @model_home_ml, @model_total, @lineup_source,
       @venue_id, @venue_name, COALESCE(@game_number, 1), @game_pk, datetime('now')
     )
@@ -2475,6 +2484,7 @@ const q = {
       game_time = COALESCE(excluded.game_time, game_log.game_time),
       market_away_ml = excluded.market_away_ml, market_home_ml = excluded.market_home_ml,
       market_total = excluded.market_total, park_factor = excluded.park_factor,
+      park_factor_source = COALESCE(excluded.park_factor_source, game_log.park_factor_source),
       model_away_ml = excluded.model_away_ml, model_home_ml = excluded.model_home_ml,
       model_total = excluded.model_total, lineup_source = excluded.lineup_source,
       -- COALESCE venue fields so a RotoWire-only upsert (which doesn't

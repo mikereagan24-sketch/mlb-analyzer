@@ -258,8 +258,42 @@ function loadParkFactors(force) {
   return out;
 }
 
+// WHICH PULL a factor came from. (2026-09-18)
+//
+// SOURCE_NAME alone cannot distinguish two pulls of the same source, and
+// the pulls move: the 2026-09-01 re-pull changed ARI, CWS, DET, MIN, NYM
+// and WAS by 0.02 each, and nothing recorded it. game_log rows on either
+// side of that date carry different factors for those six parks with an
+// identical source string, so an analysis spanning it pools two regimes
+// exactly the way the 2026-08-25 legacy/Savant boundary does -- the case
+// CLAUDE.md documents under "It is a column, not a convention".
+//
+// Stamping the pull date makes each re-pull observable from the row
+// itself, rather than inferable from a remembered date. Cheap: one
+// string, written once per game row at scrape time.
+//
+// Returns e.g. 'baseball_savant_index_runs@2026-09-01'. Falls back to the
+// bare source name if the table has no pulled_at -- a stamp that is less
+// precise is still better than one that lies.
+let _stamp = null;
+function sourceStamp(force) {
+  // Memoised beside _cache and invalidated the same way: the scraper
+  // calls this once per game, and the pull date cannot change inside a
+  // single scrape. loadParkFactors(true) after a refresh clears both.
+  if (_stamp && !force) return _stamp;
+  try {
+    const { db } = require('../db/schema');
+    const row = db.prepare('SELECT MAX(pulled_at) AS p FROM park_factors').get();
+    const day = row && row.p ? String(row.p).slice(0, 10) : null;
+    _stamp = day ? SOURCE_NAME + '@' + day : SOURCE_NAME;
+  } catch (e) {
+    _stamp = SOURCE_NAME;
+  }
+  return _stamp;
+}
+
 module.exports = {
-  fetchSavantParkFactors, assertAllTeamsResolve, loadParkFactors,
+  fetchSavantParkFactors, assertAllTeamsResolve, loadParkFactors, sourceStamp,
   SOURCE_NAME, SOURCE_BASE, SOURCE_PARAMS, sourceUrl, paramString,
   CLUB_TO_ABBR, REQUIRED_TEAMS, MANUAL, WOBA_FROM_RUN_K, wobaFromRun,
 };

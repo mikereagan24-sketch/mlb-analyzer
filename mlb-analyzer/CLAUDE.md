@@ -1087,6 +1087,64 @@ contamination tag — nothing is wrong with either side, they are two
 regimes — and the discontinuity is larger than either contamination class:
 **24 of 30 teams changed, by up to 0.17.**
 
+### The column was not being written (found 2026-09-18)
+
+**`services/scraper.js` computed `park_factor_source` and `upsertGame`
+never bound it**, so the marker was NULL on all **296** rows written since
+the cutover. Every non-NULL value in that column came from the one-off
+`scripts/tag-park-factor-regime.js` backfill. The convention had quietly
+replaced the column — the exact substitution this section argues against.
+Fixed by binding it in the INSERT (COALESCE on the conflict path, so a
+writer that does not carry the stamp cannot wipe it), and pinned end to
+end by `scripts/test-park-factor-source-stamp.js`, which writes a row
+through the real prepared statement and reads it back. The 296 unstamped
+rows predate the fix and can only be repaired by backfill: the pull that
+produced each one is no longer recoverable from the row.
+
+### EVERY RE-PULL IS A BOUNDARY, not just the source switch (2026-09-18)
+
+The 2026-08-25 entry treats legacy-vs-Savant as the boundary. It is the
+largest one, not the only one. **A re-pull of the same source moves
+factors too**, and until 2026-09-18 the stamp recorded only the source
+name, which cannot tell two pulls apart:
+
+```
+2026-09-01 re-pull   ARI 1.08->1.06  CWS 0.96->0.98  DET 1.02->1.00
+                     MIN 1.06->1.04  NYM 0.98->0.96  WAS 1.06->1.04
+                     6 parks, 0.02 each, recorded nowhere
+```
+
+Directly observable in `game_log`: those six teams' persisted
+`park_factor` changes mid-season with an identical source string either
+side. The stamp now carries the pull date
+(`baseball_savant_index_runs@2026-09-01`) so the regime is readable from
+the row.
+
+**How much does a re-pull actually move?** Measured 2026-09-18 with
+`node scripts/park-factor-refresh-ab.js`, a 17-day-old table against a
+fresh pull:
+
+```
+input delta      4 of 29 parks moved, all by exactly 0.02 (CHC HOU MIL TEX)
+                 max |d| 0.0200, mean over 29 teams 0.0028
+                 Savant publishes integer index points, so 0.01 is the
+                 resolution floor -- these are two-tick moves
+game-weighted    1189 games re-scored both ways, 179 (15.1%) at a moved park
+                 d model_total  all games: mean +0.0116, median 0.0000
+                                moved parks: mean +0.0769, MEDIAN +0.1538
+accuracy n=1161  MAE -0.0019   RMSE -0.0070   level +0.0116
+```
+
+Two readings, and both matter. In aggregate the refresh is **not
+resolvable** — a d MAE of 0.0019 against a source switch that moved 24 of
+30 parks for d MAE 0.0387, twenty times larger, and the corpus floor is
+above both. Per game at the four moved parks it is **0.15 runs of model
+total**, about a third of the way to the next half-run rung.
+
+So the monthly cadence in `runParkFactorsJobIfStale` (30 days) is
+defensible and a mid-month manual pull is not worth a new regime boundary
+for four parks. **Refresh on the cron, not on the calendar feeling.**
+
 ### It is a column, not a convention
 
 ```sql

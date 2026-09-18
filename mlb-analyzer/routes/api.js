@@ -1472,6 +1472,7 @@ router.post('/games/upsert', requireAdminToken, async (req, res) => {
       home_sp_id: g.home_sp_id != null ? Number(g.home_sp_id) : null,
       market_away_ml: g.market_away_ml, market_home_ml: g.market_home_ml,
       market_total: g.market_total, park_factor: g.park_factor || 1.0,
+      park_factor_source: g.park_factor_source || null,
       model_away_ml: null, model_home_ml: null, model_total: null,
       lineup_source: 'manual',
       venue_id: g.venue_id != null ? g.venue_id : null,
