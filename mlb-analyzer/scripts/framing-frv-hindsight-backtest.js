@@ -65,37 +65,43 @@ const ARGS = parseArgs(process.argv.slice(2));
 const { db, q } = require('../db/schema');
 const model = require('../services/model');
 const jobs  = require('../services/jobs');
-const { normName, stripSfx } = require('../utils/names');
 
 function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 
 // ---------------------------------------------------------------- framing/FRV
-// Duplicated from services/jobs.js processGameSignals (~lines 370-497)
-// because the script can't modify production code and the resolver +
-// per-game computation aren't exported. Kept in sync via comment cross-
-// reference; if production logic changes, mirror here.
-
-function resolveCatcherMlbId(team, lineupName) {
-  if (!team || !lineupName) return null;
-  const norm = stripSfx(normName(lineupName));
-  const parts = norm.split(' ');
-  if (parts.length < 2) return null;
-  const last = parts[parts.length - 1];
-  const firstInit = parts[0][0];
-  let candidates = [];
-  try {
-    const players = q.getPositionPlayers.all(team);
-    for (const p of players) {
-      const pn = stripSfx(normName(p.player_name));
-      const pp = pn.split(' ');
-      if (pp.length < 2) continue;
-      const pLast = pp[pp.length - 1];
-      const pInit = pp[0][0];
-      if (pLast === last && pInit === firstInit) candidates.push(p);
-    }
-  } catch (e) { return null; }
-  return candidates.length === 1 ? candidates[0].mlb_id : null;
-}
+// The resolver is now the SHARED one. (2026-09-18)
+//
+// This file carried its own copy, with the standing note "kept in sync
+// via comment cross-reference; if production logic changes, mirror
+// here." It was not kept in sync, and a cross-reference comment is not a
+// mechanism. Three things had been added to the production resolver and
+// never mirrored:
+//
+//   * team.toUpperCase() -- team_rosters stores UPPERCASE and SQLite '='
+//     is case-sensitive, the root cause of the PIT/SEA/BOS/STL framing
+//     misses (fix/resolver-team-case-and-single-source)
+//   * PASS 1b, the unique-last-name fallback for first-name encoding
+//     mismatches
+//   * PASS 2, the catcher_framing lifeline, and the season-roster
+//     fallback that makes resolveBacktestMlbId a backtest resolver at all
+//
+// MEASURED BEFORE THE SWAP, over every distinct (team, name) fielder and
+// catcher slot in game_log lineups:
+//
+//     slots compared                  667
+//     both resolve, same id           417
+//     both null                        13
+//     SHARED resolves, local null     237   <- gained
+//     local resolves, shared null       0   <- lost
+//     both resolve, DIFFERENT id        0   <- must be 0
+//
+// So 237 of 667 slots -- 36% -- were being dropped silently here while
+// services/frv-backtest.js resolved them, which means this script's
+// framing and FRV inputs were computed over a materially thinner set of
+// fielders than the service that shares its name. Any figure this script
+// published before today was computed on that thinner substrate.
+// Re-run: node scripts/test-normalizer-single-source.js
+const resolveCatcherMlbId = jobs.resolveBacktestMlbId;
 
 // Thin wrapper. The precedence itself lives in utils/framing-rate.js --
 // this existed as FIVE verbatim copies, all carrying the same bug: the

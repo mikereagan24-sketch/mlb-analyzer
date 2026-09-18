@@ -62,38 +62,28 @@ const ARGS = parseArgs(process.argv.slice(2));
 const { db, q } = require('../db/schema');
 const model = require('../services/model');
 const jobs  = require('../services/jobs');
-const { normName, stripSfx } = require('../utils/names');
 
 function tryParse(s) { try { return s ? JSON.parse(s) : null; } catch (e) { return null; } }
 
 // ---------------------------------------------------------------- framing/FRV helpers
-// Replicated from services/jobs.js processGameSignals (~370-497) per
-// the convention established by scripts/framing-frv-hindsight-backtest.js.
-// If processGameSignals' framing/FRV logic changes upstream, mirror here.
+// The resolver is now the SHARED one. (2026-09-18)
 //
-// Case-quirk: team_rosters.team is uppercase; game_id parts are
-// lowercase. q.getPositionPlayers is case-sensitive, so callers must
-// upper-case the team abbr before resolving.
-
-function resolveCatcherMlbId(team, lineupName) {
-  if (!team || !lineupName) return null;
-  const norm = stripSfx(normName(lineupName));
-  const parts = norm.split(' ');
-  if (parts.length < 2) return null;
-  const last = parts[parts.length - 1];
-  const firstInit = parts[0][0];
-  let candidates = [];
-  try {
-    const players = q.getPositionPlayers.all(team);
-    for (const p of players) {
-      const pn = stripSfx(normName(p.player_name));
-      const pp = pn.split(' ');
-      if (pp.length < 2) continue;
-      if (pp[pp.length - 1] === last && pp[0][0] === firstInit) candidates.push(p);
-    }
-  } catch (e) { return null; }
-  return candidates.length === 1 ? candidates[0].mlb_id : null;
-}
+// This was the second verbatim copy, propagated "per the convention
+// established by scripts/framing-frv-hindsight-backtest.js" -- which is
+// how a copy becomes a convention. Both copies missed the same three
+// later production fixes: team.toUpperCase(), PASS 1b's unique-last-name
+// fallback, and PASS 2 plus the season-roster fallback.
+//
+// The case-quirk note that stood here ("callers must upper-case the team
+// abbr before resolving") is no longer the caller's problem: the shared
+// resolver upper-cases internally, which is the whole point of having one
+// defensive boundary instead of a note in each copy.
+//
+// Measured before the swap, over 667 distinct (team, name) lineup slots:
+// 237 gained, 0 lost, 0 resolving to a different id. See the fuller
+// table in framing-frv-hindsight-backtest.js.
+// Re-run: node scripts/test-normalizer-single-source.js
+const resolveCatcherMlbId = jobs.resolveBacktestMlbId;
 
 // Thin wrapper. The precedence itself lives in utils/framing-rate.js --
 // this existed as FIVE verbatim copies, all carrying the same bug: the

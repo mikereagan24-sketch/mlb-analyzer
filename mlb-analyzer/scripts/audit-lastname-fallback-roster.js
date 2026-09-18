@@ -29,8 +29,12 @@ const jobs = require(path.join(R, 'services/jobs'));
 const s = jobs.getSettings();
 
 const DATE = process.argv[2] || '2026-08-30';
-const norm = x => String(x || '').toLowerCase().normalize('NFD')
-  .replace(/[^a-z ]/g, '').replace(/ +/g, ' ').trim();
+// SHARED normalizer (2026-09-18). The copy here was a THIRD variant: it
+// stripped [^a-z ] WITHOUT the NFD decomposition, so an accented name
+// lost the accented letter entirely ("Jose" keeps the e, "José" drops
+// it) rather than folding to its base letter. Strictly worse than the
+// other copies, and in a script auditing name-match fallbacks.
+const { normName: norm } = require('../utils/names');
 const N = (v, d) => (v != null ? Number(v) : d);
 const mk = t => (n, raw) => { try {
   const f = mdl.resolveNeutralizationFactor(t, s, { playerName: n, isPitcher: true });
