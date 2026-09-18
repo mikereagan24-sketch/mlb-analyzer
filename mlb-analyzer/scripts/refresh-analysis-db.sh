@@ -28,10 +28,26 @@
 # They are all dry-run-by-default and idempotent, which is what makes
 # this safe to repeat.
 #
-# THE ADMIN TOKEN IS READ FROM THE ENVIRONMENT, deliberately. The older
-# scripts/../refresh-db.sh has it hardcoded and committed; that is a live
-# credential in version control and should be rotated in the Render
-# dashboard. Do not copy the pattern here.
+# THE ADMIN TOKEN IS READ FROM THE ENVIRONMENT AND NOWHERE ELSE. There is
+# no file fallback, by design: this script never reads a token out of a
+# path, so there is no on-disk copy for it to find.
+#
+# A CORRECTION, because the comment that stood here was wrong and it
+# described a security incident. (2026-09-18) It said the older
+# refresh-db.sh had the token "hardcoded and committed; that is a live
+# credential in version control". Hardcoded, yes. COMMITTED, NO. Verified
+# across the full history rather than asserted:
+#
+#   git log --all --reflog -S<token>        no commits
+#   git log --all -- '*refresh-db.sh'       no commits
+#   git grep <token> $(git rev-list --all)  0 hits over 1,718 commits
+#   3 stashes, 7 tags                       no hits
+#   .gitignore:22                           refresh-db.sh  <- why
+#
+# So the token never reached version control, the repo being public was
+# never the exposure, and rotation is hygiene rather than an incident.
+# The file itself was deleted on 2026-09-18; everything it did, this
+# script does, gzipped and with an integrity check.
 #
 #   export DB_DOWNLOAD_TOKEN=...      # or MLB_ADMIN_TOKEN (older name)
 #   bash scripts/refresh-analysis-db.sh              # download + compare only
@@ -169,9 +185,11 @@ PROMOTE=0
 # ("the value read this morning now returns 401 on every admin endpoint").
 #
 # The deliberate decision being preserved is "READ FROM THE ENVIRONMENT,
-# NEVER HARDCODE" -- the owner's untracked refresh-db.sh carries a literal
-# token, which is the pattern this script exists not to copy. Accepting a
-# second variable name does not weaken that at all.
+# NEVER HARDCODE" -- the owner's untracked refresh-db.sh carried a literal
+# token, which is the pattern this script exists not to copy. That file is
+# gone as of 2026-09-18 (it was gitignored and never committed; see the
+# header for the history sweep that established that). Accepting a second
+# variable name does not weaken the rule at all.
 #
 # DB_DOWNLOAD_TOKEN wins when both are set, because it is the name the
 # server and the API docs use; MLB_ADMIN_TOKEN stays supported so existing
@@ -185,10 +203,26 @@ elif [ -n "${MLB_ADMIN_TOKEN:-}" ]; then
   TOKEN="${MLB_ADMIN_TOKEN}"; TOKEN_VAR="MLB_ADMIN_TOKEN"
 fi
 if [ -z "${TOKEN}" ]; then
-  echo "No admin token in the environment. Export ONE of these first; neither is stored here:" >&2
-  echo "  export DB_DOWNLOAD_TOKEN=...   # the name the server uses (preferred)" >&2
-  echo "  export MLB_ADMIN_TOKEN=...     # older name, still accepted" >&2
+  echo "NO ADMIN TOKEN IN THE ENVIRONMENT." >&2
+  echo "  This script reads \$DB_DOWNLOAD_TOKEN and nothing else -- there is no" >&2
+  echo "  file fallback and no value stored on disk anywhere in this repo." >&2
+  echo "" >&2
+  echo "  export DB_DOWNLOAD_TOKEN=...   # the name the server compares against" >&2
+  echo "  export MLB_ADMIN_TOKEN=...     # older name, still accepted, deprecated" >&2
+  echo "" >&2
+  echo "  The value lives in the Render dashboard (service env var" >&2
+  echo "  DB_DOWNLOAD_TOKEN). Copy it into this shell; do not write it to a file." >&2
   exit 2
+fi
+# DEPRECATION, and it matters most at a rotation. (2026-09-18) A token
+# rotated in Render leaves any MLB_ADMIN_TOKEN still exported in an old
+# shell pointing at the retired value. The script already names which
+# variable it used, so the resulting 401 is diagnosable -- this warning
+# moves it one step earlier, to before the download rather than after.
+if [ -z "${DB_DOWNLOAD_TOKEN:-}" ] && [ -n "${MLB_ADMIN_TOKEN:-}" ]; then
+  echo "NOTE using \$MLB_ADMIN_TOKEN, the deprecated name. The server's variable is" >&2
+  echo "     DB_DOWNLOAD_TOKEN; if this value predates a rotation the download will" >&2
+  echo "     401. Prefer: export DB_DOWNLOAD_TOKEN=..." >&2
 fi
 if [ -n "${DB_DOWNLOAD_TOKEN:-}" ] && [ -n "${MLB_ADMIN_TOKEN:-}" ] \
    && [ "${DB_DOWNLOAD_TOKEN}" != "${MLB_ADMIN_TOKEN}" ]; then

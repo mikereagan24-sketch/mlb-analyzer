@@ -1780,6 +1780,48 @@ be able to take down the thing it observes" — there, a synchronous stringify
 of an 88MB feed OOM-killed a 512MB instance for a capability nothing read.
 Same shape, with the laptop as the instance.
 
+## The admin token lives in the environment and nowhere on disk (2026-09-18)
+
+**`DB_DOWNLOAD_TOKEN` is read from the shell. There is no file fallback,
+no dotfile, and no copy in this repo — and nothing may add one.**
+
+```
+export DB_DOWNLOAD_TOKEN=...            # the name the server compares against
+bash scripts/refresh-analysis-db.sh --promote
+```
+
+The value lives in the Render dashboard as the service env var of the same
+name. `MLB_ADMIN_TOKEN` is still accepted under its old name and now warns
+that it is deprecated — a rotation in Render leaves a stale value in any
+shell that still exports it, and that produces a 401 whose cause is not
+obvious from the error.
+
+`refresh-db.sh` — a three-line curl with a 64-character token **hardcoded**
+— was deleted on 2026-09-18. Everything it did, `refresh-analysis-db.sh`
+does, gzipped (23.6% of the bytes) and integrity-checked before promoting.
+
+**It was never committed, and that was checked rather than assumed.** The
+comment in `refresh-analysis-db.sh` had asserted the opposite — "hardcoded
+and committed; that is a live credential in version control" — which would
+make a public repo an active incident. The sweep:
+
+```
+git log --all --reflog -S<token>          no commits
+git log --all -- '*refresh-db.sh'         no commits
+git grep <token> $(git rev-list --all)    0 hits across 1,718 commits
+3 stashes, 7 tags                         no hits
+.gitignore:22  refresh-db.sh              <- the reason
+```
+
+So rotation is **hygiene, not an incident**. The `.gitignore` entry stays
+even though the file is gone: it is what prevented the leak, and it keeps
+guarding against the file being recreated by muscle memory.
+
+The general rule this instance serves: **a comment asserting a security
+exposure needs the command that establishes it, exactly like a comment
+asserting a fix needs its number.** A false alarm costs a rotation and an
+afternoon; a false all-clear costs more.
+
 ## Other project notes
 
 - **Node version:** better-sqlite3 native binding is compiled for Node 20.
