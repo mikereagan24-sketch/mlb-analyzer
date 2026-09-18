@@ -4,7 +4,9 @@
 // #364 built cleanly on Render and then died at startup, four deploys in a
 // row, with a bare "Exited with status 1". The cause was stream-json 3.6.0
 // and stream-chain 4.2.5 being "type": "module" -- requiring ESM from
-// CommonJS needs Node >= 20.19, and Render pins 20.11.0 via .node-version.
+// CommonJS needs Node >= 20.19, and Render pinned 20.11.0 via .node-version
+// at the time (bumped to 20.20.2 on 2026-09-18 -- see the note on
+// checkDeps opts.target for what that changed about THIS file).
 // stream-chain 4.x also declares engines >= 22 outright.
 //
 // Two things made it invisible:
@@ -101,11 +103,30 @@ function resolvedIsEsm(name) {
   return null;
 }
 
+// opts.target: evaluate against a SPECIFIC deploy target instead of the
+// pinned one — '20.11.0', [20, 11, 0], or {version, source}. Added
+// 2026-09-18 with the bump to 20.20.2, which crossed the 20.19
+// require(ESM) cutoff and so made the checker correctly STOP flagging the
+// #364 shape. Without an override, the only way to test the cutoff is to
+// depend on whatever .node-version happens to say that week, and the two
+// assertions that did exactly that broke on the bump. The behaviour under
+// test is "what does this checker do at a target below the cutoff",
+// which must stay assertable at any pin.
+//
+// Production callers pass nothing and get the pinned target, unchanged.
 function checkDeps(opts) {
   opts = opts || {};
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   const deps = Object.keys(pkg.dependencies || {}).sort();
-  const target = deployTarget();
+  let target = deployTarget();
+  if (opts.target) {
+    const t = opts.target;
+    const version = Array.isArray(t) ? t
+      : (t && t.version) ? t.version
+      : parseVersion(t);
+    if (!version) throw new Error('checkDeps: unparseable opts.target ' + JSON.stringify(t));
+    target = { version, source: (t && t.source) || 'opts.target' };
+  }
   const problems = [];
   const rows = [];
 
@@ -127,9 +148,10 @@ function checkDeps(opts) {
         // "type":"module" ALONE IS NOT THE TEST. A dual package can be
         // type:module and still ship a CommonJS entry through an exports
         // "require" condition -- cheerio and csv-parse both do, and both
-        // run fine on Node 20.11 today. Flagging on type alone produced
-        // exactly those two false positives on the first run of this
-        // check, which would have blocked a deploy for the wrong reason.
+        // ran fine on the 20.11.0 target of the day. Flagging on type
+        // alone produced exactly those two false positives on the first
+        // run of this check, which would have blocked a deploy for the
+        // wrong reason.
         //
         // The real question is what require() actually RESOLVES to, and
         // whether that specific file is ESM. require.resolve honours the
@@ -145,9 +167,12 @@ function checkDeps(opts) {
         //
         // npm treats engines as advisory unless engine-strict is set, so a
         // minor-level miss is usually harmless -- cheerio declares
-        // >=20.18.1 against this 20.11.0 target and runs fine in production
-        // today. Failing on that would block deploys for something that
-        // demonstrably works.
+        // >=20.18.1, which the 20.11.0 target of the day missed at the
+        // minor level while running fine in production. Failing on that
+        // would block deploys for something that demonstrably works.
+        // (At the 20.20.2 target it is satisfied outright, which is why
+        // the test for this branch now pins an explicit target rather
+        // than relying on a live dependency to miss.)
         //
         // A MAJOR-level miss is different: stream-chain 4.x declares >=22
         // against a Node 20 target, and that one really did die. So major
