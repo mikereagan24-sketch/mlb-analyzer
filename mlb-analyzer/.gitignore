@@ -19,6 +19,10 @@ forecasts.csv
 # Additional frv scratch (any extension)
 frv-*.cjs
 frv-*.py
+# refresh-db.sh: DELETED 2026-09-18 (it hardcoded an admin token; everything
+# it did, scripts/refresh-analysis-db.sh does, gzipped and integrity-checked).
+# THE ENTRY STAYS. It is why the token never reached history -- verified over
+# 1,718 commits -- and it keeps guarding against the file being recreated.
 refresh-db.sh
 
 # Scratch analysis dir and one-off diagnostics. These were untracked for
