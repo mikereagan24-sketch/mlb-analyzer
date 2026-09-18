@@ -100,15 +100,91 @@ const sig = db.prepare('SELECT COUNT(*) n, '
   + 'SUM(CASE WHEN closing_line IS NOT NULL THEN 1 ELSE 0 END) cl, '
   + 'SUM(CASE WHEN bet_line IS NOT NULL THEN 1 ELSE 0 END) lg '
   + 'FROM bet_signals WHERE game_date >= ? AND game_date <= ?').get(F0, lastG);
+// Split by signal_type: the CLV prong is ML-only, and pooling the two
+// is what made the retired assertion unreadable.
+const byType = (t) => db.prepare(
+  'SELECT COUNT(*) n, SUM(CASE WHEN closing_line IS NOT NULL THEN 1 ELSE 0 END) cl '
+  + 'FROM bet_signals WHERE signal_type = ? AND game_date >= ? AND game_date <= ?'
+).get(t, F0, lastG);
+const sigMl = byType('ML');
+const sigTot = byType('Total');
+
+// The prong's real precondition: a morning ML capture to enter on and a
+// gametime one to close against, per SCORED GAME -- which is what
+// services/baserunning-backtest.js lookupMorningMlPrices /
+// lookupClosePrice actually query.
+const capRow = db.prepare(
+  'SELECT COUNT(*) scored, '
+  + "  SUM(CASE WHEN EXISTS (SELECT 1 FROM empirical_market_captures c "
+  + "      WHERE c.game_date = g.game_date AND c.game_id = g.game_id "
+  + "        AND c.market_type = 'ml' AND c.capture_track = 'morning') "
+  + '   AND EXISTS (SELECT 1 FROM empirical_market_captures c2 '
+  + "      WHERE c2.game_date = g.game_date AND c2.game_id = g.game_id "
+  + "        AND c2.market_type = 'ml' AND c2.capture_track = 'gametime') "
+  + '   THEN 1 ELSE 0 END) both '
+  + 'FROM game_log g WHERE g.game_date >= ? AND g.game_date <= ? AND g.home_score IS NOT NULL'
+).get(F0, lastG);
+const scored = capRow.scored, bothCaps = capRow.both || 0;
+
 console.log('  live: snapshot days ' + snapDays + ', graded since first snapshot ' + since
   + ', signals ' + sig.n + ' (closing_line ' + sig.cl + ', logged ' + sig.lg + ')');
+console.log('  live: closing_line by type -- ML ' + sigMl.cl + '/' + sigMl.n
+  + ', Total ' + sigTot.cl + '/' + sigTot.n
+  + ' | prong captures (morning+gametime) ' + bothCaps + '/' + scored);
 ok('snapshot-days precondition genuinely met', snapDays >= 60, snapDays + ' >= 60');
 ok('forward-games precondition genuinely met', since >= 500, since + ' >= 500');
 ok('closing-line coverage is broad (context, not the prong population)',
    sig.cl > 5 * sig.lg, sig.cl + ' with a closing line vs ' + sig.lg + ' logged');
-ok('the closing-line capture rate is high enough to build a prong on',
-   sig.n > 0 && sig.cl / sig.n > 0.9,
-   (100 * sig.cl / sig.n).toFixed(1) + '% of emitted signals carry a closing line');
+
+// THE POOLED >90% ASSERTION IS GONE. (2026-09-18)
+//
+// It read:
+//
+//   ok('the closing-line capture rate is high enough to build a prong on',
+//      sig.n > 0 && sig.cl / sig.n > 0.9, ...)
+//
+// and had been failing at 63.5%. It was not a wish about an unreachable
+// number -- it was the WRONG COLUMN, the WRONG POPULATION, and a bar
+// that could only ever be met by counting fabricated data. All three:
+//
+// 1. WRONG COLUMN. The CLV prong never reads bet_signals.closing_line.
+//    services/baserunning-backtest.js takes its prices from
+//    empirical_market_captures (capture_track 'morning' for entry,
+//    'gametime' for the close) with a kalshi_ml_markets_snapshot
+//    fallback. The prong's real input coverage is 1153 of 1155 scored
+//    games in the window -- 99.8% -- asserted directly below.
+//
+// 2. WRONG POPULATION. The prong is ML-only (market_type='ml',
+//    away_price_ml / home_price_ml). The assertion pooled ML with
+//    Totals. Split:
+//
+//        ML     1041/1049   99.2%
+//        Total   202/ 907   22.3%
+//        pooled 1243/1956   63.5%   <- the number it was failing on
+//
+// 3. THE BAR REQUIRED FABRICATED DATA. Totals sit at 22.3% because
+//    scripts/null-fabricated-totals-closing.js NULLs the closing lines
+//    the old GET /backtest manufactured (it assigned
+//    closing_line = market_line on every request). Before that
+//    remediation the pooled rate was ~99.6%, which is where the
+//    registry row's "1,812 of 1,884" and this 90% bar both come from.
+//    Restoring the assertion would mean demanding the fabricated rows
+//    back.
+//
+// What it was trying to guard -- "does the prong have enough closing
+// prices to be worth reading" -- is now asserted on the population the
+// prong actually consumes, plus the ML column at its achievable level.
+// Re-run: node scripts/test-bsr-gate-respec.js
+ok('ML closing-line coverage is high (the prong is ML-only)',
+   sigMl.n > 0 && sigMl.cl / sigMl.n >= 0.95,
+   (100 * sigMl.cl / sigMl.n).toFixed(1) + '% of ' + sigMl.n + ' ML signals'
+   + '   (Totals sit at ' + (100 * sigTot.cl / Math.max(1, sigTot.n)).toFixed(1)
+   + '% by design -- fabricated closing lines are NULLed by remediation)');
+ok('the prong can actually score the window: morning AND close captured',
+   scored > 0 && bothCaps / scored >= 0.95,
+   bothCaps + ' of ' + scored + ' scored games ('
+   + (100 * bothCaps / scored).toFixed(1) + '%) have both a morning and a '
+   + 'gametime ML capture -- the prong\'s real precondition');
 
 // ---- selftest ----------------------------------------------------------
 ok('SELFTEST: the same-side-exclusion check goes red if dropped',
