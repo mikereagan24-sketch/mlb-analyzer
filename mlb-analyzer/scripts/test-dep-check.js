@@ -59,8 +59,9 @@ ok('stream-chain is no longer a dependency', !(pkg.dependencies || {})['stream-c
 // ---- FALSE POSITIVES: type:module with a CJS require condition -------
 // The first version of this checker flagged cheerio and csv-parse purely
 // because they are "type":"module". Both ship a CommonJS entry through an
-// exports "require" condition and run fine on Node 20.11 in production
-// today. Flagging them would have blocked a deploy for the wrong reason.
+// exports "require" condition and ran fine on the Node 20.11.0 target in
+// production. Flagging them would have blocked a deploy for the wrong
+// reason.
 for (const n of ['cheerio', 'csv-parse']) {
   if (!byName[n]) continue;
   ok(n + ' is type:module but resolves to CJS — must NOT be flagged',
@@ -69,11 +70,26 @@ for (const n of ['cheerio', 'csv-parse']) {
 }
 
 // ---- minor-level engines is advisory, not fatal ---------------------
-const ch = byName['cheerio'];
-if (ch && ch.engines) {
-  ok('a minor-level engines miss is an advisory, not a failure',
-     ch.issues.length === 0 && (ch.advisories || []).length > 0,
-     ch.engines + ' vs target ' + (t ? t.version.join('.') : '?'));
+// PINNED TO AN EXPLICIT TARGET 2026-09-18. This used to read the live
+// pin and assert that cheerio (engines >=20.18.1) produced an advisory.
+// That held only while the pin sat BELOW 20.18.1; the bump to 20.20.2
+// satisfies it outright, and the assertion failed for the one reason a
+// test must not fail -- the thing it describes stopped being reachable
+// through the door it was looking at. The BEHAVIOUR is what matters, so
+// evaluate it at a target where a minor-level miss exists.
+{
+  const at2011 = checkDeps({ target: '20.11.0' });
+  const ch = Object.fromEntries(at2011.deps.map(d => [d.name, d]))['cheerio'];
+  if (ch && ch.engines) {
+    ok('a minor-level engines miss is an advisory, not a failure',
+       ch.issues.length === 0 && (ch.advisories || []).length > 0,
+       ch.engines + ' vs an explicit 20.11.0 target');
+  }
+  const chLive = byName['cheerio'];
+  ok('and at the CURRENT pin that same dep is clean, not advisory',
+     !chLive || !chLive.engines || (chLive.advisories || []).length === 0,
+     (chLive && chLive.engines ? chLive.engines : '-') + ' vs target '
+       + (t ? t.version.join('.') : '?'));
 }
 
 // ---- DETECTOR SELFTEST ----------------------------------------------
@@ -93,17 +109,46 @@ try {
   const pkg = JSON.parse(orig);
   pkg.dependencies['__depcheck_probe__'] = '1.0.0';
   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-  let probe;
-  try { probe = checkDeps(); } finally { fs.writeFileSync(pkgPath, orig); }
+  // THE CUTOFF IS NOW TESTED FROM BOTH SIDES. (2026-09-18)
+  //
+  // #364's ESM hazard is a property of a target BELOW 20.19, so it is
+  // asserted at an explicit 20.11.0 -- the pin that actually shipped the
+  // outage -- and not at whatever .node-version says today. The bump to
+  // 20.20.2 crossed the cutoff, which made the old form of this
+  // assertion fail while the checker was behaving correctly.
+  //
+  // The second probe is the half that keeps the first honest: at the
+  // CURRENT pin the ESM hazard must NOT fire. If it does, either the pin
+  // regressed below 20.19 or the cutoff logic is wrong, and both are
+  // worth a red test.
+  let probeOld, probeLive;
+  try {
+    probeOld  = checkDeps({ target: '20.11.0' });
+    probeLive = checkDeps();
+  } finally { fs.writeFileSync(pkgPath, orig); }
 
-  const p = probe.deps.find(d => d.name === '__depcheck_probe__');
+  const p = probeOld.deps.find(d => d.name === '__depcheck_probe__');
   ok('DETECTOR SELFTEST: an ESM-only dep with engines>=22 IS flagged',
      !!p && p.issues.length > 0, p ? p.issues.join(' | ') : 'probe not evaluated');
-  ok('DETECTOR SELFTEST: it names the ESM require hazard',
-     !!p && p.issues.some(i => i.indexOf('cannot require() ESM') !== -1));
+  ok('DETECTOR SELFTEST: at a 20.11.0 target it names the ESM require hazard',
+     !!p && p.issues.some(i => i.indexOf('cannot require() ESM') !== -1),
+     'the #364 shape, at the pin that shipped #364');
   ok('DETECTOR SELFTEST: it names the engines major mismatch',
      !!p && p.issues.some(i => i.indexOf('MAJOR level') !== -1));
-  ok('DETECTOR SELFTEST: the whole run reports FAILED', probe.problems.length > 0);
+  ok('DETECTOR SELFTEST: the whole run reports FAILED', probeOld.problems.length > 0);
+
+  const pl = probeLive.deps.find(d => d.name === '__depcheck_probe__');
+  const pinClearsCutoff = !!t && (t.version[0] > 20
+    || (t.version[0] === 20 && (t.version[1] > 19
+        || (t.version[1] === 19 && t.version[2] >= 0))));
+  ok('DETECTOR SELFTEST: at the CURRENT pin the ESM hazard is correctly silent',
+     !pinClearsCutoff
+       || (!!pl && !pl.issues.some(i => i.indexOf('cannot require() ESM') !== -1)),
+     'pin ' + (t ? t.version.join('.') : '?') + ' is '
+       + (pinClearsCutoff ? 'at or past' : 'below') + ' the 20.19 require(ESM) cutoff');
+  ok('DETECTOR SELFTEST: the engines>=22 miss still fails at the current pin',
+     !!pl && pl.issues.some(i => i.indexOf('MAJOR level') !== -1),
+     'a major-level miss is fatal at any v20 target -- the bump must not have softened that');
 } finally {
   try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {}
 }

@@ -6,9 +6,9 @@
 // #364 built cleanly on Render and then died at startup four times in a
 // row with a bare "Exited with status 1" -- stream-json 3.6.0 and
 // stream-chain 4.2.5 are ESM, and requiring ESM from CommonJS needs Node
-// >= 20.19 while .node-version pins 20.11.0. A top-level require that
-// throws kills the process before any of our logging runs, so the deploy
-// log named nothing.
+// >= 20.19 while .node-version pinned 20.11.0 at the time (20.20.2 since
+// 2026-09-18). A top-level require that throws kills the process before
+// any of our logging runs, so the deploy log named nothing.
 //
 // This runs before the app's own requires and reports every offending
 // module by name, with the reason, then rethrows. The deploy still fails --
@@ -207,6 +207,31 @@ app.use('/api', require('./routes/api'));
 // when only one source covered.
 app.get('/health', (req, res) => {
   const out = { status: 'ok', time: new Date().toISOString() };
+  // THE DEPLOY TARGET WAS A CLAIM NOBODY COULD CHECK. (2026-09-18)
+  //
+  // .node-version says what Render SHOULD run, utils/dep-check evaluates
+  // every dependency against that number, and nothing anywhere reported
+  // what Render ACTUALLY runs. #364's lesson was "checking a require
+  // against some Node 20 is not the same as checking it against the Node
+  // the platform will run" -- and the check inherited exactly that gap
+  // one level up: if the platform ignores the pin, or the pin is bumped
+  // without a redeploy, every dependency verdict is computed against a
+  // version that is not in production and nothing says so.
+  //
+  // runtime vs pinned, on the live box. They must match after a deploy;
+  // if they do not, the pre-flight is answering the wrong question.
+  try {
+    const { deployTarget } = require('./utils/dep-check');
+    const t = deployTarget();
+    out.node = {
+      runtime: process.versions.node,
+      pinned: t ? t.version.join('.') : null,
+      pin_source: t ? t.source : null,
+      matches_pin: !!t && t.version.join('.') === process.versions.node,
+    };
+  } catch (e) {
+    out.node = { runtime: process.versions.node, error: String(e && e.message) };
+  }
   try {
     const { q, db } = require('./db/schema');
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });

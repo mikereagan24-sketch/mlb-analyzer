@@ -11,7 +11,10 @@
  *
  * WHY IT EXISTS. #364 added stream-json 3.6.0 and stream-chain 4.2.5. Both
  * are "type": "module"; stream-chain 4.x declares engines >= 22. Requiring
- * ESM from CommonJS needs Node >= 20.19, and Render pins Node 20.11.0.
+ * ESM from CommonJS needs Node >= 20.19, and Render pinned Node 20.11.0 at
+ * the time. The pin moved to 20.20.2 on 2026-09-18, matching local, so the
+ * runtime/target gap below is now closed -- /health reports both so the
+ * match is verifiable on the live box rather than assumed.
  * The build succeeded, the process died at startup with a bare "Exited with
  * status 1", and production sat on the previous deploy for four attempts.
  *
