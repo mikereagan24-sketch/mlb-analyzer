@@ -961,6 +961,16 @@ const GATES = [
         + 'marginal rows inside the harness bet sets: 87 of 425 on that run (47 without-only, 40 with-only, 0 '
         + 'flips). Separately, 1,812 of 1,884 emitted bet_signals in the window carry a closing line -- that is a '
         + 'fact about coverage, not the prong s population, and an earlier draft of this row confused the two.\n'
+        + 'AMENDED 2026-09-18 -- THAT 1,812 COUNTED FABRICATED ROWS. Re-measured on the remediated copy the '
+        + 'window reads 1,243 of 1,956 (63.5%), and the drop is not decay: scripts/null-fabricated-totals-closing.js '
+        + 'NULLs the totals closing lines the old GET /backtest manufactured (it assigned closing_line = market_line '
+        + 'on every request). Split by type the picture is clean -- ML 1,041/1,049 (99.2%), Total 202/907 (22.3%), '
+        + 'and 99.6% pooled if the fabricated totals rows are counted back in, which is where 1,812/1,884 came from. '
+        + 'The CLV prong is unaffected either way: it is ML-only and reads empirical_market_captures, not this '
+        + 'column, and 1,143 of 1,145 scored games in the window carry both a morning and a gametime ML capture. '
+        + 'A pooled >90% assertion in scripts/test-bsr-gate-respec.js was failing on this and has been replaced by '
+        + 'the ML-only and capture-coverage forms; see that file for why re-pinning the pooled number would have '
+        + 'meant asking for the fabricated rows back.\n'
         + 'See docs/bsr-gate-status-2026-08-23.md for the original measurement.' },
 
   { id: 'bullpen_w_proj_w_act', key: 'bullpen_w_proj', numeric: true,
