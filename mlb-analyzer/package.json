@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node --max-old-space-size=384 server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "test": "node scripts/run-tests.js"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
