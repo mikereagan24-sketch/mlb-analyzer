@@ -112,7 +112,11 @@ function resolveParkFactor(team, gameDate, parkFactorsMap) {
   if (hit) return { pf: hit.pf, source: 'venue_override' };
   const v = parkFactorsMap && parkFactorsMap[team];
   if (v != null && isFinite(v) && v > 0) {
-    return { pf: v, source: require('./park-factors').SOURCE_NAME };
+    // The stamp carries the PULL DATE, not just the source name
+    // (2026-09-18). Two pulls of the same source produce different
+    // factors -- 2026-09-01 moved six parks by 0.02 with no record --
+    // so a bare source name cannot tell two regimes apart.
+    return { pf: v, source: require('./park-factors').sourceStamp() };
   }
   // NO SILENT 1.0. A missing team used to fall through to the neutral park,
   // a plausible-looking number nothing downstream could distinguish from
@@ -425,6 +429,8 @@ function parseLineupsHtml(html, dateStr) {
       console.log('[scraper] RotoWire doubleheader leg ' + occ + ' for ' + baseGameId + ' → ' + gameId);
     }
 
+    const pfResolved = resolveParkFactor(homeTeam, dateStr, PARK_FACTORS);
+
     games.push({
       game_id: gameId,
       away_team: awayTeam,
@@ -443,8 +449,14 @@ function parseLineupsHtml(html, dateStr) {
       // first; falls back to PARK_FACTORS[homeTeam] || 1.0. dateStr
       // is the parseLineupsHtml date arg in scope here. See
       // VENUE_OVERRIDES at module top for the full mechanism.
-      park_factor: resolveParkFactor(homeTeam, dateStr, PARK_FACTORS).pf,
-      park_factor_source: resolveParkFactor(homeTeam, dateStr, PARK_FACTORS).source,
+      //
+      // Called ONCE per game and destructured (2026-09-18). It used to be
+      // called twice, once per field; harmless when both branches were
+      // pure, but the source stamp now reads the park_factors table, so a
+      // second call was a second query per game for a value that cannot
+      // differ between them.
+      park_factor: pfResolved.pf,
+      park_factor_source: pfResolved.source,
       away_lineup: parsePlayers('is-visit'),
       home_lineup: parsePlayers('is-home'),
     });

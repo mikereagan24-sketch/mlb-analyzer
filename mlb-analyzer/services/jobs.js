@@ -2162,6 +2162,10 @@ async function ensureScheduleBootstrap(dateStr) {
       market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
       market_total:   existingRow ? existingRow.market_total : null,
       park_factor:    existingRow ? existingRow.park_factor : 1.0,
+      // Carries the row's existing stamp rather than minting one: this
+      // pass copies a factor, it does not resolve one. COALESCE on the
+      // conflict path means null here preserves what is stored anyway.
+      park_factor_source: existingRow ? existingRow.park_factor_source : null,
       model_away_ml:  existingRow ? existingRow.model_away_ml : null,
       model_home_ml:  existingRow ? existingRow.model_home_ml : null,
       model_total:    existingRow ? existingRow.model_total : null,
@@ -2281,6 +2285,7 @@ async function runLineupJob(dateStr) {
           market_home_ml: existingRow ? (existingRow.market_home_ml || null) : null,
           market_total:   existingRow ? existingRow.market_total : null,
           park_factor:    existingRow ? existingRow.park_factor : 1.0,
+          park_factor_source: existingRow ? existingRow.park_factor_source : null,
           model_away_ml:  existingRow ? existingRow.model_away_ml : null,
           model_home_ml:  existingRow ? existingRow.model_home_ml : null,
           model_total:    existingRow ? existingRow.model_total : null,
@@ -3008,6 +3013,9 @@ async function runLineupJob(dateStr) {
       market_home_ml: existingRow ? (existingRow.market_home_ml||null) : null, // ML only from Odds API
       market_total:   existingRow ? existingRow.market_total   : g.market_total,
       park_factor: g.park_factor || 1.0,
+      // The scraper resolved this alongside the factor; see
+      // services/park-factors.js sourceStamp for why it carries a date.
+      park_factor_source: g.park_factor_source || null,
         model_away_ml: existingRow ? existingRow.model_away_ml : null,
         model_home_ml: existingRow ? existingRow.model_home_ml : null,
         model_total:   existingRow ? existingRow.model_total   : null,
