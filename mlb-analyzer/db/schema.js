@@ -1408,6 +1408,42 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN kalshi_anchor_total REAL"); } cat
 // keep their existing semantics (NULL opener_name = "don't touch the
 // SP slot"); new rows can optionally pin a name.
 try { db.exec("ALTER TABLE opener_override ADD COLUMN opener_name TEXT"); } catch(e) {}
+// THE OVERRIDE CARRIES THE IDENTITY, NOT JUST THE NAME. (2026-09-19)
+//
+// opener_override is the ONLY manual pitcher edit that survives a
+// lineup refresh: runLineupJob deletes every unplayed row for the date
+// (services/jobs.js ~2230 and ~2414) and re-inserts from the feeds, and
+// detectOpeners re-reads this table on every pass and wins outright.
+// The card's free-text SP edit did NOT survive, because it was a direct
+// UPDATE on game_log with nothing to replay it from.
+//
+// So the roster picker writes HERE, and these columns carry what a
+// dropdown selection actually knows:
+//   opener_name_id / bulk_guy_id   -- MLBAM id, so the join key is real
+//                                     rather than a name to re-resolve
+//   opener_name_hand / bulk_guy_hand -- pitchHand from team_rosters,
+//                                     replacing the operator's separate
+//                                     R/L guess
+//   pick_source                    -- 'active_roster' | 'season_roster'
+//                                     | 'free_text'
+//   off_roster                     -- 1 when the name came from the
+//                                     free-text escape hatch, i.e. no
+//                                     roster row backs it and the id is
+//                                     NULL. Rendered as a loud badge on
+//                                     the card; never silently accepted.
+//
+// Why an escape hatch at all: measured over 688 SP slots 2026-08-20..
+// 09-14, matching on stripSfx(normName()), 6.1% of real starters were
+// absent from the ACTIVE 26-man (IL/optioned/same-day callup) and 0.1%
+// (1 of 688, SD/Joe Musgrove) were absent from active UNION season. A
+// dropdown alone cannot represent that last case.
+// Re-run: node scripts/test-pitcher-picker.js --coverage
+try { db.exec("ALTER TABLE opener_override ADD COLUMN opener_name_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE opener_override ADD COLUMN opener_name_hand TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE opener_override ADD COLUMN bulk_guy_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE opener_override ADD COLUMN bulk_guy_hand TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE opener_override ADD COLUMN pick_source TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE opener_override ADD COLUMN off_roster INTEGER DEFAULT 0"); } catch(e) {}
 // Soft-delete columns for the auto-prune path. fetchSchedule sets these
 // when a previously-bootstrapped row's game_pk disappears from statsapi
 // (cancellation, postponement to a different date, doubleheader
@@ -1459,6 +1495,29 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away TEXT"); } catch(e) 
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) {}
 // RotoWire's PRIM-tagged announced bulk pitcher. High-confidence signal
 // preferred over identifyBulkGuy's historical-pattern scoring.
+// THE BULK PITCHER GETS AN IDENTITY TOO. (2026-09-19)
+//
+// bulk_guy_{side} was a bare name, so every consumer re-derived an id
+// from it -- services/jobs.js detectOpeners resolveMlbId does exactly
+// that to compute {side}_bulk_forecast_ip, and services/model.js
+// buildOpenerOpts (~line 1028) carried the comment "Bulk-guy hand isn't
+// carried on game_log; fallback default 'R'". So the bulk slot was
+// priced against a HARDCODED RIGHT HAND on every opener game.
+//
+// Measured coverage for the picker that fills these (2026-09-19,
+// data/mlb.db, team_rosters refreshed 2026-09-14): 419 pitchers across
+// 30 teams, 13-14 per team, 100% mlb_id and 100% hand. Re-run:
+// node scripts/test-pitcher-picker.js
+//
+// bulk_guy_{side}_hand is WRITTEN BUT NOT READ by this PR. model.js
+// keeps its 'R' default, so pricing is byte-identical on landing; the
+// hand is stored so the model change can be measured on its own against
+// prod-shaped rows rather than riding in on a UI PR. Same staging the
+// forecast_ip columns above used ("Diagnostic only in this PR").
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_hand TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_hand TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_announced TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_announced TEXT"); } catch(e) {}
 // Tandem subtype (feat/sp-sp-tandem-forecast-split, 2026-07-04). Set by
@@ -3242,6 +3301,38 @@ q.listFieldingFrv = db.prepare("SELECT mlb_id,name,total_runs,outs_total,positio
 // matching since SQLite LIKE won't fold accents reliably.
 q.getPositionPlayers = db.prepare("SELECT player_name, mlb_id, position FROM team_rosters WHERE team=? AND role='POS'");
 
+// THE PITCHER PICKER'S SOURCE. (2026-09-19)
+//
+// The counterpart to getPositionPlayers, feeding the card's pitcher
+// dropdown (opener slot AND bulk slot) instead of a free-text box.
+// role IN ('SP','RP','CL') -- 'CL' is included because
+// services/fangraphs-roles.js can promote a closer out of 'RP', and a
+// hand-maintained role list that silently drops an unrecognised value
+// is the failure this repo has hit three times (see CLAUDE.md
+// "a guard that fails open is not a guard").
+//
+// Two tiers, because the ACTIVE 26-man is not the whole truth.
+// Measured over 688 SP slots 2026-08-20..09-14, matched on
+// stripSfx(normName()):
+//     absent from ACTIVE roster          42 / 688  = 6.1%
+//     absent from ACTIVE UNION SEASON     1 / 688  = 0.1%
+// So the active tier alone would refuse a legitimate starter about once
+// per 16 slots -- IL returns, option recalls, same-day callups. The
+// season tier (team_rosters_season, which deliberately keeps IL'd and
+// traded players) closes all but one, and the free-text escape hatch in
+// the UI covers that one with off_roster=1.
+// Re-run: node scripts/test-pitcher-picker.js --coverage
+q.getTeamPitchers = db.prepare(
+  "SELECT player_name, mlb_id, hand, role FROM team_rosters " +
+  "WHERE team=? AND role IN ('SP','RP','CL') " +
+  "ORDER BY CASE role WHEN 'SP' THEN 0 WHEN 'CL' THEN 1 ELSE 2 END, player_name"
+);
+q.getTeamPitchersSeason = db.prepare(
+  "SELECT player_name, mlb_id, hand, role FROM team_rosters_season " +
+  "WHERE team=? AND role IN ('SP','RP','CL') " +
+  "ORDER BY CASE role WHEN 'SP' THEN 0 WHEN 'CL' THEN 1 ELSE 2 END, player_name"
+);
+
 // pitcher_fg_role + pitcher_role_override prepared statements.
 // source is now an explicit bind param (was hardcoded 'fangraphs' when the
 // dead server-side scraper was the only writer). The FG Daily Sync
@@ -3281,12 +3372,37 @@ q.setWobaOverride = db.prepare(
 q.deleteWobaOverride = db.prepare("DELETE FROM pitcher_woba_override WHERE player_name=? AND vs_hand=?");
 q.listWobaOverrides  = db.prepare("SELECT * FROM pitcher_woba_override ORDER BY set_at DESC");
 
+// NAMED parameters, not positional. (2026-09-19)
+//
+// This grew from 9 columns to 15 with the roster picker, and the #407
+// incident was a payload that omitted a key: better-sqlite3 throws
+// "Missing named parameter bulk_guy_id" on a named statement, which is
+// loud, whereas one missing POSITIONAL argument silently shifts every
+// value after it -- a hand into planned_batters and an id into set_by.
+// Six hand-maintained slots is where that stops being hypothetical.
+//
+// Overwrite, not COALESCE, on every column: clearing a bulk pitcher has
+// to be expressible. The PARTIAL-update merge (edit the bulk slot
+// without wiping a pinned opener_name) lives in the route handler,
+// which reads the current row and fills the fields the body omitted --
+// see routes/api.js POST /opener-override. Keeping the merge out of the
+// SQL is what makes it testable.
 q.setOpenerOverride = db.prepare(
-  "INSERT INTO opener_override (game_date, game_id, side, is_opener, bulk_guy, opener_name, planned_batters, set_at, set_by, reason) " +
-  "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?) " +
+  "INSERT INTO opener_override (game_date, game_id, side, is_opener, " +
+  "  bulk_guy, bulk_guy_id, bulk_guy_hand, " +
+  "  opener_name, opener_name_id, opener_name_hand, " +
+  "  pick_source, off_roster, planned_batters, set_at, set_by, reason) " +
+  "VALUES (@game_date, @game_id, @side, @is_opener, " +
+  "  @bulk_guy, @bulk_guy_id, @bulk_guy_hand, " +
+  "  @opener_name, @opener_name_id, @opener_name_hand, " +
+  "  @pick_source, @off_roster, @planned_batters, datetime('now'), @set_by, @reason) " +
   "ON CONFLICT(game_date, game_id, side) DO UPDATE SET " +
-  "  is_opener=excluded.is_opener, bulk_guy=excluded.bulk_guy, " +
-  "  opener_name=excluded.opener_name, " +
+  "  is_opener=excluded.is_opener, " +
+  "  bulk_guy=excluded.bulk_guy, bulk_guy_id=excluded.bulk_guy_id, " +
+  "  bulk_guy_hand=excluded.bulk_guy_hand, " +
+  "  opener_name=excluded.opener_name, opener_name_id=excluded.opener_name_id, " +
+  "  opener_name_hand=excluded.opener_name_hand, " +
+  "  pick_source=excluded.pick_source, off_roster=excluded.off_roster, " +
   "  planned_batters=excluded.planned_batters, set_at=excluded.set_at, " +
   "  set_by=excluded.set_by, reason=excluded.reason"
 );

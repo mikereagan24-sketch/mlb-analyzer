@@ -3551,11 +3551,11 @@ function injectEditButtons(games, date) {
 
     var ba = document.createElement('button');
     ba.className = 'edit-btn'; ba.title = 'Edit away SP'; ba.textContent = '✎';
-    ba.onclick = function(){ showSPEdit(g.game_id, date, 'away', g.away_sp, g.away_sp_hand, 'spe-'+g.game_id+'-away'); };
+    ba.onclick = function(){ showPitcherEdit(g.game_id, date, 'away', 'sp'); };
 
     var bh = document.createElement('button');
     bh.className = 'edit-btn'; bh.title = 'Edit home SP'; bh.textContent = '✎';
-    bh.onclick = function(){ showSPEdit(g.game_id, date, 'home', g.home_sp, g.home_sp_hand, 'spe-'+g.game_id+'-home'); };
+    bh.onclick = function(){ showPitcherEdit(g.game_id, date, 'home', 'sp'); };
 
     var spans = gsp.querySelectorAll('.lu-confirmed,.lu-projected');
     if (spans.length >= 1) spans[0].after(ba); else gsp.prepend(ba);
@@ -3584,31 +3584,40 @@ function injectEditButtons(games, date) {
       b.className = 'opener-badge';
       b.style.cssText = 'display:inline-block;margin-left:6px;padding:2px 6px;background:#ffe082;color:#5d4037;border-radius:8px;font-size:11px;font-weight:600;line-height:1.4;';
       b.textContent = 'Opener: ' + (openerName || '?') + ' → ' + trailer;
-      if (!bulk) {
-        var setBtn = document.createElement('button');
-        setBtn.textContent = 'Set';
-        setBtn.title = 'Identify the bulk-guy for this opener';
-        setBtn.style.cssText = 'margin-left:4px;font-size:10px;padding:1px 6px;cursor:pointer;border:1px solid #5d4037;background:#fff8e1;border-radius:4px;';
-        setBtn.onclick = function() {
-          var name = prompt('Bulk-guy name for ' + g.game_id + ' (' + side + ' side):');
-          if (!name) return;
-          // Routed through api() (was bare fetch) so the 2026-08-02 admin
-          // token gate on /opener-override picks up X-Admin-Token from
-          // localStorage. Same functional flow.
-          api('/opener-override', {
-            method: 'POST',
-            body: JSON.stringify({
-              game_date: date, game_id: g.game_id, side: side,
-              is_opener: 1, bulk_guy: name.trim(), planned_batters: 4,
-              set_by: 'ui', reason: 'manual bulk-guy ID',
-            })
-          }).then(function(){
-            if (typeof loadGamesFromDB === 'function') loadGamesFromDB();
-            else location.reload();
-          });
+      // THE BULK PITCHER IS EDITABLE, not just settable-when-empty.
+      // (feat/roster-pitcher-picker, 2026-09-19)
+      //
+      // This button used to render only inside `if (!bulk)` and open a
+      // prompt() for a typed name. That made a MISSING bulk fixable and a
+      // WRONG one unreachable -- and detection fills the bulk on almost
+      // every opener side (222 of 228 on the local corpus), so the
+      // control was hidden exactly when it was needed. Now it is always
+      // present and opens the same roster picker the SP slot uses.
+      var editBulk = document.createElement('button');
+      editBulk.textContent = bulk ? '✎' : 'Set';
+      editBulk.title = bulk
+        ? 'Change the bulk pitcher for this opener game'
+        : 'Identify the bulk pitcher for this opener game';
+      editBulk.style.cssText = 'margin-left:4px;font-size:10px;padding:1px 6px;cursor:pointer;border:1px solid #5d4037;background:#fff8e1;border-radius:4px;';
+      (function(gid, dt, sd){
+        editBulk.onclick = function(e){
+          e.stopPropagation();
+          showPitcherEdit(gid, dt, sd, 'bulk');
         };
-        b.appendChild(document.createTextNode(' '));
-        b.appendChild(setBtn);
+      })(g.game_id, date, side);
+      b.appendChild(document.createTextNode(' '));
+      b.appendChild(editBulk);
+      // OFF-ROSTER warning. A name with no MLBAM id behind it is matched
+      // by the name resolver alone, so it is the one case where the
+      // displayed pitcher may not be the priced one. Loud, same amber
+      // reasoning as the override badges.
+      var offAway = g.opener_off_roster_away, offHome = g.opener_off_roster_home;
+      if (side === 'away' ? offAway : offHome) {
+        var ow = document.createElement('span');
+        ow.style.cssText = 'margin-left:4px;padding:1px 4px;background:#c62828;color:#fff;border-radius:6px;font-size:10px;font-weight:700;';
+        ow.textContent = 'OFF-ROSTER';
+        ow.title = 'This pitcher was entered by hand and is not on the roster — no MLBAM id, matched by name only.';
+        b.appendChild(ow);
       }
       return b;
     };
@@ -3723,58 +3732,257 @@ function injectEditButtons(games, date) {
     }
   });
 }
-function showSPEdit(gameId, date, side) {
-  var rowId = 'sp-erow-'+side+'-'+gameId;
+// ── Pitcher picker (feat/roster-pitcher-picker, 2026-09-19) ──────────
+//
+// Replaces the free-text SP box + separate R/L selector with a dropdown
+// of that team's pitchers from team_rosters. A selection carries the
+// NAME, the MLBAM ID and the HAND together, because the roster row holds
+// all three -- the operator was previously retyping one and guessing
+// another while the id was silently left pointing at the pitcher being
+// replaced.
+//
+// Two slots, one control:
+//   slot 'sp'   -- away_sp / home_sp. On an opener game this IS the
+//                  opener, which is what the ✎ has always edited.
+//   slot 'bulk' -- bulk_guy_{side}. Previously reachable ONLY through a
+//                  prompt() that rendered when the bulk was UNKNOWN, so
+//                  a WRONG auto-detected bulk had no control at all
+//                  (222 of 228 opener sides on the local corpus).
+//
+// Both save through POST /opener-override, not the lineup PATCH, because
+// that table is the only manual pitcher edit that SURVIVES a lineup
+// refresh: runLineupJob deletes every unplayed row for the date and
+// re-inserts from the feeds, and detectOpeners re-reads opener_override
+// on every pass and wins outright.
+//
+// Escape hatch: the last option is "off roster / not listed", which
+// reveals a free-text name + an explicit R/L/S select and posts
+// off_roster:1 with a null id. Measured need: 1 of 688 SP slots
+// (2026-08-20..09-14) was absent from active UNION season rosters, and
+// 6.1% were absent from the active 26-man alone -- so the dropdown
+// offers both tiers and the escape hatch covers the remainder rather
+// than refusing a pitcher who is really starting.
+var _pitcherCache = {};
+async function _fetchPitchers(team) {
+  var k = (team || '').toUpperCase();
+  if (_pitcherCache[k]) return _pitcherCache[k];
+  try {
+    var r = await fetch('/api/pitchers/' + encodeURIComponent(k));
+    if (!r.ok) throw new Error('pitchers HTTP ' + r.status);
+    var rows = await r.json();
+    _pitcherCache[k] = Array.isArray(rows) ? rows : [];
+    return _pitcherCache[k];
+  } catch (e) {
+    console.warn('[pitcher-picker] fetch failed for', k, e && e.message);
+    return [];
+  }
+}
+
+var OFF_ROSTER_VALUE = '__off_roster__';
+
+function showPitcherEdit(gameId, date, side, slot) {
+  slot = slot === 'bulk' ? 'bulk' : 'sp';
+  var rowId = 'sp-erow-' + slot + '-' + side + '-' + gameId;
   var existing = document.getElementById(rowId);
   if (existing) { existing.remove(); return; }
-  var card = document.getElementById('gc-'+gameId);
+  var card = document.getElementById('gc-' + gameId);
   if (!card) return;
-  fetch('/api/games/'+date+'?t='+Date.now()).then(function(r){return r.json();}).then(function(games){
-    var g = games.find(function(x){return x.game_id===gameId;});
+  fetch('/api/games/' + date + '?t=' + Date.now()).then(function(r){return r.json();}).then(async function(games){
+    var g = games.find(function(x){ return x.game_id === gameId; });
     if (!g) return;
-    var name = side==='away' ? (g.away_sp||'') : (g.home_sp||'');
-    var hand = side==='away' ? (g.away_sp_hand||'R') : (g.home_sp_hand||'R');
-    // Build row using DOM — no innerHTML with onclick strings
+    var team = side === 'away' ? g.away_team : g.home_team;
+    var current = slot === 'bulk'
+      ? (side === 'away' ? (g.bulk_guy_away || '') : (g.bulk_guy_home || ''))
+      : (side === 'away' ? (g.away_sp || '')       : (g.home_sp || ''));
+    var pitchers = await _fetchPitchers(team);
+
     var row = document.createElement('div');
     row.id = rowId; row.className = 'sp-edit-row';
-    var inp = document.createElement('input');
-    inp.id = 'spi-'+rowId; inp.value = name; inp.placeholder = 'SP name';
+
+    var label = document.createElement('span');
+    label.style.cssText = 'font-size:11px;color:var(--text2);margin-right:6px;';
+    label.textContent = (slot === 'bulk' ? 'Bulk' : 'SP') + ' · ' + (team || side) + ':';
+    row.appendChild(label);
+
     var sel = document.createElement('select');
-    sel.id = 'sph-'+rowId;
-    ['R','L','S'].forEach(function(v){
+    sel.id = 'spsel-' + rowId;
+    sel.style.cssText = 'min-width:190px;';
+    var blank = document.createElement('option');
+    blank.value = ''; blank.textContent = slot === 'bulk' ? '— no bulk pitcher —' : '— unset —';
+    sel.appendChild(blank);
+
+    // Name match is normalized-ish on the client: the stored value may be
+    // "F. Valdez" from statsapi while the roster row is "Framber Valdez",
+    // so a strict equality preselect would silently show "unset" for a
+    // pitcher who is in fact listed. Exact first, then last name +
+    // first initial -- the same two passes the server-side resolver uses.
+    var norm = function(n) {
+      return (n || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[.,']/g, '').replace(/\s+(jr|sr|ii|iii|iv)$/,'').trim();
+    };
+    var abbrKey = function(n) {
+      var a = norm(n).split(' ');
+      return a.length >= 2 ? a[0][0] + ' ' + a[a.length - 1] : norm(n);
+    };
+    var mkOption = function(pr) {
       var o = document.createElement('option');
-      o.value = v; o.textContent = v;
-      if (v===hand) o.selected = true;
-      sel.appendChild(o);
+      o.value = String(pr.mlb_id);
+      o.textContent = pr.player_name + ' (' + pr.hand + ') · ' + pr.role;
+      o.dataset.name = pr.player_name;
+      o.dataset.hand = pr.hand;
+      o.dataset.tier = pr.tier;
+      if (current && (norm(pr.player_name) === norm(current)
+                      || abbrKey(pr.player_name) === abbrKey(current))) o.selected = true;
+      return o;
+    };
+    var active = pitchers.filter(function(pr){ return pr.tier === 'active'; });
+    var season = pitchers.filter(function(pr){ return pr.tier === 'season'; });
+    active.forEach(function(pr){ sel.appendChild(mkOption(pr)); });
+    if (season.length) {
+      var og = document.createElement('optgroup');
+      og.label = 'Not on the active roster (IL / optioned / traded)';
+      season.forEach(function(pr){ og.appendChild(mkOption(pr)); });
+      sel.appendChild(og);
+    }
+    var offOpt = document.createElement('option');
+    offOpt.value = OFF_ROSTER_VALUE;
+    offOpt.textContent = '⚠ off roster / not listed — type a name';
+    sel.appendChild(offOpt);
+    row.appendChild(sel);
+
+    if (!pitchers.length) {
+      var warn = document.createElement('span');
+      warn.style.cssText = 'font-size:11px;color:#c62828;margin-left:6px;';
+      warn.textContent = 'no roster for ' + (team || '?') + ' — use "off roster"';
+      row.appendChild(warn);
+    }
+
+    // Escape-hatch inputs: hidden until the off-roster option is chosen.
+    // The R/L/S select exists ONLY here -- a roster pick never needs it.
+    var freeWrap = document.createElement('span');
+    freeWrap.id = 'spfree-' + rowId;
+    freeWrap.hidden = true;
+    freeWrap.style.cssText = 'margin-left:6px;';
+    var freeInp = document.createElement('input');
+    freeInp.id = 'spfreename-' + rowId;
+    freeInp.placeholder = 'off-roster pitcher name';
+    freeInp.style.cssText = 'min-width:150px;';
+    var freeHand = document.createElement('select');
+    freeHand.id = 'spfreehand-' + rowId;
+    ['R','L','S'].forEach(function(v){
+      var o = document.createElement('option'); o.value = v; o.textContent = v;
+      freeHand.appendChild(o);
     });
+    var freeNote = document.createElement('span');
+    freeNote.style.cssText = 'font-size:10px;color:#8d6e63;margin-left:4px;';
+    freeNote.textContent = 'flagged OFF-ROSTER; no id, name-resolved';
+    freeWrap.appendChild(freeInp); freeWrap.appendChild(freeHand); freeWrap.appendChild(freeNote);
+    row.appendChild(freeWrap);
+
+    sel.addEventListener('change', function(){
+      var off = sel.value === OFF_ROSTER_VALUE;
+      freeWrap.hidden = !off;
+      if (off) freeInp.focus();
+    });
+
     var saveBtn = document.createElement('button');
     saveBtn.className = 'sp-save-btn'; saveBtn.textContent = 'Save';
-    (function(gid,dt,sd,rid){saveBtn.addEventListener('click',function(){saveSP(gid,dt,sd,rid);});})(gameId,date,side,rowId);
+    (function(gid,dt,sd,sl,rid){
+      saveBtn.addEventListener('click', function(){ savePitcherEdit(gid,dt,sd,sl,rid); });
+    })(gameId, date, side, slot, rowId);
     var cancelBtn = document.createElement('button');
     cancelBtn.className = 'sp-cancel-btn'; cancelBtn.textContent = 'Cancel';
-    (function(rid){cancelBtn.addEventListener('click',function(){var el=document.getElementById(rid);if(el)el.remove();});})(rowId);
-    row.appendChild(inp); row.appendChild(sel); row.appendChild(saveBtn); row.appendChild(cancelBtn);
+    (function(rid){
+      cancelBtn.addEventListener('click', function(){
+        var el = document.getElementById(rid); if (el) el.remove();
+      });
+    })(rowId);
+    row.appendChild(saveBtn); row.appendChild(cancelBtn);
+
     card.querySelector('.gsp').after(row);
-    inp.focus(); inp.select();
+    sel.focus();
   });
 }
-async function saveSP(gameId, date, side, rowId) {
-  var name = (document.getElementById('spi-'+rowId)||{}).value||'';
-  var hand = (document.getElementById('sph-'+rowId)||{}).value||'R';
-  name = name.trim();
-  if (!name) return;
-  var body = {}; body[side+'_sp']=name; body[side+'_sp_hand']=hand;
-  // Routed through api() (was bare fetch) so the 2026-08-02 admin
-  // token gate on the lineup PATCH picks up X-Admin-Token from
-  // localStorage.
+
+// Back-compat shim: showSPEdit was the entry point before the picker and
+// injectEditButtons passed it (name, hand) that the roster now supplies.
+// Kept so any other caller keeps working; both args are ignored.
+function showSPEdit(gameId, date, side) {
+  return showPitcherEdit(gameId, date, side, 'sp');
+}
+
+async function savePitcherEdit(gameId, date, side, slot, rowId) {
+  var sel = document.getElementById('spsel-' + rowId);
+  if (!sel) return;
+  var isBulk = slot === 'bulk';
+  var nameKey = isBulk ? 'bulk_guy'      : 'opener_name';
+  var idKey   = isBulk ? 'bulk_guy_id'   : 'opener_name_id';
+  var handKey = isBulk ? 'bulk_guy_hand' : 'opener_name_hand';
+
+  var body = { game_date: date, game_id: gameId, side: side, set_by: 'ui' };
+  if (sel.value === OFF_ROSTER_VALUE) {
+    var nm = ((document.getElementById('spfreename-' + rowId) || {}).value || '').trim();
+    if (!nm) { alert('Type the off-roster pitcher name, or pick one from the list.'); return; }
+    if (!confirm('"' + nm + '" is not on ' + (side === 'away' ? 'the away' : 'the home')
+                 + " team's roster.\n\nIt will be saved with NO MLBAM id (matched by name"
+                 + ' only) and flagged OFF-ROSTER on the card. Continue?')) return;
+    body[nameKey] = nm;
+    body[idKey] = null;
+    body[handKey] = (document.getElementById('spfreehand-' + rowId) || {}).value || 'R';
+    body.off_roster = 1;
+    body.pick_source = 'free_text';
+    body.reason = 'manual ' + slot + ' pick (off roster)';
+  } else if (sel.value === '') {
+    // Explicit clear. Only meaningful for the bulk slot -- clearing the
+    // SP would leave the row with no starter, which the feeds own.
+    if (!isBulk) { alert('Pick a pitcher. The SP slot cannot be cleared from here.'); return; }
+    body[nameKey] = null;
+    body[idKey] = null;
+    body[handKey] = null;
+    body.pick_source = null;
+    body.off_roster = 0;
+    body.reason = 'manual bulk clear';
+  } else {
+    var opt = sel.options[sel.selectedIndex];
+    body[nameKey] = opt.dataset.name;
+    body[idKey] = Number(sel.value);
+    body[handKey] = opt.dataset.hand;
+    body.pick_source = opt.dataset.tier === 'season' ? 'season_roster' : 'active_roster';
+    body.off_roster = 0;
+    body.reason = 'manual ' + slot + ' pick (' + body.pick_source + ')';
+  }
+
+  // is_opener is required by the endpoint and never inherited. Editing
+  // the BULK slot asserts this is an opener game (that is what a bulk
+  // pitcher means); editing the SP slot must not silently flip a
+  // standard game into opener mode, so it carries the row's current
+  // flag.
+  if (isBulk && body[nameKey]) {
+    body.is_opener = 1;
+    if (body.planned_batters === undefined) body.planned_batters = 4;
+  } else {
+    var games = [];
+    try { games = await (await fetch('/api/games/' + date + '?t=' + Date.now())).json(); } catch (e) {}
+    var g = (games || []).find(function(x){ return x.game_id === gameId; }) || {};
+    body.is_opener = (side === 'away' ? g.is_opener_game_away : g.is_opener_game_home) ? 1 : 0;
+  }
+
+  // Routed through api() so the 2026-08-02 admin token gate on
+  // /opener-override picks up X-Admin-Token from localStorage.
   var r;
   try {
-    r = await api('/games/'+date+'/'+gameId+'/lineup',{
-      method:'PATCH',body:JSON.stringify(body)
-    });
+    r = await api('/opener-override', { method: 'POST', body: JSON.stringify(body) });
   } catch (e) { alert('Save failed: ' + (e.message || e)); return; }
-  if (r.success) { var el=document.getElementById(rowId); if(el) el.remove(); loadGamesFromDB(); }
-  else alert('Save failed: '+r.error);
+  if (!r || !r.success) { alert('Save failed: ' + ((r && r.error) || 'unknown')); return; }
+  // repriced:false means the override landed but the model did not
+  // re-run. Say so -- silence here would read as "priced with the new
+  // pitcher" when it is still the old number.
+  if (r.repriced === false) {
+    alert('Saved, but the model did NOT re-run (' + (r.reprice_error || 'unknown')
+          + ').\nHit ⟳ Rerun Model before betting this game.');
+  }
+  var el = document.getElementById(rowId); if (el) el.remove();
+  loadGamesFromDB();
 }
 
 // Lineup edit modal state + roster cache
