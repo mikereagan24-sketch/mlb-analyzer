@@ -1499,21 +1499,38 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home TEXT"); } catch(e) 
 //
 // bulk_guy_{side} was a bare name, so every consumer re-derived an id
 // from it -- services/jobs.js detectOpeners resolveMlbId does exactly
-// that to compute {side}_bulk_forecast_ip, and services/model.js
-// buildOpenerOpts (~line 1028) carried the comment "Bulk-guy hand isn't
-// carried on game_log; fallback default 'R'". So the bulk slot was
-// priced against a HARDCODED RIGHT HAND on every opener game.
+// that to compute {side}_bulk_forecast_ip.
 //
 // Measured coverage for the picker that fills these (2026-09-19,
 // data/mlb.db, team_rosters refreshed 2026-09-14): 419 pitchers across
 // 30 teams, 13-14 per team, 100% mlb_id and 100% hand. Re-run:
 // node scripts/test-pitcher-picker.js
 //
-// bulk_guy_{side}_hand is WRITTEN BUT NOT READ by this PR. model.js
-// keeps its 'R' default, so pricing is byte-identical on landing; the
-// hand is stored so the model change can be measured on its own against
-// prod-shaped rows rather than riding in on a UI PR. Same staging the
-// forecast_ip columns above used ("Diagnostic only in this PR").
+// RETRACTION (2026-09-19). This comment previously ended: "So the bulk
+// slot was priced against a HARDCODED RIGHT HAND on every opener game."
+// THAT WAS WRONG, and it was wrong in the direction that schedules
+// work -- it was read as a live pricing defect and a follow-up
+// measurement was opened against it.
+//
+// The 'R' literal at services/model.js buildOpenerOpts is real and is
+// INERT. Inside getPitcherWoba the hand argument selects only the
+// per-hand DEFAULT, applied via `?? d.vsLHB` -- consulted solely when
+// the split is missing from the wOBA index. Real bulk pitchers are in
+// the index, and on the one branch where the default would be read
+// (source === 'fallback') buildOpenerOpts overwrites both splits with
+// UNKNOWN_PITCHER_WOBA anyway.
+//
+// Correcting the hand on every side where it is genuinely wrong moves
+// the consumed bulk wOBA on 0 of 222 opener sides -- and the premise
+// checks out, so this is not "the hand happened to be R": 49 of those
+// 222 sides (22.1%) have a genuinely LEFT-handed bulk.
+// Re-run: node --max-old-space-size=1536 scripts/probe-bulk-hand-channel.js
+// Full finding: docs/bulk-hand-measured-inert-2026-09-19.md
+//
+// So bulk_guy_{side}_hand is CAPTURED FOR FUTURE USE, NOT READ. Zero
+// consumers across services/ routes/ utils/ db/. Keep it: the per-slot
+// hand work (docs/per-slot-pitcher-hand-open-question-2026-09-19.md)
+// is the thing that would need it, and that is registered-not-built.
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_home_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bulk_guy_away_hand TEXT"); } catch(e) {}

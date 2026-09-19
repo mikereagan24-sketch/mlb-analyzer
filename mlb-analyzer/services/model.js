@@ -1026,6 +1026,25 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     // Bulk-guy hand isn't carried on game_log; fallback default 'R' is
     // only used when the wOBA index misses entirely (in which case we
     // overwrite both vsLHB/vsRHB with UNKNOWN_PITCHER_WOBA below).
+    //
+    // DO NOT "FIX" THIS BY PASSING game_log.bulk_guy_{side}_hand.
+    // (measured 2026-09-19)
+    //
+    // That column exists (#424) and is tempting. Passing it here moves
+    // the consumed bulk wOBA on 0 of 222 opener sides, because of the
+    // two sentences above: found-in-index means the hand-selected
+    // default is never read, and index-miss means it is overwritten on
+    // the next line. Not an accident of the data either -- 49 of the
+    // 222 sides (22.1%) have a genuinely left-handed bulk.
+    //
+    // The real gap is one level up: perBatterEW takes ONE pitcherHand
+    // for the whole game (the opener's), so the bulk's handedness never
+    // reaches effHand() or the vsStart/vsOpp platoon selection at all.
+    // 149 of 217 sides have opener hand != bulk hand. That is a hot-path
+    // change, registered and deliberately NOT built:
+    //   docs/per-slot-pitcher-hand-open-question-2026-09-19.md
+    //   docs/bulk-hand-measured-inert-2026-09-19.md
+    // Re-run: node --max-old-space-size=1536 scripts/probe-bulk-hand-channel.js
     const bulkW = getPitcherWoba(wobaIdx, bulkSp, 'R', team, W_PROJ, W_ACT, MIN_BF, settings);
     let bulkVsL = bulkW.vsLHB;
     let bulkVsR = bulkW.vsRHB;
