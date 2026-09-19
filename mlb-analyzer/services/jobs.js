@@ -2806,9 +2806,21 @@ async function runLineupJob(dateStr) {
         const _ovHome = q.getOpenerOverride.get(dateStr, gameId, 'home');
         const _awaySpPinned = !!(_ovAway && _ovAway.opener_name);
         const _homeSpPinned = !!(_ovHome && _ovHome.opener_name);
+        // The pinned id/hand (feat/roster-pitcher-picker, 2026-09-19).
+        // The comment above says the override "doesn't carry hand info"
+        // -- it does now, when the operator picked from the roster
+        // dropdown, so the hand is asserted instead of deferred and the
+        // id is passed into upsertGame where the away_sp_id CASE's
+        // "supplied id wins" branch takes it. Both stay NULL on the
+        // free-text escape hatch, which restores exactly the previous
+        // behaviour for that case: COALESCE keeps the stored hand, and
+        // the changed name clears the stale id.
+        const _pinHandOf = (v) => (v === 'L' || v === 'R' || v === 'S') ? v : null;
+        let writeAwaySpId = null, writeHomeSpId = null;
         if (_awaySpPinned) {
           writeAwaySp = _ovAway.opener_name;
-          writeAwayHand = null;
+          writeAwayHand = _pinHandOf(_ovAway.opener_name_hand);
+          writeAwaySpId = _ovAway.opener_name_id != null ? _ovAway.opener_name_id : null;
           console.log('[lineups] ' + gameId + '/away: SP pinned by opener_override'
             + " (opener_name='" + _ovAway.opener_name + "')"
             + (rwAwaySp && rwAwaySp !== _ovAway.opener_name
@@ -2817,7 +2829,8 @@ async function runLineupJob(dateStr) {
         }
         if (_homeSpPinned) {
           writeHomeSp = _ovHome.opener_name;
-          writeHomeHand = null;
+          writeHomeHand = _pinHandOf(_ovHome.opener_name_hand);
+          writeHomeSpId = _ovHome.opener_name_id != null ? _ovHome.opener_name_id : null;
           console.log('[lineups] ' + gameId + '/home: SP pinned by opener_override'
             + " (opener_name='" + _ovHome.opener_name + "')"
             + (rwHomeSp && rwHomeSp !== _ovHome.opener_name
@@ -2905,8 +2918,11 @@ async function runLineupJob(dateStr) {
         // parameter away_sp_id" on every lineup pull from the #407 deploy
         // (2026-09-15 01:30Z) -- 0/15 lineups on 09-15, weather wiped on 09-16.
         // Re-run: node scripts/test-game-log-sp-id.js
-        away_sp_id: null,
-        home_sp_id: null,
+        // ... except when an opener_override pinned a ROSTER pick, whose
+        // id is authoritative and takes the CASE's "supplied id wins"
+        // branch. Null on every other path, pinned-free-text included.
+        away_sp_id: writeAwaySpId,
+        home_sp_id: writeHomeSpId,
         // Per-source SP capture: RotoWire writes its RAW value (rwAwaySp /
         // rwHomeSp), independent of the Option-B precedence merge above
         // that may have rejected it in favor of statsapi for away_sp /
@@ -6771,7 +6787,13 @@ async function detectOpeners(dateStr) {
     if (out.source === 'fallback') return null;
     return out.forecast;
   };
-  const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters, tandemSubtype) => {
+  // Team for a (date, gameId, side), used to resolve a bulk pitcher's id
+  // on the auto-detection path where the caller has no team in hand.
+  const _teamFor = (date, gameId, side) => {
+    const r = q.getGameById ? q.getGameById.get(date, gameId) : null;
+    return r ? (side === 'away' ? r.away_team : r.home_team) : null;
+  };
+  const writeDetection = (date, gameId, side, isOpener, bulkGuy, plannedBatters, tandemSubtype, bulkId, bulkHand) => {
     // side comes from a closed { 'away', 'home' } enum below — safe to
     // splice into the column name. NEVER widen this to user input.
     //
@@ -6794,15 +6816,40 @@ async function detectOpeners(dateStr) {
       ? (bulkGuy ? 'opener' : 'bullpen_game')
       : 'standard';
     const subtypeCol = 'tandem_subtype_' + side;
+    // bulk_guy_{side}_id / _hand travel with the name.
+    // (feat/roster-pitcher-picker, 2026-09-19)
+    //
+    // bulkId/bulkHand are the picker's values when a manual override
+    // supplied them; on the auto-detection path they are undefined and
+    // we resolve the id through the SAME resolveMlbId the forecast
+    // already uses, so the stored id and the forecast's id can never
+    // disagree. Hand is left NULL on the auto path -- resolveMlbId gives
+    // an id, not a handedness, and inventing one would be worse than the
+    // null (services/model.js still defaults the bulk hand to 'R'; that
+    // is the next PR, measured on its own).
+    //
+    // Written unconditionally so a cleared bulk clears its id and hand
+    // too. An id that outlives its name is the defect the game_log SP
+    // columns already guard against (db/schema.js ~2470).
+    const _bulkId = (bulkId !== undefined)
+      ? bulkId
+      : (bulkGuy ? resolveMlbId(side === 'away' ? _teamFor(date, gameId, 'away')
+                                                : _teamFor(date, gameId, 'home'), bulkGuy) : null);
+    const _bulkHand = (bulkHand !== undefined) ? bulkHand : null;
     const sql = "UPDATE game_log SET "
       + "is_opener_game_" + side + " = ?, "
       + "bulk_guy_" + side + " = ?, "
+      + "bulk_guy_" + side + "_id = ?, "
+      + "bulk_guy_" + side + "_hand = ?, "
       + "opener_planned_batters_" + side + " = ?, "
       + "game_type_" + side + " = ?, "
       + subtypeCol + " = ?, "
       + "opener_detected_at = datetime('now') "
       + "WHERE game_date = ? AND game_id = ?";
-    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy, plannedBatters, gameType,
+    db.prepare(sql).run(isOpener ? 1 : 0, bulkGuy,
+      bulkGuy ? (_bulkId != null ? _bulkId : null) : null,
+      bulkGuy ? (_bulkHand || null) : null,
+      plannedBatters, gameType,
       tandemSubtype != null ? tandemSubtype : null, date, gameId);
 
     // After writing detection state, refresh the role-specific forecast
@@ -6856,20 +6903,54 @@ async function detectOpeners(dateStr) {
         // durability guard. Until that lands, the override only sticks
         // until the next lineup-job pass touches this row.
         if (ov.opener_name && typeof ov.opener_name === 'string') {
+          // THE ID AND HAND GO WITH IT. (feat/roster-pitcher-picker,
+          // 2026-09-19)
+          //
+          // This UPDATE used to write the name alone, so a pinned
+          // pitcher inherited whatever away_sp_id the feed had left for
+          // the pitcher he replaced -- the same defect the upsert's
+          // away_sp_id CASE exists to prevent (db/schema.js ~2470),
+          // reached by a path that never touches the upsert.
+          //
+          // opener_name_id is non-null whenever the operator picked from
+          // the roster dropdown, and NULL on the free-text escape hatch
+          // (off_roster=1) -- in which case the id is CLEARED, not
+          // inherited, and the #406 name resolver takes over. Hand comes
+          // from team_rosters.hand, which is why the R/L selector is
+          // gone from the card.
+          const _pinId = ov.opener_name_id != null ? ov.opener_name_id : null;
+          const _pinHand = (ov.opener_name_hand === 'L' || ov.opener_name_hand === 'R'
+                            || ov.opener_name_hand === 'S') ? ov.opener_name_hand : null;
           db.prepare(
             "UPDATE game_log SET "
-              + (side === 'away' ? 'away_sp' : 'home_sp') + " = ? "
+              + (side === 'away' ? 'away_sp' : 'home_sp') + " = ?, "
+              + (side === 'away' ? 'away_sp_id' : 'home_sp_id') + " = ?, "
+              + (side === 'away' ? 'away_sp_hand' : 'home_sp_hand') + " = COALESCE(?, "
+              + (side === 'away' ? 'away_sp_hand' : 'home_sp_hand') + ") "
             + "WHERE game_date=? AND game_id=?"
-          ).run(ov.opener_name, dateStr, g.game_id);
+          ).run(ov.opener_name, _pinId, _pinHand, dateStr, g.game_id);
           console.log('[opener-detect] ' + g.game_id + '/' + side
             + ': override pinned opener_name=\'' + ov.opener_name + '\''
+            + ' id=' + (_pinId != null ? _pinId : 'null')
+            + (ov.off_roster ? ' OFF-ROSTER' : '')
             + ' (replaced ' + (sp || 'null') + ')');
         }
         writeDetection(
           dateStr, g.game_id, side,
           !!ov.is_opener,
           ov.bulk_guy || null,
-          ov.planned_batters != null ? ov.planned_batters : null
+          ov.planned_batters != null ? ov.planned_batters : null,
+          undefined,
+          // undefined, NOT null, when a pre-picker override carries a
+          // bulk name with no id: undefined means "resolve it by name
+          // like the auto path does", null means "there deliberately is
+          // no id". Only off_roster=1 asserts the latter. The 3 legacy
+          // rows written by the old prompt() have no id and are not
+          // off-roster, so passing null here would have made an override
+          // strictly worse than no override at all.
+          ov.bulk_guy_id != null ? ov.bulk_guy_id : (ov.off_roster ? null : undefined),
+          (ov.bulk_guy_hand === 'L' || ov.bulk_guy_hand === 'R' || ov.bulk_guy_hand === 'S')
+            ? ov.bulk_guy_hand : null
         );
         if (ov.is_opener) {
           detectedCount++;
@@ -7036,9 +7117,14 @@ async function detectOpeners(dateStr) {
         const _spNorm   = sp ? stripSfx(normName(sp)) : null;
         const _bulkNorm = stripSfx(normName(announcedBulk));
         if (_spNorm && _bulkNorm && _spNorm === _bulkNorm) {
+          // away_sp_id nulled with the name (2026-09-19). The name and
+          // hand were already cleared here; the id was not, so the row
+          // ended up with no starter and a live join key pointing at the
+          // pitcher who had just been reclassified as the bulk.
           db.prepare(
             "UPDATE game_log SET "
               + (side === 'away' ? 'away_sp' : 'home_sp') + " = NULL, "
+              + (side === 'away' ? 'away_sp_id' : 'home_sp_id') + " = NULL, "
               + (side === 'away' ? 'away_sp_hand' : 'home_sp_hand') + " = NULL "
             + "WHERE game_date=? AND game_id=?"
           ).run(dateStr, g.game_id);
