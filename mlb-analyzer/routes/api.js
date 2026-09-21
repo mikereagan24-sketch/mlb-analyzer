@@ -5509,9 +5509,85 @@ router.post('/replay/scores', requireAdminToken, async (req, res) => {
   }
 });
 
+// Recent cron rows. (filters added 2026-09-21)
+//
+// WHY: this was `LIMIT 20` with no parameters, which is the whole of what
+// production exposes about its own jobs without a DB download. Twenty
+// rows is roughly half a morning, so the 5:30AM PT FG sync -- the one
+// that writes pitcher_batted_ball_snapshot -- has already fallen off the
+// end by mid-morning. Three separate questions this week ("did the
+// batted-ball snapshot take a live row", "what do the odds passes report
+// for anchors", "did the weather job run before the lineup job") each
+// needed a full refresh-analysis-db.sh run to answer something the
+// server already knew.
+//
+// GATING. The no-parameter call is UNCHANGED and stays open: it is what
+// the cron panel in public/index.html renders, and gating it would break
+// that panel for anyone whose admin token is not in localStorage. Asking
+// for MORE than the default window requires the token. So the publicly
+// reachable surface is exactly what it was, and the operator gets the
+// rest. That split is why this is not simply `requireAdminToken` on the
+// whole route.
+//
+// ZONE, because this schema mixes them: `ran_at` is UTC (SQL
+// datetime('now')), `run_date` is the PT slate date the job was working
+// on. They are NOT the same day for evening passes -- an 8PM PT pull for
+// tomorrow's slate has a `ran_at` of the next UTC day. `from`/`to`
+// filter `run_date`, which is the one a human means by "that day's
+// games"; use `job_type` + `limit` when you want recency instead.
+const CRON_LOG_DEFAULT_LIMIT = 20;
+const CRON_LOG_MAX_LIMIT = 500;
 router.get('/cron-log', (req, res) => {
-  const rows = q.getRecentCronLogs.all();
-  res.json(rows);
+  const qs = req.query || {};
+  const FILTER_KEYS = ['limit', 'job_type', 'status', 'from', 'to'];
+  const asked = FILTER_KEYS.filter(k => qs[k] !== undefined);
+
+  // Unfiltered = the historical behaviour, byte for byte.
+  if (asked.length === 0) return res.json(q.getRecentCronLogs.all());
+
+  // Anything beyond it is admin-gated. requireAdminToken is middleware,
+  // so it is invoked directly here rather than mounted on the route.
+  return requireAdminToken(req, res, () => {
+    try {
+      let limit = CRON_LOG_DEFAULT_LIMIT;
+      if (qs.limit !== undefined) {
+        if (!/^\d{1,5}$/.test(String(qs.limit))) {
+          return res.status(400).json({ error: 'limit must be a positive integer' });
+        }
+        limit = Number(qs.limit);
+        if (limit < 1) return res.status(400).json({ error: 'limit must be >= 1' });
+        // Capped rather than rejected: a caller asking for everything gets
+        // the most it can have, and is told so in the response.
+        limit = Math.min(limit, CRON_LOG_MAX_LIMIT);
+      }
+      const where = [], vals = [];
+      // job_type and status are BOUND, never matched against a
+      // hand-maintained list. A list would have to decide what an
+      // unrecognised value means, and the answer that keeps being wrong
+      // in this repo is "ignore it and return everything". Bound, an
+      // unknown job_type returns zero rows, which is the honest answer.
+      if (qs.job_type !== undefined) { where.push('job_type = ?'); vals.push(String(qs.job_type)); }
+      if (qs.status !== undefined) { where.push('status = ?'); vals.push(String(qs.status)); }
+      for (const [k, op] of [['from', '>='], ['to', '<=']]) {
+        if (qs[k] === undefined) continue;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(qs[k]))) {
+          return res.status(400).json({ error: k + ' must be YYYY-MM-DD' });
+        }
+        where.push('run_date ' + op + ' ?');
+        vals.push(String(qs[k]));
+      }
+      const sql = 'SELECT * FROM cron_log'
+        + (where.length ? ' WHERE ' + where.join(' AND ') : '')
+        + ' ORDER BY ran_at DESC LIMIT ?';
+      const rows = db.prepare(sql).all(...vals, limit);
+      res.set('X-Cron-Log-Limit', String(limit));
+      res.set('X-Cron-Log-Capped', rows.length >= limit ? '1' : '0');
+      res.json(rows);
+    } catch (e) {
+      console.error('[cron-log] query failed:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
 });
 
 router.get('/settings', (req, res) => {
