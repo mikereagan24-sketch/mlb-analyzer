@@ -4645,12 +4645,39 @@ function startCronJobs() {
   cron.schedule('0 7 * * *', async () => {
     const d = todayStr();
     console.log('[cron] 7AM PT morning refresh for ' + d);
-    try { await runOddsJob(d); }
-    catch(e) { console.error('[cron-refresh] odds failed:', e && e.message); }
-    try { await runWeatherJob(d); }
-    catch(e) { console.error('[cron-refresh] weather failed:', e && e.message); }
+    // ORDER: lineups -> weather -> odds. (2026-09-21)
+    //
+    // This chain used to run odds -> weather -> lineups, which fetched
+    // weather and then re-pulled lineups on top of it. Before #426 that
+    // discarded the weather outright (the lineup job deleted and
+    // re-inserted the row); it no longer does, but the order is still
+    // wrong for a reason that survives that fix:
+    //
+    //   runWeatherJob iterates q.getGamesByDate.all(date) -- it can
+    //   only fetch for rows that already exist. The lineup job is what
+    //   CREATES the slate, via its statsapi bootstrap. Running weather
+    //   first therefore fetches for whatever slate was already there
+    //   and silently misses every game this pass is about to add -- on
+    //   a fresh date, all of them. That is the load-bearing half.
+    //
+    //   Odds last is weaker and is consistency, not a proven data
+    //   dependency: runOddsJob does NOT iterate the slate. It walks the
+    //   odds feed ("oddsRaw is authoritative for which games exist")
+    //   and resolves each game with q.getGameById, so it attaches to
+    //   rows rather than enumerating them. Placing it after the slate
+    //   is settled still avoids a lookup miss on a game the bootstrap
+    //   is about to add.
+    //
+    // This is the same order runMorningCaptureJob uses (~line 6464) and
+    // the one its own comment documents. Pinned by
+    // scripts/test-cron-chain-order.js so the next chain cannot be
+    // pasted in the old order.
     try { await runLineupJob(d); }
     catch(e) { console.error('[cron-refresh] lineups failed:', e && e.message); }
+    try { await runWeatherJob(d); }
+    catch(e) { console.error('[cron-refresh] weather failed:', e && e.message); }
+    try { await runOddsJob(d); }
+    catch(e) { console.error('[cron-refresh] odds failed:', e && e.message); }
     // Final rerun of every game on the slate (mirrors POST /games/:date/rerun).
     try {
       const games = q.getGamesByDate.all(d);
@@ -4704,9 +4731,16 @@ function startCronJobs() {
       // tick -- the second odds pass is what carried the peak from ~400MB
       // to 485MB. The capture itself is not skipped, only its duplicate
       // invocation from this context.
-      const oddsR    = await runOddsJob(d, { skipChainedMorningCapture: true });
-      const weatherR = await runWeatherJob(d);
+      // ORDER: lineups -> weather -> odds, same reasoning as the 7AM
+      // chain above -- runWeatherJob iterates q.getGamesByDate.all(date)
+      // and the lineup job is what creates that row set. For a TOMORROW
+      // slate this is the sharper case:
+      // on the 8PM pass the date is frequently not bootstrapped at all
+      // yet, so the old order ran weather and odds against an empty
+      // slate and only the next pass picked the games up.
       const lineupR  = await runLineupJob(d);
+      const weatherR = await runWeatherJob(d);
+      const oddsR    = await runOddsJob(d, { skipChainedMorningCapture: true });
       console.log('[cron-prefetch] ' + d
         + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
         + ', weather updated ' + ((weatherR && weatherR.updated) || 0)
@@ -4728,8 +4762,19 @@ function startCronJobs() {
       // This slot also collides with the 11PM PT lineup pull, which fires
       // from its own cron at the same minute, so it is the worst place to
       // be running a second odds pass.
-      const oddsR    = await runOddsJob(d, { skipChainedMorningCapture: true });
+      //
+      // ORDER: weather -> odds. This block deliberately runs NO lineup
+      // pull (see the comment above the cron: RotoWire rarely has new
+      // info between 8PM and 11PM and the 8PM pass already bootstrapped
+      // the schedule), so the lineups-first defect does not apply here.
+      // The two are reordered only to keep the relative order the same
+      // as every other chain -- neither reads the other's output, so
+      // this is consistency, not a behaviour change. The 11PM lineup
+      // pull that collides here is runLineupJob(todayStr()), a
+      // DIFFERENT date from this block's tomorrowStr(), so it cannot
+      // touch these rows.
       const weatherR = await runWeatherJob(d);
+      const oddsR    = await runOddsJob(d, { skipChainedMorningCapture: true });
       console.log('[cron-prefetch-refresh] ' + d
         + ': odds updated ' + ((oddsR && oddsR.updated) || 0)
         + ', weather updated ' + ((weatherR && weatherR.updated) || 0));
