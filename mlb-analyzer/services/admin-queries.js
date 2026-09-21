@@ -308,6 +308,153 @@ const QUERIES = [
     ],
     bindOrder: ['task', 'task', 'limit'],
   },
+
+  // ==================== totals anchor path ====================
+  //
+  // The question these exist for (#413/#414, docs/kalshi-totals-*):
+  // does a DAY slate reach the Poly totals path through a different
+  // anchor than an EVENING slate? If day games fall to
+  // liquidity_fallback because the 8AM PT pass runs before Kalshi has
+  // posted, a ~9:30AM PT pass is worth adding. If the persisted anchor
+  // already carries them, it is not.
+  //
+  // Both read the counts runOddsJob now logs:
+  //
+  //   [poly totals by anchor: kalshi pass=A persisted=B liquidity_fallback=C;
+  //    kalshi totals rung: persisted=D auto=E]
+  //
+  // so the measurement is one call rather than message parsing in a
+  // throwaway script. Rows written before #414 carry no anchor block
+  // and are EXCLUDED by the instr() guards rather than counted as
+  // zeros -- a missing instrument must not read as a measured zero.
+  //
+  // TWO ZONES, and this is the part that will bite a reader: cron_log
+  // .ran_at is UTC (SQL datetime('now')), while run_date is the PT
+  // slate date the pass was working on. They are different days for
+  // evening passes -- an 8PM PT pull for tomorrow carries a ran_at on
+  // the next UTC day. So `from`/`to` filter run_date (the slate), and
+  // ran_at_pt is derived for display.
+  //
+  // The -7 hours is PDT. Correct for the entire regular season; it
+  // would be -8 after the 2026-11-02 DST end, which no regular-season
+  // slate reaches. Stated because a silent 1-hour shift would move
+  // passes across the cutoff.
+  {
+    name: 'odds-anchor-split',
+    description: 'Poly totals anchor path and Kalshi rung source, summed per (slate type, '
+      + 'PT pass hour). slate_type is "day" when the slate contains at least one game '
+      + 'starting before cutoff_hour PT (default 16, i.e. ~4PM), "evening" otherwise, and '
+      + '"unknown" when no game on that date carries scheduled_start_utc -- reported rather '
+      + 'than folded into either bucket. day_games/total_games are carried through so a MIXED '
+      + 'slate is visible instead of hidden behind the label. Excludes pre-#414 rows that '
+      + 'carry no anchor block, so an uninstrumented pass never reads as a measured zero.',
+    sql:
+      'WITH p AS ('
+      + '  SELECT id, run_date, ran_at, status,'
+      + "         substr(message, instr(message,'by anchor:') + 10) AS rest"
+      + '  FROM cron_log'
+      + "  WHERE job_type = 'odds'"
+      + "    AND instr(message,'by anchor:') > 0"
+      + "    AND instr(message,'kalshi totals rung:') > 0"
+      + '    AND run_date >= ? AND run_date <= ?'
+      + '), h AS ('
+      + '  SELECT id, run_date, ran_at, status,'
+      + "    substr(rest, 1, instr(rest,'kalshi totals rung:') - 1) AS a,"
+      + "    substr(rest, instr(rest,'kalshi totals rung:') + 19)   AS r"
+      + '  FROM p'
+      + '), n AS ('
+      + '  SELECT id, run_date, ran_at, status,'
+      + "    CAST(substr(a, instr(a,'kalshi pass=') + 12) AS INTEGER)        AS k_pass,"
+      + "    CAST(substr(a, instr(a,'persisted=') + 10) AS INTEGER)          AS k_persisted,"
+      + "    CAST(substr(a, instr(a,'liquidity_fallback=') + 19) AS INTEGER) AS k_liqfall,"
+      + "    CAST(substr(r, instr(r,'persisted=') + 10) AS INTEGER)          AS rung_persisted,"
+      + "    CAST(substr(r, instr(r,'auto=') + 5) AS INTEGER)                AS rung_auto"
+      + '  FROM h'
+      + '), slate AS ('
+      + '  SELECT game_date, COUNT(*) AS total_games,'
+      + '    SUM(CASE WHEN scheduled_start_utc IS NOT NULL'
+      + "          AND CAST(strftime('%H', datetime(scheduled_start_utc,'-7 hours')) AS INTEGER) < ?"
+      + '         THEN 1 ELSE 0 END) AS day_games,'
+      + '    SUM(CASE WHEN scheduled_start_utc IS NULL THEN 1 ELSE 0 END) AS unanchored_games,'
+      + "    MIN(datetime(scheduled_start_utc,'-7 hours')) AS first_pitch_pt"
+      + '  FROM game_log WHERE COALESCE(is_removed, 0) = 0'
+      + '  GROUP BY game_date'
+      + ') '
+      + 'SELECT '
+      + '  CASE WHEN s.total_games IS NULL OR s.total_games = s.unanchored_games'
+      + "         THEN 'unknown'"
+      + "       WHEN s.day_games > 0 THEN 'day' ELSE 'evening' END AS slate_type,"
+      + "  strftime('%H', datetime(n.ran_at,'-7 hours')) AS pass_hour_pt,"
+      + '  COUNT(*) AS passes,'
+      + '  COUNT(DISTINCT n.run_date) AS dates,'
+      + '  SUM(n.k_pass)          AS anchor_kalshi_pass,'
+      + '  SUM(n.k_persisted)     AS anchor_persisted,'
+      + '  SUM(n.k_liqfall)       AS anchor_liquidity_fallback,'
+      + '  SUM(n.rung_persisted)  AS rung_persisted,'
+      + '  SUM(n.rung_auto)       AS rung_auto,'
+      + '  SUM(s.day_games)       AS day_game_slots,'
+      + '  SUM(s.total_games)     AS total_game_slots,'
+      + '  MIN(s.first_pitch_pt)  AS earliest_first_pitch_pt '
+      + 'FROM n LEFT JOIN slate s ON s.game_date = n.run_date '
+      + 'GROUP BY 1, 2 ORDER BY 1, 2',
+    params: [
+      { name: 'from',        type: 'date', required: true },
+      { name: 'to',          type: 'date', required: true },
+      { name: 'cutoff_hour', type: 'int',  required: false, default: 16 },
+    ],
+    bindOrder: ['from', 'to', 'cutoff_hour'],
+  },
+  {
+    name: 'odds-anchor-passes',
+    description: 'Per-pass detail behind odds-anchor-split: one row per odds cron pass with '
+      + 'its parsed anchor counts, its PT wall-clock, and the slate shape it was pricing. '
+      + 'Exists so a number in the grouped view can be chased to the pass that produced it '
+      + 'rather than trusted. Same exclusions and same -7h PDT assumption.',
+    sql:
+      'WITH p AS ('
+      + '  SELECT id, run_date, ran_at, status,'
+      + "         substr(message, instr(message,'by anchor:') + 10) AS rest"
+      + '  FROM cron_log'
+      + "  WHERE job_type = 'odds'"
+      + "    AND instr(message,'by anchor:') > 0"
+      + "    AND instr(message,'kalshi totals rung:') > 0"
+      + '    AND run_date >= ? AND run_date <= ?'
+      + '), h AS ('
+      + '  SELECT id, run_date, ran_at, status,'
+      + "    substr(rest, 1, instr(rest,'kalshi totals rung:') - 1) AS a,"
+      + "    substr(rest, instr(rest,'kalshi totals rung:') + 19)   AS r"
+      + '  FROM p'
+      + '), slate AS ('
+      + '  SELECT game_date, COUNT(*) AS total_games,'
+      + '    SUM(CASE WHEN scheduled_start_utc IS NOT NULL'
+      + "          AND CAST(strftime('%H', datetime(scheduled_start_utc,'-7 hours')) AS INTEGER) < ?"
+      + '         THEN 1 ELSE 0 END) AS day_games,'
+      + '    SUM(CASE WHEN scheduled_start_utc IS NULL THEN 1 ELSE 0 END) AS unanchored_games,'
+      + "    MIN(datetime(scheduled_start_utc,'-7 hours')) AS first_pitch_pt"
+      + '  FROM game_log WHERE COALESCE(is_removed, 0) = 0'
+      + '  GROUP BY game_date'
+      + ') '
+      + 'SELECT h.run_date, h.ran_at AS ran_at_utc,'
+      + "  datetime(h.ran_at,'-7 hours') AS ran_at_pt, h.status,"
+      + '  CASE WHEN s.total_games IS NULL OR s.total_games = s.unanchored_games'
+      + "         THEN 'unknown'"
+      + "       WHEN s.day_games > 0 THEN 'day' ELSE 'evening' END AS slate_type,"
+      + '  s.day_games, s.total_games, s.unanchored_games, s.first_pitch_pt,'
+      + "  CAST(substr(a, instr(a,'kalshi pass=') + 12) AS INTEGER)        AS anchor_kalshi_pass,"
+      + "  CAST(substr(a, instr(a,'persisted=') + 10) AS INTEGER)          AS anchor_persisted,"
+      + "  CAST(substr(a, instr(a,'liquidity_fallback=') + 19) AS INTEGER) AS anchor_liquidity_fallback,"
+      + "  CAST(substr(r, instr(r,'persisted=') + 10) AS INTEGER)          AS rung_persisted,"
+      + "  CAST(substr(r, instr(r,'auto=') + 5) AS INTEGER)                AS rung_auto "
+      + 'FROM h LEFT JOIN slate s ON s.game_date = h.run_date '
+      + 'ORDER BY h.ran_at DESC LIMIT ?',
+    params: [
+      { name: 'from',        type: 'date', required: true },
+      { name: 'to',          type: 'date', required: true },
+      { name: 'cutoff_hour', type: 'int',  required: false, default: 16 },
+      { name: 'limit',       type: 'int',  required: false, default: 200 },
+    ],
+    bindOrder: ['from', 'to', 'cutoff_hour', 'limit'],
+  },
 ];
 
 // Index for O(1) lookup by name.
