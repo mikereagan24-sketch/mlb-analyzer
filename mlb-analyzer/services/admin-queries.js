@@ -341,7 +341,17 @@ const QUERIES = [
   // passes across the cutoff.
   {
     name: 'odds-anchor-split',
-    description: 'Poly totals anchor path and Kalshi rung source, summed per (slate type, '
+    description: 'DO NOT USE THIS FOR A DAY-VS-EVENING COMPARISON -- it cannot make one. '
+      + 'Measured 2026-09-21 over 70 passes (09-18..09-22): 70 of 70 rows came back '
+      + 'slate_type="day", because the classifier labels a slate "day" when ANY game starts '
+      + 'before the cutoff, and in late September every slate has one. There is no evening '
+      + 'bucket to compare against. The label is not wrong, it is useless at this '
+      + 'granularity: one 1PM game speaks for fourteen 7PM ones. Use '
+      + 'odds-poly-by-first-pitch instead, which cuts PER GAME. See '
+      + 'docs/totals-anchor-fallbacks-closed-2026-09-21.md. '
+      + 'Still useful for what it does measure: the anchor-path and rung-source totals per '
+      + 'PT pass hour, which is what showed the fallbacks are all first-touch. '
+      + 'Poly totals anchor path and Kalshi rung source, summed per (slate type, '
       + 'PT pass hour). slate_type is "day" when the slate contains at least one game '
       + 'starting before cutoff_hour PT (default 16, i.e. ~4PM), "evening" otherwise, and '
       + '"unknown" when no game on that date carries scheduled_start_utc -- reported rather '
@@ -454,6 +464,52 @@ const QUERIES = [
       { name: 'limit',       type: 'int',  required: false, default: 200 },
     ],
     bindOrder: ['from', 'to', 'cutoff_hour', 'limit'],
+  },
+  {
+    name: 'odds-poly-by-first-pitch',
+    description: 'PER GAME totals source, split by whether first pitch is before or after '
+      + 'the `hour` param in PT (default 11, the 11AM PT odds pass). Replaces the '
+      + 'slate-level cut in odds-anchor-split, which cannot make a day/evening comparison '
+      + 'at all -- 70 of 70 passes classified "day" because one sub-cutoff game labels a '
+      + 'whole slate. This is the granularity the original 44%/9.7% finding was measured '
+      + 'at. First run (09-18..09-22): 4 Poly-priced games started before 11PT, all on '
+      + '2026-09-20; 4 of 5 early games that date went Poly against 9 of 59 elsewhere. '
+      + 'TWO CAVEATS, both structural rather than sampling. (1) total_source is CURRENT '
+      + 'STATE, overwritten on every pass, so a game Kalshi priced on a later pass reads '
+      + '"kalshi" even if an earlier pass priced it off Poly -- this UNDERCOUNTS '
+      + 'ever-Poly-priced games and never overcounts them. (2) It cannot say WHICH pass '
+      + 'priced a game; only what the last one did. The per-pass record is cron_log '
+      + '(odds-anchor-passes), and that carries no game identity -- so neither source '
+      + 'answers both halves, and a claim needing both needs a new column, not a new '
+      + 'query. with_kalshi_anchor is carried so "Kalshi never listed" can be told apart '
+      + 'from "Kalshi listed later": a Poly-priced game WITH an anchor was priced before '
+      + 'Kalshi got there, not instead of it.',
+    sql:
+      'WITH g AS ('
+      + '  SELECT game_date, game_id, total_source, kalshi_anchor_total,'
+      + '    CAST(strftime(\'%H\','
+      + "      datetime(COALESCE(scheduled_start_utc, first_pitch_utc),'-7 hours')"
+      + '    ) AS INTEGER) AS pt_hour'
+      + '  FROM game_log'
+      + '  WHERE COALESCE(is_removed, 0) = 0'
+      + '    AND game_date >= ? AND game_date <= ?'
+      + ') '
+      + 'SELECT '
+      + "  CASE WHEN pt_hour IS NULL THEN 'unknown'"
+      + "       WHEN pt_hour < ? THEN 'before' ELSE 'after' END AS first_pitch_bucket,"
+      + "  COALESCE(total_source, 'null') AS total_source,"
+      + '  COUNT(*) AS games,'
+      + '  COUNT(DISTINCT game_date) AS dates,'
+      + '  SUM(CASE WHEN kalshi_anchor_total IS NOT NULL THEN 1 ELSE 0 END) AS with_kalshi_anchor,'
+      + '  MIN(pt_hour) AS earliest_pt_hour,'
+      + '  MAX(pt_hour) AS latest_pt_hour '
+      + 'FROM g GROUP BY 1, 2 ORDER BY 1, 2',
+    params: [
+      { name: 'from', type: 'date', required: true },
+      { name: 'to',   type: 'date', required: true },
+      { name: 'hour', type: 'int',  required: false, default: 11 },
+    ],
+    bindOrder: ['from', 'to', 'hour'],
   },
 ];
 
