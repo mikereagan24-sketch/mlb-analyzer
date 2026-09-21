@@ -183,9 +183,16 @@ check('the task is registered', !!task, true);
   };
   for (const d of ['services', 'routes', 'db', 'utils']) walk(path.join(R, d));
   // A scanner that finds nothing passes every per-site check vacuously.
-  // 4 is today's call-site count; this is a floor on the scanner, not the
+  // 3 is today's call-site count; this is a floor on the scanner, not the
   // property under test.
-  check('the scanner finds the known upsertGame.run( sites (>= 4)', payloadSites.length >= 4, true);
+  //
+  // It was 4 until 2026-09-21, when POST /games/upsert in routes/api.js
+  // was deleted. That site was a payload which had been SIXTEEN named
+  // parameters short since 2026-05-05 -- it threw on every call and had
+  // no callers -- so the drop is a site removed, not a site missed. All
+  // three that remain are in services/jobs.js: two statsapi-bootstrap
+  // writes and the RotoWire enrichment.
+  check('the scanner finds the known upsertGame.run( sites (>= 3)', payloadSites.length >= 3, true);
   for (const s of payloadSites) {
     check(s.file + ' (stripped line ' + s.line + ') payload carries away_sp_id and home_sp_id',
       !!s.body && /(^|[\s,{])away_sp_id\s*:/.test(s.body) && /(^|[\s,{])home_sp_id\s*:/.test(s.body), true);
