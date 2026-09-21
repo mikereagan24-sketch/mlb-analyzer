@@ -1,7 +1,35 @@
 # Open question: kalshi_totals_markets_snapshot keeps one pass per PT day, not a history (2026-09-17)
 
-**Status: filed, not scheduled.** Nothing in production reads this table for
-pricing; the cost is analytical.
+**Status: RESOLVED 2026-09-21.** Nothing in production reads this table for
+pricing; the cost was analytical.
+
+Shipped in two parts, and the second is not the one this ticket proposed:
+
+1. **The clear is now scoped to `(snapshot_date, game_date)`** on all three
+   tables. That alone fixes the overwrite described below -- an evening pass
+   for D+1 no longer deletes D's rows -- and it needed no key change, because
+   the PK already carried `game_date`.
+
+2. **Three new `kalshi_*_markets_log` tables**, keyed
+   `(game_date, game_id, captured_at)` (spread adds `spread_team, spread_line`),
+   never cleared, written in the same transaction as the snapshot.
+
+The `*_snapshot` tables KEEP their shape and their writes, against this
+ticket's "add the new table" wording but for the reason that wording
+anticipated: `services/clv-stats.js`, `services/baserunning-backtest.js` and
+`services/empirical-spread-roi.js` read them by the existing key. Re-keying in
+place would have meant migrating three consumers, or inventing a `captured_at`
+for rows whose pass time is not recoverable. Old rows stay exactly readable;
+history starts at the deploy.
+
+`captured_at` is PT (`nowPtIso()`) and is REQUIRED -- the helpers throw on a
+missing or malformed value rather than defaulting, because a default would
+silently re-collapse every pass onto one key.
+
+Verified by `node scripts/test-kalshi-snapshot-per-pass.js`, which includes
+this ticket's own acceptance check (§"If picked up" item 3): two passes on one
+slate keep two observations with the line move visible, and an evening pass for
+D+1 leaves D's rows intact.
 
 ## What it does now
 
