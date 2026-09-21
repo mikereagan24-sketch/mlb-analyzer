@@ -2180,6 +2180,61 @@ async function ensureScheduleBootstrap(dateStr) {
   return rows;
 }
 
+// THE WRONG-DATE ORPHAN DELETE. (narrowed 2026-09-21)
+//
+// This used to be, at both call sites below:
+//
+//   DELETE FROM game_log WHERE game_date=? AND away_score IS NULL
+//
+// i.e. every unplayed row for the date, followed by a re-insert from
+// statsapi. That discarded the whole row and not just the columns the
+// re-insert rewrites, because a fresh INSERT reaches none of
+// upsertGame's ON CONFLICT guards:
+//
+//   124 of game_log's 165 columns are not named by the INSERT at all
+//   (weather among them: temp_f, wind_*, temp_run_adj, roof_*,
+//   weather_* -- 99-100% populated before a refresh), and 11 more are
+//   supplied as `existingRow ? existingRow.x : <default>` while
+//   `existingRow` is read AFTER the delete and is therefore always
+//   undefined. park_factor reset to a plausible-looking 1.0 that way.
+//
+// Reported instance: 2026-09-16, a manual Pull Weather at 10:09 wiped
+// by the lineup pull at 10:14, temp_f NULL on 15 games. Lineup pulls
+// run ten times a day; only some are followed by a weather job.
+//
+// WHAT THE ORIGINAL DELETE WAS FOR. Commit 3e71b5c (2026-04-20) added
+// it alongside a fail-closed fix to services/scraper.js's RotoWire date
+// guard. The guard had been fail-open, so an unmatched date silently
+// wrote YESTERDAY's lineups under today's dateStr; the delete cleaned
+// up rows that bug had already produced. The same commit stopped them
+// being produced.
+//
+// WHY A NARROW DELETE IS STILL RIGHT, rather than none at all.
+// fetchSchedule's auto-prune (services/scraper.js ~1391) now removes
+// schedule orphans properly -- soft-delete, an audit row, a guard for
+// locked bets, and a guard against pruning on a statsapi outage -- and
+// it runs earlier in this same job. But it only considers rows with
+// `game_pk IS NOT NULL`, and a wrong-date RotoWire row has no game_pk.
+// That residual class is exactly what this deletes, and nothing else:
+//
+//   unplayed  AND  game_pk IS NULL  AND  not among the ids we are
+//   about to write
+//
+// A real game on today's slate fails all three tests, so its row
+// survives, upsertGame takes the ON CONFLICT path, and the 36 columns
+// that clause touches are the only ones that move -- none of them
+// weather. Verified: node scripts/test-lineup-refresh-preserves.js
+function buildOrphanDeleteSql(idCount) {
+  if (!Number.isInteger(idCount) || idCount < 1) {
+    throw new Error('buildOrphanDeleteSql needs the count of ids being written; '
+      + 'got ' + idCount + '. Deleting without that list would be the old '
+      + 'unscoped sweep.');
+  }
+  return 'DELETE FROM game_log WHERE game_date=? AND away_score IS NULL '
+    + 'AND game_pk IS NULL AND game_id NOT IN ('
+    + new Array(idCount).fill('?').join(',') + ')';
+}
+
 async function runLineupJob(dateStr) {
   dateStr = dateStr || todayStr();
   console.log('[lineup-job] Starting for ' + dateStr);
@@ -2221,16 +2276,20 @@ async function runLineupJob(dateStr) {
       console.warn('[lineup-job] statsapi bootstrap failed for ' + dateStr + ': ' + e.message);
     }
     if (bootstrapRows.length > 0) {
-      // Cleanup matches the RotoWire path below: drop stale unplayed rows
-      // before upsert so a previous mistaken date can't survive. Wrapped in
-      // try/catch because bet_signals FK blocks the delete when a signal
-      // has a user-locked bet_line — the upsert below still updates via
-      // ON CONFLICT in that case.
+      // Drop wrong-date orphans ONLY -- see buildOrphanDeleteSql above
+      // for why this is no longer "every unplayed row". The rows for the
+      // games we are about to write survive, so the upsert below takes
+      // the ON CONFLICT path and everything it does not name (weather,
+      // opener detection, bullpen wOBA, market prices, lineups) stays.
+      // Wrapped in try/catch because bet_signals FK blocks the delete
+      // when a signal has a user-locked bet_line -- the upsert still
+      // updates via ON CONFLICT in that case.
       try {
-        const info = db.prepare('DELETE FROM game_log WHERE game_date=? AND away_score IS NULL').run(dateStr);
-        if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' stale unplayed row(s) for ' + dateStr + ' (pre-bootstrap)');
+        const keepIds = bootstrapRows.map(g => g.game_id);
+        const info = db.prepare(buildOrphanDeleteSql(keepIds.length)).run(dateStr, ...keepIds);
+        if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' wrong-date orphan row(s) for ' + dateStr + ' (pre-bootstrap; no game_pk, not in the statsapi slate)');
       } catch (e) {
-        console.warn('[lineup-job] Pre-bootstrap cleanup skipped (likely bet_signals FK):', e && e.message);
+        console.warn('[lineup-job] Pre-bootstrap orphan cleanup skipped (likely bet_signals FK):', e && e.message);
       }
       for (const g of bootstrapRows) {
         const existingRow = q.getGameById.get(dateStr, g.game_id);
@@ -2403,20 +2462,22 @@ async function runLineupJob(dateStr) {
       console.error('[lineup-capture] failed (non-fatal):', e && e.message);
     }
 
-    // Stale-row cleanup runs only when statsapi bootstrap didn't fire (it
-    // already cleaned up there before its own upsert). Skipping the second
-    // cleanup is critical: with bootstrap rows in place, this DELETE would
-    // wipe them all (they have away_score IS NULL) before the RotoWire
-    // upsert loop could enrich. The pre-bootstrap cleanup already covered
-    // the wrong-date-write scenario this guard was protecting against.
-    if (bootstrapRows.length === 0) {
-      try {
-        const info = db.prepare('DELETE FROM game_log WHERE game_date=? AND away_score IS NULL').run(dateStr);
-        if (info.changes > 0) console.log('[lineup-job] Removed ' + info.changes + ' stale unplayed row(s) for ' + dateStr);
-      } catch (e) {
-        console.error('[lineup-job] Cleanup skipped (likely bet_signals FK):', e && e.message);
-      }
-    }
+    // The second cleanup is GONE. (2026-09-21)
+    //
+    // It ran only when the statsapi bootstrap returned nothing, and in
+    // that state there is no id list to scope a delete against -- the
+    // only form available is the unscoped "every unplayed row" sweep
+    // that cost the 2026-09-16 weather wipe.
+    //
+    // An empty statsapi response is also precisely when pruning is
+    // least safe. fetchSchedule's own auto-prune refuses to run on it
+    // for that reason ("prune skipped: statsapi returned 0 games (avoid
+    // wiping slate on transient outage)"), and this had the opposite
+    // policy on the same signal. Leaving a stale row costs a wrong row;
+    // deleting the slate during an upstream outage costs the slate.
+    //
+    // Wrong-date orphans are still removed on every pass where
+    // statsapi DID answer, which is the pass that can tell them apart.
 
     const settings = getSettings();
     const wobaIdx = getWobaIndex();
@@ -8411,4 +8472,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
