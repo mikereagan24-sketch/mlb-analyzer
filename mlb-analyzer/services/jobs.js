@@ -5495,7 +5495,7 @@ async function runOddsJob(dateStr, opts) {
           // ML override above. CLV-only consumer.
           try {
             const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-            q.snapshotKalshiMlMarkets(snapDate, mlSnapshotRows);
+            q.snapshotKalshiMlMarkets(snapDate, nowPtIso(), mlSnapshotRows);
             console.log('[odds-snapshot] Kalshi ML: captured ' + mlSnapshotRows.length
               + ' rows for ' + snapDate);
           } catch (e) {
@@ -5754,7 +5754,7 @@ async function runOddsJob(dateStr, opts) {
         // block the live spread upsert above.
         try {
           const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-          q.snapshotKalshiSpreads(snapDate, projectedRows);
+          q.snapshotKalshiSpreads(snapDate, nowPtIso(), projectedRows);
           console.log('[odds-snapshot] Kalshi spreads: captured ' + projectedRows.length
             + ' rows for ' + snapDate);
         } catch (e) {
@@ -6097,7 +6097,7 @@ async function runOddsJob(dateStr, opts) {
           // not block the totals override above. CLV-only consumer.
           try {
             const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-            q.snapshotKalshiTotalsMarkets(snapDate, totalsSnapshotRows);
+            q.snapshotKalshiTotalsMarkets(snapDate, nowPtIso(), totalsSnapshotRows);
             console.log('[odds-snapshot] Kalshi totals: captured ' + totalsSnapshotRows.length
               + ' rows for ' + snapDate);
           } catch (e) {

@@ -751,6 +751,81 @@ db.exec(`
   -- If morning capture's market_line differs at lookup time, the
   -- line_moved branch in empirical-spread-roi handles it (sibling
   -- and snapshot both compared against morning's frozen line).
+  -- PER-PASS KALSHI MARKET LOG. (2026-09-21)
+  --
+  -- The *_snapshot tables above are keyed (snapshot_date, game_date,
+  -- game_id) and cleared per snapshot_date, so they hold ONE
+  -- observation per PT day: whichever pass wrote last. Measured on the
+  -- analysis copy before this change:
+  --
+  --   table          rows   same-day   day-before   >1 obs per game
+  --   totals         1125         14         1111              14
+  --   ml             1203         13         1190
+  --   spread         7602         84         7518
+  --
+  -- Same-day presence is 14 of 1125 on totals. That is not Kalshi's
+  -- behaviour, it is the clear: the 8PM and 11PM PT passes price
+  -- TOMORROW, and their unscoped DELETE ... WHERE snapshot_date=?
+  -- removed the game-day rows written earlier under the same PT date.
+  --
+  -- These tables key on the PASS and are never cleared, so "when did
+  -- Kalshi's line move" and "did Kalshi have a line at the pass where
+  -- Poly priced it" become answerable. captured_at is PT
+  -- (nowPtIso, 'YYYY-MM-DD HH:MM:SS') -- this schema mixes PT and UTC
+  -- in adjacent columns, so the zone is stated here and at every
+  -- comparison site per CLAUDE.md.
+  --
+  -- The snapshot tables STAY, unchanged in shape and still written.
+  -- services/clv-stats.js, services/baserunning-backtest.js and
+  -- services/empirical-spread-roi.js read them by that key, and
+  -- re-keying in place would have meant either migrating three
+  -- consumers or inventing a captured_at for rows whose pass time is
+  -- not recoverable. Old rows stay exactly readable; history starts
+  -- here.
+  --
+  -- Size: ~15 games x ~8 passes x 180 days is order 20k rows a season
+  -- for totals/ml. No pruning at that size.
+  CREATE TABLE IF NOT EXISTS kalshi_totals_markets_log (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    captured_at TEXT NOT NULL,          -- PT, from nowPtIso()
+    snapshot_date TEXT NOT NULL,        -- PT day of the pass
+    market_line REAL,
+    over_ask_dollars REAL,
+    under_ask_dollars REAL,
+    over_price_ml INTEGER,
+    under_price_ml INTEGER,
+    PRIMARY KEY (game_date, game_id, captured_at)
+  );
+  CREATE TABLE IF NOT EXISTS kalshi_ml_markets_log (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    away_ask_dollars REAL,
+    home_ask_dollars REAL,
+    away_ask_ml INTEGER,
+    home_ask_ml INTEGER,
+    volume_24h_away REAL,
+    volume_24h_home REAL,
+    PRIMARY KEY (game_date, game_id, captured_at)
+  );
+  CREATE TABLE IF NOT EXISTS kalshi_spread_markets_log (
+    game_date TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    spread_team TEXT NOT NULL,
+    spread_line REAL NOT NULL,
+    yes_ask_dollars REAL,
+    yes_bid_dollars REAL,
+    no_ask_dollars REAL,
+    no_bid_dollars REAL,
+    yes_ask_ml INTEGER,
+    no_ask_ml INTEGER,
+    volume_24h REAL,
+    PRIMARY KEY (game_date, game_id, captured_at, spread_team, spread_line)
+  );
   CREATE TABLE IF NOT EXISTS kalshi_totals_markets_snapshot (
     snapshot_date TEXT NOT NULL,
     game_date TEXT NOT NULL,
@@ -3982,6 +4057,28 @@ q.getPlayerBaserunningTrailingSnapshotCoverage = db.prepare(
   + "FROM player_baserunning_trailing_snapshot"
 );
 
+// captured_at is REQUIRED, and validated rather than defaulted.
+//
+// A default would silently collapse every pass of a day onto one key
+// again -- the exact failure these tables exist to undo -- and it would
+// do it quietly, which is the shape CLAUDE.md records three times under
+// "a guard that fails open is not a guard". So: throw.
+//
+// PT, 'YYYY-MM-DD HH:MM:SS', from services/jobs.js nowPtIso(). The
+// format check is deliberately narrow: a UTC value would order wrongly
+// against snapshot_date and every other PT column in this schema, and a
+// Date object or an ISO string with a 'T' would sort differently as
+// text.
+function _requireCapturedAt(capturedAt, fnName) {
+  if (typeof capturedAt !== 'string'
+      || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(capturedAt)) {
+    throw new Error(fnName + ' needs capturedAt as PT "YYYY-MM-DD HH:MM:SS" '
+      + '(services/jobs.js nowPtIso()); got ' + JSON.stringify(capturedAt)
+      + '. Defaulting it would re-collapse every pass onto one row.');
+  }
+  return capturedAt;
+}
+
 // ------------------------------------------------------------------
 // Daily kalshi_spread_markets snapshot. Same delete-then-insert
 // pattern as the framing/FRV helpers. Rows are upserted spread-
@@ -3989,8 +4086,20 @@ q.getPlayerBaserunningTrailingSnapshotCoverage = db.prepare(
 // yes_ask_dollars, yes_bid_dollars, no_ask_dollars, no_bid_dollars,
 // yes_ask_ml, no_ask_ml, volume_24h}). Rows missing any PK component
 // (game_date, game_id, spread_team, spread_line) are skipped.
+// SCOPED TO (snapshot_date, game_date). (2026-09-21)
+//
+// This used to be "DELETE ... WHERE snapshot_date=?" alone. The 8PM and
+// 11PM PT passes price TOMORROW's slate under TODAY's PT snapshot_date,
+// so the unscoped clear deleted the game-day rows an earlier pass had
+// written and replaced them with next-day rows under the same key.
+// Same-day presence was 14 of 1125 rows on totals as a result --
+// services/empirical-spread-roi.js wants exactly those rows and found
+// 84 of 7602 on spreads.
+//
+// Scoping costs nothing: the PK already carries game_date, so one
+// snapshot_date holding both slates cannot collide.
 q._snapKalshiSpreadsClearDate = db.prepare(
-  "DELETE FROM kalshi_spread_markets_snapshot WHERE snapshot_date=?"
+  "DELETE FROM kalshi_spread_markets_snapshot WHERE snapshot_date=? AND game_date=?"
 );
 q._snapKalshiSpreadsInsert = db.prepare(
   "INSERT OR REPLACE INTO kalshi_spread_markets_snapshot "
@@ -3999,12 +4108,34 @@ q._snapKalshiSpreadsInsert = db.prepare(
   + " yes_ask_ml, no_ask_ml, volume_24h) "
   + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
 );
-q.snapshotKalshiSpreads = (snapshotDate, rows) => {
-  const tx = db.transaction((d, rs) => {
-    q._snapKalshiSpreadsClearDate.run(d);
+q._snapKalshiSpreadsLogInsert = db.prepare(
+  "INSERT OR REPLACE INTO kalshi_spread_markets_log "
+  + "(game_date, game_id, captured_at, snapshot_date, spread_team, spread_line, "
+  + " yes_ask_dollars, yes_bid_dollars, no_ask_dollars, no_bid_dollars, "
+  + " yes_ask_ml, no_ask_ml, volume_24h) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+);
+// Writes BOTH the per-day snapshot (unchanged shape, existing readers)
+// and the per-pass log, in one transaction, so the two can never
+// disagree about what a pass saw.
+q.snapshotKalshiSpreads = (snapshotDate, capturedAt, rows) => {
+  _requireCapturedAt(capturedAt, 'snapshotKalshiSpreads');
+  const tx = db.transaction((d, at, rs) => {
+    const dates = new Set();
+    for (const r of rs) if (r && r.game_date != null) dates.add(r.game_date);
+    for (const gd of dates) q._snapKalshiSpreadsClearDate.run(d, gd);
     for (const r of rs) {
       if (r == null || r.game_date == null || r.game_id == null
           || r.spread_team == null || r.spread_line == null) continue;
+      q._snapKalshiSpreadsLogInsert.run(
+        r.game_date, r.game_id, at, d, r.spread_team, Number(r.spread_line),
+        r.yes_ask_dollars == null ? null : Number(r.yes_ask_dollars),
+        r.yes_bid_dollars == null ? null : Number(r.yes_bid_dollars),
+        r.no_ask_dollars  == null ? null : Number(r.no_ask_dollars),
+        r.no_bid_dollars  == null ? null : Number(r.no_bid_dollars),
+        r.yes_ask_ml == null ? null : Number(r.yes_ask_ml),
+        r.no_ask_ml  == null ? null : Number(r.no_ask_ml),
+        r.volume_24h == null ? null : Number(r.volume_24h));
       q._snapKalshiSpreadsInsert.run(d,
         r.game_date, r.game_id, r.spread_team, Number(r.spread_line),
         r.yes_ask_dollars == null ? null : Number(r.yes_ask_dollars),
@@ -4016,7 +4147,7 @@ q.snapshotKalshiSpreads = (snapshotDate, rows) => {
         r.volume_24h == null ? null : Number(r.volume_24h));
     }
   });
-  tx(snapshotDate, rows);
+  tx(snapshotDate, capturedAt, rows);
 };
 
 // Daily kalshi_ml_markets snapshot. Same delete-then-insert pattern
@@ -4024,7 +4155,7 @@ q.snapshotKalshiSpreads = (snapshotDate, rows) => {
 // home_ask_dollars, away_ask_ml, home_ask_ml, volume_24h_away,
 // volume_24h_home}]. Rows missing any PK component skipped.
 q._snapKalshiMlClearDate = db.prepare(
-  "DELETE FROM kalshi_ml_markets_snapshot WHERE snapshot_date=?"
+  "DELETE FROM kalshi_ml_markets_snapshot WHERE snapshot_date=? AND game_date=?"
 );
 q._snapKalshiMlInsert = db.prepare(
   "INSERT OR REPLACE INTO kalshi_ml_markets_snapshot "
@@ -4033,11 +4164,29 @@ q._snapKalshiMlInsert = db.prepare(
   + " volume_24h_away, volume_24h_home) "
   + "VALUES (?,?,?,?,?,?,?,?,?)"
 );
-q.snapshotKalshiMlMarkets = (snapshotDate, rows) => {
-  const tx = db.transaction((d, rs) => {
-    q._snapKalshiMlClearDate.run(d);
+q._snapKalshiMlLogInsert = db.prepare(
+  "INSERT OR REPLACE INTO kalshi_ml_markets_log "
+  + "(game_date, game_id, captured_at, snapshot_date, "
+  + " away_ask_dollars, home_ask_dollars, away_ask_ml, home_ask_ml, "
+  + " volume_24h_away, volume_24h_home) "
+  + "VALUES (?,?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotKalshiMlMarkets = (snapshotDate, capturedAt, rows) => {
+  _requireCapturedAt(capturedAt, 'snapshotKalshiMlMarkets');
+  const tx = db.transaction((d, at, rs) => {
+    const dates = new Set();
+    for (const r of rs) if (r && r.game_date != null) dates.add(r.game_date);
+    for (const gd of dates) q._snapKalshiMlClearDate.run(d, gd);
     for (const r of rs) {
       if (r == null || r.game_date == null || r.game_id == null) continue;
+      q._snapKalshiMlLogInsert.run(
+        r.game_date, r.game_id, at, d,
+        r.away_ask_dollars == null ? null : Number(r.away_ask_dollars),
+        r.home_ask_dollars == null ? null : Number(r.home_ask_dollars),
+        r.away_ask_ml == null ? null : Number(r.away_ask_ml),
+        r.home_ask_ml == null ? null : Number(r.home_ask_ml),
+        r.volume_24h_away == null ? null : Number(r.volume_24h_away),
+        r.volume_24h_home == null ? null : Number(r.volume_24h_home));
       q._snapKalshiMlInsert.run(d,
         r.game_date, r.game_id,
         r.away_ask_dollars == null ? null : Number(r.away_ask_dollars),
@@ -4048,14 +4197,14 @@ q.snapshotKalshiMlMarkets = (snapshotDate, rows) => {
         r.volume_24h_home == null ? null : Number(r.volume_24h_home));
     }
   });
-  tx(snapshotDate, rows);
+  tx(snapshotDate, capturedAt, rows);
 };
 
 // Daily kalshi_totals_markets snapshot. Same pattern. Rows:
 // [{game_date, game_id, market_line, over_ask_dollars,
 //   under_ask_dollars, over_price_ml, under_price_ml}].
 q._snapKalshiTotalsClearDate = db.prepare(
-  "DELETE FROM kalshi_totals_markets_snapshot WHERE snapshot_date=?"
+  "DELETE FROM kalshi_totals_markets_snapshot WHERE snapshot_date=? AND game_date=?"
 );
 q._snapKalshiTotalsInsert = db.prepare(
   "INSERT OR REPLACE INTO kalshi_totals_markets_snapshot "
@@ -4064,11 +4213,27 @@ q._snapKalshiTotalsInsert = db.prepare(
   + " over_price_ml, under_price_ml) "
   + "VALUES (?,?,?,?,?,?,?,?)"
 );
-q.snapshotKalshiTotalsMarkets = (snapshotDate, rows) => {
-  const tx = db.transaction((d, rs) => {
-    q._snapKalshiTotalsClearDate.run(d);
+q._snapKalshiTotalsLogInsert = db.prepare(
+  "INSERT OR REPLACE INTO kalshi_totals_markets_log "
+  + "(game_date, game_id, captured_at, snapshot_date, market_line, "
+  + " over_ask_dollars, under_ask_dollars, over_price_ml, under_price_ml) "
+  + "VALUES (?,?,?,?,?,?,?,?,?)"
+);
+q.snapshotKalshiTotalsMarkets = (snapshotDate, capturedAt, rows) => {
+  _requireCapturedAt(capturedAt, 'snapshotKalshiTotalsMarkets');
+  const tx = db.transaction((d, at, rs) => {
+    const dates = new Set();
+    for (const r of rs) if (r && r.game_date != null) dates.add(r.game_date);
+    for (const gd of dates) q._snapKalshiTotalsClearDate.run(d, gd);
     for (const r of rs) {
       if (r == null || r.game_date == null || r.game_id == null) continue;
+      q._snapKalshiTotalsLogInsert.run(
+        r.game_date, r.game_id, at, d,
+        r.market_line == null ? null : Number(r.market_line),
+        r.over_ask_dollars == null ? null : Number(r.over_ask_dollars),
+        r.under_ask_dollars == null ? null : Number(r.under_ask_dollars),
+        r.over_price_ml == null ? null : Number(r.over_price_ml),
+        r.under_price_ml == null ? null : Number(r.under_price_ml));
       q._snapKalshiTotalsInsert.run(d,
         r.game_date, r.game_id,
         r.market_line == null ? null : Number(r.market_line),
@@ -4078,7 +4243,7 @@ q.snapshotKalshiTotalsMarkets = (snapshotDate, rows) => {
         r.under_price_ml == null ? null : Number(r.under_price_ml));
     }
   });
-  tx(snapshotDate, rows);
+  tx(snapshotDate, capturedAt, rows);
 };
 
 // ------------------------------------------------------------------
