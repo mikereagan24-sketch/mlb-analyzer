@@ -1,5 +1,48 @@
 # Open question: 8 bet_signals rows have unreadable signal_label values
 
+> **RESOLVED 2026-09-21.** Item (3) was done first, as this ticket asked, and
+> it changed the answer: the damage is **wider than the 6 labels counted
+> below** and the path that caused it is **dead**.
+>
+> `scripts/probe-mojibake-scan.js` sweeps every TEXT column in the DB (319
+> columns, 49 tables) and found **30 distinct damaged values over 57 rows in
+> four columns** — not 6 rows in one:
+>
+> | column | distinct | rows | recoverable |
+> |---|---|---|---|
+> | `bet_signal_audit.detail` | 6 | 29 | yes — em dash |
+> | `bet_signals.notes` | 20 | 20 | yes — em dash |
+> | `bet_signals.signal_label` | 3 | 6 | yes — star |
+> | `pitcher_woba_override.reason` | 1 | 2 | **no** — U+FFFD, bytes gone |
+>
+> **All of it is 2026-04.** Zero damaged rows in 2026-05..09 against ~51,000
+> clean ones, so the writer is dead and no constraint (item 2) is needed to
+> stop an ongoing source. The `notes`/`detail` damage is a *double*
+> double-decode of U+2014 in the deactivation message, not the star path.
+>
+> Item (1) then shipped as migration `v6-mojibake-repair-001`, widened to all
+> three recoverable columns. Two deliberate non-repairs:
+>
+> - **`pitcher_woba_override.reason`** — U+FFFD means the bytes were lost
+>   before the write. No deterministic inverse exists; left as-is.
+> - **the 2 `unrated` rows** — left as-is, for the reason stated below:
+>   NULLing them would move them out of the star era into the continuous-edge
+>   era, where the emit thresholds would then apply. Both are April, inactive,
+>   and carry a logged `bet_line`.
+>
+> **Post-lock carve-out:** 5 of the 6 label rows carry `bet_locked_at`, and
+> `signal_label` is not on the whitelist of fields that may flow post-lock.
+> The repair restores the value originally written rather than changing one,
+> touches no baseline field, and writes a `bet_signal_audit` row per repaired
+> signal. Owner-authorised.
+>
+> Verified by `node scripts/test-mojibake-repair.js`, which runs the real
+> migration SQL against seeded real byte sequences and asserts idempotency.
+> `scripts/test-highlight-gate.js` keeps its mojibake assertion as a
+> defensive property: an unrecognised label must still fall through to
+> not-highlighted.
+
+
 Filed 2026-09-17, alongside the highlight-gate consolidation (which found
 them but deliberately did not change their behaviour).
 

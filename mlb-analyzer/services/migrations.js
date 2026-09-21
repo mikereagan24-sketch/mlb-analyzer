@@ -126,6 +126,67 @@ const MIGRATIONS = [
       + "  AND total_source = 'kalshi' "
       + "  AND market_total IS NOT NULL;\n",
   },
+  {
+    name: 'v6-mojibake-repair-001',
+    description:
+      'Repair April-2026 double-decode damage in three columns. UTF-8 read '
+      + 'as Latin-1 turned U+2605 (star, E2 98 85) into three characters '
+      + 'and U+2014 (em dash, E2 80 94) into six. Found by '
+      + 'scripts/probe-mojibake-scan.js, which sweeps every TEXT column in '
+      + 'the DB: 30 distinct damaged values over 57 rows, ALL of them in '
+      + '2026-04. Zero damaged rows in 2026-05..09 against ~51,000 clean '
+      + 'ones, so the path that produced them is dead and this is a '
+      + 'one-off repair, not a symptom of a live writer. '
+      + 'Idempotent by construction: every filter matches only the damaged '
+      + 'sequence, which cannot survive its own replacement, and the '
+      + 'migrations_applied gate stops a rerun regardless. '
+      + 'NOT repaired, deliberately: pitcher_woba_override.reason (2 rows) '
+      + 'carries U+FFFD, so the bytes are already gone and no '
+      + 'deterministic inverse exists; and the 2 rows with '
+      + 'signal_label = unrated are left alone, because NULLing them would '
+      + 'move them out of the star era into the continuous-edge era where '
+      + 'the emit thresholds would then apply. Both are recorded in '
+      + 'docs/mojibake-star-labels-open-question-2026-09-17.md. '
+      + 'POST-LOCK CARVE-OUT: signal_label is not on the whitelist of '
+      + 'fields that may flow once bet_locked_at is set, and 5 of the 6 '
+      + 'label rows are locked. This restores the value ORIGINALLY '
+      + 'WRITTEN rather than changing one, touches no baseline field '
+      + '(market_line, edge_pct, price_venue, venue_stale), and writes a '
+      + 'bet_signal_audit row for every repaired signal so the write is '
+      + 'visible. Owner-authorised 2026-09-21.',
+    sql:
+      // Op 0: audit FIRST, while the damaged rows are still identifiable.
+      // After op 1 the filter cannot match them, which is also what makes
+      // a rerun insert nothing.
+      "INSERT INTO bet_signal_audit "
+      + "(signal_id, game_date, game_id, action, source, detail, created_at) "
+      + "SELECT id, game_date, game_id, 'label_repaired', "
+      + "       'v6-mojibake-repair-001', "
+      + "       'signal_label double-decode repaired: ' || signal_label "
+      + "       || ' -> ' || substr(signal_label, 1, 1) || '★', "
+      + "       datetime('now') "
+      + "FROM bet_signals "
+      + "WHERE signal_label LIKE '_â' "
+      + "  AND substr(signal_label, 1, 1) IN ('1','2','3');\n"
+
+      // Op 1: the six star labels. The leading digit survived the
+      // mangling, so the target is unambiguous: '2' + E2 98 85 was '2*'.
+      + "UPDATE bet_signals "
+      + "SET signal_label = substr(signal_label, 1, 1) || '★' "
+      + "WHERE signal_label LIKE '_â' "
+      + "  AND substr(signal_label, 1, 1) IN ('1','2','3');\n"
+
+      // Op 2: the em dash in the deactivation note. bet_signals.notes IS
+      // on the post-lock whitelist, so these need no carve-out.
+      + "UPDATE bet_signals "
+      + "SET notes = replace(notes, 'Ã¢ÂÂ', '—') "
+      + "WHERE notes LIKE '%Ã¢ÂÂ%';\n"
+
+      // Op 3: the same sequence in the audit trail.
+      + "UPDATE bet_signal_audit "
+      + "SET detail = replace(detail, 'Ã¢ÂÂ', '—') "
+      + "WHERE detail LIKE '%Ã¢ÂÂ%';\n",
+  },
 ];
 
 // Ensure the bookkeeping table exists. Schema:
