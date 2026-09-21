@@ -147,13 +147,24 @@ const MIGRATIONS = [
       + 'move them out of the star era into the continuous-edge era where '
       + 'the emit thresholds would then apply. Both are recorded in '
       + 'docs/mojibake-star-labels-open-question-2026-09-17.md. '
-      + 'POST-LOCK CARVE-OUT: signal_label is not on the whitelist of '
-      + 'fields that may flow once bet_locked_at is set, and 5 of the 6 '
-      + 'label rows are locked. This restores the value ORIGINALLY '
-      + 'WRITTEN rather than changing one, touches no baseline field '
-      + '(market_line, edge_pct, price_venue, venue_stale), and writes a '
-      + 'bet_signal_audit row for every repaired signal so the write is '
-      + 'visible. Owner-authorised 2026-09-21.',
+      + 'LOCKED ROWS ARE SKIPPED, not carved out. signal_label is not on '
+      + 'the whitelist of fields that may flow once a lock is set, and 5 '
+      + 'of the 6 label rows carry bet_locked_at. An earlier draft of '
+      + 'this migration repaired them anyway under an owner-authorised '
+      + 'carve-out; that was the wrong trade. The whitelist exists so '
+      + 'that authorisation does NOT bypass it -- a carve-out granted '
+      + 'once is a precedent for the next writer that wants one, and '
+      + 'five garbled historical labels cost less than that. So ops 0 '
+      + 'and 1 filter on BOTH locks named by the rule: bet_locked_at on '
+      + 'the signal, and odds_locked_at on its game_log row. The latter '
+      + 'is NULL for all six on the analysis copy and is included '
+      + 'anyway, because that copy is not production. '
+      + 'Ops 2 and 3 need no such filter: bet_signals.notes IS on the '
+      + 'post-lock whitelist, and bet_signal_audit is an append-only '
+      + 'trail the rule does not govern. '
+      + 'Consequence, stated rather than hidden: 5 labels stay damaged '
+      + 'and render as legacy rows that never highlight, which is '
+      + 'exactly what they did before this migration.',
     sql:
       // Op 0: audit FIRST, while the damaged rows are still identifiable.
       // After op 1 the filter cannot match them, which is also what makes
@@ -167,14 +178,26 @@ const MIGRATIONS = [
       + "       datetime('now') "
       + "FROM bet_signals "
       + "WHERE signal_label LIKE '_â' "
-      + "  AND substr(signal_label, 1, 1) IN ('1','2','3');\n"
+      + "  AND substr(signal_label, 1, 1) IN ('1','2','3') "
+      + "  AND bet_locked_at IS NULL "
+      + "  AND NOT EXISTS (SELECT 1 FROM game_log g "
+      + "                  WHERE g.game_date = bet_signals.game_date "
+      + "                    AND g.game_id = bet_signals.game_id "
+      + "                    AND g.odds_locked_at IS NOT NULL);\n"
 
-      // Op 1: the six star labels. The leading digit survived the
-      // mangling, so the target is unambiguous: '2' + E2 98 85 was '2*'.
+      // Op 1: the star labels on UNLOCKED rows only. The leading digit
+      // survived the mangling, so the target is unambiguous: '2' + E2 98
+      // 85 was '2*'. The two lock predicates must match op 0 exactly, or
+      // the audit trail would claim a repair that did not happen.
       + "UPDATE bet_signals "
       + "SET signal_label = substr(signal_label, 1, 1) || '★' "
       + "WHERE signal_label LIKE '_â' "
-      + "  AND substr(signal_label, 1, 1) IN ('1','2','3');\n"
+      + "  AND substr(signal_label, 1, 1) IN ('1','2','3') "
+      + "  AND bet_locked_at IS NULL "
+      + "  AND NOT EXISTS (SELECT 1 FROM game_log g "
+      + "                  WHERE g.game_date = bet_signals.game_date "
+      + "                    AND g.game_id = bet_signals.game_id "
+      + "                    AND g.odds_locked_at IS NOT NULL);\n"
 
       // Op 2: the em dash in the deactivation note. bet_signals.notes IS
       // on the post-lock whitelist, so these need no carve-out.

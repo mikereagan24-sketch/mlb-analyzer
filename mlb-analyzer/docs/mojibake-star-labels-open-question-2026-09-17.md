@@ -1,12 +1,13 @@
 # Open question: 8 bet_signals rows have unreadable signal_label values
 
-> **RESOLVED 2026-09-21.** Item (3) was done first, as this ticket asked, and
-> it changed the answer: the damage is **wider than the 6 labels counted
-> below** and the path that caused it is **dead**.
+> **RESOLVED 2026-09-21.**
 >
-> `scripts/probe-mojibake-scan.js` sweeps every TEXT column in the DB (319
-> columns, 49 tables) and found **30 distinct damaged values over 57 rows in
-> four columns** — not 6 rows in one:
+> ## The finding: the writer is dead
+>
+> Item (3) was done first, as this ticket asked, and it is the result that
+> matters. `scripts/probe-mojibake-scan.js` sweeps every TEXT column in the DB
+> — 319 columns across 49 tables — and found **30 distinct damaged values over
+> 57 rows in four columns**, not 6 rows in one:
 >
 > | column | distinct | rows | recoverable |
 > |---|---|---|---|
@@ -15,33 +16,63 @@
 > | `bet_signals.signal_label` | 3 | 6 | yes — star |
 > | `pitcher_woba_override.reason` | 1 | 2 | **no** — U+FFFD, bytes gone |
 >
-> **All of it is 2026-04.** Zero damaged rows in 2026-05..09 against ~51,000
-> clean ones, so the writer is dead and no constraint (item 2) is needed to
-> stop an ongoing source. The `notes`/`detail` damage is a *double*
-> double-decode of U+2014 in the deactivation message, not the star path.
+> Two corruptions, both UTF-8 read as Latin-1. The star is the one this ticket
+> counted; the larger share is a **double** double-decode of U+2014 in the
+> deactivation message (*"edge no longer meets threshold"*), a different path
+> from the one suspected here.
 >
-> Item (1) then shipped as migration `v6-mojibake-repair-001`, widened to all
-> three recoverable columns. Two deliberate non-repairs:
+> **All 57 rows are 2026-04, and there are zero damaged rows in the five
+> months since:**
 >
-> - **`pitcher_woba_override.reason`** — U+FFFD means the bytes were lost
->   before the write. No deterministic inverse exists; left as-is.
-> - **the 2 `unrated` rows** — left as-is, for the reason stated below:
->   NULLing them would move them out of the star era into the continuous-edge
->   era, where the emit thresholds would then apply. Both are April, inactive,
->   and carry a logged `bet_line`.
+> ```
+> bet_signals.notes         2026-04  damaged 20   clean     20
+>                           2026-05          0             52
+>                           2026-06..09      0            793
+> bet_signal_audit.detail   2026-04  damaged 29   clean   1017
+>                           2026-05..09      0         50,568
+> ```
 >
-> **Post-lock carve-out:** 5 of the 6 label rows carry `bet_locked_at`, and
-> `signal_label` is not on the whitelist of fields that may flow post-lock.
-> The repair restores the value originally written rather than changing one,
-> touches no baseline field, and writes a `bet_signal_audit` row per repaired
-> signal. Owner-authorised.
+> Zero in ~51,000 clean rows. **The writer is dead**, which settles ticket item
+> (2): no CHECK constraint or write-path validation is needed, because there is
+> no live producer to constrain. A guard on a door nobody uses is cost without
+> cover. Re-run the scan if that assumption ever needs re-testing — it is one
+> read-only command.
+>
+> ## The repair, which is the smaller half
+>
+> Migration `v6-mojibake-repair-001`, widened from this ticket's 6 labels to
+> the recoverable columns. Idempotent by construction: every filter matches
+> only the damaged sequence, which cannot survive its own replacement.
+>
+> **Five of the six labels stay damaged, on purpose.** They carry
+> `bet_locked_at`, and `signal_label` is not on CLAUDE.md's whitelist of fields
+> that may flow once a lock is set. An earlier draft of this migration repaired
+> them under an owner-authorised carve-out. That was the wrong trade: **the
+> whitelist exists so that authorisation does not bypass it**, and a carve-out
+> granted once is a precedent for the next writer that wants one. Five garbled
+> historical labels cost less than that precedent.
+>
+> So the label ops filter on **both** locks the rule names — the signal's
+> `bet_locked_at` and its game's `odds_locked_at`. `odds_locked_at` is NULL for
+> all six on the analysis copy and is included anyway, because that copy is not
+> production.
+>
+> | rows | outcome |
+> |---|---|
+> | 1 label, no lock of either kind | repaired, with a `bet_signal_audit` row |
+> | **5 labels, bet-locked** | **left damaged** — render as legacy rows that never highlight, exactly as before |
+> | 20 `notes` + 29 `detail` | repaired; `notes` IS on the whitelist and the audit trail is append-only |
+> | 2 `pitcher_woba_override.reason` | left — U+FFFD means the bytes are gone, so any "repair" would be fabrication |
+> | 2 `unrated` labels | left — see below; NULLing them moves settled logged bets into the continuous-edge era |
+>
+> The visible consequence is unchanged from before this ticket: 3 rows that
+> would highlight if their labels were intact still do not. That is the price
+> of the whitelist, paid deliberately.
 >
 > Verified by `node scripts/test-mojibake-repair.js`, which runs the real
-> migration SQL against seeded real byte sequences and asserts idempotency.
-> `scripts/test-highlight-gate.js` keeps its mojibake assertion as a
-> defensive property: an unrecognised label must still fall through to
-> not-highlighted.
-
+> migration SQL against seeded real byte sequences and asserts that locked rows
+> are untouched, that no audit row is written for a row that was not repaired,
+> and that a second apply changes nothing.
 
 Filed 2026-09-17, alongside the highlight-gate consolidation (which found
 them but deliberately did not change their behaviour).
