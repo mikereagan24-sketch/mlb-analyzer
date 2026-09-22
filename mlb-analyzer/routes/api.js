@@ -6429,40 +6429,54 @@ router.post('/signals/recalc', requireAdminToken, (req, res) => {
 
 router.post('/signals/manual', requireAdminToken, (req, res) => {
   try {
+    // Hoisted above the recalc branch, which now uses it too. As a
+    // `const` it is in the temporal dead zone until its declaration,
+    // so leaving it further down made the recalc path throw
+    // ReferenceError at runtime while parsing cleanly.
+    const { calcPnl } = require('../services/model');
     // If recalc:true, recalculate all resolved signal P&L with to-win-100 math
     if (req.body.recalc) {
+      // ONE GRADING IMPLEMENTATION, NOT TWO. (2026-09-23)
+      //
+      // This branch re-derived P&L by hand and, for Totals, deliberately
+      // ignored the struck price: "bet_line/closing_line for totals store
+      // the line NUMBER, which is not the juice. Default to -110." True
+      // about bet_line, and it skipped bet_price -- which DOES hold the
+      // juice and has since 2026-08-23. So pressing recalc rewrote every
+      // graded Total at the market price and silently undid
+      // regrade-stale-totals-pnl's work.
+      //
+      // It now calls calcPnl, the same function live grading uses, so the
+      // two cannot drift again. Scores and market_total are joined in for
+      // that reason.
       const sigs = db.prepare(
-        "SELECT bs.*, gl.over_price AS gl_over_price, gl.under_price AS gl_under_price " +
+        "SELECT bs.*, gl.over_price AS gl_over_price, gl.under_price AS gl_under_price, " +
+        "       gl.away_score AS gl_away_score, gl.home_score AS gl_home_score, " +
+        "       gl.market_total AS gl_market_total " +
         "FROM bet_signals bs " +
         "LEFT JOIN game_log gl ON gl.id = bs.game_log_id " +
         "WHERE bs.outcome IN ('win','loss')"
       ).all();
-      let updated = 0;
+      let updated = 0, skipped = 0, flipped = [];
       const upd = db.prepare("UPDATE bet_signals SET pnl=? WHERE id=?");
       for (const sig of sigs) {
-        let pnl;
-        if (sig.signal_type === 'ML') {
-          const ml2 = parseFloat(sig.bet_line || sig.market_line);
-          if (!isNaN(ml2) && ml2 !== 0) {
-            const stake = ml2 > 0 ? parseFloat((10000/ml2).toFixed(2)) : Math.abs(ml2);
-            pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
-          }
-        } else {
-          // Total: bet_line is the line number not the price ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ use closing_line as price or -110
-          // Total — price is on game_log (over_price / under_price), not
-          // on the signal. bet_line/closing_line for totals store the line
-          // NUMBER (e.g. 8.5), which is not the juice. Default to -110.
-          const isOver = sig.signal_side === 'over';
-          const priceRaw = isOver ? sig.gl_over_price : sig.gl_under_price;
-          const price = parseFloat(priceRaw);
-          const p = (!isNaN(price) && price !== 0) ? price : -110;
-          const stake = p < 0 ? Math.abs(p) : parseFloat((10000/p).toFixed(2));
-          pnl = sig.outcome === 'win' ? 100 : parseFloat((-stake).toFixed(2));
-        }
+        if (sig.gl_away_score == null || sig.gl_home_score == null) { skipped++; continue; }
+        const r = calcPnl({
+          type: sig.signal_type, side: sig.signal_side,
+          marketLine: sig.market_line, bet_line: sig.bet_line, bet_price: sig.bet_price,
+          overPrice: sig.gl_over_price, underPrice: sig.gl_under_price,
+        }, sig.gl_away_score, sig.gl_home_score, sig.gl_market_total);
+        // recalc is a P&L tool. A row whose OUTCOME would move is a
+        // different problem -- the line on file disagrees with the one it
+        // was graded at -- and gets reported, never silently rewritten.
+        if (r.outcome !== sig.outcome) { flipped.push(sig.id); skipped++; continue; }
+        const pnl = Number(r.pnl);
+        if (!Number.isFinite(pnl)) { skipped++; continue; }
         upd.run(parseFloat(pnl.toFixed(2)), sig.id);
         updated++;
       }
-      return res.json({success:true, recalculated:updated});
+      return res.json({success:true, recalculated:updated, skipped,
+        outcome_would_change: flipped});
     }
     const { game_date, game_id, signal_type, signal_side, market_line, bet_line, bet_price } = req.body;
     if (!game_date||!game_id||!signal_type||!signal_side||market_line==null)
@@ -6489,13 +6503,15 @@ router.post('/signals/manual', requireAdminToken, (req, res) => {
       ? parseFloat(Math.abs(iP(Number(market_line)) - iP(Number(model_line))).toFixed(4))
       : null;
     // outcome if already scored
-    const { calcPnl } = require('../services/model');
     let outcome='pending', pnl=0;
     if (gl.away_score!=null){
       const r=calcPnl({
         type:signal_type, side:signal_side,
         marketLine:Number(market_line),
         bet_line: bet_line != null ? Number(bet_line) : null,
+        // bet_price too (2026-09-23) -- without it a manually logged
+        // Total was graded at the market's juice, not the operator's.
+        bet_price: bet_price != null ? Number(bet_price) : null,
         overPrice: gl.over_price, underPrice: gl.under_price,
       }, gl.away_score, gl.home_score, gl.market_total);
       outcome=r.outcome; pnl=r.pnl;
