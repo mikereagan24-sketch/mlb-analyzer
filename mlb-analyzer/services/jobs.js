@@ -1238,8 +1238,15 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     const updateRunline = db.prepare('UPDATE bet_signals SET companion_spread_outcome=?, companion_spread_pnl=? WHERE id=?');
     for (const ex of existing) {
       if (ex.outcome !== 'pending') continue;
+      // bet_line / bet_price carried through (2026-09-23). This passed
+      // only market_line, so a manually-locked bet was graded at the
+      // market's number and the market's price -- the ones the operator
+      // did NOT take. calcPnl prefers the struck values when given them;
+      // it was never given them here.
       const { outcome, pnl } = calcPnl(
-        {type:ex.signal_type, side:ex.signal_side, marketLine:ex.market_line},
+        {type:ex.signal_type, side:ex.signal_side, marketLine:ex.market_line,
+         bet_line:ex.bet_line, bet_price:ex.bet_price,
+         overPrice:gl.over_price, underPrice:gl.under_price},
         gl.away_score, gl.home_score, gl.market_total, gl.over_price, gl.under_price
       );
       if (outcome !== 'pending') updateSig.run(outcome, pnl, ex.id);
@@ -3789,7 +3796,14 @@ async function runScoreJob(dateStr) {
               // (~line 1206) and at the override site itself. Known,
               // accepted; see feat/kalshi-fee-adjusted-lines and the
               // totals override block for the design rationale.
-              const _price = sig.signal_side === 'over' ? (gameRow.over_price || -110) : (gameRow.under_price || -110);
+              // bet_price first (2026-09-23), matching calcPnl's own
+              // precedence. This branch re-derives the P&L instead of
+              // using calcPnl's, so it never inherited the struck-price
+              // rule when that landed on 2026-08-23 -- the same split
+              // that let the grading sites disagree with each other.
+              const _price = (sig.bet_price != null && sig.bet_price !== '')
+                ? Number(sig.bet_price)
+                : (sig.signal_side === 'over' ? (gameRow.over_price || -110) : (gameRow.under_price || -110));
               const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
               _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
             }

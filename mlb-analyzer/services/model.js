@@ -1739,7 +1739,29 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
   } else {
     // Total â use -110 vig basis (standard): stake $110 to win $100
     // But if over_price/under_price available via signal.overPrice/underPrice, use that
-    const tot = parseFloat(marketTotal) || parseFloat(signal.marketLine);
+    // THE STRUCK LINE WINS, on Totals as it already did on ML. (2026-09-23)
+    //
+    // This was `parseFloat(marketTotal) || parseFloat(signal.marketLine)`,
+    // so a Total was always graded at the MARKET number even when
+    // bet_line recorded a different one. ML has honoured the struck value
+    // through effectiveLine since it was written; Totals were the half
+    // that never got it, and the comment further down -- "bet_line holds
+    // the total on Total rows" -- said so while the code above it ignored
+    // exactly that.
+    //
+    // It decides win/loss, not just the stake: TOR@TEX 2026-09-19 was
+    // logged under 7.5, the market was 8.5 on all 18 captures that day,
+    // and the game landed on 8. Graded at the market line that is a win;
+    // at the line the operator actually took, a loss.
+    //
+    // INERT FOR EVERY BACKTEST. parameter-sweep, frv-, temp-,
+    // runmult-totals- and under-selection- all build signals from
+    // getSignals(), which never sets bet_line, so they keep falling to
+    // marketTotal and score byte-identically. Only rows carrying a real
+    // operator lock move: 3 of 94 graded Totals, 1 of which changes
+    // outcome.
+    const tot = effectiveLine(parseFloat(marketTotal) || parseFloat(signal.marketLine),
+      signal.bet_line);
     if (isNaN(tot)) return { outcome: 'pending', pnl: 0 };
     const isOver  = signal.side === 'over';
     const covered = isOver ? actualTotal > tot : actualTotal < tot;
@@ -1761,7 +1783,9 @@ function calcPnl(signal, awayScore, homeScore, marketTotal) {
       : (isOver
           ? (signal.overPrice || signal.over_price || -110)
           : (signal.underPrice || signal.under_price || -110));
-    const line = effectiveLine(price, null); // price, not the total: bet_line holds the total on Total rows
+    // `price` is already the struck-or-market price chosen just above;
+    // the struck TOTAL is handled by `tot`, not here.
+    const line = price;
     const pnl = toWin100(line, covered);
     return { outcome: covered ? 'win' : 'loss', pnl };
   }
