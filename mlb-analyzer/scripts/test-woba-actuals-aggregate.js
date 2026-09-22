@@ -25,7 +25,13 @@
 // WHAT THIS PINS:
 //   1. the request sends strGroup:'career' and still sends the two-year
 //      window (the fix is aggregation, not a range change);
-//   2. a duplicate player_name is REJECTED, naming the offenders;
+//   2. a PERIOD SPLIT -- the same player under two different period
+//      labels -- is REJECTED, naming the offenders. A duplicate with
+//      the SAME label, or none, is a name collision and merges
+//      instead; that rule has its own suite
+//      (test-woba-period-split-guard.js). Until 2026-09-22 every
+//      duplicate threw, because nothing here could tell the two
+//      apart;
 //   3. the rejection ROLLS BACK -- the previous good upload survives,
 //      because the clear now lives inside the transaction. Before this,
 //      the clear ran first in routes/api.js and a failed ingest left the
@@ -109,23 +115,26 @@ function main() {
       threw || 'no throw');
     expect('...and all three landed', rowsOf().length === 3, rowsOf().length + ' row(s)');
 
-    console.log('\n4. a duplicate player_name is REJECTED and named');
+    console.log('\n4. a PERIOD SPLIT is REJECTED and named');
+    // The rows now carry the source's own period label. Two different
+    // labels for one player is the defect this guard exists for; the
+    // same label twice is a name collision and merges instead.
     const good = rowsOf();
     let msg = null;
     try {
       q.upsertWobaBatch(KEY, [
-        { name: 'Zzt Tidwell', woba: 0.382, sample: 60 },    // the 2025 row
-        { name: 'Zzt Tidwell', woba: 0.212, sample: 86 },    // the 2026 row
-        { name: 'Zzt Other', woba: 0.300, sample: 150 },
+        { name: 'Zzt Tidwell', woba: 0.382, sample: 60, period: '2025' },
+        { name: 'Zzt Tidwell', woba: 0.212, sample: 86, period: '2026' },
+        { name: 'Zzt Other', woba: 0.300, sample: 150, period: '2026' },
       ]);
     } catch (e) { msg = e.message; }
     expect('the batch throws', !!msg, msg ? 'threw' : 'DID NOT THROW');
     expect('the message names the offending player', !!msg && /Zzt Tidwell/.test(msg));
-    expect('...carries BOTH samples, so a split is distinguishable from a repeat',
-      !!msg && /60 vs 86|86 vs 60/.test(msg), msg ? msg.slice(-90) : '');
+    expect('...carries BOTH period labels, so the operator can see the split',
+      !!msg && /2025 vs 2026|2026 vs 2025/.test(msg), msg ? msg.slice(-90) : '');
     expect('...and says where to look', !!msg && /strGroup/.test(msg));
     expect('...and explains the consequence, not just the fact',
-      !!msg && /subset, not the/.test(msg));
+      !!msg && /subset of the real total/.test(msg));
 
     console.log('\n5. the rejection rolls back -- the previous upload survives');
     const nowRows = rowsOf();
@@ -136,6 +145,28 @@ function main() {
     expect('no partial write from the rejected batch leaked in',
       !nowRows.some(r => /Zzt Tidwell|Zzt Other/.test(r.player_name)),
       nowRows.map(r => r.player_name).join(','));
+
+    console.log('\n5b. an UNLABELLED duplicate merges instead, and does not roll back');
+    // The same rows without a period label are a name collision, which
+    // must not cost the other ~6000 rows their upload. Full rule in
+    // scripts/test-woba-period-split-guard.js.
+    let msg2 = null, info = null;
+    try {
+      info = q.upsertWobaBatch(KEY, [
+        { name: 'Zzt Tidwell', woba: 0.382, sample: 60 },
+        { name: 'Zzt Tidwell', woba: 0.212, sample: 86 },
+        { name: 'Zzt Other', woba: 0.300, sample: 150 },
+      ]);
+    } catch (e) { msg2 = e.message; }
+    expect('no throw', msg2 === null, msg2 || '');
+    const merged = rowsOf();
+    expect('the duplicate became ONE row', merged.length === 2, merged.length + ' row(s)');
+    expect('...the one with the larger sample',
+      merged.some(r => r.player_name === 'Zzt Tidwell' && r.sample_size === 86),
+      JSON.stringify(merged));
+    expect('...and it is reported by name, not swallowed',
+      !!info && (info.collisions || []).indexOf('Zzt Tidwell') !== -1,
+      JSON.stringify(info && info.collisions));
 
     console.log('\n6. the clear is inside the transaction, not before the call');
     const api = fs.readFileSync(path.join(R, 'routes/api.js'), 'utf8');

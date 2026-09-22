@@ -8437,7 +8437,8 @@ async function runFangraphsWobaSyncJob(opts) {
       if (!r.success) { ingested.push({ key: r.key, ok: false, error: r.error }); continue; }
       try {
         const inserted = ingestWobaCSV(r.key, r.csv, r.key + '.csv');
-        ingested.push({ key: r.key, ok: true, rows: inserted });
+        ingested.push({ key: r.key, ok: true, rows: inserted.rows,
+          name_collisions: inserted.collisions });
       } catch (e) {
         ingested.push({ key: r.key, ok: false, error: 'ingest failed: ' + e.message });
       }

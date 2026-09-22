@@ -1731,6 +1731,40 @@ cause is added, *what already explains this branch to a human.* Three
 occurrences in one working sequence is enough to make it a habit rather than
 a lesson.
 
+## Scratch files go in the scratchpad, never in tmp/ (2026-09-22)
+
+**`tmp/` is a tracked directory holding 70 committed scripts. It is not
+scratch space.** One-shot files that exist only for the current
+conversation go in the session scratchpad path the harness provides —
+outside the repo, gitignored by construction.
+
+The reason is one keystroke wide: `rm -f tmp/*.js` in the repo root
+deletes all 70 of them. That happened on 2026-09-22
+while cleaning up after a probe. It was caught in `git status` and undone
+with `git checkout -- tmp/` because nothing had been staged, but the only
+thing standing between a routine cleanup and losing every
+`verify-*`/`measure-*` script in the tree was noticing the output.
+
+### The rule
+
+1. **Scratch → scratchpad.** Anything you would delete at the end of the
+   turn never enters the repo. The harness names a per-session
+   scratchpad directory; use it for intermediate JSON, one-off probes,
+   patch scripts, downloaded payloads.
+2. **`tmp/` is for one-shot verifications TIED TO A PR**, committed with
+   that PR — the existing convention (see "Other project notes"). If it
+   is worth keeping past the turn it is worth committing; if it is not,
+   it does not belong in `tmp/`.
+3. **A keeper goes to `scripts/`.** `probe-*` and `test-*` there are the
+   re-runnable evidence a doc or a code comment cites.
+4. **Never glob-delete inside the repo.** Remove files you created, by
+   name. `rm -f tmp/*.js`, `rm -rf docs/*`, and friends cannot tell your
+   file from four months of committed work.
+
+`git status` after any cleanup is the cheap check, and it is what caught
+this one — a deletion that is not staged is still one `git add -A` away
+from being permanent.
+
 ## Local measurement runs stay under 2GB (2026-09-12)
 
 **Any measurement, backtest, sweep, replay, or DB job run on Mike's Windows
