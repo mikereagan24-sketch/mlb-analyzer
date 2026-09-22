@@ -3714,8 +3714,52 @@ q.getFatiguedPitchers = (teamAbbr, gameDate, gameNumber) => {
 };
 
 
+// A DUPLICATE NAME IS NOW AN ERROR, NOT AN OVERWRITE. (2026-09-22)
+//
+// upsertWoba is ON CONFLICT(data_key, player_name) DO UPDATE, which for
+// an ingest means "the last row wins, quietly". That is what hid the
+// per-season actuals collapse from April to September: FG was asked for
+// strGroup:'season' over a two-year window, returned ~1.5 rows per
+// player, and each player's first season was overwritten by the second.
+// Nothing logged, nothing failed, and the stored sample was one season
+// while services/fangraphs.js documented it as a two-year cumulative
+// figure the MIN_BF/MIN_PA gates were calibrated against.
+//
+// The pull now asks for strGroup:'career', so a duplicate should be
+// impossible. This makes that assumption FAIL LOUDLY rather than
+// silently degrade if FG ever changes shape again. Expansion does not
+// trip it: the bare / name+team / stripped+team forms are DIFFERENT
+// player_name values by construction.
+//
+// THE CLEAR MOVED INSIDE THE TRANSACTION. It used to run in
+// routes/api.js before this call, so a throw here left the key EMPTY --
+// an ingest failure that wiped the previous good upload. Clearing and
+// inserting in one transaction means a rejected batch rolls back to the
+// last good data instead.
 q.upsertWobaBatch = (key, rows) => {
-  const tx = db.transaction((k, rs) => { for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0); });
+  const tx = db.transaction((k, rs) => {
+    db.prepare('DELETE FROM woba_data WHERE data_key = ?').run(k);
+    const seen = new Map();
+    const dupes = [];
+    for (const r of rs) {
+      if (seen.has(r.name)) {
+        // Report the two values, because "duplicate" alone does not say
+        // whether the source split a player across rows (the bug) or
+        // emitted the same row twice (harmless but still wrong).
+        dupes.push(r.name + ' [' + seen.get(r.name) + ' vs ' + (r.sample || 0) + ']');
+      } else {
+        seen.set(r.name, r.sample || 0);
+      }
+    }
+    if (dupes.length) {
+      throw new Error('woba ingest ' + k + ': ' + dupes.length + ' duplicate player_name row(s)'
+        + ' -- refusing to overwrite. A duplicate means the source returned MORE THAN ONE ROW'
+        + ' PER PLAYER (e.g. one per season), so the stored sample would be a subset, not the'
+        + ' total. Check services/fangraphs.js strGroup. Samples: '
+        + dupes.slice(0, 5).join('; '));
+    }
+    for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0);
+  });
   tx(key, rows);
 };
 
