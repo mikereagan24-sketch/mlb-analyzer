@@ -310,7 +310,46 @@ async function fetchActualSplit(splitCode, position, cookieValue, opts) {
     strSplitTeams: false,       // boolean, NOT the string 'false'
     dctFilters: [],
     strStatType: 'player',
-    strAutoPt: 'true',
+    // strAutoPt:'false' — FG's AUTOMATIC QUALIFIER, OFF. (2026-09-22)
+    //
+    // This was 'true', and it was the real cause of the sample shortfall,
+    // not strGroup. With the qualifier ON, FG drops any row below its own
+    // automatic minimum -- which silently removed BOTH whole players from
+    // the aggregate AND whole seasons from the per-season response.
+    //
+    // VERIFIED, three calls, pitchers vs RHB, same two-year window
+    // (tmp/probe-autopt.js, 2026-09-22):
+    //
+    //   strGroup   strAutoPt   rows   players   Blade Tidwell vs RHB
+    //   career     true         421       421   ABSENT
+    //   career     false       1158      1158   Total  TBF 146  wOBA .2824
+    //   season     false       2179      1158   2025 47/.4354, 2026 99/.2098
+    //
+    // 146 / .282 is exactly FanGraphs' career splits page. The 421-row
+    // response shipped in #435 was missing 118 of 539 stored pitchers --
+    // about one in five losing their actuals row entirely and falling to
+    // pure projection, which is worse than the halved sample it replaced.
+    // That is live on main until this lands.
+    //
+    // WHY NOT SUM THE SEASON ROWS OURSELVES (the fallback that was asked
+    // for): with the qualifier ON it cannot work. Summing Tidwell's
+    // returned season rows gives 99 BF, because his 47-BF 2025 season is
+    // below FG's per-row minimum and is not in the response at all. Only
+    // 25% of players' season-sums matched FG's own career figure. The
+    // missing data is missing before we see it, so no client-side
+    // arithmetic recovers it.
+    //
+    // With the qualifier OFF the two agree exactly: 47 + 99 = 146, and
+    // (47*.4354 + 99*.2098)/146 = .2824, matching the career row to four
+    // decimals. So TBF-weighting IS the right aggregation -- we just do
+    // not need to do it, because FG will.
+    //
+    // Cost: 1158 rows instead of 421, many with small samples. That is
+    // correct rather than expensive -- MIN_BF/MIN_PA already gate on
+    // sample, and a stored-but-gated row is distinguishable from a
+    // missing one in the Matchups header, while a missing one is not
+    // distinguishable from anything.
+    strAutoPt: 'false',
     arrPlayerId: [],
     strPlayerId: 'all',
     strSplitArrPitch: [],
