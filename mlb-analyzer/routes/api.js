@@ -50,11 +50,11 @@ const { parse } = require('csv-parse/sync');
 const { q, db, DB_PATH } = require('../db/schema');
 const { runParkFactorsJob, runLineupJob, runScoreJob, runOddsJob, getWobaIndex, getSettings, processGameSignals, runRosterJob, runFangraphsRolesJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runPitcherUsageBackfill, detectOpeners, runMorningCaptureJob, nowPtIso, cohortForGameDate } = require('../services/jobs');
 const { legOf } = require('../utils/dh-leg');
-const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats, weightOr } = require('../services/model');
+const { runModel, getSignals, getBatterWoba, getPitcherWoba, buildSpStartIndex, forecastSpIP, buildRosterGatedIdx, getRosterGateStats, weightOr, BATTER_ACT_FULL_WEIGHT_PA } = require('../services/model');
 const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/scraper');
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
-const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
+const { normName, stripSfx, fuzzyLookup, hasTeamTag } = require('../utils/names');
 const { calcCLV, clvForSignal } = require('../services/clv');
 const { windBadge: _windBadge } = require('../utils/wind-badge');
 const router = express.Router();
@@ -5840,6 +5840,70 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const awayGatedIdx = buildRosterGatedIdx(wobaIdx, game.away_team, awayGateSet);
     const homeGatedIdx = buildRosterGatedIdx(wobaIdx, game.home_team, homeGateSet);
 
+    // WHY A BATTER'S SOURCE NEEDS A BADGE. (2026-09-23) Display only.
+    //
+    // #434 put the two inputs behind each PITCHER rate on the header.
+    // This is the batter side, and the reason it is worth having is the
+    // resolver bug #443 fixed: Fernando Tatis Jr., Michael Harris II,
+    // Vladimir Guerrero Jr. and Jazz Chisholm Jr. resolved their
+    // PROJECTION but not their ACTUALS all season -- their actuals rows
+    // are bare, and the bare suffixed key was excluded from the scans by
+    // a shape test. The lineup showed a number. Nothing said the actuals
+    // term was missing from it.
+    //
+    // THREE STATES, and the distinction is the whole point:
+    //   act_gated            an actuals row resolved and sat below
+    //                        MIN_PA. Normal for a rookie; shown with its
+    //                        sample and the threshold, like the pitcher
+    //                        card.
+    //   proj_only_no_row     no actuals row under any plausible key.
+    //                        Also normal -- a debut, a callup.
+    //   proj_only_near_miss  no actuals row resolved, but something in
+    //                        the actuals index shares this batter's
+    //                        surname on this team, or is one
+    //                        abbreviation away. THAT is a resolver bug
+    //                        signature, and it is styled to stand out.
+    //
+    // The probe reads the same index fuzzyLookup just failed on. It is a
+    // linear scan over one map, run for at most 18 batters on one game's
+    // page, and it decides nothing -- the rate is already computed.
+    function nearMissFor(keyMap, name, teamHint) {
+      if (!keyMap) return null;
+      const k = normName(name);
+      const p = stripSfx(k).split(' ');
+      if (p.length < 2) return null;
+      const last = p[p.length - 1];
+      const initial = p[0][0];
+      const tl = teamHint ? String(teamHint).toLowerCase() : null;
+      let best = null;
+      for (const key of Object.keys(keyMap)) {
+        const tagged = hasTeamTag(key);
+        const cut = tagged ? key.lastIndexOf(' ') : -1;
+        const base = tagged ? key.slice(0, cut) : key;
+        const tag = tagged ? key.slice(cut + 1) : null;
+        const bp = stripSfx(base).split(' ');
+        if (bp.length < 1 || bp[bp.length - 1] !== last) continue;
+        // A different team is not a near miss -- it is a different
+        // player until something says otherwise.
+        if (tag && tl && tag !== tl) continue;
+        const sameInitial = !!(bp[0] && bp[0][0] === initial);
+        const cand = {
+          key,
+          team: tag,
+          sameInitial,
+          kind: tag ? 'same_surname_same_team' : 'same_surname_untagged',
+          sample: keyMap[key] && keyMap[key].sample != null ? Number(keyMap[key].sample) : null,
+        };
+        // Prefer a same-initial hit, then a team-tagged one: the closer
+        // it is to matching, the more it looks like a resolver failure
+        // rather than a coincidental surname.
+        if (!best) best = cand;
+        else if (cand.sameInitial && !best.sameInitial) best = cand;
+        else if (cand.sameInitial === best.sameInitial && cand.team && !best.team) best = cand;
+      }
+      return best;
+    }
+
     function lookupBatter(name, hand, oppSpHand, teamHint, ownGatedIdx) {
         const vsKey  = oppSpHand==='R' ? 'bat-proj-rhp' : 'bat-proj-lhp';
         const actKey = oppSpHand==='R' ? 'bat-act-rhp'  : 'bat-act-lhp';
@@ -5925,7 +5989,57 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         // the act-fluke safety triggered.
         const bothDefault = (srcVsSP === 'default' && srcVsOpp === 'default');
         const finalSource = (oneSideActFluke || bothDefault) ? 'default' : srcVsSP;
-        return {woba:blended, wobaVsSP: finalVsSP, wobaVsOpp: finalVsOpp, source:finalSource};
+        // The vs-SP side is the one the lineup row displays, so that is
+        // the side reported. Read a second time from the same index and
+        // the same MIN_PA the lookup above used; nothing is recomputed
+        // differently and nothing here feeds pricing.
+        const projHit = fuzzyLookup(ownGatedIdx[vsKey], name, teamHint) || null;
+        const actHit  = fuzzyLookup(ownGatedIdx[actKey], name, teamHint) || null;
+        const actSample = actHit && Number.isFinite(Number(actHit.sample)) ? Number(actHit.sample) : null;
+        const actUsed = !!(actHit && !isNaN(actHit.woba) && actSample != null && actSample >= MIN_PA);
+        // The RAMP, not just the gate. getBatterWoba passes
+        // BATTER_ACT_FULL_WEIGHT_PA to blendWoba, so between MIN_PA and
+        // that floor the actuals weight smoothsteps in -- and at exactly
+        // MIN_PA it is ZERO. Reporting actUsed alone would claim a
+        // contribution the model did not make, so the weight rides along.
+        const rampW = (() => {
+          if (!actUsed) return 0;
+          const floor = Number(BATTER_ACT_FULL_WEIGHT_PA);
+          if (!(floor > MIN_PA)) return 1;
+          const t = (actSample - MIN_PA) / (floor - MIN_PA);
+          if (!(t > 0)) return 0;
+          if (t >= 1) return 1;
+          return t * t * (3 - 2 * t);
+        })();
+        const nm = actHit ? null : nearMissFor(ownGatedIdx[actKey], name, teamHint);
+        // Decided on the RAW ramp, never the rounded one. At 61 PA the
+        // weight is 0.00037 -- it rounds to 0.000 for display while the
+        // model genuinely did use the actuals term, so rounding first
+        // would make the badge contradict the blend by a hair.
+        const actContributes = actUsed && rampW > 0;
+        let flag;
+        if (actUsed) flag = actContributes ? 'ok' : 'act_ramp_zero';
+        else if (actHit) flag = 'act_gated';
+        else if (nm) flag = 'proj_only_near_miss';
+        else flag = 'proj_only_no_row';
+        const wobaSrc = {
+          flag,
+          actUsed,
+          act: actHit ? { woba: actHit.woba, sample: actSample } : null,
+          proj: projHit ? { woba: projHit.woba } : null,
+          actRejectReason: actHit
+            ? (actUsed ? null : (actSample == null ? 'no_sample' : 'below_min_pa'))
+            : 'no_actuals_row',
+          minPa: MIN_PA,
+          fullWeightPa: Number(BATTER_ACT_FULL_WEIGHT_PA),
+          // Rounded for the badge; actContributes carries the decision.
+          rampWeight: +rampW.toFixed(3),
+          actContributes,
+          sampleUnit: 'PA',
+          nearMiss: nm,
+          splitKey: actKey,
+        };
+        return {woba:blended, wobaVsSP: finalVsSP, wobaVsOpp: finalVsOpp, source:finalSource, wobaSrc};
       }
     function lookupPitcher(name, hand, team) {
       // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback

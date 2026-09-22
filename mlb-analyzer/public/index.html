@@ -2737,6 +2737,96 @@ async function renderMatchupGame(id){
     return '<div style="font-size:10px;color:var(--text2);margin:1px 0 2px 10px">'
       + actTxt + '  ' + projTxt + '</div>';
   }
+  // THE BATTER SIDE OF #434's HEADER. (2026-09-23) Display only.
+  //
+  // A lineup row showed a wOBA and nothing said where it came from. That
+  // hid the defect #443 fixed: Tatis, Harris, Guerrero and Chisholm
+  // resolved their PROJECTION but not their ACTUALS for the whole
+  // season, because their actuals rows are bare and a shape test
+  // excluded the bare suffixed key. The number looked fine.
+  //
+  // Two of these states are ordinary and one is a bug:
+  //   act N PA (ramp W)     both terms used; W<1 means the actuals
+  //                         weight is still ramping in toward
+  //                         fullWeightPa, and W=0 at exactly min_pa,
+  //                         which is why the weight is printed rather
+  //                         than implied by "used".
+  //   act gated             an actuals row resolved below min_pa. Normal
+  //                         for a rookie. Greyed and struck, with the
+  //                         sample and the threshold -- same shape as
+  //                         the pitcher card.
+  //   proj only             no actuals row at all. Normal for a debut.
+  //   NEAR MISS             no actuals row resolved, but the index holds
+  //                         this surname on this team, or one
+  //                         abbreviation away. A resolver bug, so it is
+  //                         the one state styled to be impossible to
+  //                         miss.
+  function batSrc(b) {
+    const v = b && b.wobaSrc;
+    if (!v || typeof v !== 'object') return '';
+    const f = (x) => (x == null || isNaN(x)) ? '\u2014' : Number(x).toFixed(3).replace(/^0/, '');
+    const u = v.sampleUnit || 'PA';
+    if (v.flag === 'proj_only_near_miss') {
+      const nm = v.nearMiss || {};
+      const what = nm.key ? nm.key.replace(/\b\w/g, function(c) { return c.toUpperCase(); }) : 'a same-surname row';
+      return '<div style="font-size:9px;margin:1px 0 2px 24px;padding:1px 5px;border-radius:3px;'
+        + 'background:var(--red-bg,#fdeaea);color:var(--red,#b32020);font-weight:600;display:inline-block"'
+        + ' title="No actuals row resolved for this batter, but the actuals index contains '
+        + what + (nm.sameInitial ? ' (same first initial)' : '')
+        + '. That is one lookup away from matching, which means the resolver failed rather than the data being absent. The rate shown is the projection alone.">'
+        + '\u26a0 proj only \u00b7 NEAR MISS: ' + what + (nm.sameInitial ? ' (same initial)' : '')
+        + '</div>';
+    }
+    if (v.flag === 'proj_only_no_row') {
+      return '<div style="font-size:9px;color:var(--text3);margin:1px 0 2px 24px">'
+        + 'proj only \u00b7 no actuals row</div>';
+    }
+    if (v.flag === 'act_gated') {
+      const smp = v.act ? v.act.sample : null;
+      return '<div style="font-size:9px;color:var(--text3);opacity:.85;margin:1px 0 2px 24px"'
+        + ' title="An actuals row resolved but was NOT used: ' + smp + ' ' + u
+        + ' is below the min_pa threshold of ' + v.minPa
+        + '. The rate shown is the projection alone.">'
+        + 'act <s>' + f(v.act && v.act.woba) + '</s> (' + smp + ' ' + u
+        + ' \u00b7 gated, min ' + v.minPa + ')</div>';
+    }
+    if (v.flag === 'act_ramp_zero') {
+      return '<div style="font-size:9px;color:var(--text3);margin:1px 0 2px 24px"'
+        + ' title="The actuals row clears min_pa but the ramp weight is 0 at exactly the threshold, so the rate is the projection alone in practice.">'
+        + 'act ' + f(v.act && v.act.woba) + ' (' + (v.act ? v.act.sample : '?') + ' ' + u
+        + ' \u00b7 ramp weight 0)</div>';
+    }
+    if (v.actContributes && v.rampWeight != null && v.rampWeight < 1) {
+      return '<div style="font-size:9px;color:var(--text2);margin:1px 0 2px 24px">'
+        + 'act ' + f(v.act && v.act.woba) + ' (' + (v.act ? v.act.sample : '?') + ' ' + u
+        + ') \u00b7 ramp ' + v.rampWeight + ' toward ' + v.fullWeightPa + ' ' + u + '</div>';
+    }
+    return '';
+  }
+  // Per-slot tally, so a slate with eight near-misses is one glance
+  // rather than nine rows of scanning.
+  function batSrcCounts(lu) {
+    const c = { near: 0, noRow: 0, gated: 0, ramp: 0 };
+    (lu || []).forEach(function(b) {
+      const v = b && b.wobaSrc; if (!v) return;
+      if (v.flag === 'proj_only_near_miss') c.near++;
+      else if (v.flag === 'proj_only_no_row') c.noRow++;
+      else if (v.flag === 'act_gated') c.gated++;
+      else if (v.flag === 'act_ramp_zero' || (v.actContributes && v.rampWeight != null && v.rampWeight < 1)) c.ramp++;
+    });
+    return c;
+  }
+  function batSrcSummary(lu) {
+    const c = batSrcCounts(lu);
+    const bits = [];
+    if (c.near) bits.push('<span style="background:var(--red-bg,#fdeaea);color:var(--red,#b32020);'
+      + 'font-weight:600;padding:0 4px;border-radius:3px">\u26a0 ' + c.near + ' near miss</span>');
+    if (c.noRow) bits.push(c.noRow + ' proj only');
+    if (c.gated) bits.push(c.gated + ' act gated');
+    if (c.ramp) bits.push(c.ramp + ' ramping');
+    if (!bits.length) return '<span style="color:var(--text3)">all 9 blended</span>';
+    return bits.join(' \u00b7 ');
+  }
   function wc(w){const lo=.260,mid=.320,hi=.380;let r,g,b;if(w>=hi){r=39;g=139;b=66;}else if(w>=mid){const t=(w-mid)/(hi-mid);r=Math.round(200-161*t);g=Math.round(180-41*t);b=Math.round(50+16*t);}else if(w>=lo){const t=(w-lo)/(mid-lo);r=200;g=Math.round(50+130*t);b=50;}else{r=200;g=50;b=50;}const a=Math.min(.18+Math.abs(w-mid)/.12*.10,.32);return 'background:rgba('+r+','+g+','+b+','+a+');color:rgb('+Math.round(r*.55)+','+Math.round(g*.55)+','+Math.round(b*.55)+');border-radius:3px;padding:3px 4px';}
   function mt(lu,sn,sh,pw,lbl){
     // Pull W_PIT / W_BAT from the live settings object (populated by
@@ -2752,10 +2842,10 @@ async function renderMatchupGame(id){
       const bw=b.woba!=null?b.woba:(eff==='L'?.330:.305),pw2=eff==='L'?gw(pw,'vsLHB'):gw(pw,'vsRHB'),av=bw*wBat+pw2*wPit;
       wB+=bw*pa;wP+=pw2*pa;wA+=av*pa;wT+=pa;
       const hd=b.hand==='S'?'S>'+eff:b.hand,dt=b.source&&b.source!=='default'?'<span style="color:var(--green);font-size:9px"> *</span>':'';
-      return '<tr><td>'+(i+1)+'</td><td><span class="hbadge h'+eff+'" style="font-size:9px;width:20px;height:15px;line-height:15px">'+hd+'</span> '+b.name+dt+'</td><td>'+pa.toFixed(2)+'</td><td style="'+wc(bw)+'">'+bw.toFixed(3)+'</td><td style="'+wc(pw2)+'">'+pw2.toFixed(3)+'</td><td style="'+wc(av)+'">'+av.toFixed(3)+'</td></tr>';
+      return '<tr><td>'+(i+1)+'</td><td><span class="hbadge h'+eff+'" style="font-size:9px;width:20px;height:15px;line-height:15px">'+hd+'</span> '+b.name+dt+batSrc(b)+'</td><td>'+pa.toFixed(2)+'</td><td style="'+wc(bw)+'">'+bw.toFixed(3)+'</td><td style="'+wc(pw2)+'">'+pw2.toFixed(3)+'</td><td style="'+wc(av)+'">'+av.toFixed(3)+'</td></tr>';
     });
     const rb=wB/wT,rp=wP/wT,ra=wA/wT;
-    return '<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+lbl+' vs '+sn+' ('+sh+'HP)</th><th>PA</th><th>Bat wOBA</th><th>Pit wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>Wtd avg</td><td style="text-align:center;font-size:10px">'+wT.toFixed(1)+'</td><td style="'+wc(rb)+';font-weight:500">'+rb.toFixed(3)+'</td><td style="'+wc(rp)+';font-weight:500">'+rp.toFixed(3)+'</td><td style="'+wc(ra)+';font-weight:500">'+ra.toFixed(3)+'</td></tr></tfoot></table>';
+    return '<table class="mu-tbl"><colgroup><col style="width:20px"><col><col style="width:32px"><col style="width:48px"><col style="width:48px"><col style="width:48px"></colgroup><thead><tr><th>#</th><th style="text-align:left">'+lbl+' vs '+sn+' ('+sh+'HP)<div style="font-weight:400;font-size:9px;color:var(--text2);margin-top:1px">wOBA source: '+batSrcSummary(lu)+'</div></th><th>PA</th><th>Bat wOBA</th><th>Pit wOBA</th><th>Avg</th></tr></thead><tbody>'+rows.join('')+'</tbody><tfoot><tr><td></td><td>Wtd avg</td><td style="text-align:center;font-size:10px">'+wT.toFixed(1)+'</td><td style="'+wc(rb)+';font-weight:500">'+rb.toFixed(3)+'</td><td style="'+wc(rp)+';font-weight:500">'+rp.toFixed(3)+'</td><td style="'+wc(ra)+';font-weight:500">'+ra.toFixed(3)+'</td></tr></tfoot></table>';
   }
   const sb=h=>'<span class="sp-hand-'+h+'">'+h+'HP</span>';
   const awayConfirmed=(g.away_lineup_status||g.lineup_status||'projected')==='confirmed'; const homeConfirmed=(g.home_lineup_status||g.lineup_status||'projected')==='confirmed'; const srcBadge=awayConfirmed||homeConfirmed?'<span style="background:var(--green-bg);color:var(--green);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">✓ Confirmed Lineup</span>':'<span style="background:var(--yellow-bg);color:var(--yellow);padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500;margin-left:6px">⚠ Projected Lineup</span>';
