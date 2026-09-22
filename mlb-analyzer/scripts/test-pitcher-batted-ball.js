@@ -127,9 +127,28 @@ console.log('\n7. an unpopulated new capture is STALE, not CRITICAL');
 // an existing green test, for a table nothing has had a chance to write.
 const { checkPipelineFreshness } = require('../utils/pipeline-freshness');
 check('declared awaitingFirstRun', !!p.awaitingFirstRun, true);
-const liveRun = checkPipelineFreshness(db, '2026-09-12');
-const pbbRow = liveRun.rows.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
-check('empty table reports STALE', pbbRow.level, 'STALE');
+// ON A SYNTHETIC EMPTY TABLE, NOT THE LIVE DB. (2026-09-23)
+//
+// This ran against `db` -- the real analysis copy -- and asserted STALE.
+// That was true only while the table was empty, so the assertion went red
+// the moment the capture started working: the 2026-09-22 refresh brought
+// 8273 rows down and the test reported a failure for the SUCCESS case.
+//
+// The property is about the awaitingFirstRun flag, not about today's row
+// count, so it is now exercised on a table that is present and empty by
+// construction. The live DB is asserted against the OPPOSITE property
+// below, which is the one that can still catch something.
+const emptyDb = new Database(':memory:');
+emptyDb.exec('CREATE TABLE game_log (game_date TEXT)');
+// The `source` column is part of the shape that matters: the check's SQL
+// filters WHERE source='live', and a query ERROR is CRITICAL by design --
+// so a fixture missing the column would exercise the error path instead of
+// this one. That is exactly what the first draft of this fixture did.
+emptyDb.exec('CREATE TABLE pitcher_batted_ball_snapshot '
+  + '(snapshot_date TEXT, mlb_id INTEGER, source TEXT)');
+const pbbRow = checkPipelineFreshness(emptyDb, '2026-09-12')
+  .rows.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
+check('an empty table reports STALE', pbbRow.level, 'STALE');
 // NOT PINNED TO THE SENTENCE (2026-09-13). This read /awaiting its first
 // run/ and broke when the detail changed to name the LIVE-capture filter
 // -- a red test whose message said nothing true about the code, which is
@@ -137,7 +156,27 @@ check('empty table reports STALE', pbbRow.level, 'STALE');
 // What must hold is that the line names what it is waiting for rather
 // than reporting a bare STALE.
 check('and says why', /awaiting/.test(pbbRow.detail) && pbbRow.detail.length > 30, true);
-check('the run has no criticals because of it', liveRun.crit, 0);
+// A POPULATED table must NOT report the awaiting-first-run excuse. This is
+// the half that can catch a real regression: the flag existing is only
+// safe while it stops applying once rows arrive, otherwise a genuinely
+// dead capture hides behind it for ever.
+const liveRow = checkPipelineFreshness(db, '2026-09-12')
+  .rows.filter((x) => x.key === 'pitcher_batted_ball_snapshot')[0];
+const livePopulated = db.prepare(
+  'SELECT COUNT(*) c FROM pitcher_batted_ball_snapshot').get().c > 0;
+if (livePopulated) {
+  check('a POPULATED table drops the awaiting-first-run excuse',
+    /awaiting/.test(liveRow.detail || ''), false);
+} else {
+  console.log('  SKIP  live table is still empty, so the populated case cannot be checked');
+}
+// ROW-LEVEL, not the global count. The old form asserted the whole run had
+// zero criticals, which was always a proxy: on a synthetic DB every other
+// pipeline is empty too, and on the live DB that number moves for reasons
+// with nothing to do with this table. What must hold is that THIS row is
+// not CRITICAL while it is awaiting its first run.
+check('...and this row is not CRITICAL while awaiting',
+  pbbRow.level !== 'CRITICAL', true);
 // A dropped table and a job that never ran look identical downstream, so
 // only one of them is excused. Point the check at a DB with no such table.
 const broken = new Database(':memory:');
