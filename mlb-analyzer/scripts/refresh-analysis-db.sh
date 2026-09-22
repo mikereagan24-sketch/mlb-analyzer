@@ -346,7 +346,70 @@ fi
 echo "=== 4/5 backing up the current copy (this is the undo) ==="
 cp data/mlb.db "data/mlb.db.local-pre-refresh-${STAMP}"
 ls -l "data/mlb.db.local-pre-refresh-${STAMP}"
-cp "${SNAP}" data/mlb.db
+
+# THE PROMOTE NEVER WRITES ONTO THE LIVE FILE. (2026-09-22)
+#
+# This was `cp "${SNAP}" data/mlb.db` with nothing after it. On
+# 2026-09-22 that copy overwrote the live database in place and stopped at
+# exactly 835,006,464 bytes -- the byte length the destination already had
+# -- 54,255,616 short of the 889,262,080-byte snapshot. It did not abort
+# the script. Step 5's remediation then ran against a file whose header
+# claimed 217,105 pages over 203,859 pages of data and threw
+# SQLITE_CORRUPT. The refresh had reported every earlier step as passing,
+# which it had: the download, the integrity check and the comparison were
+# all fine. Only the promote was broken, and nothing looked at it.
+#
+# Stopping at EXACTLY the old file's length is the signature of a copy
+# that overwrote existing bytes and could not extend past the old EOF --
+# what Windows does when another process holds the file open. So the
+# structural fix is not a better cp. It is to build the new file BESIDE
+# the old one and rename it into place: a rename either happens or fails,
+# it cannot half-succeed, and it cannot write a byte into a database
+# something else is reading.
+#
+# Then verify anyway, because the class of failure here was "the copy
+# reported success and the bytes were not there", and the only defence
+# against that is looking at the result.
+PROMOTE_TMP="data/mlb.db.promoting-${STAMP}"
+rm -f "${PROMOTE_TMP}"
+if ! cp "${SNAP}" "${PROMOTE_TMP}"; then
+  rm -f "${PROMOTE_TMP}"
+  echo "PROMOTE FAILED: could not stage ${SNAP} -> ${PROMOTE_TMP}." >&2
+  echo "  data/mlb.db is UNTOUCHED. Nothing was lost." >&2
+  exit 5
+fi
+# A -wal/-shm pair belongs to the database it was created from. Leaving
+# the old pair beside a new main file is a second corruption route, and
+# costs one line to close.
+rm -f data/mlb.db-wal data/mlb.db-shm
+if ! mv -f "${PROMOTE_TMP}" data/mlb.db; then
+  rm -f "${PROMOTE_TMP}"
+  echo "PROMOTE FAILED: could not rename ${PROMOTE_TMP} over data/mlb.db." >&2
+  echo "  Something is holding the file open -- close any running server or" >&2
+  echo "  node process and re-run. data/mlb.db is UNTOUCHED." >&2
+  exit 5
+fi
+
+# The post-condition. Size, the header's own page arithmetic, quick_check,
+# and the game_log count the snapshot was admitted on.
+if ! "$NODE" scripts/assert-db-promoted.js "${SNAP}" data/mlb.db; then
+  echo "" >&2
+  echo "PROMOTE FAILED VERIFICATION -- restoring the pre-refresh copy." >&2
+  RESTORE_TMP="data/mlb.db.restoring-${STAMP}"
+  rm -f "${RESTORE_TMP}"
+  if cp "data/mlb.db.local-pre-refresh-${STAMP}" "${RESTORE_TMP}" \
+     && rm -f data/mlb.db-wal data/mlb.db-shm \
+     && mv -f "${RESTORE_TMP}" data/mlb.db; then
+    echo "  Restored data/mlb.db from data/mlb.db.local-pre-refresh-${STAMP}." >&2
+  else
+    rm -f "${RESTORE_TMP}"
+    echo "  RESTORE ALSO FAILED. data/mlb.db is NOT usable." >&2
+    echo "  Recover by hand: cp data/mlb.db.local-pre-refresh-${STAMP} data/mlb.db" >&2
+  fi
+  echo "  The snapshot ${SNAP} is intact -- this is a promote failure, not a" >&2
+  echo "  download failure. Re-run with --promote once the cause is cleared." >&2
+  exit 5
+fi
 
 echo "=== 5/5 re-applying local-only remediation ==="
 # ORDER IS LOAD-BEARING, and getting it wrong fails quietly rather than
