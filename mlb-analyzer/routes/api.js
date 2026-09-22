@@ -315,7 +315,28 @@ function parseCSV(buffer, isPitcher) {
   const nameCol = Object.keys(records[0]).find(h => ['name', 'player', 'playername'].includes(h.toLowerCase()));
   const sampleCols = isPitcher ? ['tbf', 'bf', 'batters faced'] : ['pa', 'plate appearances'];
   const sampleCol = Object.keys(records[0]).find(h => sampleCols.includes(h.toLowerCase()));
-  const teamCol = Object.keys(records[0]).find(h => h.toLowerCase() === 'team');
+  // TEAM, INCLUDING THE ACTUALS SPELLING. (2026-09-22)
+  //
+  // Projections carry 'Team'; the splits API that feeds the four
+  // actuals keys carries 'TeamNameAbb'. Matching only 'team' meant every
+  // actuals row fell to expansion rule 1 -- "untagged, write the bare
+  // name" -- so two different players with the same name became one row.
+  //
+  // That is not hypothetical: there are two Max Muncys (LAD 571970, ATH
+  // 691777) and two Yunior Martes (CIN, SF) on current rosters. In
+  // projections they coexist as "Max Muncy LAD" / "Max Muncy ATH"; in
+  // actuals they collapsed, and one silently overwrote the other until
+  // #435's duplicate guard turned the collapse into a rejected upload.
+  //
+  // Ordered preference, not a set-membership test: if a source ever
+  // carries both columns, 'Team' wins because that is the one the
+  // projection path has always used. Object.keys().find() over a set
+  // would return whichever appeared first in the record, which is the
+  // source's choice rather than ours.
+  const TEAM_COLS = ['team', 'teamnameabb'];
+  const teamCol = TEAM_COLS
+    .map(want => Object.keys(records[0]).find(h => h.toLowerCase() === want))
+    .find(Boolean);
   if (!wobaCol || !nameCol) return [];
   const rows = [];
   for (const r of records) {
@@ -483,6 +504,56 @@ function ingestWobaCSV(key, csvText, filename) {
     }
     return parts.join(' ');
   }
+  // TEAM-TAG ONLY WHERE IT DISAMBIGUATES. (2026-09-22)
+  //
+  // parseCSV now reads TeamNameAbb, so actuals rows carry a team for the
+  // first time. Letting that flow straight into expansion rule 2 would
+  // re-key EVERY actuals row from "max muncy" to "max muncy lad" -- and
+  // measured against the real (name, team) pairs the model queries with
+  // since 2026-08-01, that BREAKS far more than it fixes:
+  //
+  //   blanket team-tagging   pit: 76 of 245 queries stop resolving (31%)
+  //                          bat: 202 of 536 stop resolving (38%)
+  //   collision-only         pit: 0 lost, 0 gained
+  //                          bat: 0 lost, 0 gained
+  //
+  // The reason is that FanGraphs reports a MULTI-TEAM marker over a
+  // two-year window -- "6 Tms", "2 Tms" -- for anyone who changed teams.
+  // Tagging with that produces "kevin gausman 6 tms", which no lookup
+  // carrying teamHint 'TOR' can ever hit, and the bare fallback the
+  // lookup used to land on no longer exists.
+  //
+  // So: keep the existing keying, and add a team tag ONLY to names that
+  // actually collide. That is 1-2 names per key (max muncy; luis garcia,
+  // yunior marte) instead of 800-1200, and it removes the ambiguity that
+  // made #435's guard reject the upload.
+  //
+  // Scoped to the actuals keys because projections have ALWAYS been
+  // team-tagged -- applying collision-only there would strip the team
+  // from ~6000 rows, which is the same regression in the other
+  // direction. `key.includes('-act-')` is the same switch isProj already
+  // uses two lines up.
+  //
+  // Re-run the measurement: node --max-old-space-size=1536 \
+  //   scripts/probe-actuals-team-tagging.js
+  if (key.includes('-act-')) {
+    const nameCount = new Map();
+    for (const r of rows) {
+      const k = normName(r.name);
+      nameCount.set(k, (nameCount.get(k) || 0) + 1);
+    }
+    let tagged = 0;
+    for (const r of rows) {
+      if (nameCount.get(normName(r.name)) > 1) { tagged++; continue; }
+      r.team = null;                     // falls to rule 1: bare name only
+    }
+    if (tagged) {
+      console.log('[woba-ingest] ' + key + ': team-tagged ' + tagged
+        + ' row(s) on ' + [...nameCount.entries()].filter(([, c]) => c > 1).length
+        + ' colliding name(s) to keep them distinct');
+    }
+  }
+
   const expandedRows = [];
   let excludedCount = 0;
   for (const r of rows) {
