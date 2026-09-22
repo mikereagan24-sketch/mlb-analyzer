@@ -263,7 +263,33 @@ async function fetchActualSplit(splitCode, position, cookieValue, opts) {
   // ID → we pass [splitCode] so FG scopes to the split we want.
   const body = {
     strSplitArr: [splitCode],
-    strGroup: 'season',
+    // 'career', NOT 'season'. (2026-09-22)
+    //
+    // strGroup:'season' returns ONE ROW PER PLAYER PER SEASON. Over the
+    // two-year window that is ~1.5 rows per player, and q.upsertWoba is
+    // ON CONFLICT(data_key, player_name) DO UPDATE -- so the first
+    // season was silently overwritten by the second and the stored
+    // sample was ONE SEASON, never the two-year total the gates are
+    // calibrated against. 804 CSV rows stored as 539 on pit-act-rhb;
+    // median stored sample / current-season batters-faced was 0.94.
+    //
+    // VERIFIED against a real response rather than assumed
+    // (scripts/probe-fg-strgroup.js, 2026-09-22, split 5 = vs LHB):
+    //
+    //   strGroup='season'  723 rows  Tidwell: Season 2026,    TBF 123, wOBA .3813
+    //   strGroup='career'  466 rows  Tidwell: Season "Total", TBF 154, wOBA .3878
+    //   strGroup='total' | 'all' | ''            HTTP 500
+    //
+    // 154 / .388 is exactly what FanGraphs' own career splits page shows
+    // for him vs L, so 'career' is FG aggregating the requested range --
+    // not a different range, and not a career-to-date figure that
+    // ignores strStartDate. Row count falling 723 -> 466 is the same
+    // 1.55 rows/player collapsing to 1.
+    //
+    // 'career' is FG's label for "group the date range into one row". It
+    // still honours strStartDate/strEndDate, which is why the window
+    // below is unchanged.
+    strGroup: 'career',
     strPosition: position,
     // strType selects which FG stat panel comes back:
     //   '1' = Standard/Dashboard panel — H, 2B, 3B, HR, BB, SO, AVG,

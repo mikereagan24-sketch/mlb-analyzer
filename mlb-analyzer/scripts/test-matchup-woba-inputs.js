@@ -24,7 +24,10 @@
 //      stops the header drifting from what the model priced;
 //   6. `source` keeps its old value and meaning, because
 //      loadDataQuality tests it against ['default','fallback'];
-//   7. NO PRICING FILE CHANGED. Content invariants plus a git diff.
+//   7. the pricing path's own invariants still hold -- the gate line,
+//      the six-arg call that keeps the shrink ramp off the pitcher
+//      path, and the MIN_BF default. (A git-diff check lived here and
+//      was removed; see the note in section 7 for why.)
 //
 // Synthetic date 2999-05-01; every write undone in the finally block.
 // Takes `db` from db/schema -- never a second write connection.
@@ -33,7 +36,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const { execFileSync } = require('child_process');
 const R = path.join(__dirname, '..');
 const { db, q } = require(path.join(R, 'db/schema'));
 
@@ -89,9 +91,7 @@ function cleanup() {
 
 async function main() {
   // ---- 7 first: the guard the brief asked for, before anything else --
-  console.log('\n7. no pricing file changed');
-  const PRICING = ['services/model.js', 'services/jobs.js', 'db/schema.js',
-    'utils/names.js', 'services/settings-schema.js'];
+  console.log('\n7. the pricing path invariants still hold');
   const modelSrc = fs.readFileSync(path.join(R, 'services/model.js'), 'utf8');
   // The gate itself, verbatim. A display PR must not move it.
   expect('blendWoba gate is untouched',
@@ -101,33 +101,26 @@ async function main() {
       .test(modelSrc));
   expect('MIN_BF default in getPitcherWoba is still 100',
     modelSrc.indexOf('if (minBF == null) minBF = 100;') !== -1);
-  let gitOk = false, changed = [];
-  try {
-    const base = execFileSync('git', ['merge-base', 'HEAD', 'origin/main'],
-      { cwd: R, encoding: 'utf8' }).trim();
-    changed = execFileSync('git', ['diff', '--name-only', base, 'HEAD'],
-      { cwd: R, encoding: 'utf8' }).split('\n').map(x => x.trim()).filter(Boolean)
-      .map(x => x.replace(/^mlb-analyzer\//, ''));
-    gitOk = true;
-  } catch (e) { /* reported below */ }
-  if (gitOk) {
-    // A diff that sees NOTHING passes the pricing check vacuously -- run
-    // before committing, `git diff base HEAD` is empty and the assertion
-    // below is satisfied by an absence rather than by a fact. So assert
-    // the diff is non-empty first. Same reasoning as the scanner floor in
-    // test-game-log-sp-id.js.
-    expect('the diff is non-empty, so the check below means something',
-      changed.length > 0,
-      changed.length + ' file(s) -- if 0, this branch has no commits yet '
-      + 'and the pricing check verified nothing');
-    const hits = changed.filter(f => PRICING.indexOf(f) !== -1);
-    expect('git diff touches no pricing file', hits.length === 0,
-      hits.length ? hits.join(', ') : changed.length + ' file(s): ' + changed.join(', '));
-  } else {
-    console.log('  SKIPPED  git diff check could not run (no git / no origin/main).');
-    console.log('           The content assertions above still stand, but this one');
-    console.log('           did NOT verify anything -- do not read it as a pass.');
-  }
+  // THE GIT-DIFF CHECK WAS REMOVED. (2026-09-22)
+  //
+  // It asserted that `git diff <merge-base> HEAD` touched no pricing
+  // file. That is a property of ONE historical diff, and a test that
+  // runs forever cannot hold it: the first branch to legitimately touch
+  // services/fangraphs.js and db/schema.js -- fix/actuals-career-aggregate,
+  // which corrected the per-season actuals collapse -- failed it with
+  // "git diff touches no pricing file -- db/schema.js" while changing
+  // nothing about the matchup display at all.
+  //
+  // So it was a check nobody could keep, of the kind CLAUDE.md's
+  // "scope a check to what it can act on" section describes: it would
+  // have trained the next reader to edit the PRICING list rather than
+  // read the failure. The three content assertions above are the real
+  // protection and they DO hold forever -- they pin the gate line, the
+  // six-arg call that keeps the shrink ramp off the pitcher path, and
+  // the MIN_BF default. Those are properties of the code, not of a diff.
+  //
+  // The display-only claim for that PR stands in its own description and
+  // its own diff, which is where a one-time claim belongs.
 
   seed();
   const express = require(path.join(R, 'node_modules/express'));

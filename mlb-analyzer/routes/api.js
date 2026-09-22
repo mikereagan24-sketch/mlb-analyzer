@@ -432,7 +432,9 @@ function ingestWobaCSV(key, csvText, filename) {
   const buf = Buffer.isBuffer(csvText) ? csvText : Buffer.from(csvText, 'utf-8');
   const rows = parseCSV(buf, isPitcher);
   if (!rows.length) throw new Error('No valid rows parsed. Check wOBA and Name columns.');
-  q.clearWobaKey.run(key);
+  // The clear moved INSIDE q.upsertWobaBatch's transaction (2026-09-22)
+  // so a rejected batch rolls back to the last good upload instead of
+  // leaving the key empty. Clearing here would defeat that.
   // Row expansion (fix/woba-ingest-dedup, 2026-07-24):
   //
   // Steamer emits ONE row per player. The pre-fix code unconditionally
