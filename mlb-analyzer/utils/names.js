@@ -44,6 +44,61 @@ function stripSfx(n) {
   return n.replace(/\b(jr|sr|ii|iii|iv)\b/g, '').replace(/\s+/g, ' ').trim();
 }
 
+// A 2-3 LETTER TRAILING TOKEN IS A TEAM TAG ONLY IF IT IS ONE. (2026-09-23)
+//
+// Three of the stages below skip index entries that carry a team tag,
+// because those are reached by the team-scoped stages instead. The test
+// used to be a SHAPE -- /\s[a-z]{2,3}$/ -- which is true of any short
+// trailing token, and a great many of those are not teams:
+//
+//   suffixes      jr (40 entries), iii (7), ii (3), iv (2)
+//   surnames      lee (13), kim (12), paz (4), gil (4), oca (3), fry,
+//                 cox, son, ha, woo, may, ray, ryu, oh, bae, lux, puk,
+//                 baz, fox, orr, seo ... 64 distinct non-team tokens
+//   FG's marker   tms, from its "6 Tms" multi-team spelling
+//
+// So every one of those entries was invisible to stages 6, 6.5-global
+// and 7. Measured cost of the suffix half alone: "L. Gurriel" + ARI
+// could not reach "Lourdes Gurriel Jr." -- 558 PA of real actuals -- and
+// 48 ARI lineup slots between 2026-04-18 and 2026-09-11 priced an
+// everyday hitter at the league-average default. A team-tagged entry
+// survives because stage 5 matches on the tag itself; the ones that
+// broke are the UNTAGGED entries, where the scans were the only route.
+//
+// Membership, not shape. The list is the 30 current abbreviations as
+// game_log and team_rosters spell them, plus AL/NL (All-Star rows in
+// game_log) and the legacy/FanGraphs spellings that older woba_data rows
+// can still carry. scripts/test-team-tag-membership.js asserts it covers
+// every trailing team token actually present in woba_data, so a rebrand
+// or expansion team fails the test rather than silently re-opening this.
+//
+// UNDER-LISTING IS THE SAFE DIRECTION, and worth stating because it is
+// not obvious. If a real team tag were missing from this set, the entry
+// stops being excluded from the scans -- but the scans compare the
+// lookup's LAST NAME against the entry's last token, and for a tagged
+// entry that token is the team ("aaron judge nyy" -> "nyy"), which no
+// surname matches. It becomes unreachable, exactly as it was when
+// excluded. Over-listing is the harmful direction: putting a surname in
+// here would re-create the bug for that surname.
+const TEAM_TOKENS = new Set([
+  'ari', 'ath', 'atl', 'bal', 'bos', 'chc', 'cin', 'cle', 'col', 'cws',
+  'det', 'hou', 'kc', 'laa', 'lad', 'mia', 'mil', 'min', 'nym', 'nyy',
+  'phi', 'pit', 'sd', 'sea', 'sf', 'stl', 'tb', 'tex', 'tor', 'was',
+  // All-Star rows in game_log carry these as the "team".
+  'al', 'nl',
+  // Legacy + FanGraphs spellings that predate normaliseFgTeam, or that a
+  // hand-built index can still hold: Oakland before ATH, Kansas City and
+  // San Francisco's FG forms, and the five FG_TEAM_MAP sources.
+  'oak', 'kan', 'sfg', 'kcr', 'sdp', 'tbr', 'wsn', 'chw',
+]);
+
+// Does this normalised index key end in a team tag?
+function hasTeamTag(n) {
+  const i = n.lastIndexOf(' ');
+  if (i < 0) return false;               // single token: nothing to tag
+  return TEAM_TOKENS.has(n.slice(i + 1));
+}
+
 // Fuzzy lookup against a normalized name→value map.
 // Stages:
 //   1. exact match on "<name> <team>"
@@ -99,7 +154,7 @@ function fuzzyLookup(keyMap, name, teamHint) {
   if (isAbbrev) {
     const initial = parts[0], last = parts[parts.length - 1];
     const matches = Object.entries(keyMap).filter(([n]) => {
-      if (/\s[a-z]{2,3}$/.test(n)) return false;
+      if (hasTeamTag(n)) return false;
       const p = stripSfx(n).split(' ');
       return p[p.length - 1] === last && p[0] && p[0][0] === initial;
     });
@@ -111,7 +166,7 @@ function fuzzyLookup(keyMap, name, teamHint) {
       for (let wi = 1; wi < parts.length; wi++) {
         const altLast = parts[wi];
         const altMatches = Object.entries(keyMap).filter(([n]) => {
-          if (/\s[a-z]{2,3}$/.test(n)) return false;
+          if (hasTeamTag(n)) return false;
           const p = stripSfx(n).split(' ');
           return p[p.length - 1] === altLast && p[0] && p[0][0] === initial;
         });
@@ -153,7 +208,7 @@ function fuzzyLookup(keyMap, name, teamHint) {
     // Global scan — require exactly-one match to avoid promoting an
     // ambiguous cross-team collision (mirrors Stage 6's exactly-one gate).
     const globalMatches = Object.entries(keyMap).filter(([n]) => {
-      if (/\s[a-z]{2,3}$/.test(n)) return false;  // team-tagged: already tried above
+      if (hasTeamTag(n)) return false;  // team-tagged: already tried above
       const p = stripSfx(n).split(' ');
       return p.length >= 2 && p[0].length === 1 && p[0] === initial && p[p.length - 1] === last;
     });
@@ -165,8 +220,8 @@ function fuzzyLookup(keyMap, name, teamHint) {
     const tk2 = sk + ' ' + teamHint.toLowerCase();
     if (keyMap[tk2]) return keyMap[tk2];
   }
-  const e2 = Object.entries(keyMap).find(([n]) => !/\s[a-z]{2,3}$/.test(n) && stripSfx(n) === sk);
+  const e2 = Object.entries(keyMap).find(([n]) => !hasTeamTag(n) && stripSfx(n) === sk);
   return e2 ? e2[1] : null;
 }
 
-module.exports = { normName, stripSfx, fuzzyLookup };
+module.exports = { normName, stripSfx, fuzzyLookup, TEAM_TOKENS, hasTeamTag };
