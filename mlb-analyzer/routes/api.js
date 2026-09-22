@@ -5819,9 +5819,64 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       // Use model.js getPitcherWoba which has full fuzzyLookup including compound surname fallback
       const { getPitcherWoba } = require('../services/model');
       const result = getPitcherWoba(wobaIdx, name, hand||'R', team, W_PROJ, W_ACT);
+      // THE TWO INPUTS BEHIND EACH RATE. (2026-09-21) Display only.
+      //
+      // getPitcherWoba returns the blended number and ONE aggregate
+      // `source` for both hands, so the Matchups header could show a
+      // rate without showing what produced it -- and worse, that
+      // aggregate reads 'blend' whenever the two hands resolve
+      // DIFFERENTLY (services/model.js: `bL.source===bR.source ? ... :
+      // 'blend'`). Blade Tidwell resolved vsLHB from a blend and vsRHB
+      // from the projection alone, and the header said 'blend' for
+      // both. So the per-split source is recomputed here rather than
+      // read off the aggregate.
+      //
+      // Nothing about the blend or the gate changes. These are the same
+      // index, the same fuzzyLookup and the same MIN_BF the model uses,
+      // read a second time for display. The pricing path is untouched --
+      // asserted by scripts/test-matchup-woba-inputs.js.
+      //
+      // WHY THE REJECTED ACTUAL IS SHOWN RATHER THAN HIDDEN: an actual
+      // that exists but sat below the gate is indistinguishable, in the
+      // old header, from no actual at all. That is the state that sent
+      // the owner looking at Tidwell by hand. It is now labelled with
+      // its sample and the threshold that rejected it.
+      const MIN_BF = num(settings.MIN_BF, 100);
+      const splitOf = (projKey, actKey) => {
+        const proj = fuzzyLookup(wobaIdx[projKey], name, team) || null;
+        const act  = fuzzyLookup(wobaIdx[actKey],  name, team) || null;
+        const sample = act && Number.isFinite(Number(act.sample)) ? Number(act.sample) : null;
+        const actUsable = !!(act && !isNaN(act.woba) && sample != null && sample >= MIN_BF);
+        // Mirrors blendWoba's own source labels so the header and the
+        // model cannot disagree about which term was used.
+        const splitSource = (proj && !isNaN(proj.woba))
+          ? (actUsable ? 'blend' : 'steamer')
+          : (actUsable ? 'actual' : 'fallback');
+        return {
+          splitSource,
+          act: act ? { woba: act.woba, sample } : null,
+          proj: proj ? { woba: proj.woba } : null,
+          actUsed: actUsable,
+          // Named reason rather than a bare boolean, so a future second
+          // rejection cause cannot inherit this one's explanation.
+          actRejectReason: act
+            ? (actUsable ? null : (sample == null ? 'no_sample' : 'below_min_bf'))
+            : 'no_actuals_row',
+          minBf: MIN_BF,
+          // The gate is measured in BATTERS FACED: parseCSV picks the
+          // pitcher sample from ['tbf','bf','batters faced'] and the
+          // setting is min_bf. Labelled so the number is not read as PA
+          // or innings.
+          sampleUnit: 'BF',
+        };
+      };
       return {
-        vsLHB: { woba: result.vsLHB, rawWoba: result.vsLHB, source: result.source },
-        vsRHB: { woba: result.vsRHB, rawWoba: result.vsRHB, source: result.source },
+        // `source` keeps the aggregate value and meaning -- loadDataQuality
+        // tests it against ['default','fallback'] and must not change.
+        vsLHB: { woba: result.vsLHB, rawWoba: result.vsLHB, source: result.source,
+                 ...splitOf('pit-proj-lhb', 'pit-act-lhb') },
+        vsRHB: { woba: result.vsRHB, rawWoba: result.vsRHB, source: result.source,
+                 ...splitOf('pit-proj-rhb', 'pit-act-rhb') },
       };
     }
     const awayLineup=tryParse(game.away_lineup_json)||[];
