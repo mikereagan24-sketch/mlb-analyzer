@@ -123,7 +123,9 @@ baseline with another.
 - mean |actual − projection| on gated rows: 0.0390 (RHB) / 0.0428 (LHB) wOBA
 - cliff step at the gate: 0.0215 wOBA mean, 0.064 for Tidwell
 - 68 pitchers with one hand blending and the other gated
-- 0 batter rows gated at `MIN_PA=60`
+- 0 batter rows gated at `MIN_PA=60` — **true, and it was the wrong
+  question. See "The batter side was not fine" below: eight hitters never
+  reached the gate at all.**
 - the claim "all 140 clear 100 if the sample doubles" — directionally safe, but the numbers behind it move
 
 **Model calibration:**
@@ -141,14 +143,107 @@ baseline with another.
 - `SP_WEIGHT` / `SP_PIT_WEIGHT` sweeps, `pyth_exp`, `RUN_MULT`
 - `BATTER_ACT_FULL_WEIGHT_PA = 150`: the 60→150 ramp was being fed
   half-size samples, so batters near the floor got less actuals weight
-  than their true sample warranted. No batter was *rejected*, but the
-  ramp position was wrong for many.
+  than their true sample warranted. No batter was *rejected* — but eight
+  were never *found*, which is a different and worse failure and is
+  recorded in the section below.
 
 **Not affected:**
 - anything on projections only (`pit-proj-*`, `bat-proj-*` never collapsed)
 - park factors, wind, weather, FRV, framing, baserunning — different inputs
 - the totals anchor work (#413/#414, `docs/totals-anchor-fallbacks-closed-2026-09-21.md`)
 - signal selection sweeps whose target was not model output
+
+## SEVERITY CORRECTION: the batter side was not fine (2026-09-23)
+
+**Added after the fact.** The ledger above says "0 batter rows gated at
+`MIN_PA=60`" and "no batter was *rejected*". Both are true and both read as
+"the batter side came through this intact". It did not.
+
+**A gate count cannot see a lookup that never happened.** Eight hitters'
+actuals rows were never reached at all, so they were never gated, never
+rejected, and never counted. Their wOBA was the projection alone for the
+whole season.
+
+`utils/fuzzyLookup` skipped index entries carrying a team tag using the
+SHAPE `/\s[a-z]{2,3}$/`, and `" jr"` matches that shape. Projections are
+team-tagged, so stage 5 reached them on the tag. Actuals are
+collision-only tagged since #438, so a non-colliding actuals row is
+**bare** — and a bare suffixed key was exactly the excluded one. Fixed in
+#443; full taxonomy in `docs/name-resolution-failures-2026-09-23.md`.
+
+Measured over every 2026 lineup lookup, old resolver against new
+(0 lost, 0 changed, 1416 lookups gained):
+
+| hitter | lookups gained | maps | **lineup slots** |
+|---|---|---|---|
+| Fernando Tatis Jr. [SD] | 284 | act ×2 | **142** |
+| Michael Harris II [ATL] | 264 | act ×2 | **132** |
+| Vladimir Guerrero Jr. [TOR] | 262 | act ×2 | **131** |
+| Jazz Chisholm Jr. [NYY] | 232 | act ×2 | **116** |
+| Lourdes Gurriel Jr. [ARI] | 192 | all ×4 | **48** |
+| George Lombard Jr. [NYY] | 80 | act ×2 | **40** |
+| Rafael Flores Jr. [PIT] | 76 | act ×2 | **38** |
+| Gabriel Rincones Jr. [PHI] | 26 | act ×1 | **26** |
+| | | | **673 slots** |
+
+Gurriel is the arithmetic check: 192 / 4 maps = 48, which is independently
+the slot count measured for him in the taxonomy doc.
+
+**673 of 40,050 lineup slots (1.7%)** — and not a random 1.7%. Seven of the
+eight are everyday hitters batting in high-PA-weight lineup positions, and
+four are stars. Gurriel is worse again: his projection row also carries no
+team tag, so **both** halves were missing and he took the league-average
+`BAT_DFLT` for all 48 slots.
+
+### Why this belongs in this ledger and not only in its own doc
+
+It is the same failure as the single-season collapse — actuals silently not
+reaching the blend — one layer down. The collapse happened at **ingest**
+(`strGroup`/`strAutoPt` returning a subset); this happened in the
+**resolver** (a key the scans could not see). They compound: for these
+eight hitters the actuals were not merely half-size, they were absent.
+
+So every entry in the ledger above carries a second defect on the batter
+side:
+
+- **Model calibration** — `calibration-sweep.js`, every gate-registry flag
+  A/B, and the ROI and log-loss resolution floors were all computed with
+  four star hitters priced on projection alone. The floors in particular
+  are a noise measurement, and this is a systematic offset inside it.
+- **`W_PROJ`/`W_ACT` at 0.45/0.55** — the split between projection and
+  actuals, measured on a corpus where 673 batter slots had **no** actuals
+  term to weight. The direction of that bias is knowable: it flatters
+  `W_PROJ`, because the rows where actuals were missing scored as though
+  the projection were the whole answer.
+- **`BATTER_ACT_FULL_WEIGHT_PA = 150`** — the ramp's shape was fitted on
+  `(actual − projection)` dispersion by PA bucket. The eight hitters
+  contributed no rows to those buckets at all, so they are missing from
+  the curve rather than misplaced on it.
+
+### What does NOT need re-running because of this
+
+- pitcher-side numbers: `pit-act-*` rows are team-tagged and were reached
+  by stage 5 throughout, and the 140-gated-hand measurement is unaffected
+  by this defect (it has its own, above);
+- anything on projections only;
+- park factors, wind, weather, FRV, framing, baserunning.
+
+### Order of operations for this half
+
+It slots in **after** step 2 of the list below and before step 3:
+
+2a. With #443 merged and one refresh landed, re-run
+    `scripts/test-team-tag-membership.js` and confirm the eight resolve.
+2b. Re-run the batter ramp occupancy — the 60→150 band — because it now
+    includes eight hitters it has never included, all of them
+    high-sample. Expect the band to get *less* crowded, not more: their
+    true two-year PA counts sit well above 150.
+2c. Only then treat any batter-side calibration number as re-derivable.
+
+**Do not re-run the calibration sweeps before 2b.** The ramp occupancy is
+an input to interpreting them, and re-running in the wrong order replaces
+one wrong baseline with another — the same trap step 1 above was written
+to avoid.
 
 ## Order of operations
 
