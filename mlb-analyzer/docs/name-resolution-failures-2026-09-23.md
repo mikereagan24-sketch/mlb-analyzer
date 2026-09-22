@@ -98,12 +98,58 @@ built, looked up under the team he is on now:
  1  Brice Perkins [MIL]  -> "blake perkins cle"       2026-04-05..2026-04-05
 ```
 
-Not yet dispositioned. The two candidate shapes are a resolver fallback
-(try the untagged/any-team key when the team-scoped lookup misses) and an
-ingest fix (the tag should follow the current roster). They are not
-equivalent: the resolver version will match a genuinely different player
-who shares a surname, which is the failure mode collision-only tagging
-exists to avoid.
+**Dispositioned 2026-09-23: fixed at INGEST.** The two candidates were a
+resolver fallback (accept any team when the team-scoped lookup misses) and
+an ingest correction (the tag follows the current roster). They are not
+equivalent: the resolver version cannot tell `buddy kennedy was` looked up
+as SF, which is the same player, from `blake perkins cle` answering a
+lookup for `Brice Perkins MIL`, which is not. That is the Victor Mesa
+failure mode on the pricing hot path, where two attempts already caused
+prod-wide mass rejections. A stale tag is wrong at write time, so
+`rosterCorrectTeams` (routes/api.js) fixes it at write time: exactly one
+roster row and a different team retags; more than one leaves it alone; no
+roster row leaves it alone.
+
+### Its measured effect today is ZERO, and that is a date, not a verdict
+
+Across all 160,200 lineup lookups, stored tags vs roster-corrected:
+
+```
+identical  151789
+GAINED          0
+LOST            0
+CHANGED         0
+```
+
+It retags 3 rows (`Luis De Leon HOU -> BAL`, `Luis Castillo MIL -> CWS`),
+none of whom appears in a 2026 lineup. The reason is that **all 9 affected
+players have since left every roster**, so today's `team_rosters` snapshot
+cannot exhibit their case — `%kennedy%`, `%fedko%` and `%gurriel%` all
+return "not on any current roster".
+
+Each of the 36 slots *would* have been caught on its own date, because a
+player who appears in a lineup is on a roster that day by definition. So
+the value is prospective and the risk is nil; what cannot be claimed is a
+present-day improvement.
+
+### The regime boundary
+
+**`woba_data` is a current snapshot, overwritten on every refresh, so this
+cannot repair the 36 historical slots.** Those games were scored with the
+projection alone and stay that way. Backtests read `woba_data_snapshot`,
+whose rows were written with the tags in force on each date, so:
+
+- games scored **before 2026-09-23** may carry a defaulted or
+  projection-only batter wherever a stale tag blocked the lookup;
+- games from the first refresh **after** this lands carry roster-corrected
+  tags.
+
+The boundary is the first `woba_data` upload after the merge, observable in
+`upload_log`, not a remembered date — same principle as
+`park_factor_source` in CLAUDE.md. It is far smaller than the park-factor
+boundary (36 slots against 1436 of 1876 rows) and, unlike that one, both
+sides are not "correct at the time": the pre-boundary side is simply
+missing data it should have had.
 
 ## Held: the alias table
 

@@ -3083,6 +3083,9 @@ q.upsertRoster = db.prepare(`INSERT INTO team_rosters (team,player_name,mlb_id,r
     mlb_id=excluded.mlb_id, role=excluded.role, hand=excluded.hand, position=excluded.position, updated_at=excluded.updated_at`);
 q.clearRoster  = db.prepare("DELETE FROM team_rosters WHERE team=?");
 q.getRoster    = db.prepare("SELECT player_name,role,hand FROM team_rosters WHERE team=?");
+// Every rostered player with his team, for the ingest's stale-team-tag
+// correction (routes/api.js rosterCorrectTeams). Read-only; 840 rows.
+q.allRosterPlayers = db.prepare("SELECT player_name, team FROM team_rosters");
 
 // Season roster (statsapi rosterType=fullSeason) — used by
 // resolveBacktestMlbId only. Same writer/reader shape as the active

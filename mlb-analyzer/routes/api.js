@@ -473,6 +473,94 @@ const SHADOW_EXCLUSIONS = new Set([
 // logic stays in one place. Throws on empty parse; returns rows-inserted
 // count on success. Caller supplies raw CSV text (from file buffer or from
 // the FanGraphs fetcher) plus the 8-slot key and a filename for the log.
+// THE TEAM TAG FOLLOWS THE CURRENT ROSTER. (2026-09-23)
+//
+// woba_data rows carry the team FanGraphs listed when the file was built.
+// When a player moves, that tag goes stale, and a team-scoped lookup for
+// the team he is on NOW cannot reach the row. Measured over the 2026
+// season, 36 lineup slots across 9 players missed for exactly this
+// reason:
+//
+//   8  B. Kennedy [SF]      -> "buddy kennedy was"
+//   7  Greg Jones [MIL]     -> "greg jones chc"
+//   6  C. Robinson [LAD]    -> "chuckie robinson atl"
+//   4  J. Rodriguez [BAL]   -> "jesus rodriguez sf"
+//   4  Kyler Fedko [MIN]    -> "kyler fedko pit"
+//   3  B. Kennedy [SEA]     -> "buddy kennedy was"
+//   2  S. Whitcomb [HOU]    -> "shay whitcomb sf"
+//   1  Jared Oliva [SF]     -> "jared oliva tb"
+//   1  Brice Perkins [MIL]  -> "blake perkins cle"
+//
+// FIXED AT INGEST, NOT IN THE RESOLVER, and the distinction matters. A
+// resolver fallback -- "if the team-scoped lookup misses, accept any
+// team" -- cannot tell "buddy kennedy was looked up as SF", which is the
+// same player, from "blake perkins cle answering a lookup for Brice
+// Perkins MIL", which is not. That is the Victor Mesa failure mode, on
+// the pricing hot path, and CLAUDE.md's ingest-not-hot-path rule exists
+// because two attempts at the resolver version caused prod-wide mass
+// rejections. A stale tag is not runtime-varying; it is wrong at write
+// time, which is where it gets fixed.
+//
+// THE RULE, deliberately narrow:
+//   exactly one roster row for this name, team differs  -> RETAG
+//   more than one roster row (ambiguous)                -> leave alone
+//   no roster row at all                                -> leave alone
+//
+// Leaving alone is the safe branch both times. An unmatched name is
+// usually a minor-leaguer no lineup will ask for, and an ambiguous one is
+// precisely where guessing costs a wrong player. team_rosters is the
+// right authority because it is refreshed daily from statsapi and carries
+// mlb_id; woba_data has no id column at all.
+//
+// It also repairs FanGraphs' multi-team marker as a side effect: a traded
+// player's TeamNameAbb is "6 Tms", which normalises to the token "tms"
+// and produced keys like "luis garcia 6 tms" that no teamHint could ever
+// match.
+//
+// Re-run the measurement:
+//   node --max-old-space-size=1536 scripts/test-ingest-team-tag-roster.js
+function rosterCorrectTeams(rows, key) {
+  let index;
+  try {
+    index = new Map();
+    for (const r of q.allRosterPlayers.all()) {
+      const n = normName(r.player_name);
+      if (!n) continue;
+      for (const form of (stripSfx(n) !== n ? [n, stripSfx(n)] : [n])) {
+        if (!index.has(form)) index.set(form, new Set());
+        index.get(form).add(String(r.team || '').trim().toUpperCase());
+      }
+    }
+  } catch (e) {
+    // No roster table, or it is empty: leave every tag exactly as it is.
+    // A missing authority must never rewrite data.
+    console.warn('[woba-ingest] ' + key + ': roster team-correction skipped (' + e.message + ')');
+    return { retagged: 0, ambiguous: 0, unmatched: 0, examples: [] };
+  }
+  let retagged = 0, ambiguous = 0, unmatched = 0;
+  const examples = [];
+  for (const r of rows) {
+    if (!r.team) continue;                        // nothing to correct
+    const n = normName(r.name);
+    const teams = index.get(n) || index.get(stripSfx(n));
+    if (!teams) { unmatched++; continue; }
+    if (teams.size !== 1) { ambiguous++; continue; }
+    const rosterTeam = [...teams][0];
+    if (!rosterTeam) { unmatched++; continue; }
+    const fgTeam = String(r.team).trim().toUpperCase();
+    if (fgTeam === rosterTeam) continue;
+    if (examples.length < 6) examples.push(r.name + ' ' + fgTeam + ' -> ' + rosterTeam);
+    r.team = rosterTeam;
+    retagged++;
+  }
+  if (retagged) {
+    console.log('[woba-ingest] ' + key + ': retagged ' + retagged
+      + ' row(s) to the current roster team (' + examples.join(', ') + ')'
+      + '; ' + ambiguous + ' ambiguous and ' + unmatched + ' unmatched left alone');
+  }
+  return { retagged, ambiguous, unmatched, examples };
+}
+
 function ingestWobaCSV(key, csvText, filename) {
   const isPitcher = key.startsWith('pit');
   const buf = Buffer.isBuffer(csvText) ? csvText : Buffer.from(csvText, 'utf-8');
@@ -561,6 +649,11 @@ function ingestWobaCSV(key, csvText, filename) {
   //
   // Re-run the measurement: node --max-old-space-size=1536 \
   //   scripts/probe-actuals-team-tagging.js
+  // Correct stale tags BEFORE the collision pass below: that pass counts
+  // NAMES, not teams, so its result is unaffected -- but the expansion
+  // that follows writes the team into the key, and it must write the
+  // current one.
+  const rosterFix = rosterCorrectTeams(rows, key);
   if (key.includes('-act-')) {
     const nameCount = new Map();
     for (const r of rows) {
@@ -626,7 +719,8 @@ function ingestWobaCSV(key, csvText, filename) {
   // have kept every caller working untouched, and would have made
   // `typeof inserted` 'object' for whoever reads this next -- the kind
   // of cleverness that costs more than the four call sites it saves.
-  return { rows: rows.length, collisions: batchInfo.collisions || [] };
+  return { rows: rows.length, collisions: batchInfo.collisions || [],
+    retagged: rosterFix.retagged, retagged_examples: rosterFix.examples };
 }
 
 // FG Daily Sync — wOBA slot (projections + actuals) accepting raw FG JSON.
@@ -8494,5 +8588,6 @@ module.exports = router;
 // partial module — but a require inside the cron callback runs after both
 // modules have fully loaded and resolves correctly).
 module.exports.ingestWobaCSV = ingestWobaCSV;
+module.exports.rosterCorrectTeams = rosterCorrectTeams;
 
 
