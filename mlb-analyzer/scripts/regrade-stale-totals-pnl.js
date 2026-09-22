@@ -34,7 +34,7 @@ const APPLY = process.argv.includes('--apply');
     + "WHERE b.signal_type='Total' AND b.bet_line IS NOT NULL "
     + "AND b.outcome IN ('win','loss') ORDER BY b.game_date").all();
 
-  const stale = [];
+  const stale = [], refused = [];
   for (const r of rows) {
     const sig = { type: 'Total', side: r.signal_side, marketLine: r.bet_line,
       bet_line: r.bet_line, bet_price: r.bet_price,
@@ -48,6 +48,7 @@ const APPLY = process.argv.includes('--apply');
     if (res.outcome !== r.outcome) {
       console.log('  *** REFUSING id=' + r.id + ': outcome would change '
         + r.outcome + ' -> ' + res.outcome + '. Not a pricing-only correction.');
+      refused.push({ r, was: r.outcome, would: res.outcome });
       continue;
     }
     stale.push({ r, old, nw });
@@ -72,6 +73,12 @@ const APPLY = process.argv.includes('--apply');
   console.log('  net delta: ' + d.toFixed(2));
   console.log('  every affected row is a LOSS -- a win pays +100 at any price, so only');
   console.log('  the stake risked on a loss can move.');
+
+  if (refused.length) {
+    console.log('');
+    console.log('  REFUSED (outcome would move, so not a pricing correction): '
+      + refused.map(x => 'id=' + x.r.id + ' ' + x.was + '->' + x.would).join(', '));
+  }
 
   if (!APPLY) { console.log(''); console.log('  DRY RUN -- pass --apply to write.'); return; }
 
@@ -99,16 +106,43 @@ const APPLY = process.argv.includes('--apply');
   console.log('');
   console.log('  rows re-graded: ' + n);
 
-  // verify none remain
+  // VERIFY WHAT THIS SCRIPT CAN ACT ON, NOT WHAT IT DECLINED. (2026-09-23)
+  //
+  // This loop re-scanned every graded totals row, including the ones the
+  // refusal above deliberately skipped. So a correct refusal made the
+  // script report `must be 0: 1` -- permanently, on a row it had just
+  // decided on purpose not to touch. The check was counting its own
+  // refusal against itself.
+  //
+  // That is the §"Scope a check to what it can act on" failure: a check
+  // that can never pass on part of its input trains the reader to skip
+  // the line, and the skipping generalises to the runs where something
+  // is genuinely wrong. It surfaced the moment the first such row existed
+  // -- id=178727, TOR@TEX 2026-09-19, logged under 7.5 against a market
+  // that was 8.5 all day -- which arrived with the 2026-09-22 refresh.
+  //
+  // Refusals are EXCLUDED from the failure count and REPORTED on their
+  // own line with their ids, never dropped silently. A refusal is a
+  // finding the operator has to resolve against the book; it is not a
+  // failure of the re-grade.
+  const refusedIds = new Set(refused.map(x => x.r.id));
   let left = 0;
   for (const r of db.prepare(
     "SELECT b.*, g.over_price, g.under_price, g.away_score, g.home_score "
     + "FROM bet_signals b JOIN game_log g ON g.game_date=b.game_date AND g.game_id=b.game_id "
     + "WHERE b.signal_type='Total' AND b.bet_line IS NOT NULL AND b.outcome IN ('win','loss')").all()) {
+    if (refusedIds.has(r.id)) continue;
     const sig = { type: 'Total', side: r.signal_side, marketLine: r.bet_line, bet_line: r.bet_line,
       bet_price: r.bet_price, overPrice: r.over_price, underPrice: r.under_price };
     const nw = Number(calcPnl(sig, r.away_score, r.home_score, r.bet_line).pnl);
     if (Number.isFinite(nw) && Math.abs(nw - Number(r.pnl)) >= 0.01) left++;
   }
   console.log('  rows still disagreeing with calcPnl (must be 0): ' + left);
+  console.log('  rows REFUSED and left alone (a finding, not a failure): ' + refused.length
+    + (refused.length ? ' -- ' + refused.map(x => 'id=' + x.r.id + ' ' + x.was + '->' + x.would).join(', ') : ''));
+  if (refused.length) {
+    console.log('    A refusal means the stored outcome and the stored bet_line');
+    console.log('    disagree. Settle it against what the book actually shows;');
+    console.log('    this script only ever moves the stake, never the result.');
+  }
 })();
