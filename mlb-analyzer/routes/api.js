@@ -337,6 +337,28 @@ function parseCSV(buffer, isPitcher) {
   const teamCol = TEAM_COLS
     .map(want => Object.keys(records[0]).find(h => h.toLowerCase() === want))
     .find(Boolean);
+  // THE PERIOD LABEL, carried so the duplicate guard can classify
+  // STRUCTURALLY. (2026-09-22)
+  //
+  // FanGraphs' splits response labels every row with the period it
+  // covers: 'Total' under strGroup:'career', a year under 'season'. That
+  // label is the source telling us whether it split a player across
+  // rows, and it is the only non-heuristic way to tell a PERIOD SPLIT
+  // (two rows that are halves of one player) from a NAME COLLISION (two
+  // rows that are different players).
+  //
+  // Projection CSVs have no such column by construction -- BAT_PROJ_COLS
+  // and PIT_PROJ_COLS are fixed 74- and 28-column lists with no Season
+  // -- so their duplicates are always collisions, which is correct.
+  //
+  // Dropped before this: parseCSV kept only name/woba/sample/team, so
+  // the guard had nothing but the numbers to go on, and deciding from
+  // the numbers is how a wrong merge would hide the next defect the way
+  // the silent overwrite hid this one.
+  const PERIOD_COLS = ['season', 'year', 'period'];
+  const periodCol = PERIOD_COLS
+    .map(want => Object.keys(records[0]).find(h => h.toLowerCase() === want))
+    .find(Boolean);
   if (!wobaCol || !nameCol) return [];
   const rows = [];
   for (const r of records) {
@@ -355,7 +377,10 @@ function parseCSV(buffer, isPitcher) {
     // (utils/fg-pitcher-id.js). This was a local copy until 2026-09-13.
     const { FG_TEAM_MAP: FG_MAP } = require('../utils/fg-pitcher-id');
     const team = fgTeam ? (FG_MAP[fgTeam]||fgTeam) : null;
-    rows.push({ name, woba, sample, team });
+    // period: the source's own label for what this row covers, or null
+    // when the source does not label rows at all. Never derived.
+    const period = periodCol ? String(r[periodCol] == null ? '' : r[periodCol]).trim() : null;
+    rows.push({ name, woba, sample, team, period });
   }
   return rows;
 }
@@ -572,7 +597,13 @@ function ingestWobaCSV(key, csvText, filename) {
     }
   }
   if (excludedCount > 0) console.log('[woba-ingest] ' + key + ': excluded ' + excludedCount + ' shadow-list row(s)');
-  q.upsertWobaBatch(key, expandedRows);
+  // The collision list rides back so the upload RESPONSE can name the
+  // players whose duplicate rows were resolved by keeping the larger
+  // sample -- name_collisions on every ingest route. The server log
+  // line alone would leave it somewhere nobody checks. The
+  // bookmarklet overlay still shows counts only; the names are in the
+  // JSON and in the refresh-job result.
+  const batchInfo = q.upsertWobaBatch(key, expandedRows) || {};
   // Snapshot this key's rows for date-accurate backtests. The calendar
   // date is the server's local date at ingest time = "the data as it
   // existed on day X". Non-fatal: a snapshot failure must never block
@@ -586,12 +617,16 @@ function ingestWobaCSV(key, csvText, filename) {
     // snapshot writers added in feat/framing-frv-daily-snapshots
     // (e48a26d), which already use PT.
     const snapDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-    q.snapshotWobaKey(snapDate, key, expandedRows);
+    q.snapshotWobaKey(snapDate, key, batchInfo.kept || expandedRows);
   } catch (e) {
     console.warn('[woba-snapshot] capture failed for ' + key + ' (non-fatal): ' + e.message);
   }
   q.logUpload.run(key, filename, rows.length);
-  return rows.length;
+  // { rows, collisions } rather than a bare count. A boxed Number would
+  // have kept every caller working untouched, and would have made
+  // `typeof inserted` 'object' for whoever reads this next -- the kind
+  // of cleverness that costs more than the four call sites it saves.
+  return { rows: rows.length, collisions: batchInfo.collisions || [] };
 }
 
 // FG Daily Sync — wOBA slot (projections + actuals) accepting raw FG JSON.
@@ -628,7 +663,8 @@ router.post('/upload/fg-json/:key', requireOriginAllowlist, requireBookmarkletTo
       ? jsonToProjectionCsv(rowsIn, isPit ? 'pit' : 'bat')
       : jsonToCsv(rowsIn);
     const inserted = ingestWobaCSV(key, csv, key + '.csv');
-    res.json({ success: true, key, rows: inserted, source_rows: rowsIn.length });
+    res.json({ success: true, key, rows: inserted.rows, source_rows: rowsIn.length,
+      name_collisions: inserted.collisions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -746,8 +782,9 @@ router.use((req, res, next) => {
     if (!file) return res.status(400).json({ error: 'No file uploaded' });
     const key = req.params.key || detectKey(file.originalname);
     if (!key) return res.status(400).json({ error: 'Cannot detect CSV type from filename: ' + file.originalname });
-    const rows = ingestWobaCSV(key, file.buffer, file.originalname);
-    res.json({ success: true, key, filename: file.originalname, rows });
+    const inserted = ingestWobaCSV(key, file.buffer, file.originalname);
+    res.json({ success: true, key, filename: file.originalname, rows: inserted.rows,
+      name_collisions: inserted.collisions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -803,7 +840,8 @@ router.post('/jobs/refresh-fangraphs', requireAdminToken, async (req, res) => {
       if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
       try {
         const inserted = ingestWobaCSV(r.key, r.csv, r.name + '.csv');
-        return { name: r.name, key: r.key, success: true, rowCount: inserted };
+        return { name: r.name, key: r.key, success: true,
+          rowCount: inserted.rows, name_collisions: inserted.collisions };
       } catch (e) {
         return { name: r.name, key: r.key, success: false, error: 'ingest failed: ' + e.message };
       }
@@ -847,7 +885,8 @@ router.post('/jobs/refresh-fangraphs-actuals', requireOriginAllowlist, requireBo
       if (!r.success) return { name: r.name, key: r.key, success: false, error: r.error };
       try {
         const inserted = ingestWobaCSV(r.key, r.csv, r.name + '.csv');
-        return { name: r.name, key: r.key, success: true, rowCount: inserted };
+        return { name: r.name, key: r.key, success: true,
+          rowCount: inserted.rows, name_collisions: inserted.collisions };
       } catch (e) {
         return { name: r.name, key: r.key, success: false, error: 'ingest failed: ' + e.message };
       }

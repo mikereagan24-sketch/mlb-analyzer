@@ -3739,28 +3739,82 @@ q.getFatiguedPitchers = (teamAbbr, gameDate, gameNumber) => {
 q.upsertWobaBatch = (key, rows) => {
   const tx = db.transaction((k, rs) => {
     db.prepare('DELETE FROM woba_data WHERE data_key = ?').run(k);
-    const seen = new Map();
-    const dupes = [];
+    // TWO KINDS OF DUPLICATE, TOLD APART STRUCTURALLY. (2026-09-22)
+    //
+    //   PERIOD SPLIT   the source returned one row per period for one
+    //                  player. Overwriting stores a subset; summing
+    //                  without knowing the denominator fabricates. This
+    //                  is the defect the guard exists for -> THROW.
+    //
+    //   NAME COLLISION two different players share a name the key cannot
+    //                  separate. Nothing is recoverable by failing the
+    //                  whole upload, and rejecting means the other ~6000
+    //                  rows never land -> keep one deterministically and
+    //                  REPORT.
+    //
+    // The discriminator is the SOURCE'S OWN PERIOD LABEL (r.period, from
+    // parseCSV), never the sample values. FanGraphs writes 'Total' under
+    // strGroup:'career' and a year under 'season'; projection CSVs carry
+    // no period column at all. So:
+    //
+    //   labels differ               -> period split  -> throw
+    //   labels equal, or no label   -> collision     -> keep larger
+    //   label present but missing   -> treat as differing -> throw
+    //
+    // Deciding from the numbers was the alternative and is rejected on
+    // purpose: a heuristic that merges two rows because they "look like
+    // halves" is exactly how the original collapse stayed invisible for
+    // six months. Ambiguity fails toward throwing.
+    //
+    // After the actuals team-tagging fix the actuals collisions are gone
+    // at the source, so in practice this branch now serves the
+    // projection keys, where FG genuinely emits the same name+team twice
+    // (16 rows on each pit-proj-*, 4 on each bat-proj-*).
+    const first = new Map();
+    const splits = [];
+    const collisions = [];
     for (const r of rs) {
-      if (seen.has(r.name)) {
-        // Report the two values, because "duplicate" alone does not say
-        // whether the source split a player across rows (the bug) or
-        // emitted the same row twice (harmless but still wrong).
-        dupes.push(r.name + ' [' + seen.get(r.name) + ' vs ' + (r.sample || 0) + ']');
+      const prev = first.get(r.name);
+      if (!prev) { first.set(r.name, r); continue; }
+      const a = prev.period == null ? null : String(prev.period);
+      const b = r.period == null ? null : String(r.period);
+      const bothUnlabelled = a === null && b === null;
+      const sameLabel = a !== null && b !== null && a === b && a !== '';
+      if (bothUnlabelled || sameLabel) {
+        collisions.push(r.name);
+        // Keep the LARGER sample, deterministically. Ties keep the first
+        // seen, so a re-run of the same input produces the same row.
+        if ((r.sample || 0) > (prev.sample || 0)) first.set(r.name, r);
       } else {
-        seen.set(r.name, r.sample || 0);
+        splits.push(r.name + ' [' + (a === null ? 'unlabelled' : a || 'empty')
+          + ' vs ' + (b === null ? 'unlabelled' : b || 'empty') + ']');
       }
     }
-    if (dupes.length) {
-      throw new Error('woba ingest ' + k + ': ' + dupes.length + ' duplicate player_name row(s)'
-        + ' -- refusing to overwrite. A duplicate means the source returned MORE THAN ONE ROW'
-        + ' PER PLAYER (e.g. one per season), so the stored sample would be a subset, not the'
-        + ' total. Check services/fangraphs.js strGroup. Samples: '
-        + dupes.slice(0, 5).join('; '));
+    if (splits.length) {
+      throw new Error('woba ingest ' + k + ': ' + splits.length + ' player(s) returned as a'
+        + ' PERIOD SPLIT -- refusing to write. The source labelled two rows for the same player'
+        + ' with different periods, so whichever landed would be a subset of the real total.'
+        + ' Check services/fangraphs.js strGroup (expect career, which labels every row Total).'
+        + ' Offenders: ' + splits.slice(0, 5).join('; '));
     }
-    for (const r of rs) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0);
+    for (const r of first.values()) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0);
+    if (collisions.length) {
+      // Reported, not thrown -- but never silent. The silence is what
+      // hid the original defect.
+      console.warn('[woba-ingest] ' + k + ': ' + collisions.length
+        + ' duplicate name(s) kept by LARGEST sample (same-period or unlabelled source,'
+        + ' i.e. a name collision rather than a split): '
+        + [...new Set(collisions)].slice(0, 10).join(', '));
+    }
+    // kept: the deduped rows, so the daily snapshot writes the SAME row
+    // the live table got. Passing expandedRows there would let
+    // INSERT OR REPLACE pick last-write-wins on a collided name while
+    // woba_data holds the larger sample -- a live/backtest divergence
+    // that could not exist while duplicates threw.
+    return { collisions: [...new Set(collisions)], kept: [...first.values()] };
   });
-  tx(key, rows);
+  // Returned so the upload result can surface the collision list.
+  return tx(key, rows);
 };
 
 // Daily wOBA snapshot helpers (date-accurate backtest support).
