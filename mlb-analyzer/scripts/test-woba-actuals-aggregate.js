@@ -67,6 +67,19 @@ function main() {
     && /twoYearDateRange\(\)/.test(fg));
   expect('the verified response is recorded next to the change',
     /Season "Total", TBF 154/.test(fg) && /HTTP 500/.test(fg));
+  // THE QUALIFIER. strAutoPt:'true' was the real cause of the shortfall:
+  // it dropped whole players from the aggregate AND whole seasons from
+  // the per-season response, so a client-side sum could not recover them
+  // either (Tidwell summed to 99 BF against a career 146). Verified
+  // 2026-09-22: career+false returns 1158 players and Tidwell vs RHB at
+  // 146 / .2824, exactly FanGraphs' career page.
+  expect("strAutoPt is 'false' -- FG's automatic qualifier is OFF",
+    /strAutoPt: 'false',/.test(fg));
+  expect("...and 'true' is gone", !/strAutoPt: 'true',/.test(fg));
+  expect('the qualifier evidence is recorded at the site',
+    /TBF 146  wOBA \.2824/.test(fg) && /1158/.test(fg));
+  expect('and why client-side summing cannot substitute',
+    fg.indexOf('returned season rows gives 99 BF') !== -1);
 
   cleanup();
   try {
