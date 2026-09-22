@@ -7469,6 +7469,16 @@ router.get('/debug/bullpen-report', (req, res) => {
           fatigued: false,
           fatigue_reasons: [],
           in_pool: !!m.in_pool,
+          // PER-HAND MEMBERSHIP, because `in_pool` is the OR across hands
+          // and `pool_size` is the MAX of the two per-hand pools. Those
+          // are different quantities: the qualified>=3 rule is applied per
+          // hand, so a union of two 8-arm pools is 9 when the hands are
+          // asymmetric. Without these two fields the only checkable
+          // relation is an inequality; with them the real identity
+          // -- pool_size === max(count(rhb), count(lhb)) -- is assertable.
+          // scripts/test-bullpen-report-single-source.js does exactly that.
+          in_pool_vs_lhb: !!(m.vs_lhb && m.vs_lhb.in_pool),
+          in_pool_vs_rhb: !!(m.vs_rhb && m.vs_rhb.in_pool),
         };
       });
 
@@ -7492,6 +7502,8 @@ router.get('/debug/bullpen-report', (req, res) => {
           fatigued: true,
           fatigue_reasons: reasons || [],
           in_pool: false,
+          in_pool_vs_lhb: false,
+          in_pool_vs_rhb: false,
         });
       }
 

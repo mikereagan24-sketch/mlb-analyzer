@@ -88,9 +88,35 @@ function run(j, code) {
     if (!s || s.team_bullpen_woba == null) continue;
     const ps = s.pitchers || [];
 
-    // in_pool must be the REAL pool, so its count matches pool_size.
-    eq(ps.filter(p => p.in_pool).length, s.pool_size,
-       team + ': in_pool row count equals the reported pool size');
+    // ASSERT THE INVARIANT, NOT A COINCIDENCE. (2026-09-23)
+    //
+    // This read `count(in_pool) === pool_size` and was green for weeks.
+    // It is not an identity: `in_pool` is the OR across hands
+    // (db/schema.js, "in_pool is kept per hand AND as an OR") while
+    // `pool_size` is Math.max of the two per-hand pool counts. The union
+    // of two 8-arm pools is 9 whenever the hands are asymmetric, and the
+    // qualified>=3 rule IS applied per hand.
+    //
+    // It only passed because no team on 2026-08-30 happened to have an
+    // asymmetric pool in the data the baseline was recorded against. The
+    // 2026-09-22 refresh introduced asymmetry and ten teams went red --
+    // reporting a defect that was not there, which is the failure mode
+    // that trains a reader to skip the output.
+    //
+    // The real relations, now that the route exposes per-hand membership:
+    const nR = ps.filter(p => p.in_pool_vs_rhb).length;
+    const nL = ps.filter(p => p.in_pool_vs_lhb).length;
+    const nUnion = ps.filter(p => p.in_pool).length;
+    eq(s.pool_size, Math.max(nR, nL),
+       team + ': pool_size IS the larger per-hand pool');
+    eq(nUnion, ps.filter(p => p.in_pool_vs_rhb || p.in_pool_vs_lhb).length,
+       team + ': in_pool IS the union of the two per-hand pools');
+    ok(nUnion >= s.pool_size,
+       team + ': the union is at least the larger hand (' + nUnion + ' >= ' + s.pool_size + ')');
+    // An excluded arm must never be in either hand's pool. This is the
+    // property the old assertion was reaching for.
+    ok(!ps.some(p => p.fatigued && (p.in_pool || p.in_pool_vs_rhb || p.in_pool_vs_lhb)),
+       team + ': no excluded arm is marked in_pool on either hand');
 
     // Excluded arms are rows, not omissions -- the point of the table.
     const flagged = ps.filter(p => !p.in_pool);
