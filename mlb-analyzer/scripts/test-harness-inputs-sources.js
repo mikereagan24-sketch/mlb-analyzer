@@ -238,13 +238,22 @@ console.log('');
 console.log('7. the registry marks the rows whose evidence predates this change');
 const reg = require(path.join(R, 'services/feature-gate-registry'));
 const marked = reg.GATES.filter(g => g.evidence_predates);
-// PINNED on purpose. Removing a row from this list is correct only when it
-// has been re-run and its new figures recorded -- so the edit that removes
-// it should have to touch this test too.
+// PINNED on purpose, in BOTH directions. Removing a row is correct only when
+// it has been re-run and its new figures recorded; adding one is correct only
+// when a run that predates 2026-09-16 is actually being quoted. Either edit
+// has to touch this test, which is the point of pinning the set rather than
+// counting it.
+//
+// catcher_framing_mute ADDED 2026-09-23: its two A/B runs (2026-08-22 n=790
+// on an 82-day-stale framing table, 2026-08-24 n=349 on fresh) both read
+// framing RECOMPUTED from current state rather than from persisted emit-time
+// game_log values. harness-inputs.js names CATCHER_FRAMING_MUTE as the
+// parameter that reported "0 of 790 -- the flag is inert" under the old
+// path, so this row is squarely in the rebaselined set.
 check('the rows measured through populateCallerInputs before 2026-09-16', marked.map(g => g.id).sort(), [
-  'bullpen_woba_neutralization', 'defense_frv_enabled', 'defense_frv_split',
-  'park_neutral_inputs_enabled', 'signal_edge_cap_enabled', 'signal_edge_hard_cap_pp',
-  'use_hand_conditional_sp_weight',
+  'bullpen_woba_neutralization', 'catcher_framing_mute', 'defense_frv_enabled',
+  'defense_frv_split', 'park_neutral_inputs_enabled', 'signal_edge_cap_enabled',
+  'signal_edge_hard_cap_pp', 'use_hand_conditional_sp_weight',
 ]);
 check('every marker names a known event and carries measured/harness/figures',
   marked.filter(g => !reg.REBASELINE_EVENTS[g.evidence_predates.event]
@@ -266,7 +275,7 @@ const lines = [];
   try { reg.logGateHealth(db, { today: '2026-09-16' }); } finally { console.log = L; console.warn = W; }
 }
 check('the 6AM gate-health pass lists them on one line',
-  lines.some(l => /7 gate\(s\) quote evidence measured before the 2026-09-16 harness_inputs_persisted/.test(l)), true);
+  lines.some(l => /8 gate\(s\) quote evidence measured before the 2026-09-16 harness_inputs_persisted/.test(l)), true);
 
 if (saved === undefined) delete process.env.HARNESS_INPUTS; else process.env.HARNESS_INPUTS = saved;
 console.log('');

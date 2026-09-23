@@ -991,10 +991,129 @@ const GATES = [
     decision: { date: '2026-07-13', outcome: 'shipped_at_0.06', ref: 'docs/ship-hard-cap-0.08-2026-07-13.md' } },
 
   { id: 'catcher_framing_mute', key: 'catcher_framing_mute', numeric: true,
-    criterion: 'Muting factor on framing runs. Schema default 0.65.',
-    criterion_type: 'none', window_end: null, decision: null,
-    note: 'Prod runs 1.0 — i.e. NO muting — against a schema default of 0.65. That is a live divergence from the '
-        + 'documented default with no recorded rationale.' },
+    // FORWARD-VERIFY WINDOW OPENED 2026-09-23 -- and this row's own premise
+    // corrected in the same commit, because it was wrong.
+    //
+    // WHAT IT USED TO SAY: criterion "Muting factor on framing runs. Schema
+    // default 0.65", note "Prod runs 1.0 ... a live divergence from the
+    // documented default with no recorded rationale." The divergence half
+    // has been FALSE SINCE 2026-08-22. settings-schema.js:188 reads
+    // `default: 1.0`, moved from 0.65 that day for exactly the reason the
+    // recommendation gave -- "a default that no deployment uses is a trap
+    // for the next person who reads it" -- and the change is recorded in
+    // that field's own help text. Live value is 1.0 (app_settings, read
+    // 2026-09-23). PROD AND SCHEMA AGREE. There is nothing to reconcile.
+    //
+    // The row described a state that had been closed for a month, which is
+    // what criterion_type:'none' buys: a row with no criterion is a row
+    // nothing re-reads, so nothing ever caught up with it. That is the
+    // substantive argument for the window below, independent of the value.
+    //
+    // WHAT THE 1.0 RESTS ON -- asked directly, answered from the record:
+    //
+    //   2026-07-05  docs/framing-mute-semantics-2026-07-05.md DISCOVERS prod
+    //               at 1.0 and endorses it on a SEMANTIC argument (MUTE is a
+    //               scale factor, misleadingly named; 1.0 applies the whole
+    //               measured effect, 0 mutes it) plus an irrelevance
+    //               argument (~1.4 total-runs across 28 covered July games;
+    //               halving it moves no signal population). It does not say
+    //               who set 1.0 or when. app_settings has no timestamp
+    //               column, so the ORIGIN of the value is unrecoverable.
+    //   2026-08-22  First calibration A/B: 1.0 better on 5 of 5 metrics,
+    //               d log loss -0.00007 CI [-0.00049, +0.00038], 3/5
+    //               windows, n=790. The schema default was aligned on it.
+    //   2026-08-24  RETRACTED. That A/B read a catcher_framing table last
+    //               written 2026-06-03 -- 82 days stale, because nothing
+    //               scheduled the refresh -- and MUTE is a multiplier, not a
+    //               switch, so framing was applied at full strength off
+    //               frozen run values. Re-run on fresh framing: 3 of 5
+    //               metrics, WORSE on log loss and Brier, d +0.00002 CI
+    //               [-0.00061, +0.00067], 2/5 windows, n=349. The provenance
+    //               ledger moved it from 'current evidence' back to 'never
+    //               evaluated'.
+    //
+    // So the answer is neither "nothing is recorded" nor "measured and
+    // kept". Something is recorded, and what it records is an explicit
+    // finding of NO SUPPORT, in those words:
+    // docs/decontaminated-rerun-corrected-2026-08-24.md 3c -- "1.0 has no
+    // supporting evidence in either direction. Not 'weak support', not
+    // 'directionally favourable' -- none ... It stays at 1.0 because
+    // nothing argues for moving it, which is inertia, not an argument."
+    criterion: 'Forward calibration A/B (scripts/calibration-ab.js '
+             + 'CATCHER_FRAMING_MUTE 0.65 1.0), log loss over all scored games, identical '
+             + 'game set both arms, on games played AFTER 2026-09-23 only. Bar: '
+             + 'delta_log_loss CI excludes zero at n >= 1200 -- the same bar and the same '
+             + '0.015 measured log-loss floor the FRV and catcher_framing_enabled rows '
+             + 'carry. A NULL AT THAT n IS THE EXPECTED OUTCOME AND CLOSES THE ROW (see '
+             + 'the power arithmetic below). A null does not move the value: '
+             + 'indistinguishable is not harmful, and 0.65 has no more support than 1.0.',
+    criterion_type: 'calibration', precondition: 'catcher_framing_populated',
+    // WINDOW_END 2027-08-01, the same arithmetic catcher_framing_enabled
+    // uses: game_log ends 2026-09-23 with ZERO games after it (verified), so
+    // a forward window accrues nothing until the 2027 season opens in late
+    // March. The calibration corpus yields 9.8 usable games/day after every
+    // filter the harness applies, and 1200 / 9.8 = 123 game-days, which
+    // from a late-March opening lands in early August.
+    window_end: '2027-08-01',
+    // WHAT THE WINDOW IS FOR, SAID UP FRONT SO IT IS NOT A FORMALITY.
+    //
+    // The two measured half-widths obey 1/sqrt(n) on this pair: 0.000435 at
+    // n=790 projects 0.000654 at n=349 against 0.000640 measured, 2% out.
+    // So the projection is arithmetic, not a hunch. At n=1200 the half-width
+    // is +/-0.00035 against a point estimate of +0.00002 -- seventeen times
+    // too wide. Resolving 0.00002 needs 357,000 games; resolving even the
+    // retracted 0.00007 needs 29,000, eight seasons of this corpus. THE CI
+    // WILL NOT EXCLUDE ZERO, and the ledger already says so: "the open item
+    // is no longer 'run the A/B' -- it is that at n=349 this A/B cannot
+    // separate the two values at all".
+    //
+    // The window is therefore a deadline for a RECORDED DISPOSITION, not a
+    // wait for the interval to move. By 2027-08-01 this row carries either a
+    // third measurement or a decision stating that 0.65 and 1.0 are
+    // indistinguishable at any n this project will reach -- the same
+    // disposition the FRV rows and W_PROJ/W_ACT got, reached on the same
+    // reasoning rather than by letting a dateless row sit.
+    //
+    // AND THE THIRD RUN IS NOT MERELY A THIRD RUN. Two inputs changed after
+    // 2026-08-24. harness_inputs_persisted (2026-09-16) moved framing from
+    // RECOMPUTED-from-current-state to persisted emit-time game_log values,
+    // which BOTH prior runs predate. And the catcher resolver was corrected
+    // on 2026-09-23 (#450 season-roster fallback, #452 fuzzyLookup, which
+    // fixed a real cross-player misresolution) -- this term is keyed on the
+    // CATCHER, making it the registry row most directly exposed to that
+    // change. Catchers resolved at 99.57% even before it, so that is a
+    // correction rather than a rescue; it is still a different input. The
+    // refresh job is also in the 6AM chain now (last write 2026-09-22), so
+    // staleness cannot confound a third run the way it voided the first.
+    //
+    // corpus_size is an explicit NULL, not a missing field: the forward
+    // window has no scored corpus until it closes, and the 790 and 349
+    // belong to the superseded runs, where they sit in evidence_predates
+    // with their own n. Setting it also means this row leaves
+    // CORPUS_SIZE_GRANDFATHERED -- see the prune note there.
+    corpus_size: null,
+    decision: null,
+    evidence_predates: { event: 'harness_inputs_persisted',
+      measured: '2026-08-24', harness: 'scripts/calibration-ab.js',
+      figures: 'd log loss +0.00002 CI [-0.00061, +0.00067], 3 of 5 metrics (WORSE on log '
+        + 'loss and Brier), 2/5 windows, mean |dp| 0.00239 over 349/349 games',
+      detail: 'Supersedes the 2026-08-22 run (5 of 5 metrics, d -0.00007 CI [-0.00049, '
+        + '+0.00038], n=790), which read an 82-day-stale catcher_framing table. BOTH runs '
+        + 'predate the persisted-inputs rebaseline as well: framing was recomputed from '
+        + 'current state rather than read from emit-time game_log values.' },
+    note: 'THE VALUE IS NOT CHANGING, AND THE DIVERGENCE THIS ROW ASSERTED DOES NOT EXIST. '
+        + 'Prod is 1.0 and the schema default has been 1.0 since 2026-08-22; the row went '
+        + 'on claiming 0.65 and a "live divergence" for a month after that was closed. '
+        + 'WHAT IS ACTUALLY OPEN IS THE JUSTIFICATION. 1.0 is held by inertia: measured '
+        + 'twice, indistinguishable both times, and the one favourable result (5 of 5 '
+        + 'metrics, 2026-08-22) was retracted two days later as a measurement of an '
+        + '82-day-stale table. The only surviving argument for 1.0 is the 2026-07-05 '
+        + 'semantic one -- MUTE is a scale rather than a mute, and applying the whole '
+        + 'measured framing effect is the intended behaviour. That is an argument about '
+        + 'what the parameter MEANS, not evidence about what it is worth. It is a '
+        + 'legitimate basis for a default and it is now written down AS the basis, so the '
+        + '5-of-5 sentence stops being quotable as validation. none -> calibration is the '
+        + 'substantive change.' },
 
   { id: 'defense_frv_mute', key: 'defense_frv_mute', numeric: true,
     criterion: 'Muting factor on team FRV. Schema default 0.5.',
@@ -1426,9 +1545,12 @@ function logGateHealth(db, opts) {
 // never reported, which is a silent state: "nobody set a deadline" and
 // "no deadline is appropriate" look identical from the outside.
 //
-// This list is the difference. It holds the SIX rows that were already in
+// This list is the difference. It was SEEDED with the six rows already in
 // that state when the contract test landed, each with the reason its
-// deadline is not a date. scripts/test-registry-gate-contract.js asserts:
+// deadline is not a date. FIVE now -- catcher_framing_mute left on
+// 2026-09-23 when it gained a forward window, which is the both-directions
+// rule below working rather than an edit to the seed.
+// scripts/test-registry-gate-contract.js asserts:
 //
 //   * every row has a decision, OR an unelapsed window_end, OR an entry
 //     here -- so a NEW row with neither fails. The list is a record of
@@ -1475,15 +1597,16 @@ const NO_DEADLINE_ACKNOWLEDGED = [
     reason: 'Blocked on a precondition, not a clock: the bullpen blend needs per-date '
           + 'wOBA snapshots, and calibration-sweep reports the bullpen half read from '
           + 'persisted emit-time values, so no arm can move it today.' },
-  // ---- reasons below are ADMISSIONS. These two want a window. ----
+  // ---- the reason below is an ADMISSION. This one still wants a window. ----
   { id: 'use_hand_conditional_sp_weight', wants_window: true,
     reason: 'NO JUSTIFICATION. It has a real calibration criterion (tier-2 sign-test '
           + 'standard) and unfavourable first evidence from 2026-08-23, so it wants '
           + 'either a window or a recorded decision. Nobody set one.' },
-  { id: 'catcher_framing_mute', wants_window: true,
-    reason: 'NO JUSTIFICATION. Prod runs 1.0 against a schema default of 0.65 -- a live '
-          + 'divergence the row itself calls "no recorded rationale". An open question '
-          + 'wants a window, not an exemption.' },
+  // catcher_framing_mute PRUNED 2026-09-23: it was the second wants_window
+  // row, and it got the window instead of the exemption. The standing
+  // finding is what surfaced it -- which is the flag working as intended,
+  // and the both-directions arm below is what requires it to leave here in
+  // the same commit.
 ];
 
 const CORPUS_SIZE_GRANDFATHERED = [
@@ -1501,7 +1624,11 @@ const CORPUS_SIZE_GRANDFATHERED = [
   // had no business remaining exempt from it.
   'use_hand_conditional_sp_weight',
   'ui_highlight_tot_overs_enabled', 'signal_edge_hard_cap_pp',
-  'signal_edge_soft_cap_pp', 'catcher_framing_mute', 'defense_frv_mute',
+  // catcher_framing_mute PRUNED 2026-09-23: it now carries an explicit
+  // corpus_size (null -- the forward window has not closed), and the
+  // both-directions arm of test-registry-corpus-size.js requires a row that
+  // GAINS the field to leave this list in the same commit.
+  'signal_edge_soft_cap_pp', 'defense_frv_mute',
   // bsr_baserunning PRUNED 2026-09-12: it now carries corpus_size 1100.
   // The gate-health baseline arm flagged it the moment the field landed,
   // which is the arm working -- an accepted-failure list that never
