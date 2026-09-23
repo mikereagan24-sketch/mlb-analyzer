@@ -501,6 +501,88 @@ some are genuinely absent from Savant rather than name-resolution failures.
 Do not treat 100% as the target.
 
 
+## FRV gate re-run on the corrected resolver (2026-09-23)
+
+Step **2e** of the order of operations below, done. Both gate rows are now
+dispositioned in `services/feature-gate-registry.js` as
+**`not_enabled_indistinguishable`**, and **neither window was extended** —
+more of the same corpus cannot resolve an effect this size.
+
+`scripts/calibration-ab.js DEFENSE_FRV_ENABLED false true`, `FRV_READ=asof`,
+through the shipped chain (`harness-inputs` -> `frv-backtest` ->
+`utils/fielding-frv-term` with `resolveId: resolveCatcherMlbId`), so #450's
+season-roster fallback is in both arms.
+
+| | `defense_frv_enabled` | `defense_frv_split` (as-of window) |
+|---|---|---|
+| window | 2026-06-01 .. 2026-08-07 | 2026-06-04 .. 2026-09-22 |
+| games, identical set | **658** | **1076** |
+| Δ logLoss (ON − OFF) | **−0.00075** | **−0.00047** |
+| 95% CI | [−0.00230, +0.00086] | [−0.00170, +0.00092] |
+| window sign test | 3/5 | 3/5 |
+| p(home) moved | 619/658 (94.1%) | 1075/1076 (99.9%) |
+| mean abs(Δp) | 0.00821 | 0.00873 |
+| verdict | not significant | not significant |
+
+**Neither clears the flip criterion** — *CI excludes zero on the negative
+side, on ≥1200 games*. The as-of arm reaches 1076 of the 1200, and its CI
+still spans zero.
+
+**Both effects are one twentieth of the log-loss floor.** The floor is
+**0.015** (re-measured, 1268 items — see the CLAUDE.md section this doc's
+W_PROJ closure points at). 0.00075 and 0.00047 sit far below it. The
+direction has been negative in all three measurements and the interval has
+tightened slightly (±0.00131 now against ±0.00138 in 2026-08-23), but
+tightening is not separating.
+
+### The coverage win is real, and it is what #450 bought
+
+```
+FRV coverage, as-of window:  1076 / 1076 sides, BOTH teams
+```
+
+Before #450 roughly **a fifth of fielder slots silently defaulted** — 4355
+of 20062 (21.71%) over this era — and the term scales the resolved slots'
+mean across the full complement, so those sides were being priced from as
+few as one of seven fielders. The term is now populated everywhere it
+should be. That did not make the flag distinguishable; it made the number
+being tested the right number.
+
+### The recorded 2026-08-23 figures are NOT a baseline to difference against
+
+| | recorded | now (recorded window) | now (as-of) |
+|---|---|---|---|
+| Δ logLoss | −0.00087 | −0.00075 | −0.00047 |
+| ALL FIVE metrics better | claimed | **no** | **no** |
+| edge slope | −0.313 → −0.218 | **+0.128 → +0.253** | +0.101 → +0.179 |
+
+**The edge slope flipping sign at OFF is the proof they are not the same
+measurement.** Three things changed in between and their contributions
+cannot be separated:
+
+1. the recorded run **predates `harness_inputs_persisted`** — the registry
+   row says so itself — so bullpen and framing inputs were recomputed then
+   and are read from persisted emit-time values now;
+2. it **predates the 2026-09-14 `FRV_READ=asof` default**, so it read
+   current-state FRV, which is hindsight for a June game;
+3. it **predates the 2026-09-12 term redefinition** (the `(mlb_id,
+   position)` split) — which is why `defense_frv_split` exists as a
+   separate row at all.
+
+So the recorded numbers are a record of what was believed on 2026-08-23,
+not a comparator. Quoting a delta between them and these would be
+attributing to the resolver fix a difference that four changes share.
+
+### Disposition
+
+**Not enabled. Effect indistinguishable. Revisit on a pooled multi-season
+corpus.** Not by extending either window, and not by another re-run against
+the same games — at one twentieth of the floor the answer would be the same
+null with a slightly different third decimal. What would change the
+picture is a corpus large enough to move the floor, which means more
+seasons rather than more dates.
+
+
 ## Order of operations
 
 1. Resolve the dropped-player question and merge a pull fix.
