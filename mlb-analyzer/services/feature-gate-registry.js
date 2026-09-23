@@ -298,7 +298,18 @@ const GATES = [
   { id: 'defense_frv_enabled', key: 'defense_frv_enabled', on_expected: false,
     criterion: 'Default OFF — "requires the fielding_frv table to be populated".',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
-    window_end: '2026-09-30', decision: null,
+    // WINDOW NOT EXTENDED. Dispositioned on the 2026-09-23 re-run rather
+    // than pushed out: the effect is one twentieth of the measured
+    // log-loss floor, so more of the same corpus cannot resolve it.
+    window_end: '2026-09-30',
+    decision: { date: '2026-09-23', outcome: 'not_enabled_indistinguishable',
+      ref: 'docs/actuals-single-season-rebaseline-2026-09-22.md #frv-gate-re-run-on-the-corrected-resolver-2026-09-23' },
+    // RE-RUN 2026-09-23 on the corrected resolver (#450 season-roster
+    // fallback). 658 games, identical set both arms, 0 dropped:
+    //   d logLoss -0.00075  CI [-0.00230, +0.00086]   3/5 windows
+    //   flag moves p(home) on 619/658 (94.1%), mean |dp| 0.00821
+    // CI still spans zero, and the corpus is 658 against a 1200-game
+    // criterion. NOT flippable.
     evidence_predates: { event: 'harness_inputs_persisted',
       measured: '2026-08-23', harness: 'scripts/calibration-ab.js',
       figures: 'delta log loss -0.00087 CI [-0.00211, +0.00065], ALL FIVE metrics, edge slope -0.313 -> -0.218',
@@ -340,7 +351,20 @@ const GATES = [
              + 'applies to, because a current-state read prices a game with FRV that already '
              + 'knows how those fielders turned out.',
     criterion_type: 'calibration', precondition: 'fielding_frv_populated',
-    window_end: '2026-10-31', decision: null,
+    // WINDOW NOT EXTENDED, same reasoning as the row above.
+    window_end: '2026-10-31',
+    decision: { date: '2026-09-23', outcome: 'not_enabled_indistinguishable',
+      ref: 'docs/actuals-single-season-rebaseline-2026-09-22.md #frv-gate-re-run-on-the-corrected-resolver-2026-09-23' },
+    // RE-RUN 2026-09-23 on the corrected resolver, on the AS-OF window
+    // this row pins (2026-06-04..2026-09-22, FRV_READ=asof). 1076 games,
+    // identical set both arms, 0 dropped:
+    //   d logLoss -0.00047  CI [-0.00170, +0.00092]   3/5 windows
+    //   flag moves p(home) on 1075/1076 (99.9%), mean |dp| 0.00873
+    //   FRV coverage 1076/1076 sides BOTH teams -- #450's win; a fifth of
+    //   fielder slots silently defaulted before it.
+    // Tighter interval than 2026-08-23 (+/-0.00131 vs +/-0.00138) and
+    // consistently negative across all three measurements, but still
+    // spanning zero on 1076 of the required 1200 games. NOT flippable.
     evidence_predates: { event: 'harness_inputs_persisted',
       measured: '2026-09-13..09-14', harness: 'scripts/calibration-ab.js',
       figures: 'gate window -0.00154 [-0.00334, +0.00003] n=797; season -0.00066 [-0.00216, +0.00078] '
