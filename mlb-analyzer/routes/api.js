@@ -55,6 +55,9 @@ const { parseLineupsHtml, parseScoresJson, makeGameId } = require('../services/s
 const { TEAM_SLUGS: FG_TEAM_SLUGS } = require('../services/fangraphs-roles');
 const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services/snapshot');
 const { normName, stripSfx, fuzzyLookup, hasTeamTag } = require('../utils/names');
+// Display-only near-miss classifier for the batter wOBA-source badge.
+// One definition, shared with its test -- see utils/near-miss.js.
+const { nearMissFor, rosterPredicate } = require('../utils/near-miss');
 const { calcCLV, clvForSignal } = require('../services/clv');
 const { windBadge: _windBadge } = require('../utils/wind-badge');
 const router = express.Router();
@@ -5934,6 +5937,34 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     const awayGatedIdx = buildRosterGatedIdx(wobaIdx, game.away_team, awayGateSet);
     const homeGatedIdx = buildRosterGatedIdx(wobaIdx, game.home_team, homeGateSet);
 
+    // TEAM MEMBERSHIP FOR THE NEAR-MISS BADGE, and it is deliberately NOT
+    // the gate sets above. Those feed buildRosterGatedIdx, which returns
+    // its input unchanged -- the roster gate is disabled dead code, so
+    // ownGatedIdx is the full league index and any scan over it is
+    // league-wide unless something scopes it.
+    //
+    // SAFE HERE FOR THE REASON THE GATE IS NOT. The gate was disabled
+    // because filtering the PRICING path over-rejected on name variants
+    // and cost ~90 batters a slate (the #192/#194 hotfixes). This predicate
+    // decides nothing about a rate: it only chooses between two sentences
+    // on a badge. A false negative prints the ordinary no-row line instead
+    // of the loud one; a false positive is the defect being fixed. The
+    // blast radii are not comparable.
+    //
+    // Season roster UNIONED with the daily one, per #450: team_rosters is
+    // an 840-row active snapshot that drops anyone optioned, traded or
+    // shut down, and a batter whose actuals row outlives his active-roster
+    // entry is exactly the case this badge is asked about.
+    function rosterRowsFor(team) {
+      const t = (team || '').toUpperCase();
+      const sets = [];
+      try { if (q.getPositionPlayers) sets.push(q.getPositionPlayers.all(t) || []); } catch (_) {}
+      try { if (q.getSeasonPositionPlayers) sets.push(q.getSeasonPositionPlayers.all(t) || []); } catch (_) {}
+      return sets;
+    }
+    const awayOnTeam = rosterPredicate(rosterRowsFor(game.away_team));
+    const homeOnTeam = rosterPredicate(rosterRowsFor(game.home_team));
+
     // WHY A BATTER'S SOURCE NEEDS A BADGE. (2026-09-23) Display only.
     //
     // #434 put the two inputs behind each PITCHER rate on the header.
@@ -5961,44 +5992,16 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     // The probe reads the same index fuzzyLookup just failed on. It is a
     // linear scan over one map, run for at most 18 batters on one game's
     // page, and it decides nothing -- the rate is already computed.
-    function nearMissFor(keyMap, name, teamHint) {
-      if (!keyMap) return null;
-      const k = normName(name);
-      const p = stripSfx(k).split(' ');
-      if (p.length < 2) return null;
-      const last = p[p.length - 1];
-      const initial = p[0][0];
-      const tl = teamHint ? String(teamHint).toLowerCase() : null;
-      let best = null;
-      for (const key of Object.keys(keyMap)) {
-        const tagged = hasTeamTag(key);
-        const cut = tagged ? key.lastIndexOf(' ') : -1;
-        const base = tagged ? key.slice(0, cut) : key;
-        const tag = tagged ? key.slice(cut + 1) : null;
-        const bp = stripSfx(base).split(' ');
-        if (bp.length < 1 || bp[bp.length - 1] !== last) continue;
-        // A different team is not a near miss -- it is a different
-        // player until something says otherwise.
-        if (tag && tl && tag !== tl) continue;
-        const sameInitial = !!(bp[0] && bp[0][0] === initial);
-        const cand = {
-          key,
-          team: tag,
-          sameInitial,
-          kind: tag ? 'same_surname_same_team' : 'same_surname_untagged',
-          sample: keyMap[key] && keyMap[key].sample != null ? Number(keyMap[key].sample) : null,
-        };
-        // Prefer a same-initial hit, then a team-tagged one: the closer
-        // it is to matching, the more it looks like a resolver failure
-        // rather than a coincidental surname.
-        if (!best) best = cand;
-        else if (cand.sameInitial && !best.sameInitial) best = cand;
-        else if (cand.sameInitial === best.sameInitial && cand.team && !best.team) best = cand;
-      }
-      return best;
-    }
+    //
+    // MOVED OUT 2026-09-23 to utils/near-miss.js, because this file and
+    // scripts/test-batter-woba-source-flags.js each carried a copy and the
+    // test was asserting against its own. The scan is also TEAM-SCOPED
+    // now: it was skipping only candidates whose key carried a different
+    // team TAG, and actuals tags are collision-only since #438, so every
+    // bare same-surname row in the league passed. E. Rodriguez [MIN] was
+    // being told about Endy Rodriguez [PIT]. See that file for the rest.
 
-    function lookupBatter(name, hand, oppSpHand, teamHint, ownGatedIdx) {
+    function lookupBatter(name, hand, oppSpHand, teamHint, ownGatedIdx, onTeam) {
         const vsKey  = oppSpHand==='R' ? 'bat-proj-rhp' : 'bat-proj-lhp';
         const actKey = oppSpHand==='R' ? 'bat-act-rhp'  : 'bat-act-lhp';
         const oppKey    = oppSpHand==='R' ? 'bat-proj-lhp' : 'bat-proj-rhp';
@@ -6105,7 +6108,11 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
           if (t >= 1) return 1;
           return t * t * (3 - 2 * t);
         })();
-        const nm = actHit ? null : nearMissFor(ownGatedIdx[actKey], name, teamHint);
+        // teamHint scopes the tagged half, onTeam scopes the untagged half.
+        // Without a roster the untagged half is unscopable, and nmScoped
+        // says so rather than letting the badge imply the team was checked.
+        const nm = actHit ? null
+          : nearMissFor(ownGatedIdx[actKey], name, teamHint, { onTeam: onTeam || null });
         // Decided on the RAW ramp, never the rounded one. At 61 PA the
         // weight is 0.00037 -- it rounds to 0.000 for display while the
         // model genuinely did use the actuals term, so rounding first
@@ -6131,6 +6138,10 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
           actContributes,
           sampleUnit: 'PA',
           nearMiss: nm,
+          // false => no roster for this team, so an untagged same-surname
+          // row could not be confirmed or ruled out. The badge must not
+          // claim "no actuals row for this team" on that basis.
+          nmScoped: !!onTeam,
           splitKey: actKey,
         };
         return {woba:blended, wobaVsSP: finalVsSP, wobaVsOpp: finalVsOpp, source:finalSource, wobaSrc};
@@ -6207,8 +6218,8 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
       home_sp_woba:lookupPitcher(game.home_sp,game.home_sp_hand||'R',game.home_team),
       // Away batters priced against home SP hand; use away roster to
       // gate the resolver. Mirror for home.
-      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R',game.away_team,awayGatedIdx)})),
-      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R',game.home_team,homeGatedIdx)})),
+      away_batters:awayLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.home_sp_hand||'R',game.away_team,awayGatedIdx,awayOnTeam)})),
+      home_batters:homeLineup.map(b=>({...b,...lookupBatter(b.name,b.hand,game.away_sp_hand||'R',game.home_team,homeGatedIdx,homeOnTeam)})),
     });
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
