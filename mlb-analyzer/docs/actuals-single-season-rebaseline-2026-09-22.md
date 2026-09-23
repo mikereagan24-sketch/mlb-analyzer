@@ -383,6 +383,85 @@ whose output is now read from its persisted emit-time value ***` — only
 the runModel half varies between arms. Both make the run *less* able to
 find an effect, and it found none in a range already below the floor.
 
+### And the ROI cut agrees, descriptively (2026-09-23)
+
+**Descriptive, not evidence.** Run because it was asked for explicitly on
+that basis. ROI over emitted signals reads SELECTION, not pricing --
+`calcPnl` never sees the model's numbers, so a signal emitted on the same
+side at two weights carries a byte-identical pnl and stake at both. The
+log-loss result above already settles the pricing question the other way.
+
+`services/parameter-sweep.js` exports driving the shipped scorer, corpus
+2026-05-20 .. 2026-09-22, 1305 scoreable games:
+
+```
+W_PROJ    n     W-L-P       ROI%      95% CI              wagered
+ 0.25   1259  600-659-0    -5.03   [ -9.75, +3.54]        130218
+ 0.35   1235  583-652-0    -5.24   [-11.99, +1.01]        125767
+ 0.45*  1222  574-648-0    -5.12   [-12.30, -1.03]        123143
+ 0.55   1208  557-651-0    -6.35   [-13.10, -0.63]        120349
+ 0.65   1207  555-652-0    -6.17   [-12.58, -2.02]        119202
+ 0.75   1196  542-654-0    -7.05   [-10.87, -1.91]        117459
+        * production
+```
+
+**Every interval is 5-7pp wide and they all overlap. The whole 2.02pp
+headline span fits inside any single point's CI**, so the apparent
+monotone decay is not separable from noise even before the decomposition.
+
+#### The decomposition: 1.78pp composition, 0.24pp side flips
+
+The three things CLAUDE.md requires of any such sweep:
+
+```
+vs 0.45     n_stay  n_enter  n_leave  n_changed_bet  d_stay
+ 0.25        1093     166      129          0         0.00
+ 0.35        1159      76       63          0         0.00
+ 0.55        1141      67       81          0         0.00
+ 0.65        1071     136      151          1         0.19
+ 0.75         986     210      236          2         0.40
+
+CORE (emitted at all six weights): n = 863 of 1222
+  core ROI  -7.04  -7.04  -7.04  -7.04  -7.04  -6.80
+  core_roi_span = 0.24pp        headline span = 2.02pp
+```
+
+- **`n_changed_bet` is 0 at three of the five off-baseline points**, and at
+  those three the core ROI is identical to the penny. That is the arithmetic
+  proof that nothing was repriced: the same 863 bets, the same P&L.
+- **The core returns −7.04 at five of six weights.** The only movement,
+  −6.80 at 0.75, comes from **2 bets** flipping side.
+- So of the 2.02pp headline span, **0.24pp is side flips and 1.78pp is pure
+  composition** -- different bets landing, not better pricing.
+- The marginal bets that do all the work have the CIs that class of bet
+  always has here: enter/leave ROI at every weight spans zero, by ±20-30pp
+  (0.35: enter +1.95 [−17.8, +22.5], leave +7.68 [−18.8, +31.0]).
+
+#### Two instruments, one conclusion
+
+| instrument | reads | result |
+|---|---|---|
+| `calibration-sweep.js` | log loss over ALL games | range 0.0029 against a 0.015 floor, 0 of 9 CIs exclude zero |
+| this ROI cut | selection over emitted signals | core span 0.24pp on 2 flipped bets; 1.78pp composition |
+
+**Not resolvable, and not worth moving.** The calibration instrument says
+the parameter cannot be seen; the ROI instrument says what movement there is
+does not come from pricing. They do not merely agree -- they fail in the two
+independent ways the two designs can fail.
+
+#### Two caveats that bound the reading
+
+1. **The corpus straddles all four actuals regimes** (see "The corpus is four
+   regimes" above): two-year unqualified to 2026-07-01, qualifier-restricted
+   to 07-30, single-season 08-03 to 09-21, corrected from 09-22. So the
+   spread reflects which regime's actuals a game landed under as well as
+   which games landed. A snapshot-bound sweep over this window is pooling
+   three wrong input regimes and one right one.
+2. **The negative absolute ROI is a property of the emitted-signal
+   population on this corpus**, not a verdict on the weights. Every arm is
+   negative, including production; nothing here says the weights cost money,
+   and nothing here should be quoted as an ROI figure for the model.
+
 ### What this closes
 
 - **W_PROJ / W_ACT stays at 0.45/0.55.** Not because it is optimal —
