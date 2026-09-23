@@ -270,7 +270,7 @@ Measured on `woba_data_snapshot` / `bat-act-rhp`, 122 dates,
 | **B** | 07-02 → 07-30 | 27 | **338** | 1379 | two-year, **qualifier ON** — rows halve, max holds |
 | **C** | 08-03 → 09-21 | 49 | 406 | **484** | **single season** — max collapses |
 | **D** | 09-22 → | 1 | 705 | 1054 | corrected career pull (#437) |
-| **E** | first upload after the floor change | — | — | — | **0.210 batter floor retired** — weak-hit position players return |
+| **E** | 2026-09-23 | 1 | 818/811 | — | **0.210 batter wOBA floor retired**, then replaced by a sample floor at MIN_PA the same day — see below |
 
 The transitions are sharp, not gradual:
 
@@ -327,38 +327,143 @@ measured the same day (280 lineup slots already fail because two
 same-initial candidates share a surname). That is a separate change needing
 a role filter, not a looser number.
 
-**THE BOUNDARY IS OBSERVABLE IN `upload_log`, NOT A REMEMBERED DATE.** Same
-principle as the park-factor regime being classified by comparing stored
-values against both tables: a date is a proxy for a fact, so record the
-fact. Here the fact is the row count.
+**THE BOUNDARY IS CLASSIFIED BY CONTENT, NOT BY ROW COUNT.** The first
+version of this section said the boundary was the first `upload_log` row
+whose `row_count` exceeded the pre-change maximum (823 / 689). **That rule
+was wrong and the first post-change upload proved it**, on the same upload,
+in opposite directions:
 
 ```
-data_key       max row_count EVER, pre-change
-bat-act-rhp    823
-bat-act-lhp    689
+bat-act-rhp   pre-change max 823   post-change 818   -> "not crossed"
+bat-act-lhp   pre-change max 689   post-change 811   -> "crossed"
 ```
 
-The first post-change ingest is **the first `upload_log` row for a
-`bat-act-*` key whose `row_count` exceeds those maxima**, and its
-`uploaded_at` is the boundary. Not crossed as of 2026-09-23 — the change
-lands before any refresh runs.
+818 < 823, because 823 belonged to an EARLIER regime; counts of 740-745 were
+routine in late June. A threshold that collides with an older regime cannot
+discriminate, and `upload_log` stores only a count, so it can never carry
+this boundary on its own. Recorded as a correction rather than quietly
+fixed, because it is the same failure the park-factor section warns about:
+a marker that looks observable but is a proxy for the fact rather than the
+fact.
+
+**The fact here is the data's own content.** A `bat-act-*` row with
+wOBA < 0.210 cannot exist before the change, so:
 
 ```sql
-SELECT data_key, row_count, uploaded_at FROM upload_log
- WHERE (data_key='bat-act-rhp' AND row_count > 823)
-    OR (data_key='bat-act-lhp' AND row_count > 689)
- ORDER BY id LIMIT 2;
+-- the boundary, needing no threshold and no remembered date
+SELECT MIN(snapshot_date) FROM woba_data_snapshot
+ WHERE data_key LIKE 'bat-act-%' AND woba < 0.210;
 ```
 
-`scripts/verify-woba-floor-change.js` prints that, enumerates the returned
-rows, and runs the before/after on every 2026 lineup lookup. **Its
-acceptance gate is LOST = 0 and CHANGED = 0**: adding a candidate can turn
-an exactly-one gate in `fuzzyLookup` (stages 5, 6, 6.5, 8) from a unique
-match into an ambiguous one, so a row coming back can make a previously
-resolving lookup return null. That is the one real regression risk in this
-change, and it cannot be evaluated until one upload has run — the floor
-dropped its rows at parse time, before any table, which is exactly why
-nobody could see what it was discarding.
+**Measured: `2026-09-23`** — 154 rows on `bat-act-lhp`, 112 on
+`bat-act-rhp`, min 0.0000, and it is the only such date. The `upload_log`
+row is then a POINTER found by matching that date, not the classifier:
+
+```
+2026-09-23 12:30:59   706 / 657     pre-change  (five uploads at these counts)
+2026-09-23 22:22:04   818 / 811     <- FIRST POST-CHANGE INGEST
+```
+
+Six uploads landed on 2026-09-23 and only content separates them, which is
+the other reason a date would not have done.
+
+### WHAT THE FIRST POST-CHANGE UPLOAD ACTUALLY SHOWED, and it falsified the change
+
+`scripts/verify-woba-floor-change.js`, run on the refreshed copy:
+
+```
+returned rows          266        (the estimate was ~35)
+  of which sample <15  131        80 rows carry wOBA exactly 0.0000
+lineup slots compared  40266
+  GAINED                576
+  LOST                   81       <- the acceptance gate was LOST = 0
+  CHANGED                 0
+```
+
+**THE GUARD WAS CATCHING PITCHERS AFTER ALL.** `bat-act` names carrying a
+non-POS roster role went 1 -> 7, and five of the new ones are unmistakable:
+Trevor Rogers (SP), Tyler Alexander (RP), Colin Rea (SP), Jack Leiter (SP),
+Miles Mikolas (RP), Randy Vasquez (SP) — every one at wOBA 0.0000 on 1-2 PA.
+
+The argument for removal counted the failure mode on the **floored** corpus,
+i.e. the population the guard had already cleaned. **A guard's target being
+absent from the corpus that guard produced is not evidence of absence**, and
+the guard-removal rule says to go to production evidence for exactly this
+reason.
+
+#### This is the THIRD time a guard has been declared inert by an instrument that had already removed its target
+
+Worth naming as a class, because all three produced a **zero** and the zero
+was read as a finding:
+
+```
+SIGNAL_EDGE_HARD_CAP_PP   0 of 1026 signals suppressed in the backtest
+                          -> "inert, a does-nothing pass"
+                          preScreenGame had already dropped the 2 corrupt
+                          rows. Production had suppressed 1283, of which 279
+                          carried |ML| > 1000, up to +94400.
+
+CATCHER_FRAMING_MUTE      0 of 790 games changed
+                          -> "the flag is inert"
+                          CALLER_POPULATED_INPUTS failed open on the key, so
+                          framing was never populated in either arm. The
+                          arms were identical for a HARNESS reason.
+
+0.210 batter wOBA floor   0 of 762 bat-act names on a roster as a pitcher
+   (2026-09-23, this)     -> "the target is absent"
+                          The floor had already rejected them. The first
+                          upload without it admitted five, at 1-2 PA.
+```
+
+The shape is identical every time: **the measurement is taken downstream of
+the mechanism being measured**, so the mechanism's effect is invisible by
+construction and the null is uninformative rather than negative. It is the
+same family as CLAUDE.md's "identical digits" tell, one level up — there the
+giveaway is a number reproducing to five decimals, here it is a count of
+exactly zero from a population that could not have contained the thing.
+
+**The check that would have caught all three:** before believing a zero, ask
+what would have to be true for the count to be non-zero, and confirm the
+corpus could express it. For a floor, that means counting in the source
+file or in production, never in the table the floor fills.
+
+**And it broke resolutions.** `aramis garcia` returned at wOBA 0.0495 on 18
+PA, which made `fuzzyLookup`'s exactly-one abbrev gate ambiguous against
+`adolis garcia` (.2750, 607 PA) — so Adolis Garcia, a regular, lost his
+actuals term on **79 slates** and priced off the projection alone.
+
+### The corrected rule: a SAMPLE floor at MIN_PA
+
+Swept over all 40,266 lineup slots:
+
+```
+minSample   sub-floor rows kept   GAINED   LOST
+        0                   266      576     81
+        5                   200      565     81
+       10                   162      550     81
+       20                   108      467     11
+       30                    76      393     11
+       60                    32      206      0
+```
+
+60 is not read off that table — **it is `MIN_PA`, the threshold `blendWoba`
+already gates the actuals term on.** A row below MIN_PA can never contribute
+to a price; its only possible effect is to make the resolver ambiguous. So
+admitting it is all cost and no benefit, and the ingest floor belongs at the
+consumer's floor. That is the producer/consumer rule with the roles swapped
+— *"a looser consumer does not admit more good data, it admits exactly the
+rejected data."* MIN_PA is READ from settings rather than written as a
+second literal, so the two cannot drift.
+
+**What survives is the recovery the exercise was for:** 206 lookups gained,
+being weak platoon splits of ordinary regulars — Yoan Moncada .1966 vs LHP,
+Josh Lowe .2021, Kyle Isbel .2074, Josh Smith .2038.
+
+**Kwan / Rengifo / Dubon were named as returned rows and are not.** All
+three were present in both splits before the change and are unchanged after
+it — Kwan .3436/.2736, Rengifo .2865/.2631, Dubon .2993/.3062, the lowest
+being .2631, comfortably above 0.210. The returned rows are 266 other
+players, dominated by hitless tiny-sample lines.
 
 ### This is a corpus hazard, in the same family as the park-factor boundary
 
