@@ -10,7 +10,7 @@ const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES } = require('./model');
 const { fetchParkWind } = require('./weather');
-const { normName, stripSfx } = require('../utils/names');
+const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
 const { calcCLV, clvForSignal } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
 const { checkMarketMLPairSanity, isSaneSpreadPrice } = require('../utils/market-sanity');
@@ -7400,6 +7400,34 @@ async function detectOpeners(dateStr) {
 // Logs a structured warn line on every miss (after both passes) with
 // the lineup name + team so prod misses can be diagnosed without
 // re-tracing through the resolution path.
+// Roster rows -> the keyMap utils/names.js fuzzyLookup reads:
+// normName(full name) -> value. The value is the mlb_id, so a hit IS the
+// answer.
+//
+// BARE KEYS, NO TEAM SUFFIX. Every index built here is already scoped to
+// one team by the query that produced it, so fuzzyLookup's bare-name stage
+// cannot reach another team's players -- which is the scoping the old
+// hand-rolled match got from the same query. Adding "name TEAM" keys would
+// only make stage 1 fire on a string this caller never holds.
+//
+// A duplicate normalised name is DROPPED rather than resolved by insertion
+// order. Two same-named players on one roster is ambiguity the caller must
+// not silently pick from, and removing the key is what makes fuzzyLookup's
+// exactly-one gates see it that way.
+function buildRosterNameIndex(rows) {
+  const idx = {};
+  const dupe = new Set();
+  for (const r of (rows || [])) {
+    if (!r || !r.player_name || r.mlb_id == null) continue;
+    const k = normName(r.player_name);
+    if (!k) continue;
+    if (Object.prototype.hasOwnProperty.call(idx, k)) { dupe.add(k); continue; }
+    idx[k] = r.mlb_id;
+  }
+  for (const k of dupe) delete idx[k];
+  return idx;
+}
+
 function resolveCatcherMlbId(team, lineupName) {
   if (!team || !lineupName) return null;
   // CASE NORMALIZATION (fix/resolver-team-case-and-single-source).
@@ -7434,18 +7462,32 @@ function resolveCatcherMlbId(team, lineupName) {
   //      exist (genuine ambiguity — same null result as before).
   try {
     const players = q.getPositionPlayers.all(team);
-    const candidatesStrict = [];
+    // THE SHARED RESOLVER, NOT A FOURTH COPY OF NAME MATCHING. (2026-09-23)
+    //
+    // 1a was a hand-rolled `last === last && first[0] === firstInit`. That
+    // is a fork of utils/names.js fuzzyLookup, which is the repo's one name
+    // matcher and carries eight stages this did not: suffix append, the
+    // abbreviated-first-name pair in BOTH directions, the compound-surname
+    // fallback, and the de-spaced first name from #448. Measured on the
+    // 2026 lineup population, the fork missed 56 distinct (name, team)
+    // pairs fuzzyLookup resolves.
+    //
+    // Exactly the drift fix/matchup-woba-use-shared-resolver deleted from
+    // routes/api.js in July, where a ~40-line copy had silently lost
+    // stages 4 and 6.
+    const hit1 = fuzzyLookup(buildRosterNameIndex(players), lineupName, team);
+    if (hit1 != null) return hit1;
+    // 1b IS KEPT, and it is the one thing the fork could do that the shared
+    // resolver cannot: unique last name, ANY first initial. fuzzyLookup has
+    // no such stage, so dropping it would lose resolutions rather than gain
+    // them -- which is why this is a replacement of 1a only.
     const candidatesByLast = [];
     for (const p of players) {
-      const pn = stripSfx(normName(p.player_name));
-      const pp = pn.split(' ');
+      const pp = stripSfx(normName(p.player_name)).split(' ');
       if (pp.length < 2) continue;
-      if (pp[pp.length - 1] !== last) continue;
-      candidatesByLast.push(p);
-      if (pp[0][0] === firstInit) candidatesStrict.push(p);
+      if (pp[pp.length - 1] === last) candidatesByLast.push(p);
     }
-    if (candidatesStrict.length === 1) return candidatesStrict[0].mlb_id;
-    if (candidatesStrict.length === 0 && candidatesByLast.length === 1) {
+    if (candidatesByLast.length === 1) {
       // 1b unique-last fallback. Log it so prod can audit any false
       // positives — if a wrong player resolves this way, the warn
       // line in render logs lets us spot it.
@@ -7465,23 +7507,25 @@ function resolveCatcherMlbId(team, lineupName) {
   // "Lastname, Firstname" — split on comma, normalize each piece,
   // and apply the same matching rule. Loop current-season first,
   // then historical.
+  // Same treatment. Flipping "Lastname, Firstname" into "Firstname
+  // Lastname" is the only catcher_framing-specific step that remains; the
+  // matching is the shared resolver's.
   const matchCatcherFraming = (rows) => {
     if (!rows) return null;
-    const hits = [];
+    const flat = [];
     for (const r of rows) {
       if (!r.name) continue;
       const commaIdx = r.name.indexOf(',');
-      if (commaIdx < 0) continue;                  // unrecognized format → skip
-      const rLast  = stripSfx(normName(r.name.slice(0, commaIdx)));
-      const rFirst = stripSfx(normName(r.name.slice(commaIdx + 1)));
+      if (commaIdx < 0) continue;                  // unrecognized format -> skip
+      const rLast  = String(r.name.slice(0, commaIdx)).trim();
+      const rFirst = String(r.name.slice(commaIdx + 1)).trim();
       if (!rLast || !rFirst) continue;
-      // rLast / rFirst are already space-collapsed by normName; use
-      // the whole string for last-name match (handles compound
-      // surnames like "de la cruz").
-      if (rLast === last && rFirst[0] === firstInit) hits.push(r);
+      flat.push({ player_name: rFirst + ' ' + rLast, mlb_id: r.mlb_id });
     }
-    if (hits.length === 1) return hits[0].mlb_id;
-    return null;
+    // No team hint: catcher_framing is not team-scoped and the fork was not
+    // either. fuzzyLookup's exactly-one gates carry the fork's
+    // `hits.length === 1` rule, so an ambiguous surname stays unresolved.
+    return fuzzyLookup(buildRosterNameIndex(flat), lineupName, null);
   };
   try {
     if (q.getAllCatcherFramingNames) {
@@ -7538,17 +7582,15 @@ function resolveCatcherMlbId(team, lineupName) {
   try {
     if (q.getSeasonPositionPlayers) {
       const sp = q.getSeasonPositionPlayers.all(team);
-      const sStrict = [], sByLast = [];
+      const hit3 = fuzzyLookup(buildRosterNameIndex(sp), lineupName, team);
+      if (hit3 != null) return hit3;
+      const sByLast = [];
       for (const p of sp) {
-        const pn = stripSfx(normName(p.player_name));
-        const pp = pn.split(' ');
+        const pp = stripSfx(normName(p.player_name)).split(' ');
         if (pp.length < 2) continue;
-        if (pp[pp.length - 1] !== last) continue;
-        sByLast.push(p);
-        if (pp[0][0] === firstInit) sStrict.push(p);
+        if (pp[pp.length - 1] === last) sByLast.push(p);
       }
-      if (sStrict.length === 1) return sStrict[0].mlb_id;
-      if (sStrict.length === 0 && sByLast.length === 1) {
+      if (sByLast.length === 1) {
         console.warn('[resolver] PASS 3 season-roster unique-last fallback: team=' + team
           + ' lineup_name="' + lineupName + '" -> resolved to "' + sByLast[0].player_name
           + '" (mlb_id ' + sByLast[0].mlb_id + ')');
@@ -8309,47 +8351,24 @@ async function runSeasonRosterJob() {
 // the planned player-BsR backtest — surfaces where lineups are
 // historical (5/01-6/14) and the IL'd-now stars need to resolve.
 //
-// Matching logic mirrors resolveCatcherMlbId's PASS 1 + 1b inline so
-// the season-roster path gets the same accent-folding / unique-last-
-// name fallback semantics. PASS 2 (catcher_framing) is inherited
-// through the resolveCatcherMlbId delegation at the top.
+// NOW A PURE DELEGATION, because #450 made its body dead. (2026-09-23)
+//
+// This carried a THIRD copy of the last+first_init match: it called
+// resolveCatcherMlbId, and on a miss re-ran the same matching against
+// team_rosters_season. #450 added exactly that as PASS 3 of
+// resolveCatcherMlbId, so the fallback below could never fire again -- the
+// delegation had already tried it.
+//
+// Kept as a named function rather than deleted because it is the
+// documented entry point for /admin/lineup-coverage,
+// services/frv-backtest.js and the player-BsR backtest, and because the
+// NAME carries the intent: these callers want historical resolution. What
+// is gone is the duplicate logic, not the seam.
+//
+// One behaviour change, and it is the point: these callers now also get
+// fuzzyLookup's eight stages, which the inline copy never had.
 function resolveBacktestMlbId(team, lineupName) {
-  // Try the live resolver first — covers active 26-man + framing
-  // PASS 2. The live resolver already logs structured warns on miss,
-  // which we don't want spamming for routine backtest IL'd-player
-  // misses, but accepting a few extra log lines is cheaper than
-  // duplicating PASS 2 here.
-  const live = resolveCatcherMlbId(team, lineupName);
-  if (live) return live;
-
-  // Fall back to season roster. Same matching shape as PASS 1 / 1b.
-  if (!team || !lineupName) return null;
-  team = String(team).toUpperCase();
-  const norm = stripSfx(normName(lineupName));
-  const parts = norm.split(' ');
-  if (parts.length < 2) return null;
-  const last = parts[parts.length - 1];
-  const firstInit = parts[0][0];
-
-  try {
-    if (!q.getSeasonPositionPlayers) return null;
-    const players = q.getSeasonPositionPlayers.all(team);
-    const candidatesStrict = [];
-    const candidatesByLast = [];
-    for (const p of players) {
-      const pn = stripSfx(normName(p.player_name));
-      const pp = pn.split(' ');
-      if (pp.length < 2) continue;
-      if (pp[pp.length - 1] !== last) continue;
-      candidatesByLast.push(p);
-      if (pp[0][0] === firstInit) candidatesStrict.push(p);
-    }
-    if (candidatesStrict.length === 1) return candidatesStrict[0].mlb_id;
-    if (candidatesStrict.length === 0 && candidatesByLast.length === 1) {
-      return candidatesByLast[0].mlb_id;
-    }
-  } catch (e) { /* season table missing or query failed → null */ }
-  return null;
+  return resolveCatcherMlbId(team, lineupName);
 }
 
 // REPLACED 2026-07-02 by the FG Daily Sync bookmarklet + /api/upload/rr-roles.
