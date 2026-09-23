@@ -310,6 +310,20 @@ const GATES = [
     //   flag moves p(home) on 619/658 (94.1%), mean |dp| 0.00821
     // CI still spans zero, and the corpus is 658 against a 1200-game
     // criterion. NOT flippable.
+    //
+    // corpus_size SET 2026-09-23, and this row PRUNED from
+    // CORPUS_SIZE_GRANDFATHERED in the same commit -- the two go together,
+    // because test-registry-corpus-size.js fails in both directions and a
+    // grandfathered row that gains the field must leave the list.
+    //
+    // It is the row that forced the standard: its figures were recorded on
+    // 790 games, a later weather-contamination backfill cut the same window
+    // to 439, and nothing on the row said which corpus produced the
+    // numbers. Sitting on the exemption it created was the wrong state.
+    // 658 is what calibration-ab.js actually scores on this row's window
+    // (2026-06-01..2026-08-07) today; the 790 and 439 belong to the
+    // superseded evidence and stay in evidence_predates with their own n.
+    corpus_size: 658,
     evidence_predates: { event: 'harness_inputs_persisted',
       measured: '2026-08-23', harness: 'scripts/calibration-ab.js',
       figures: 'delta log loss -0.00087 CI [-0.00211, +0.00065], ALL FIVE metrics, edge slope -0.313 -> -0.218',
@@ -378,7 +392,14 @@ const GATES = [
     // test-registry-corpus-size.js accepts it as such; the superseded-scope figures
     // are kept in the note WITH their n rather than deleted.
     // Re-run the chain: node scripts/measure-calibration-corpus.js
-    corpus_size: null,
+    //
+    // SET 2026-09-23. The null above said "under that scope there is no
+    // qualifying measurement yet". There is now: the re-run on the as-of
+    // window this row pins (2026-06-04..2026-09-22, FRV_READ=asof, the
+    // corrected resolver from #450) scored 1076 games, identical set both
+    // arms, 0 dropped. That is what the criterion's own scope produces, so
+    // it replaces the null rather than the superseded 797.
+    corpus_size: 1076,
     note: 'OPENED 2026-09-12 when the FRV term was redefined — see defense_frv_enabled above for what '
         + 'changed and why its evidence does not transfer. The term is now: per-fielder FRV AT THE '
         + 'POSITION HE IS PLAYING TONIGHT ((mlb_id, position) key), summed over the non-catcher lineup '
@@ -1345,7 +1366,11 @@ const CORPUS_SIZE_GRANDFATHERED = [
   'signal_venue_aware_enabled', 'kalshi_direct_primary_enabled',
   'kalshi_direct_totals_enabled', 'signal_edge_cap_enabled',
   'bullpen_downweight_starters', 'sp_prefer_rotowire', 'totals_selection_edge',
-  'defense_frv_enabled', 'use_hand_conditional_sp_weight',
+  // defense_frv_enabled PRUNED 2026-09-23: it now carries corpus_size 658,
+  // measured by the re-run on its own window. This is the row whose missing
+  // n forced the standard in the first place (see the test's header), so it
+  // had no business remaining exempt from it.
+  'use_hand_conditional_sp_weight',
   'ui_highlight_tot_overs_enabled', 'signal_edge_hard_cap_pp',
   'signal_edge_soft_cap_pp', 'catcher_framing_mute', 'defense_frv_mute',
   // bsr_baserunning PRUNED 2026-09-12: it now carries corpus_size 1100.
