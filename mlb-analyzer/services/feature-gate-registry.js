@@ -1361,6 +1361,60 @@ function logGateHealth(db, opts) {
 // so the exemption list gets pruned rather than carried forever. A
 // permanently-accepted failure list is how a real regression hides inside
 // a carried failure count.
+// ---------------------------------------------------------------------
+// ROWS WITH NEITHER A DECISION NOR A DEADLINE (2026-09-23)
+//
+// evaluateGates() reports a gate whose window has ELAPSED with no
+// decision. A row with window_end:null therefore has no deadline and is
+// never reported, which is a silent state: "nobody set a deadline" and
+// "no deadline is appropriate" look identical from the outside.
+//
+// This list is the difference. It holds the SIX rows that were already in
+// that state when the contract test landed, each with the reason its
+// deadline is not a date. scripts/test-registry-gate-contract.js asserts:
+//
+//   * every row has a decision, OR an unelapsed window_end, OR an entry
+//     here -- so a NEW row with neither fails. The list is a record of
+//     what was already there, NOT an escape hatch for what comes next;
+//   * every entry here carries a non-empty reason. If a reason cannot be
+//     written, the row wants a window rather than an exemption;
+//   * every entry here still exists in the registry, and still actually
+//     lacks both a decision and a window -- so a row that gains either
+//     must be pruned, the same both-directions rule
+//     CORPUS_SIZE_GRANDFATHERED has.
+//
+// wants_window:true marks a row whose reason is an ADMISSION rather than a
+// justification -- it is here because nobody set a deadline, not because a
+// date would be meaningless. Those are reported as a standing finding on
+// every run. They are not failures, because failing on a state nobody can
+// fix today trains the reader to skip the output; they are also not
+// settled, and the flag is what keeps them visible.
+const NO_DEADLINE_ACKNOWLEDGED = [
+  { id: 'totals_selection_edge',
+    reason: 'The criterion is a SAMPLE threshold and says so: "re-run the decisive '
+          + 'test at n >= 100 logged totals bets. NOT a calendar date." A date would '
+          + 'fire before the bets exist.' },
+  { id: 'defense_frv_mute',
+    reason: 'Dependent gate. Moot while defense_frv_enabled is off and becomes live '
+          + 'the moment that flips, so its deadline is that gate\'s decision, not a date.' },
+  { id: 'catcher_framing_takes_per_game',
+    reason: 'A constant running on its schema default with no flip pending. The open '
+          + 'item is a missing DERIVATION, which no window closes.' },
+  { id: 'bullpen_w_proj_w_act',
+    reason: 'Blocked on a precondition, not a clock: the bullpen blend needs per-date '
+          + 'wOBA snapshots, and calibration-sweep reports the bullpen half read from '
+          + 'persisted emit-time values, so no arm can move it today.' },
+  // ---- reasons below are ADMISSIONS. These two want a window. ----
+  { id: 'use_hand_conditional_sp_weight', wants_window: true,
+    reason: 'NO JUSTIFICATION. It has a real calibration criterion (tier-2 sign-test '
+          + 'standard) and unfavourable first evidence from 2026-08-23, so it wants '
+          + 'either a window or a recorded decision. Nobody set one.' },
+  { id: 'catcher_framing_mute', wants_window: true,
+    reason: 'NO JUSTIFICATION. Prod runs 1.0 against a schema default of 0.65 -- a live '
+          + 'divergence the row itself calls "no recorded rationale". An open question '
+          + 'wants a window, not an exemption.' },
+];
+
 const CORPUS_SIZE_GRANDFATHERED = [
   'use_opener_logic', 'catcher_framing_enabled', 'park_neutral_inputs_enabled',
   'signal_venue_aware_enabled', 'kalshi_direct_primary_enabled',
@@ -1411,4 +1465,4 @@ function checkCorpusSize(gates) {
 }
 
 module.exports = { GATES, STATUS, evaluateGates, logGateHealth, PRECONDITIONS,
-  checkCorpusSize, CORPUS_SIZE_GRANDFATHERED, REBASELINE_EVENTS };
+  checkCorpusSize, CORPUS_SIZE_GRANDFATHERED, NO_DEADLINE_ACKNOWLEDGED, REBASELINE_EVENTS };
