@@ -396,6 +396,111 @@ find an effect, and it found none in a range already below the floor.
   Not more snapshots of the same thing.
 
 
+## RE-BASELINE: every FRV measurement ran with the term absent on ~17.6% of fielder slots (2026-09-23)
+
+**A re-baseline entry, not a re-run instruction.** The FRV term is gated
+OFF (`defense_frv_enabled` is not even in `app_settings`), so **no price has
+ever been affected**. What was affected is the evidence the gate decision
+rests on.
+
+### The mechanism
+
+`resolveCatcherMlbId` resolved fielder names against `team_rosters` — an
+840-row snapshot refreshed daily, holding only currently-active players —
+while replaying games from April onward. A player since optioned, traded or
+shut down did not exist to it. `team_rosters_season` (1665 rows, keeps IL'd
+players) had them all along and was not consulted. Fixed in #450.
+
+Measured on the gate's own corpus: the `fielding_frv_snapshot` era,
+**2026-06-04 → 2026-09-22, 1433 games**, FRV read **as-of** each game date
+(the scope `defense_frv_split` pins).
+
+```
+fielder slots        20062
+resolved, before     15707  (78.29%)      unresolved 4355 (21.71%)
+resolved, after      18244  (90.94%)      unresolved 1818  (9.06%)
+RECOVERED             2537
+```
+
+### What it did to the term
+
+```
+                n      mean    median      p10      p90       min      max
+before       2854    0.0762    0.0855  -0.0996   0.2487   -0.6510   0.5241
+after        2865    0.0557    0.0614  -0.1192   0.2247   -0.4134   0.5241
+```
+
+- **1502 of 2854 team-sides move** (52.6%); |delta| mean **0.0347 runs**,
+  median 0.0059, p90 0.1037, max **0.3959**.
+- Signed delta mean **−0.0199** — the unresolved version was systematically
+  **flattering** defences.
+- **1065 of 1433 games (74.3%)** have at least one side move; 437 both.
+- The **differential**, which is what the model prices: |d| mean **0.0542
+  runs**, median 0.0354, p90 0.1414, max **0.4417**.
+- 11 team-sides had **no value at all** before and have one now.
+
+For scale, the max differential of 0.44 runs is larger than the median
+weather adjustment (0.300 runs) that CLAUDE.md already records as sitting at
+the edge of detectability. This is not a rounding difference.
+
+### Why it is concentrated, not diffuse
+
+The term scales the resolved slots' mean across the full fielding
+complement — correct when a fielder is genuinely absent from Savant, and
+badly wrong when he is merely unresolvable. SF spent much of the season
+with **one of seven** slots resolving, so one player's rate stood in for the
+whole defence, and the value **flipped sign** when the rest arrived:
+
+```
+2026-07-24 laa-sf  SF   before +0.2943 (1/7 resolved)   after -0.1016 (7/7)
+2026-07-19 sf-sea  SF   before -0.6230 (1/7)            after -0.2302 (7/7)
+2026-06-21 pit-col COL  before +0.3399 (3/7)            after -0.0054 (6/7)
+```
+
+The players missing were everyday starters — Devers, Jung Hoo Lee, Ohtani,
+Chisholm, Castro, Buxton, Keith — so the loss landed on high-usage slots,
+not on the margins.
+
+### What this re-baselines
+
+Everything whose input was this term:
+
+- **`defense_frv_enabled`** (gate registry). Its recorded evidence —
+  *"moves p(home) on 100% of games (mean |dp| 0.0083), better on ALL FIVE
+  metrics, edge slope −0.313 → −0.218, Δ log loss −0.00087
+  CI [−0.00211, +0.00065]"* — was measured on the unresolved term. The flip
+  criterion (**CI excludes zero on the negative side, ≥1200 games**) is
+  unchanged; the figures it would be judged against are not re-derivable
+  from that run.
+- **`defense_frv_split`** (opened 2026-09-12 when the term was redefined,
+  window to 2026-10-31). Same bar, same corpus, same defect.
+- **The interaction arms** that carried FRV as one of their features.
+- `services/frv-backtest.js` and
+  `scripts/framing-frv-hindsight-backtest.js`, which take the same term
+  through `utils/fielding-frv-term.js`.
+
+**Not affected:** the catcher/framing path. Catchers resolved at **99.57%**
+(14 misses of 3262) because `catcher_framing` is a second authority for
+them specifically. Framing numbers stand.
+
+### Order of operations for this half
+
+Slots in alongside 2a–2c above:
+
+2d. With #450 merged, re-run the slot count and confirm 90.94%.
+2e. Re-run the `defense_frv_enabled` / `defense_frv_split` A/B on the
+    as-of window. **This is the one re-run on this page that is worth
+    doing**, because unlike W_PROJ/W_ACT the term demonstrably moves — 0.054
+    runs of differential at the median, against a log-loss floor of 0.015
+    that a 0.0083 mean |dp| was already close to clearing.
+2f. Only then read the gate's flip criterion against it.
+
+**The 1818 slots still unresolved after #450 are a different question** —
+those are players absent from both rosters, and the honest reading is that
+some are genuinely absent from Savant rather than name-resolution failures.
+Do not treat 100% as the target.
+
+
 ## Order of operations
 
 1. Resolve the dropped-player question and merge a pull fix.
