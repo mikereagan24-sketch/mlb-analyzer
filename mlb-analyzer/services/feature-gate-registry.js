@@ -1194,6 +1194,161 @@ const GATES = [
         + 'meant asking for the fabricated rows back.\n'
         + 'See docs/bsr-gate-status-2026-08-23.md for the original measurement.' },
 
+  // ---- PRE-REGISTERED CANDIDATE, opened 2026-09-23 ----
+  //
+  // The global W_PROJ/W_ACT pair had NO ROW IN THIS REGISTRY at all, despite
+  // being a live pricing parameter that "has no recorded derivation" by the
+  // ledger's own finding. This row is that gap closed, and it is a
+  // PRE-REGISTRATION rather than a proposal: the candidate value, the
+  // instrument, the bar and the n are all fixed here, before the forward
+  // corpus that will judge them exists.
+  //
+  // PRODUCTION DOES NOT MOVE. W_PROJ stays 0.45 / W_ACT 0.55. Nothing in
+  // this commit touches app_settings, settings-schema.js, or any pricing
+  // path.
+  //
+  // WHY 0.20 AND WHY NOW -- the mechanism argument.
+  //
+  // The pair splits a batter's wOBA between a PROJECTION (Steamer, an
+  // estimate) and ACTUALS (FanGraphs season/two-year, an observation).
+  // Production puts 0.45 on the estimate. The mechanism argument for moving
+  // weight toward actuals is simply that one side is measured and the other
+  // is modelled, and 0.20 is not an arbitrary step: it is the SCHEMA FLOOR
+  // for w_proj, whose exact complement is w_act's 0.80 cap. So 0.20/0.80 is
+  // the corner of the admissible box -- the most weight the settings layer
+  // will ever allow on observed data. A candidate at the boundary is the
+  // honest one to test, because any interior value is a weaker version of
+  // the same hypothesis.
+  //
+  // THE COUNTERWEIGHT IS ALREADY WRITTEN INTO THE SCHEMA, and it is the
+  // reason the floor exists: settings-schema.js records that the measured
+  // spread of (actual - projection) wOBA is SD 0.041 at 60-90 PA and still
+  // 0.017 at 450+ PA -- "season actuals are the noisier input at every
+  // sample size". Observed does not mean precise.
+  //
+  // BUT THAT DISPERSION WAS MEASURED ON A SAMPLE THAT NO LONGER EXISTS.
+  // It was computed while woba_data_snapshot held SINGLE-SEASON actuals
+  // (regime C, max 484 PA). The two-year window was restored on 2026-09-22
+  // and the same data_key now reaches 1054 PA -- 705 rows against 419 the
+  // day before. "Actuals are noisier at every sample size" is a claim about
+  // a distribution whose right tail just doubled. That is the specific,
+  // dated reason this parameter earns a forward look rather than another
+  // restatement of the 2026 answer.
+  //
+  // WHY THE CORPUS MUST BE FORWARD, and this is structural rather than
+  // stylistic: the actuals fix is FORWARD-ONLY for any snapshot-bound
+  // harness. calibration-sweep.js and parameter-sweep.js bind each game to
+  // its OWN date's snapshot, and exactly 1 of 111 snapshot dates
+  // (2026-09-22) carries corrected two-year actuals. Re-running the grid on
+  // history today would re-read regimes A/B/C for everything before that
+  // date and reproduce the pre-fix answer with a new timestamp on it.
+  //
+  // WHAT THE 2026 GRID SAID, recorded so the criterion is not mistaken for
+  // a fresh question:
+  //
+  //   calibration-sweep.js W_PROJ_W_ACT 0.45, 2026-06-01..2026-08-07
+  //     the whole 0.10..0.90 range spans 0.0029 of log loss
+  //     0 of 9 bootstrap CIs exclude zero; bootstrapCI=0, folds=0
+  //     dLL +0.00218 @0.10  +0.00022 @0.40  -0.00071 @0.80  -0.00065 @0.90
+  //     -> NON-MONOTONE, and the minimum sits at 0.80, the FAR END from
+  //        this candidate. Nothing in the 2026 curve points at 0.20.
+  //
+  //   ROI, 2026-05-20..2026-09-22, and it is COMPOSITION not pricing:
+  //     0.25..0.75 cut: 863-bet core returns -7.04 at FIVE OF SIX weights
+  //       (-6.80 at 0.75, on 2 bets flipping side). core_roi_span 0.24pp
+  //       against a 2.02pp headline. CIs 5-7pp wide, all overlapping.
+  //     0.00..0.20 cut: 927-bet core, core_roi_span EXACTLY 0 across all
+  //       six weights. 100% of the 2.51pp headline is composition. CIs
+  //       4-11pp wide. Apparent optimum 0.15 (-4.25) is below the schema
+  //       floor and therefore unsettable.
+  //   ROI IS NOT THE INSTRUMENT HERE and this row does not use it:
+  //   calcPnl never sees the model's numbers, so a signal emitted on the
+  //   same side at two weights carries a byte-identical pnl at both.
+  //
+  // THE FLOOR THAT CLOSED IT IN 2026 WAS THE WRONG DESIGN'S FLOOR.
+  // The closure reasoning reads "0.0029 of range against a 0.015 floor,
+  // five times smaller than the smallest detectable difference". 0.015 is
+  // the BETWEEN-COHORT calibration floor. This arm is PAIRED -- the same
+  // games scored twice with one weight changed -- and CLAUDE.md records
+  // that quoting the cohort floor for a paired design overstates the
+  // difficulty by ~30x, "the same class of error as quoting a schedule
+  // share as a measurement n". Measured for THIS arm, per the
+  // park-neutral-paired-floor.js template:
+  //
+  //   games scored both ways      1268
+  //   the weight moved p(home) on 1132 (89.3%), mean |dp| 0.01087
+  //     -- larger than DEFENSE_FRV (0.0087) and 4.5x CATCHER_FRAMING (0.0024)
+  //   sd(per-game paired dLL)     0.029933
+  //   date clustering ICC 0.0048 over 118 dates -> design effect 1.047
+  //   RESOLVABLE at n=1268:       +/-0.001686
+  //
+  //   n needed:  0.00300 -> 401 (already)   0.00150 -> 1602   0.00100 -> 3603
+  //
+  // So the paired half-width is NINE TIMES tighter than the figure the
+  // closure quoted, and a 0.0029 effect is resolvable at n=401. This
+  // parameter is not unanswerable; it was measured against the wrong floor
+  // and is UNDERPOWERED-BUT-CLOSE, the same state the park-neutral row sits
+  // in at 0.90x its threshold.
+  //
+  // THE CLOSURE STILL STANDS FOR 2026 and this row does not reopen it: 0 of
+  // 9 CIs excluded zero on the corpus that existed, and the grid minimum is
+  // at the opposite end. What changes is the reason -- underpowered on a
+  // paired instrument at n=1268, not invisible at any n.
+  { id: 'w_proj_w_act', key: 'w_proj', numeric: true, on_expected: null,
+    criterion: 'PRE-REGISTERED FORWARD CANDIDATE: W_PROJ 0.20 / W_ACT 0.80 against '
+             + 'production 0.45 / 0.55. Instrument: paired calibration A/B on log loss '
+             + '(scripts/calibration-sweep.js W_PROJ_W_ACT 0.45, or the equivalent '
+             + 'two-arm form), identical game set both arms, date-clustered CI. '
+             + 'CORPUS: games played AFTER 2026-09-22 ONLY -- the date the two-year '
+             + 'actuals were restored -- because the snapshot table is corrected '
+             + 'forward only and 1 of 111 existing snapshot dates qualifies. '
+             + 'BAR: delta_log_loss CI excludes zero on the NEGATIVE side (candidate '
+             + 'better) at n >= 1600. The n is the power check, not a round number: '
+             + 'the measured paired half-width is +/-0.001686 at n=1268, and 1602 is '
+             + 'what resolving a 0.0015 effect requires on this design. NOT ROI -- ROI '
+             + 'over emitted signals reads selection, and the 2026 core span was 0. '
+             + 'A null at n >= 1600 closes the row and production keeps 0.45.',
+    criterion_type: 'calibration', precondition: null,
+    // WINDOW_END 2027-09-15. SAME ARITHMETIC as catcher_framing_enabled and
+    // catcher_framing_mute, with a different n, and the difference is the
+    // power check rather than a preference:
+    //
+    //   game_log ends 2026-09-23 with ZERO games after it, so a forward
+    //   window accrues nothing until the 2027 season opens in late March.
+    //   The calibration corpus yields 9.8 usable games/day after every
+    //   filter the harness applies. 1600 / 9.8 = 163 game-days, which from
+    //   a late-March opening lands in the first half of September.
+    //
+    // The framing rows use 1200 / 9.8 = 123 game-days -> 2027-08-01. This
+    // row needs 1600 because its own paired floor says 1200 is short: the
+    // projected half-width at n=1200 is +/-0.00173 against a plausible
+    // effect near 0.0015. Setting 2027-08-01 here would close the window on
+    // a corpus that cannot clear the bar -- the exact failure the FRV rows
+    // demonstrated at 1076 of 1200 -- so the DATE follows the n, and the n
+    // follows the measurement.
+    window_end: '2027-09-15',
+    // corpus_size is an explicit NULL: the forward window has no scored
+    // corpus until it closes. The 1268 above is the POWER CHECK's n, not
+    // this criterion's corpus, and must not be recorded as though the
+    // criterion had been measured.
+    corpus_size: null,
+    decision: null,
+    note: 'PRODUCTION IS NOT CHANGING. 0.45/0.55 stays live; this row records a '
+        + 'candidate and the terms it will be judged on, nothing more. Two things it '
+        + 'deliberately does NOT claim. (1) It does not claim 0.20 is better -- the '
+        + '2026 curve is non-monotone with its minimum at 0.80, the opposite end, and '
+        + 'W_PROJ=0.00 produced the WORST ROI of six weights, so the schema floor\'s '
+        + 'own rationale is unrefuted. The candidate rests on a mechanism argument '
+        + '(observed vs estimated) plus the fact that the dispersion measurement '
+        + 'behind the floor was taken on single-season actuals that no longer exist. '
+        + '(2) It does not claim the 2026 closure was wrong. 0 of 9 CIs excluded zero '
+        + 'on the corpus that existed. What it corrects is the REASON: the closure '
+        + 'quoted a 0.015 BETWEEN-COHORT floor for a PAIRED arm whose measured '
+        + 'half-width is +/-0.001686 at n=1268, nine times tighter, which moves the '
+        + 'verdict from "invisible at any corpus size" to "underpowered by about '
+        + '+334 games". That is a live question, and this row is how it stays one '
+        + 'instead of being closed by a design error.' },
+
   { id: 'bullpen_w_proj_w_act', key: 'bullpen_w_proj', numeric: true,
     criterion: 'Phase-3-blocked pending per-date wOBA snapshots.',
     criterion_type: 'roi', window_end: null, decision: null,
