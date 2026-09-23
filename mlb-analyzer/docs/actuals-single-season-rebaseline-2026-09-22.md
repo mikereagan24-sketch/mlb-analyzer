@@ -259,7 +259,7 @@ an input to interpreting them, and re-running in the wrong order replaces
 one wrong baseline with another — the same trap step 1 above was written
 to avoid.
 
-## The corpus is four regimes, and any snapshot-bound analysis crossing them pools them
+## The corpus is five regimes, and any snapshot-bound analysis crossing them pools them
 
 Measured on `woba_data_snapshot` / `bat-act-rhp`, 122 dates,
 2026-05-20 → 2026-09-22:
@@ -270,6 +270,7 @@ Measured on `woba_data_snapshot` / `bat-act-rhp`, 122 dates,
 | **B** | 07-02 → 07-30 | 27 | **338** | 1379 | two-year, **qualifier ON** — rows halve, max holds |
 | **C** | 08-03 → 09-21 | 49 | 406 | **484** | **single season** — max collapses |
 | **D** | 09-22 → | 1 | 705 | 1054 | corrected career pull (#437) |
+| **E** | first upload after the floor change | — | — | — | **0.210 batter floor retired** — weak-hit position players return |
 
 The transitions are sharp, not gradual:
 
@@ -285,6 +286,79 @@ roughly 400–480, so regime C's ceiling of 484 is one season and regime A's
 half the players, which is the signature of FanGraphs' automatic qualifier
 (`strAutoPt`) rather than of the grouping — the same cause #437 found, two
 months before anyone looked.
+
+### REGIME E: the 0.210 batter-actuals floor comes off (2026-09-23)
+
+**An INGEST-path boundary rather than a grouping one**, and it belongs in
+this table for the same reason the other four do: it changes which rows
+`woba_data_snapshot` holds on a given date, so a snapshot-bound analysis
+crossing it pools two populations.
+
+`routes/api.js:parseCSV` rejected batter rows with `wOBA < 0.210` to "filter
+pitchers accidentally in batter files". Put through the guard-removal rule:
+
+- **In the actuals files the target is effectively absent.** Of 762 distinct
+  `bat-act` names, 628 are POS on a 2026 roster, 133 are on no roster, and
+  one carries a non-POS label — Jose Fermin, listed LAA `role=RP`, with 263
+  PA vs RHP at .2901. That is a roster mislabel, and he sits above the floor
+  regardless. The fetch is structurally batters-only as well:
+  `fetchActualSplit(1,'B')` / `(2,'B')`.
+- **In the projection file the target is PRESENT and the floor misses it.**
+  Jared Jones PIT .2688/.2554, Jose Alvarez .2767/.2664, Ryan Johnson
+  .2513/.2385 — all real pitchers' batting projections, all *above* 0.210.
+  So a wOBA threshold is the wrong instrument there; role is.
+- **The floor binds.** Minimum surviving wOBA is 0.2100–0.2108 on all four
+  batter keys: a cut, not a taper.
+
+**Dropped for ACTUALS only**, on measured asymmetry. Density per 0.005 of
+wOBA immediately above the cut:
+
+```
+bat-act-rhp     4   8  14  11  12   8  17     rising away from the cut
+bat-act-lhp     5   8  19  11  11  11  13     -> thin tail below
+bat-proj-rhp  134 141 128 127 145 138 144     FLAT at ~135/bin
+bat-proj-lhp  133 132 138 139 154 165 154     -> hundreds to thousands
+```
+
+Removing the projection floor would pour deep-minors fringe names into an
+index where 3362 of 3385 entries are already on no MLB roster — the
+documented shadow hazard — and would worsen the abbreviation ambiguity
+measured the same day (280 lineup slots already fail because two
+same-initial candidates share a surname). That is a separate change needing
+a role filter, not a looser number.
+
+**THE BOUNDARY IS OBSERVABLE IN `upload_log`, NOT A REMEMBERED DATE.** Same
+principle as the park-factor regime being classified by comparing stored
+values against both tables: a date is a proxy for a fact, so record the
+fact. Here the fact is the row count.
+
+```
+data_key       max row_count EVER, pre-change
+bat-act-rhp    823
+bat-act-lhp    689
+```
+
+The first post-change ingest is **the first `upload_log` row for a
+`bat-act-*` key whose `row_count` exceeds those maxima**, and its
+`uploaded_at` is the boundary. Not crossed as of 2026-09-23 — the change
+lands before any refresh runs.
+
+```sql
+SELECT data_key, row_count, uploaded_at FROM upload_log
+ WHERE (data_key='bat-act-rhp' AND row_count > 823)
+    OR (data_key='bat-act-lhp' AND row_count > 689)
+ ORDER BY id LIMIT 2;
+```
+
+`scripts/verify-woba-floor-change.js` prints that, enumerates the returned
+rows, and runs the before/after on every 2026 lineup lookup. **Its
+acceptance gate is LOST = 0 and CHANGED = 0**: adding a candidate can turn
+an exactly-one gate in `fuzzyLookup` (stages 5, 6, 6.5, 8) from a unique
+match into an ambiguous one, so a row coming back can make a previously
+resolving lookup return null. That is the one real regression risk in this
+change, and it cannot be evaluated until one upload has run — the floor
+dropped its rows at parse time, before any table, which is exactly why
+nobody could see what it was discarding.
 
 ### This is a corpus hazard, in the same family as the park-factor boundary
 
