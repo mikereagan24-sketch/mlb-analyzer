@@ -7494,6 +7494,69 @@ function resolveCatcherMlbId(team, lineupName) {
     }
   } catch (e) { /* fall through to miss */ }
 
+  // PASS 3: THE SEASON ROSTER, for a name the LIVE roster no longer has.
+  // (2026-09-23)
+  //
+  // team_rosters is a 840-row snapshot refreshed daily and holding only
+  // currently-active players. team_rosters_season is 1665 rows and
+  // "deliberately keeps IL'd" players (db/schema.js:3416). Every historical
+  // replay -- every backtest, every calibration A/B, every sweep -- resolves
+  // a lineup from April against the roster as it stands today, so a player
+  // who has since been optioned, traded or shut down does not exist to it.
+  //
+  // MEASURED on the FRV gate's own corpus (fielding_frv_snapshot era,
+  // 2026-06-04 .. 2026-09-22, 1433 games, FRV read as-of each game date):
+  //
+  //   fielder slots            20062
+  //   resolved, live only      15707  (78.29%)
+  //   resolved, + season       18244  (90.94%)
+  //   RECOVERED                 2537
+  //
+  // Shohei Ohtani, Rafael Devers, Jung Hoo Lee, Jazz Chisholm Jr. and
+  // Byron Buxton are all absent from the live roster and present in the
+  // season one. SF spent much of the season with ONE of seven fielding
+  // slots resolving, and the FRV term scales the resolved slots' mean
+  // across the full complement -- so one player's rate was standing in for
+  // the whole defence, and the team value flipped sign when the rest
+  // arrived (laa-sf 2026-07-24: +0.2943 at 1/7 -> -0.1016 at 7/7).
+  //
+  // LAST, SO NOTHING THAT ALREADY RESOLVED CAN CHANGE. This runs after
+  // PASS 1 and PASS 2, which makes "zero changed" structural rather than
+  // measured: every name those two answered still gets their answer, and
+  // this only ever answers a question neither could. It also needs no date
+  // threaded through the three call sites, because the live roster is
+  // consulted first -- a currently-rostered player never reaches here.
+  //
+  // Placing it BEFORE pass 2 was the first attempt and was wrong: for a
+  // name both could resolve it would have substituted the season-roster id
+  // for the catcher_framing one, which is exactly the silent change this
+  // ordering rules out. It resolved 7 slots more, and 7 unexplained
+  // differences is not a better result than 7 fewer.
+  //
+  // Same last+first_init rule, same unique-last fallback, same per-team
+  // scoping -- a "Smith" on another team still cannot false-match.
+  try {
+    if (q.getSeasonPositionPlayers) {
+      const sp = q.getSeasonPositionPlayers.all(team);
+      const sStrict = [], sByLast = [];
+      for (const p of sp) {
+        const pn = stripSfx(normName(p.player_name));
+        const pp = pn.split(' ');
+        if (pp.length < 2) continue;
+        if (pp[pp.length - 1] !== last) continue;
+        sByLast.push(p);
+        if (pp[0][0] === firstInit) sStrict.push(p);
+      }
+      if (sStrict.length === 1) return sStrict[0].mlb_id;
+      if (sStrict.length === 0 && sByLast.length === 1) {
+        console.warn('[resolver] PASS 3 season-roster unique-last fallback: team=' + team
+          + ' lineup_name="' + lineupName + '" -> resolved to "' + sByLast[0].player_name
+          + '" (mlb_id ' + sByLast[0].mlb_id + ')');
+        return sByLast[0].mlb_id;
+      }
+    }
+  } catch (e) { /* table missing -- keep going */ }
+
   // Structured miss log for prod diagnosis. Includes the raw
   // lineupName so the operator can spot encoding artifacts or
   // unexpected formats without re-running the full pipeline.
