@@ -309,7 +309,13 @@ function detectKey(filename) {
   return null;
 }
 
-function parseCSV(buffer, isPitcher) {
+// isActuals distinguishes the two BATTER files, which carry different
+// evidence about the 0.210 floor and therefore get different floors -- see
+// the minWoba block below. The flag is ACTUALS rather than PROJECTIONS on
+// purpose: it defaults falsey, and falsey must mean the STRICT floor. A
+// caller that forgets the argument has to keep the old behaviour, not
+// silently acquire the looser one.
+function parseCSV(buffer, isPitcher, isActuals) {
   const text = buffer.toString('utf-8').replace(/^\uFEFF/, '');
   const delim = text.includes('\t') ? '\t' : ',';
   const records = parse(text, { columns: true, skip_empty_lines: true, delimiter: delim, trim: true });
@@ -363,17 +369,75 @@ function parseCSV(buffer, isPitcher) {
     .map(want => Object.keys(records[0]).find(h => h.toLowerCase() === want))
     .find(Boolean);
   if (!wobaCol || !nameCol) return [];
+  // COUNTED, because the old floor's effect was unobservable after the fact:
+  // rows died here, before any table, so "how many real hitters did it
+  // discard" had no answer anywhere in the database and the question went
+  // unasked for a season. A dropped row that is counted is a dropped row
+  // somebody can argue about.
+  const rejected = { bad: 0, belowFloor: 0, keptBelowOldFloor: 0 };
   const rows = [];
   for (const r of records) {
     const name = r[nameCol];
     const woba = parseFloat(r[wobaCol]);
     const sample = sampleCol ? parseFloat(r[sampleCol]) || 0 : 0;
-    // For batter CSVs: reject wOBA < 0.210 (filters pitchers accidentally in batter files,
-    //   keeps weak-hit defensive specialists like backup catchers — Sandy León at 0.226 is
-    //   a real RoS projection that was being silently dropped by the previous 0.250 floor).
-    // For pitcher CSVs: allow as low as 0.05 (elite starters can allow very low wOBA)
-    const minWoba = isPitcher ? 0.05 : 0.210;
-    if (!name || isNaN(woba) || woba < minWoba || woba > 0.8) continue;
+    // THE 0.210 BATTER FLOOR, AND WHY IT IS GONE FROM THE ACTUALS FILES
+    // (2026-09-23).
+    //
+    // It existed to "filter pitchers accidentally in batter files". Put that
+    // through the guard-removal rule, which asks whether the guard has ever
+    // caught what it was built for, in the corpus it actually sees:
+    //
+    //   BATTER ACTUALS -- THE TARGET IS EFFECTIVELY ABSENT. Of 762 distinct
+    //   bat-act names, 628 are POS on a 2026 roster, 133 are on no roster,
+    //   and exactly ONE carries a non-POS roster label: Jose Fermin, whom
+    //   team_rosters_season has as LAA role=RP pos=P. That is a ROSTER
+    //   MISLABEL, not a pitcher in a batter file -- his rows are 263 PA vs
+    //   RHP and 173 vs LHP at .2901/.3307, and no pitcher accumulates 263
+    //   PA. AND HE IS ABOVE THE FLOOR ANYWAY, which is the part that
+    //   settles it: on either reading the floor caught zero instances of
+    //   its target here.
+    //   The fetch asks for batters structurally too: refreshFanGraphsActuals
+    //   calls fetchActualSplit(1,'B') / (2,'B'), i.e. strPosition 'B'.
+    //   Meanwhile the floor BINDS -- min surviving wOBA is 0.2100 on every
+    //   batter key, which is a cut, not a taper.
+    //
+    //   BATTER PROJECTIONS -- THE TARGET IS PRESENT AND THE FLOOR MISSES
+    //   IT. That file genuinely does carry pitchers, and they project ABOVE
+    //   0.210, so the floor never touches them:
+    //     Jared Jones PIT  0.2688 / 0.2554    (SP)
+    //     Jose Alvarez     0.2767 / 0.2664    (RP)
+    //     Ryan Johnson     0.2513 / 0.2385    (SP per roster)
+    //     Luis Sanchez     0.2273 / 0.2199
+    //   Three are confirmed non-POS by roster role. So on the one file where
+    //   its target exists, a wOBA threshold is the wrong instrument for it
+    //   -- role is -- and 0.210 sits BELOW the pitchers it is meant to stop.
+    //
+    // In neither file has this guard done its job. What it has done is
+    // discard weak-hitting POSITION players -- backup catchers, defensive
+    // specialists -- silently, before anything is persisted.
+    //
+    // DROPPED FOR ACTUALS ONLY, and the asymmetry is measured rather than
+    // timid. Density per 0.005 of wOBA immediately above the floor:
+    //     bat-act-rhp    4  8 14 11 12  8 17   <- rising AWAY from the cut,
+    //     bat-act-lhp    5  8 19 11 11 11 13      so the tail below is thin
+    //     bat-proj-rhp 134 141 128 127 145 138 144   <- FLAT at ~135/bin
+    //     bat-proj-lhp 133 132 138 139 154 165 154
+    // The actuals files return tens of rows. The projection files would
+    // return hundreds to low thousands of deep-minors fringe names, into an
+    // index where 3362 of 3385 entries are already on no MLB roster. That is
+    // the documented shadow hazard (the Victor Mesa class: 30 games, 42
+    // signals contaminated), and it directly worsens the abbreviation
+    // ambiguity measured the same day -- 280 lineup slots already fail to
+    // resolve because two same-initial candidates share a surname, and more
+    // fringe rows makes more of that, not less. Removing the projection
+    // floor is a separate change needing a separate instrument, and that
+    // instrument is a role filter rather than a looser number.
+    //
+    // Re-run the evidence: node scripts/verify-woba-floor-change.js
+    const minWoba = isPitcher ? 0.05 : (isActuals ? 0 : 0.210);
+    if (!name || isNaN(woba) || woba > 0.8 || woba < 0) { rejected.bad++; continue; }
+    if (woba < minWoba) { rejected.belowFloor++; continue; }
+    if (woba < 0.210 && !isPitcher) rejected.keptBelowOldFloor++;
     // Normalize FanGraphs team abbr (KCR->KC, SDP->SD, etc.)
     const fgTeam = teamCol ? (r[teamCol]||'').trim().toUpperCase() : null;
     // ONE definition, shared with the batted-ball id resolver
@@ -384,6 +448,14 @@ function parseCSV(buffer, isPitcher) {
     // when the source does not label rows at all. Never derived.
     const period = periodCol ? String(r[periodCol] == null ? '' : r[periodCol]).trim() : null;
     rows.push({ name, woba, sample, team, period });
+  }
+  if (rejected.belowFloor || rejected.bad || rejected.keptBelowOldFloor) {
+    console.log('[woba-parse] kept ' + rows.length
+      + '  rejected ' + rejected.bad + ' malformed/out-of-range, '
+      + rejected.belowFloor + ' below floor '
+      + (isPitcher ? 0.05 : (isActuals ? 0 : 0.210))
+      + '; of the kept, ' + rejected.keptBelowOldFloor
+      + ' sit below the retired 0.210 batter floor');
   }
   return rows;
 }
@@ -566,8 +638,12 @@ function rosterCorrectTeams(rows, key) {
 
 function ingestWobaCSV(key, csvText, filename) {
   const isPitcher = key.startsWith('pit');
+  // Derived from the KEY, never from a caller's opinion: 'bat-act-rhp' vs
+  // 'bat-proj-rhp'. The two batter files get different floors and the key is
+  // the only thing that actually knows which file this is.
+  const isActuals = /-act(-|$)/.test(key);
   const buf = Buffer.isBuffer(csvText) ? csvText : Buffer.from(csvText, 'utf-8');
-  const rows = parseCSV(buf, isPitcher);
+  const rows = parseCSV(buf, isPitcher, isActuals);
   if (!rows.length) throw new Error('No valid rows parsed. Check wOBA and Name columns.');
   // The clear moved INSIDE q.upsertWobaBatch's transaction (2026-09-22)
   // so a rejected batch rolls back to the last good upload instead of
