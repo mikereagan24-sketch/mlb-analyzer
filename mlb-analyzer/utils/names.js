@@ -116,7 +116,11 @@ function hasTeamTag(n) {
 //      entry. Introduced 2026-07-24 for feat/lineup-override-ui — roster
 //      full-name picks were systematically defaulting when Steamer only
 //      emitted the abbrev form.
-//   7. stripSfx final scan, ignoring entries with a 2-3 letter team-like suffix
+//   7. stripSfx final scan, ignoring entries that end in a team tag
+//   8. de-spaced FIRST name -- "Ke Bryan Hayes" vs "kebryan hayes",
+//      "Ji Hwan Bae" vs "jihwan bae". Last token kept intact, so
+//      compound surnames are unaffected; runs last, so it cannot
+//      preempt stage 6's compound-surname fallback.
 function fuzzyLookup(keyMap, name, teamHint) {
   if (!keyMap) return null;
   const k = normName(name);
@@ -221,7 +225,63 @@ function fuzzyLookup(keyMap, name, teamHint) {
     if (keyMap[tk2]) return keyMap[tk2];
   }
   const e2 = Object.entries(keyMap).find(([n]) => !hasTeamTag(n) && stripSfx(n) === sk);
-  return e2 ? e2[1] : null;
+  if (e2) return e2[1];
+
+  // Stage 8 -- DE-SPACED FIRST NAME. (2026-09-23)
+  //
+  // A first name split differently on the two sides:
+  //   "Ke Bryan Hayes"  vs  "Ke'Bryan Hayes" / "KeBryan Hayes"
+  //   "Ji Hwan Bae"     vs  "Jihwan Bae"
+  // normName drops the apostrophe but keeps the space, so these differ by
+  // whitespace alone and no earlier stage compares them: 1-3 need equality,
+  // 5/6/6.5 need one side abbreviated to a single character, and 7 needs
+  // exact equality after suffix-stripping.
+  //
+  // Canonical form joins every token except the last with no spaces, then
+  // the last token: "kebryan hayes". This is a NORMALIZATION question, not
+  // an aliasing one -- the two strings are the same name -- which is why it
+  // is a stage rather than a lookup table.
+  //
+  // WHY IT IS SAFE TO DE-SPACE THE FIRST NAME BUT NOT THE SURNAME. The
+  // canonical form keeps the LAST token intact, so compound surnames never
+  // converge: "simeon woods richardson" -> "simeonwoods richardson" and
+  // "s woods richardson" -> "swoods richardson", which do not match. Stage
+  // 6's compound-surname fallback is therefore untouched, and this stage
+  // runs only after every earlier stage returned null, so it cannot
+  // preempt it. Both properties are pinned by
+  // scripts/test-resolver-despaced-first-name.js.
+  //
+  // MEASURED over every 2026 lineup lookup (160,200 across 40,050 slots),
+  // shipped resolver against this one:
+  //
+  //   identical 151789   GAINED 11   LOST 0   CHANGED 0
+  //
+  // The 11 are the two cases above and nothing else. The real index holds
+  // 89 canonical-form collisions, and every one is the expansion's own
+  // suffixed/stripped pair for the SAME player -- identical wOBA on both
+  // rows -- so zero genuinely different players collide. Re-run:
+  //   node --max-old-space-size=1536 scripts/test-resolver-despaced-first-name.js
+  const canonFirst = (n) => {
+    const p = stripSfx(n).split(' ');
+    if (p.length < 2) return null;
+    return p.slice(0, -1).join('') + ' ' + p[p.length - 1];
+  };
+  const ck = canonFirst(k);
+  if (ck) {
+    if (teamHint) {
+      const tl2 = teamHint.toLowerCase();
+      const hit = Object.entries(keyMap).find(([n]) => {
+        if (!n.endsWith(' ' + tl2)) return false;
+        return canonFirst(n.slice(0, n.length - tl2.length - 1).trim()) === ck;
+      });
+      if (hit) return hit[1];
+    }
+    // Global scan takes the exactly-one gate stages 6 and 6.5 use, so an
+    // ambiguous canonical form is refused rather than guessed.
+    const g = Object.entries(keyMap).filter(([n]) => !hasTeamTag(n) && canonFirst(n) === ck);
+    if (g.length === 1) return g[0][1];
+  }
+  return null;
 }
 
 module.exports = { normName, stripSfx, fuzzyLookup, TEAM_TOKENS, hasTeamTag };
