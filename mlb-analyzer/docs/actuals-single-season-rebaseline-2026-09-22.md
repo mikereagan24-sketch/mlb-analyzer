@@ -1,6 +1,16 @@
-# Re-baseline: every actuals-dependent number this season was computed on a single season (2026-09-22)
+# Re-baseline: the stored actuals changed shape four times this season (2026-09-22, corrected 2026-09-23)
 
 **Status: recorded, nothing re-run.** This is the ledger, not the redo.
+
+> **CORRECTION (2026-09-23).** This doc originally said *"every
+> actuals-dependent number this season was computed on a single season"*.
+> That is too broad, and the correction matters because it changes which
+> dates are affected. Measured directly from `woba_data_snapshot`, the
+> stored actuals passed through **four regimes**, and single-season samples
+> begin on **2026-08-03** — not in March. See "The corpus is four regimes"
+> below. The original title is preserved in the git history; the claim it
+> made was not verified against the snapshot table at the time, which is
+> the same mistake as asserting a fix without its number.
 
 `services/fangraphs.js` asked FanGraphs for `strGroup:'season'` over a
 rolling two-year window. That returns one row per player *per season*,
@@ -214,7 +224,11 @@ side:
   actuals, measured on a corpus where 673 batter slots had **no** actuals
   term to weight. The direction of that bias is knowable: it flatters
   `W_PROJ`, because the rows where actuals were missing scored as though
-  the projection were the whole answer.
+  the projection were the whole answer. **CLOSED 2026-09-23 — not
+  re-runnable, and not for a corpus reason. See "CLOSED: W_PROJ / W_ACT is
+  unanswerable" below: the full parameter range is 0.003 of log loss
+  against a 0.015 floor, and 0.45/0.55 has no recorded derivation to
+  re-derive.**
 - **`BATTER_ACT_FULL_WEIGHT_PA = 150`** — the ramp's shape was fitted on
   `(actual − projection)` dispersion by PA bucket. The eight hitters
   contributed no rows to those buckets at all, so they are missing from
@@ -244,6 +258,143 @@ It slots in **after** step 2 of the list below and before step 3:
 an input to interpreting them, and re-running in the wrong order replaces
 one wrong baseline with another — the same trap step 1 above was written
 to avoid.
+
+## The corpus is four regimes, and any snapshot-bound analysis crossing them pools them
+
+Measured on `woba_data_snapshot` / `bat-act-rhp`, 122 dates,
+2026-05-20 → 2026-09-22:
+
+| regime | dates | n dates | avg rows | max PA | what was stored |
+|---|---|---|---|---|---|
+| **A** | 05-20 → 07-01 | 34 | 727 | **1375** | two-year aggregate, unqualified |
+| **B** | 07-02 → 07-30 | 27 | **338** | 1379 | two-year, **qualifier ON** — rows halve, max holds |
+| **C** | 08-03 → 09-21 | 49 | 406 | **484** | **single season** — max collapses |
+| **D** | 09-22 → | 1 | 705 | 1054 | corrected career pull (#437) |
+
+The transitions are sharp, not gradual:
+
+```
+2026-07-01 (742 rows, max 1379)  ->  2026-07-02 (323 rows, max 1100)
+2026-07-30 (322 rows, max 1088)  ->  2026-08-03 (388 rows, max  484)
+2026-09-21 (419 rows, max  524)  ->  2026-09-22 (705 rows, max 1054)
+```
+
+**How to read them.** A full season of PA versus RHP for a regular is
+roughly 400–480, so regime C's ceiling of 484 is one season and regime A's
+1375 is two. Regime B keeps the two-year ceiling while losing more than
+half the players, which is the signature of FanGraphs' automatic qualifier
+(`strAutoPt`) rather than of the grouping — the same cause #437 found, two
+months before anyone looked.
+
+### This is a corpus hazard, in the same family as the park-factor boundary
+
+`services/parameter-sweep.js` and `scripts/calibration-sweep.js` are
+**snapshot-bound**: each game is scored against the `woba_data_snapshot`
+rows for its own date, and games without a snapshot are skipped. So any
+window crossing **2026-07-02**, **2026-08-03** or **2026-09-22** is pooling
+regimes, exactly the way a corpus crossing 2026-08-25 pools two
+park-factor regimes.
+
+It is worse than the park-factor case in one respect and better in
+another. Worse: the park-factor regimes were both "correct at the time",
+whereas A, B and C are three different wrong answers. Better: it is
+directly observable — the row count and max sample per date are enough to
+classify a snapshot, so no marker column is needed.
+
+**The boundary is observable, not a remembered date.** Classify a date by
+querying it, the way `park_factor_source` is classified by comparing
+against both tables:
+
+```sql
+SELECT snapshot_date, COUNT(*) rows, MAX(sample_size) max_pa
+FROM woba_data_snapshot WHERE data_key='bat-act-rhp'
+GROUP BY 1 ORDER BY 1;
+```
+
+Affected by this, beyond the entries already listed above: the
+**2026-08-21 W_PROJ/W_ACT sweep**, whose window was 2026-06-01 → 2026-08-07
+and therefore spanned regimes A, B **and** C. Its corpus was never one
+corpus.
+
+## CLOSED: W_PROJ / W_ACT is unanswerable, and 0.45/0.55 has no derivation
+
+**Closing this rather than leaving it open**, because the ledger above
+otherwise implies a re-run is owed. It is not.
+
+### 0.45/0.55 was never fitted
+
+- The schema default is **0.70 / 0.30** (`services/settings-schema.js:170-175`).
+  Production's 0.45/0.55 is an `app_settings` override.
+- `scripts/optimize-params-v2.js` sweeps `W_PROJ` on `[0.50, 0.60, 0.70, 0.80]`.
+  **0.45 is not on that grid**, so it cannot have selected it.
+- `scripts/sweep-woba-blend.js` says in its own header that it exists to
+  compare "the current 0.70/0.30 against 0.50/0.50" — it predates the
+  value, scores ROI on emitted signals, and documents its own look-ahead.
+- `docs/wproj-wact-snapshot-sweep-2026-08-21.md` opens *"Measurement pass
+  only. NO parameter changes shipped."* Result: **0 of 9 bootstrap CIs
+  exclude zero.** It confirmed the value was indistinguishable from its
+  neighbours; it did not fit it.
+- The earliest trace is `docs/audit-2026-07-02.md`, which reads it out of
+  `getSettings()` as an already-live value, and
+  `docs/cohort-v7-cutover-2026-07-05.md`, which records it in a settings
+  snapshot. Both record; neither derives.
+
+There is no "before" weight or CI to report. **Do not cite a fit for
+0.45/0.55, because there isn't one.**
+
+### And no corpus of any size can resolve it
+
+`scripts/calibration-sweep.js W_PROJ_W_ACT 0.45 2026-06-01 2026-08-07`,
+the instrument CLAUDE.md prescribes for a pricing parameter:
+
+```
+value     dLL       95% CI                  excludes 0?
+ 0.10   +0.00218   [-0.00123, +0.00579]         no
+ 0.40   +0.00022   [-0.00025, +0.00072]         no
+ 0.45    baseline (production)
+ 0.80   -0.00071   [-0.00409, +0.00251]         no
+ 0.90   -0.00065   [-0.00517, +0.00335]         no
+
+verdict: clearing ALL THREE gates: NONE   ...and BETTER than production: NONE
+gate counts: bootstrapCI=0   folds=0   valfit=8 (of 9)
+```
+
+**The whole 0.10 → 0.90 range spans 0.0029 of log loss. The measured floor
+is 0.015.** The entire parameter range is five times smaller than the
+smallest detectable difference, so correcting the inputs cannot make it
+visible — corrected inputs change *what* is weighted, not the size of the
+effect the weighting can have.
+
+Two independent instruments agree. The 2026-08-21 pre-flight measured the
+full range as moving team wOBA by a median of **0.0039 = 0.18 runs**,
+against a median weather adjustment of 0.300 runs already known to be
+undetectable at these sample sizes.
+
+**The log-loss minimum sits at 0.80, and that is not a reason to move it.**
+`bootstrapCI=0` and `folds=0` mean nothing clears the three-gate rule, and
+CLAUDE.md §"The window sign test is not precise at n~350" records that a
+grid minimum moves by half the parameter range across resamples of the
+same data. This is the case that rule was written for.
+
+Two caveats on the run itself, neither of which changes the conclusion:
+the corpus was regimes A/B/C pooled, and the harness reported
+`*** PARTIAL: W_PROJ is read by runModel AND by the bullpen computation,
+whose output is now read from its persisted emit-time value ***` — only
+the runModel half varies between arms. Both make the run *less* able to
+find an effect, and it found none in a range already below the floor.
+
+### What this closes
+
+- **W_PROJ / W_ACT stays at 0.45/0.55.** Not because it is optimal —
+  because it is indistinguishable, and because no available measurement
+  can say otherwise.
+- The `W_PROJ`/`W_ACT` line in the ledger above is **struck as
+  re-runnable**. It is not blocked on corrected inputs; it is blocked on
+  the effect being too small to see.
+- What would reopen it: a materially larger scored corpus, or a
+  reformulation where the weight moves something bigger than 0.18 runs.
+  Not more snapshots of the same thing.
+
 
 ## Order of operations
 

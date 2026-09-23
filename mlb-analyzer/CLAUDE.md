@@ -834,21 +834,45 @@ on 2026-08-26 before measuring it:
 
 ### The measured log-loss floor, which is the tighter constraint
 
-`--calibration`. 564 scored games across 90 dates, and it plateaus too:
+`--calibration`. **Re-measured 2026-09-23 on 1268 items across 118 dates**
+— the corpus more than doubled, and the floor moved, so the figure below
+replaces the ~0.020 this section carried from the 564-game run:
 
 ```
     n     CI half-width    null gap 95% span         smallest resolvable
-   50       ±0.03510       [-0.03287, +0.03266]           0.03510
-  100       ±0.02618       [-0.02730, +0.02891]           0.02891
-  200       ±0.02228       [-0.01848, +0.02028]           0.02228
-  300       ±0.02023       [-0.02048, +0.01948]           0.02048
+   50       ±0.03760       [-0.03726, +0.04018]           0.04018
+  100       ±0.02749       [-0.02765, +0.02903]           0.02903
+  200       ±0.02084       [-0.02270, +0.02203]           0.02270
+  300       ±0.01766       [-0.01572, +0.01721]           0.01766
+  600       ±0.01492       [-0.01481, +0.01479]           0.01492
+  800       ±0.01505       [-0.01745, +0.01383]           0.01745
 ```
 
-**No Δ log loss below ~0.020 is detectable on this corpus at any cohort
-size.** For scale, the rookie calibration leg observed **+0.00720** at
-n=63, where the floor is ~0.032 — a quarter of the noise. "No tier change"
-was the only answer that run could produce, and that is worth knowing
-before quoting it as evidence of anything.
+**No Δ log loss below ~0.015 is detectable on this corpus at any cohort
+size** (was ~0.020 at n=564). It still plateaus, and it still widens at the
+top end for the same reason the ROI floor does — a gap is between two
+groups and the complement is what shrinks. So doubling the corpus bought
+~0.005, and a further doubling should not be expected to buy much.
+
+This is an example of the rule two sections up: a number that STOPS work
+has to be re-run before it is quoted. The ~0.020 was correct when written
+and had been cited for a month.
+
+For scale, the rookie calibration leg observed **+0.00720** at n=63, where
+the floor is ~0.040 — a fifth of the noise. "No tier change" was the only
+answer that run could produce, and that is worth knowing before quoting it
+as evidence of anything.
+
+**Worked example of a question this closes.** `W_PROJ`/`W_ACT`: the whole
+`0.10 → 0.90` range spans **0.0029** of log loss, five times smaller than
+the floor, with 0 of 9 bootstrap CIs excluding zero. No corpus correction
+can make it visible, because corrected inputs change *what* is weighted
+rather than the size of the effect the weighting can have. Closed rather
+than left open, with the evidence, in
+`docs/actuals-single-season-rebaseline-2026-09-22.md` §"CLOSED: W_PROJ /
+W_ACT is unanswerable" — which also records that production's 0.45/0.55
+**has no derivation**: it is not on any swept grid, and the one sweep of it
+shipped nothing and found nothing.
 
 This is the harder ceiling of the two, because the calibration corpus is
 smaller than the signal corpus (564 games vs 963 signals) and shrinks
@@ -1499,6 +1523,7 @@ current tree.**
 | **Settings the model cannot see** | runs in the 6AM cron; `utils/settings-sync-check.js` | a schema key never mapped into `getSettings()`, i.e. a tunable with no effect |
 | **Gate windows that elapsed silently** | runs in the 6AM cron; `services/feature-gate-registry.js` | a feature dark past its own evaluation window |
 | **Park-factor regime split** | `SELECT park_factor_source, COUNT(*) FROM game_log GROUP BY 1` | a corpus-wide analysis silently pooling two park-factor regimes across the 2026-08-25 boundary |
+| **wOBA snapshot regime split** | `SELECT snapshot_date, COUNT(*), MAX(sample_size) FROM woba_data_snapshot WHERE data_key='bat-act-rhp' GROUP BY 1` | a snapshot-bound sweep pooling the FOUR actuals regimes — two-year unqualified to 2026-07-01, qualifier-restricted to 07-30, **single-season 08-03 → 09-21**, corrected from 09-22. `parameter-sweep.js` and `calibration-sweep.js` bind each game to its own date's snapshot, so any window crossing those dates mixes them; the 2026-08-21 W_PROJ/W_ACT sweep spanned three. Classified by row count and max sample, not by a marker column or a remembered date — see `docs/actuals-single-season-rebaseline-2026-09-22.md` |
 | **Ingest pipelines that stopped arriving** | `node scripts/pipeline-freshness.js`; also runs in the 6AM cron and on `/health` | a job that stopped, or an analysis copy silently 18 days behind |
 | **The delete-missing guard** | `node scripts/test-prune-missing.js` | a truncated fetch emptying a pricing-path table, with every consumer silently taking its fallback |
 | **A "fixed" comment with no number** | grep for fix-claims in code touched by a PR | the third instance cost a month of trusting a ping-pong fix that never took |
