@@ -173,9 +173,66 @@ const GATES = [
     decision: { date: '2026-07-05', outcome: 'enabled', ref: 'docs/opener-tandem-blend-audit-2026-07-05.md' } },
 
   { id: 'catcher_framing_enabled', key: 'catcher_framing_enabled', on_expected: true,
-    criterion: 'Requires catcher_framing populated by the Savant ingest.',
-    criterion_type: 'precondition', precondition: 'catcher_framing_populated', window_end: null,
-    decision: { date: '2026-07-05', outcome: 'enabled', ref: 'docs/framing-mute-semantics-2026-07-05.md' } },
+    // FORWARD-VERIFY WINDOW OPENED 2026-09-23.
+    //
+    // The gate is ON and stays on. What changes is that its criterion is no
+    // longer just "the table is populated": it now has to survive a forward
+    // calibration A/B, on the same instrument the FRV and BsR rows use.
+    //
+    // WHY. The 2026-07-05 enablement rested on
+    // scripts/framing-frv-hindsight-backtest.js, which carries its own
+    // warning in the file -- "HINDSIGHT BIAS: catcher_framing.rv_tot and
+    // fielding_frv.total_runs are" end-of-period values read back over
+    // games they already describe. That is a legitimate way to size an
+    // effect and not a way to verify one, and it has NEVER been verified
+    // forward. A precondition criterion cannot notice that, which is why
+    // the type changes with the window.
+    //
+    // AND IT IS THE FIRST MEASUREMENT ON CORRECTED CATCHER RESOLUTION.
+    // #450 gave resolveCatcherMlbId a season-roster fallback and #452
+    // replaced its hand-rolled last+first_initial match with the shared
+    // fuzzyLookup -- which fixed a real cross-player misresolution
+    // ("Adolis Garcia" on PHI was resolving to ARAMIS Garcia, a catcher on
+    // ARI). Every framing number recorded before those landed was computed
+    // through the old matcher. Catchers resolved at 99.57% even then, so
+    // this is a correction rather than a rescue -- but it is still a
+    // different input, and nothing has been measured on it.
+    criterion: 'Forward calibration A/B (scripts/calibration-ab.js '
+             + 'CATCHER_FRAMING_ENABLED false true), log loss over all scored games, '
+             + 'identical game set both arms, on games played AFTER 2026-09-23 only. '
+             + 'Bar: delta_log_loss CI excludes zero on the negative side at n >= 1200, '
+             + 'the same bar the FRV rows carry and the same 0.015 log-loss floor it is '
+             + 'measured against. A null at that n is a real answer and closes the row; '
+             + 'it does not by itself flip the gate off, because the gate is ON for the '
+             + 'mechanism and a null means indistinguishable, not harmful.',
+    criterion_type: 'calibration', precondition: 'catcher_framing_populated',
+    // WINDOW_END 2027-08-01, AND THE DATE IS ARITHMETIC RATHER THAN A FEELING.
+    //
+    // game_log ends 2026-09-23 with ZERO games scheduled after it, so a
+    // forward window accrues NOTHING until the 2027 season opens (late
+    // March). The 2026-06-04..2026-09-22 calibration corpus scored 1076
+    // usable games over 110 days = 9.8/day after every filter the harness
+    // applies. 1200 / 9.8 = 123 game-days, which from a late-March opening
+    // lands in early August.
+    //
+    // A shorter window would close on a corpus that cannot clear the bar,
+    // which is the failure the FRV rows just demonstrated: 1076 of 1200,
+    // CI still spanning zero. Setting a date that cannot reach n is how a
+    // window becomes a formality.
+    window_end: '2027-08-01',
+    // corpus_size is an explicit NULL, not a missing field: the forward
+    // window has no scored corpus until it closes. The projection above is
+    // an estimate and does not belong in this field, which records what a
+    // run ACTUALLY scored. Setting it also means this row leaves
+    // CORPUS_SIZE_GRANDFATHERED -- see the prune note there.
+    corpus_size: null,
+    decision: { date: '2026-07-05', outcome: 'enabled', ref: 'docs/framing-mute-semantics-2026-07-05.md' },
+    note: 'THE GATE IS NOT REOPENED. It is ON, it stays ON, and the 2026-07-05 decision '
+        + 'stands as the record of why. What is opened is a VERIFICATION window: the '
+        + 'enablement evidence was a hindsight backtest, no forward measurement has ever '
+        + 'been taken, and the resolver underneath it changed on 2026-09-23. '
+        + 'Precondition -> calibration is the substantive change; the precondition itself '
+        + '(catcher_framing populated) is still required and still met.' },
 
   { id: 'park_neutral_inputs_enabled', key: 'park_neutral_inputs_enabled', on_expected: true,
     criterion: 'ON for the mechanism. Calibration cannot adjudicate at this n; '
@@ -1389,6 +1446,20 @@ function logGateHealth(db, opts) {
 // every run. They are not failures, because failing on a state nobody can
 // fix today trains the reader to skip the output; they are also not
 // settled, and the flag is what keeps them visible.
+// DEFERRED CANDIDATES, recorded so the deferral is a decision rather than
+// an oversight (2026-09-23):
+//
+//   bullpen_woba_neutralization  EXISTS, decision extended_on_mechanism
+//                                @2026-08-31, no window. Left unexamined
+//                                BY DESIGN for now. It is not in the list
+//                                below because it passes on its decision,
+//                                so nothing flags it -- which is exactly
+//                                why it is written down here.
+//   frv_cf_backfill_enabled      NOT IN THIS REGISTRY under that id. Named
+//                                as a candidate on 2026-09-23; either it
+//                                is called something else or it was never
+//                                added. Resolve the name before giving it
+//                                a row, rather than creating a second one.
 const NO_DEADLINE_ACKNOWLEDGED = [
   { id: 'totals_selection_edge',
     reason: 'The criterion is a SAMPLE threshold and says so: "re-run the decisive '
@@ -1416,7 +1487,11 @@ const NO_DEADLINE_ACKNOWLEDGED = [
 ];
 
 const CORPUS_SIZE_GRANDFATHERED = [
-  'use_opener_logic', 'catcher_framing_enabled', 'park_neutral_inputs_enabled',
+  // catcher_framing_enabled PRUNED 2026-09-23: it now carries an explicit
+  // corpus_size (null -- the forward window has not closed), and the
+  // both-directions arm of test-registry-corpus-size.js requires a row that
+  // GAINS the field to leave this list in the same commit.
+  'use_opener_logic', 'park_neutral_inputs_enabled',
   'signal_venue_aware_enabled', 'kalshi_direct_primary_enabled',
   'kalshi_direct_totals_enabled', 'signal_edge_cap_enabled',
   'bullpen_downweight_starters', 'sp_prefer_rotowire', 'totals_selection_edge',
