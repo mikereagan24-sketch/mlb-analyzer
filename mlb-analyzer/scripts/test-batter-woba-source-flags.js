@@ -25,7 +25,13 @@
 //   2. proj_only_no_row and proj_only_near_miss are DISTINGUISHABLE, and
 //      the near-miss carries what nearly matched;
 //   3. a different team is NOT a near miss -- it is a different player
-//      until something says otherwise;
+//      until something says otherwise. THIS IS THE ONE THAT WAS WRONG.
+//      The rule only skipped candidates whose key carried a DIFFERENT team
+//      TAG, and actuals keys are tagged only on collision (#438), so a bare
+//      key was never team-checked. Measured over the season, 670 of 927
+//      flags named another team's player -- 72.3% -- and the count of flags
+//      that were correctly tag-scoped was ZERO. Section 3 below now pins
+//      both directions, on the two cases reported live;
 //   4. the reported actUsed matches what getBatterWoba actually did,
 //      which is the assertion that stops the badge drifting from the
 //      model;
@@ -41,8 +47,15 @@
 const fs = require('fs');
 const path = require('path');
 const R = path.join(__dirname, '..');
-const { normName, stripSfx, hasTeamTag, fuzzyLookup } = require(path.join(R, 'utils/names'));
+const { normName, fuzzyLookup } = require(path.join(R, 'utils/names'));
 const { blendWoba, BATTER_ACT_FULL_WEIGHT_PA } = require(path.join(R, 'services/model'));
+// THE REAL CLASSIFIER, not a copy of it. This test used to carry its own
+// nearMissFor "lifted by BEHAVIOUR" from routes/api.js and then assert that
+// the route still mentioned the name. Both copies carried the same bug and
+// this file stayed green through all of it -- a test that reimplements its
+// subject is testing itself. Section 7 now asserts there is exactly one
+// definition and that this file is not a second one.
+const { nearMissFor, rosterPredicate } = require(path.join(R, 'utils/near-miss'));
 
 let failed = 0;
 function expect(name, cond, extra) {
@@ -57,34 +70,10 @@ const mk = (rows) => {
   return o;
 };
 
-// The shipped classifier, lifted by BEHAVIOUR from routes/api.js so the
-// test drives the same rule. Section 7 asserts the route still carries it.
-function nearMissFor(keyMap, name, teamHint) {
-  if (!keyMap) return null;
-  const k = normName(name);
-  const p = stripSfx(k).split(' ');
-  if (p.length < 2) return null;
-  const last = p[p.length - 1], initial = p[0][0];
-  const tl = teamHint ? String(teamHint).toLowerCase() : null;
-  let best = null;
-  for (const key of Object.keys(keyMap)) {
-    const tagged = hasTeamTag(key);
-    const cut = tagged ? key.lastIndexOf(' ') : -1;
-    const base = tagged ? key.slice(0, cut) : key;
-    const tag = tagged ? key.slice(cut + 1) : null;
-    const bp = stripSfx(base).split(' ');
-    if (bp[bp.length - 1] !== last) continue;
-    if (tag && tl && tag !== tl) continue;
-    const sameInitial = !!(bp[0] && bp[0][0] === initial);
-    const cand = { key, team: tag, sameInitial,
-      kind: tag ? 'same_surname_same_team' : 'same_surname_untagged' };
-    if (!best) best = cand;
-    else if (cand.sameInitial && !best.sameInitial) best = cand;
-    else if (cand.sameInitial === best.sameInitial && cand.team && !best.team) best = cand;
-  }
-  return best;
-}
-function classify(projIdx, actIdx, name, team) {
+// roster  array of player names on `team`, as team_rosters would hold them.
+//         The endpoint builds this from getPositionPlayers UNIONed with
+//         getSeasonPositionPlayers; here it is just a list.
+function classify(projIdx, actIdx, name, team, roster) {
   const proj = fuzzyLookup(projIdx, name, team) || null;
   const act = fuzzyLookup(actIdx, name, team) || null;
   const sample = act && Number.isFinite(Number(act.sample)) ? Number(act.sample) : null;
@@ -98,7 +87,8 @@ function classify(projIdx, actIdx, name, team) {
       ramp = !(t > 0) ? 0 : (t >= 1 ? 1 : t * t * (3 - 2 * t));
     }
   }
-  const nm = act ? null : nearMissFor(actIdx, name, team);
+  const onTeam = rosterPredicate([(roster || []).map(n => ({ player_name: n }))]);
+  const nm = act ? null : nearMissFor(actIdx, name, team, { onTeam: onTeam });
   const actContributes = actUsed && ramp > 0;
   let flag;
   if (actUsed) flag = actContributes ? 'ok' : 'act_ramp_zero';
@@ -106,7 +96,7 @@ function classify(projIdx, actIdx, name, team) {
   else if (nm) flag = 'proj_only_near_miss';
   else flag = 'proj_only_no_row';
   return { flag, actUsed, actContributes, act, proj, sample,
-    ramp: +ramp.toFixed(3), rampRaw: ramp, nearMiss: nm };
+    ramp: +ramp.toFixed(3), rampRaw: ramp, nearMiss: nm, nmScoped: !!onTeam };
 }
 
 console.log('\n1. act_gated: a row resolved but sat below MIN_PA');
@@ -129,22 +119,75 @@ expect('...and it names what nearly matched',
   !!r.nearMiss && r.nearMiss.key === 'chanteyon davidson sf', JSON.stringify(r.nearMiss));
 expect('...classified as same_surname_same_team',
   r.nearMiss.kind === 'same_surname_same_team', r.nearMiss.kind);
-// an untagged same-surname row is also a near miss
+// an untagged same-surname row is a near miss ONLY once the roster confirms
+// the candidate is on this team. Untagged means "no team in the key", which
+// is not the same as "this team" -- that conflation is the whole defect.
+r = classify(mk([['Bo Davidson SF', 0.300]]), mk([['Chanteyon Davidson', 0.273, 400]]),
+  'Bo Davidson', 'SF', ['Chanteyon Davidson', 'Matt Chapman']);
+expect('untagged + roster-confirmed -> near miss',
+  r.flag === 'proj_only_near_miss' && r.nearMiss.kind === 'same_surname_roster_confirmed', r.flag);
+r = classify(mk([['Bo Davidson SF', 0.300]]), mk([['Chanteyon Davidson', 0.273, 400]]),
+  'Bo Davidson', 'SF', ['Matt Chapman']);
+expect('untagged + NOT on the roster -> no row, not a near miss',
+  r.flag === 'proj_only_no_row' && r.nearMiss === null, r.flag);
 r = classify(mk([['Bo Davidson SF', 0.300]]), mk([['Chanteyon Davidson', 0.273, 400]]),
   'Bo Davidson', 'SF');
-expect('an untagged same-surname row is a near miss too',
-  r.flag === 'proj_only_near_miss' && r.nearMiss.kind === 'same_surname_untagged', r.flag);
+expect('no roster at all -> untagged is unscopable, so no near miss',
+  r.flag === 'proj_only_no_row' && r.nearMiss === null, r.flag);
+expect('...and nmScoped says the team was not checked', r.nmScoped === false, String(r.nmScoped));
 // same initial is the stronger signal and wins the pick
 r = classify(mk([['Bob Smith SF', 0.300]]),
-  mk([['Alan Smith SF', 0.300, 400], ['Brian Smith SF', 0.300, 400]]), 'Bob Smith', 'SF');
+  mk([['Alan Smith SF', 0.300, 400], ['Brian Smith SF', 0.300, 400]]), 'Bob Smith', 'SF',
+  ['Alan Smith', 'Brian Smith']);
 expect('a same-initial candidate is preferred', r.nearMiss.key === 'brian smith sf'
   && r.nearMiss.sameInitial === true, JSON.stringify(r.nearMiss));
 
 console.log('\n3. a DIFFERENT team is not a near miss');
+// the tagged case, which the old rule did catch
 r = classify(mk([['Buddy Kennedy SF', 0.300]]), mk([['Buddy Kennedy WAS', 0.300, 400]]),
-  'B. Kennedy', 'SF');
+  'B. Kennedy', 'SF', ['Buddy Kennedy']);
 expect('same surname on another team -> proj_only_no_row', r.flag === 'proj_only_no_row', r.flag);
 expect('...and nearMiss stays null', r.nearMiss === null, JSON.stringify(r.nearMiss));
+
+// THE TWO REPORTED LIVE, both BARE keys, which the old rule waved through.
+// A bare key carries no team, so the old guard `tag && tl && tag !== tl`
+// never fired and the whole league was in scope.
+//
+// THE FIXTURE NEEDS TWO E-RODRIGUEZ ROWS, and that is not padding. Stage 6
+// of fuzzyLookup is a GLOBAL abbrev scan behind an exactly-one gate
+// (utils/names.js:165), so a single bare "endy rodriguez" would RESOLVE for
+// "E. Rodriguez" on any team -- the badge would never run, and the first
+// draft of this test passed for that reason rather than the intended one.
+// Two same-initial candidates make the gate ambiguous, the resolver returns
+// null, and the badge is reached. That is the live condition: the real
+// bat-act index has many Rodriguezes.
+const ACT_RODRIGUEZ = mk([['Endy Rodriguez', 0.290, 400], ['Eduardo Rodriguez', 0.310, 300]]);
+r = classify(mk([['E. Rodriguez MIN', 0.300]]), ACT_RODRIGUEZ,
+  'E. Rodriguez', 'MIN', ['Byron Buxton', 'Carlos Correa']);
+expect('the resolver itself finds nothing (ambiguous abbrev, so the badge runs)',
+  r.actUsed === false, r.flag);
+expect('E. Rodriguez [MIN] is NOT told about Endy Rodriguez [PIT]',
+  r.flag === 'proj_only_no_row' && r.nearMiss === null, r.flag + ' ' + JSON.stringify(r.nearMiss));
+// THE ROSTER IS THE ONLY VARIABLE. Same index, same name, same team -- put
+// the candidate on the roster and the badge fires again. That isolates the
+// fix to team membership and nothing else.
+r = classify(mk([['E. Rodriguez MIN', 0.300]]), ACT_RODRIGUEZ,
+  'E. Rodriguez', 'MIN', ['Endy Rodriguez', 'Byron Buxton']);
+expect('...but WOULD be, if Endy were on MIN',
+  r.flag === 'proj_only_near_miss' && r.nearMiss.key === 'endy rodriguez'
+  && r.nearMiss.sameInitial === true, r.flag + ' ' + JSON.stringify(r.nearMiss));
+
+r = classify(mk([['Bo Davidson SF', 0.300]]),
+  mk([['Logan Davidson', 0.250, 400], ['Braden Davidson', 0.240, 200]]),
+  'Bo Davidson', 'SF', ['Matt Chapman', 'Heliot Ramos']);
+expect('Bo Davidson [SF] is NOT told about Logan Davidson',
+  r.flag === 'proj_only_no_row' && r.nearMiss === null, r.flag + ' ' + JSON.stringify(r.nearMiss));
+
+console.log('\n3b. a team is REQUIRED -- an unscoped scan is not run at all');
+r = classify(mk([['Bo Davidson SF', 0.300]]), mk([['Chanteyon Davidson SF', 0.273, 400]]),
+  'Bo Davidson', null, ['Chanteyon Davidson']);
+expect('no teamHint -> no near miss, however close the candidate',
+  r.flag === 'proj_only_no_row' && r.nearMiss === null, r.flag);
 
 console.log('\n4. the reported source matches what getBatterWoba actually used');
 // blendWoba is what getBatterWoba calls. Its gate is act.sample >= minSample,
@@ -185,6 +228,21 @@ console.log('\n7. display only -- the flags appear in no pricing module');
 const api = fs.readFileSync(path.join(R, 'routes/api.js'), 'utf8');
 const html = fs.readFileSync(path.join(R, 'public/index.html'), 'utf8');
 expect('routes/api.js builds the report', /wobaSrc = \{/.test(api) && /nearMissFor\(/.test(api));
+// ONE DEFINITION. The route must REQUIRE the classifier, not define it, and
+// this test must not carry a copy either -- that combination is what let the
+// cross-team bug ship green.
+expect('the route requires utils/near-miss rather than defining it',
+  /require\('\.\.\/utils\/near-miss'\)/.test(api) && !/function nearMissFor\(/.test(api));
+const selfSrc = fs.readFileSync(__filename, 'utf8');
+expect('this test does not carry its own copy of the classifier',
+  !/function nearMissFor\(/.test(selfSrc));
+const nmSrc = fs.readFileSync(path.join(R, 'utils/near-miss.js'), 'utf8');
+expect('utils/near-miss.js is the single definition',
+  (nmSrc.match(/function nearMissFor\(/g) || []).length === 1);
+expect('...and it records the measurement behind the scope rule',
+  /measure-near-miss-cross-team/.test(nmSrc) && /72\.3%/.test(nmSrc));
+expect('the no-row line names the team as the scope searched',
+  /no actuals row for this team/.test(html));
 expect('the route reports every flag',
   ['proj_only_near_miss', 'proj_only_no_row', 'act_gated', 'act_ramp_zero']
     .every(f => api.indexOf("'" + f + "'") > -1));
@@ -193,6 +251,11 @@ expect('index.html renders them', /function batSrc\(/.test(html)
 expect('the per-slot counts are on the lineup header', /batSrcSummary\(lu\)/.test(html));
 const PRICING = ['services/model.js', 'services/jobs.js', 'services/parameter-sweep.js',
   'db/schema.js', 'utils/names.js'];
+for (const f of PRICING) {
+  const src = fs.readFileSync(path.join(R, f), 'utf8');
+  expect(f + ' does not require the display-only classifier',
+    src.indexOf('near-miss') === -1);
+}
 for (const f of PRICING) {
   const src = fs.readFileSync(path.join(R, f), 'utf8');
   const hits = ['wobaSrc', 'nearMissFor', 'proj_only_near_miss', 'act_ramp_zero', 'batSrc']

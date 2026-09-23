@@ -2755,12 +2755,17 @@ async function renderMatchupGame(id){
   //                         for a rookie. Greyed and struck, with the
   //                         sample and the threshold -- same shape as
   //                         the pitcher card.
-  //   proj only             no actuals row at all. Normal for a debut.
+  //   proj only             no actuals row FOR THIS TEAM. Normal for a
+  //                         debut or a callup. The wording carries the
+  //                         team because that is the scope actually
+  //                         searched -- a same-surname row on another
+  //                         team is a different player and is not
+  //                         reported here at all (2026-09-23).
   //   NEAR MISS             no actuals row resolved, but the index holds
-  //                         this surname on this team, or one
-  //                         abbreviation away. A resolver bug, so it is
-  //                         the one state styled to be impossible to
-  //                         miss.
+  //                         this surname ON THIS TEAM -- tagged with it,
+  //                         or roster-confirmed -- or one abbreviation
+  //                         away. A resolver bug, so it is the one state
+  //                         styled to be impossible to miss.
   function batSrc(b) {
     const v = b && b.wobaSrc;
     if (!v || typeof v !== 'object') return '';
@@ -2778,8 +2783,23 @@ async function renderMatchupGame(id){
         + '</div>';
     }
     if (v.flag === 'proj_only_no_row') {
-      return '<div style="font-size:9px;color:var(--text3);margin:1px 0 2px 24px">'
-        + 'proj only \u00b7 no actuals row</div>';
+      // The team is IN the sentence because the team is the scope that was
+      // searched. "no actuals row" full stop overclaimed: the scan never
+      // looked outside this team, and it should not, because a
+      // same-surname row elsewhere is a different player (2026-09-23).
+      //
+      // nmScoped false means this team had no roster available, so an
+      // untagged same-surname row could be neither confirmed nor ruled
+      // out. That is a narrower claim and it gets a narrower sentence.
+      const scoped = v.nmScoped !== false;
+      return '<div style="font-size:9px;color:var(--text3);margin:1px 0 2px 24px"'
+        + ' title="' + (scoped
+          ? 'No actuals row resolved for this batter, and nothing in the actuals index shares his surname on this team. Ordinary for a debut or a callup. The rate shown is the projection alone.'
+          : 'No actuals row resolved, and this team had no roster available, so an untagged same-surname row could not be checked either way. The rate shown is the projection alone.')
+        + '">'
+        + (scoped ? 'proj only \u00b7 no actuals row for this team'
+                  : 'proj only \u00b7 no actuals row matched (roster unavailable)')
+        + '</div>';
     }
     if (v.flag === 'act_gated') {
       const smp = v.act ? v.act.sample : null;
