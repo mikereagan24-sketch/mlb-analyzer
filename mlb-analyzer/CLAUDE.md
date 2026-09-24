@@ -1756,6 +1756,59 @@ cause is added, *what already explains this branch to a human.* Three
 occurrences in one working sequence is enough to make it a habit rather than
 a lesson.
 
+## Where a finding gets tracked: issue or docs file (2026-09-24)
+
+**Two destinations, and the split is by what the thing IS, not by how important
+it feels.**
+
+| what you have | where it goes |
+|---|---|
+| a bug report, or a flaky test | **a GitHub issue** |
+| a decision record, a re-baseline finding, an open question | **`docs/<topic>-open-question-<DATE>.md`**, committed on the same branch as the work |
+
+**The distinguishing question is whether the thing has a STATE.** A bug and a
+flaky test are work items: they are open or closed, somebody may or may not be
+on them, and their whole value is being findable later by someone who was not
+there. That is what an issue tracker is. A decision record has no state — it is
+a fact about why the code is the way it is, it is read when somebody quotes the
+number back at you, and it belongs next to the code in the same commit as the
+change it explains.
+
+**The docs-file half is the older and unchanged half.** `docs/*.md` has carried
+every decision, closure and open question in this repo, and it keeps doing so.
+Nothing moves to issues retroactively. See
+`docs/actuals-single-season-rebaseline-2026-09-22.md` for the shape: the
+measurement, the disposition, and what would reopen it.
+
+**The issue half started 2026-09-24**, with
+[#467](https://github.com/mikereagan24-sketch/mlb-analyzer/issues/467) — the
+repo's FIRST GitHub issue, for a `test-woba-period-split-guard.js` flake that
+failed once and then passed on the identical tree seven times. That is the case
+that forced the split: a one-off intermittent failure is not a decision and has
+no natural home in `docs/`, but it also must not be dropped just because it
+cannot be reproduced on demand.
+
+Labels in use: `flaky-test`, `low priority` (both created with #467; before
+that only GitHub's defaults existed).
+
+### Why this needed writing down
+
+Because the answer had been "docs files, and the repo has zero issues all-time",
+which was true for months and stopped being true the moment a finding had a
+state and no decision attached to it. A convention that is only in someone's
+head gets re-litigated every time, and the wrong guess is cheap in one direction
+(an issue nobody reads) and expensive in the other (a re-baseline finding filed
+where the code review will never see it).
+
+### An issue still owes the same evidence a docs file does
+
+Being a tracker entry is not licence to write a vibe. The #467 body carries the
+counts, the file sizes, the reproduction attempts and their results, and an
+explicit correction of an earlier wrong reading — the same standard
+`## A comment claiming a fix carries the number it was verified against` sets
+for code. "Not reproducible" is a finding and needs its attempts listed;
+"probably X" needs to say what would confirm it.
+
 ## Scratch files go in the scratchpad, never in tmp/ (2026-09-22)
 
 **`tmp/` is a tracked directory holding 70 committed scripts. It is not
