@@ -309,7 +309,14 @@ function detectKey(filename) {
   return null;
 }
 
-function parseCSV(buffer, isPitcher) {
+// floors = { minWoba, minSample }. ALL admission policy is decided by the
+// caller (ingestWobaCSV) and passed in, so this stays a pure filter and the
+// rule lives in exactly one place. Omitted or partial, it falls back to the
+// STRICT legacy values -- a caller that forgets an argument must keep the old
+// behaviour, never silently acquire a looser one. That direction matters: the
+// first attempt at this made the looser rule the default and #461 shipped a
+// live pricing regression through it.
+function parseCSV(buffer, isPitcher, floors) {
   const text = buffer.toString('utf-8').replace(/^\uFEFF/, '');
   const delim = text.includes('\t') ? '\t' : ',';
   const records = parse(text, { columns: true, skip_empty_lines: true, delimiter: delim, trim: true });
@@ -368,54 +375,94 @@ function parseCSV(buffer, isPitcher) {
   // discard" had no answer anywhere in the database and the question went
   // unasked for a season. A dropped row that is counted is a dropped row
   // somebody can argue about.
-  const rejected = { bad: 0, belowFloor: 0, keptBelowOldFloor: 0 };
+  const rejected = { bad: 0, belowFloor: 0, belowSample: 0, keptBelowOldFloor: 0 };
+  // Resolved ONCE, outside the loop, so the log line reports the same numbers
+  // the filter applied rather than recomputing them from a different branch.
+  const minWoba = floors && floors.minWoba != null
+    ? Number(floors.minWoba) : (isPitcher ? 0.05 : 0.210);
+  const minSample = floors && floors.minSample != null ? Number(floors.minSample) : 0;
   const rows = [];
   for (const r of records) {
     const name = r[nameCol];
     const woba = parseFloat(r[wobaCol]);
     const sample = sampleCol ? parseFloat(r[sampleCol]) || 0 : 0;
-    // THE 0.210 BATTER FLOOR, REVERTED TO (2026-09-23).
+    // BATTER-ACTUALS ADMISSION: A SAMPLE FLOOR, NOT A VALUE FLOOR.
+    // (#461 -> reverted in #462 -> this. The history is the argument.)
     //
-    // #461 removed this floor for the batter ACTUALS files, on the argument
-    // that it had never caught what it was built for -- pitchers in batter
-    // files. THE FIRST UPLOAD AFTER IT FALSIFIED THAT ARGUMENT:
+    // The 0.210 wOBA floor existed to "filter pitchers accidentally in batter
+    // files". #461 removed it for the actuals files; the first upload after
+    // that falsified the reasoning in two separate ways at once:
     //
-    //   returned rows          266   (the projection was ~35)
+    //   returned rows          266   (the estimate was ~35)
     //   pitchers ADMITTED        5   Trevor Rogers SP, Tyler Alexander RP,
     //                                Colin Rea SP, Jack Leiter SP,
     //                                Miles Mikolas RP, Randy Vasquez SP
     //                                -- every one wOBA 0.0000 on 1-2 PA
     //   lineup lookups GAINED  576
-    //   lineup lookups LOST      81   <- the acceptance gate was LOST = 0
+    //   lineup lookups LOST      81   <- the gate was LOST = 0
     //
-    // THE GUARD WAS CATCHING PITCHERS. The evidence that said otherwise was
-    // counted on the FLOORED corpus -- the population this guard had already
-    // cleaned -- so the target was missing because the guard had removed it.
-    // That is the backtest-blindness trap CLAUDE.md names under the
-    // guard-removal rule, and the same shape as the SIGNAL_EDGE_HARD_CAP_PP
-    // write-up it cites ("suppressed 0 of 1026 ... a does-nothing pass").
-    // A guard's target being absent from the corpus that guard produced is
-    // not evidence of absence.
+    // (1) THE GUARD WAS CATCHING PITCHERS, and the evidence that it wasn't
+    // had been counted on the FLOORED corpus -- the population the guard
+    // itself produced -- so its target was absent because the guard had
+    // removed it. Backtest blindness, per CLAUDE.md's guard-removal rule,
+    // and the same shape as SIGNAL_EDGE_HARD_CAP_PP reading "0 of 1026,
+    // inert" while production had suppressed 1283.
     //
-    // AND IT BROKE PRICING. `aramis garcia` came back at wOBA 0.0495 on 18
-    // PA, which made fuzzyLookup's exactly-one abbrev gate ambiguous against
-    // `adolis garcia` (.2750, 607 PA). Adolis Garcia -- a regular -- lost
-    // his actuals term on 79 slates and priced off the projection alone.
+    // (2) IT BROKE PRICING. `aramis garcia` returned at .0495 on 18 PA and
+    // made fuzzyLookup's exactly-one abbrev gate ambiguous against
+    // `adolis garcia` (.2750, 607 PA), so a regular lost his actuals term
+    // across 79 slates.
     //
-    // THE REMOVAL WAS NOT WRONG IN ITS AIM. 576 of those gained lookups are
-    // real: weak platoon splits of ordinary regulars (Yoan Moncada .1966 vs
-    // LHP, Josh Lowe .2021, Kyle Isbel .2074, Josh Smith .2038) that this
-    // floor has been discarding all season. What was wrong is the
-    // INSTRUMENT: a wOBA threshold asks "is he a bad hitter", when the
-    // question is "is there enough data for this to be a rate". A sample
-    // floor at MIN_PA answers that one, keeps 206 of the gains and takes
-    // LOST to 0 -- measured, and shipped separately so that this revert can
-    // land on its own.
+    // THE AIM WAS STILL RIGHT. The floor really was discarding weak platoon
+    // splits of ordinary regulars -- Yoan Moncada .1966 vs LHP, Josh Lowe
+    // .2021, Kyle Isbel .2074, Josh Smith .2038, Henry Davis .1981. What was
+    // wrong is the INSTRUMENT. A wOBA threshold asks "is he a bad hitter?"
+    // when the question is "is there enough data here to be a rate?"
     //
-    // Re-run the evidence: node scripts/verify-woba-floor-change.js
-    const minWoba = isPitcher ? 0.05 : 0.210;
+    // SWEPT OVER ALL 40,266 LINEUP SLOTS:
+    //
+    //     minSample   sub-floor rows kept   GAINED   LOST
+    //             0                   266      576     81
+    //             5                   200      565     81
+    //            10                   162      550     81
+    //            20                   108      467     11
+    //            30                    76      393     11
+    //            60                    32      206      0
+    //
+    // 60 is NOT read off that table. It is MIN_PA, the threshold blendWoba
+    // already gates the actuals term on. A row below MIN_PA can never reach a
+    // price -- its only possible effect is making the resolver ambiguous --
+    // so admitting it is all cost and no benefit, and the ingest floor
+    // belongs exactly at the consumer's floor. That is CLAUDE.md's
+    // producer/consumer rule with the roles swapped: "a looser consumer does
+    // not admit more good data, it admits exactly the rejected data."
+    //
+    // Against the three populations the last attempt produced:
+    //   576 genuine recoveries  -> 206 kept; the 370 dropped are below
+    //                              MIN_PA and could never have contributed
+    //   266 hitless tiny-sample -> 234 excluded, 32 kept (those at >=60 PA,
+    //                              which are legitimate weak splits)
+    //     6 "pitchers"          -> all excluded. Five sit at 1-2 PA. The
+    //                              sixth, Jose Fermin, is a roster mislabel
+    //                              with 263 PA and was never a pitcher.
+    //
+    // MIN_PA is READ from settings, not written here as a second literal, so
+    // the ingest floor and blendWoba's gate cannot drift apart. Lower MIN_PA
+    // and this follows on the next upload -- and the ambiguity cost returns
+    // with it, which is the honest coupling rather than a hidden one.
+    //
+    // THE PROJECTION FLOOR IS UNCHANGED at 0.210. Density above the cut is
+    // FLAT at ~135 rows per 0.005 of wOBA there, against 4-8 in the actuals
+    // files, so removing it would pour hundreds to thousands of deep-minors
+    // rows into an index where 3359 of 3384 entries are already on no MLB
+    // roster. The pitchers in THAT file sit above 0.210 anyway (Jared Jones
+    // PIT .2688, Jose Alvarez .2767, Ryan Johnson .2513), so a value floor
+    // misses them either way and the right instrument there is role.
+    //
+    // Re-run all of it: node scripts/verify-woba-floor-change.js
     if (!name || isNaN(woba) || woba > 0.8 || woba < 0) { rejected.bad++; continue; }
     if (woba < minWoba) { rejected.belowFloor++; continue; }
+    if (sample < minSample) { rejected.belowSample++; continue; }
     if (woba < 0.210 && !isPitcher) rejected.keptBelowOldFloor++;
     // Normalize FanGraphs team abbr (KCR->KC, SDP->SD, etc.)
     const fgTeam = teamCol ? (r[teamCol]||'').trim().toUpperCase() : null;
@@ -428,12 +475,13 @@ function parseCSV(buffer, isPitcher) {
     const period = periodCol ? String(r[periodCol] == null ? '' : r[periodCol]).trim() : null;
     rows.push({ name, woba, sample, team, period });
   }
-  if (rejected.belowFloor || rejected.bad || rejected.keptBelowOldFloor) {
+  if (rejected.belowFloor || rejected.bad || rejected.belowSample || rejected.keptBelowOldFloor) {
     console.log('[woba-parse] kept ' + rows.length
       + '  rejected ' + rejected.bad + ' malformed/out-of-range, '
-      + rejected.belowFloor + ' below floor ' + (isPitcher ? 0.05 : 0.210)
+      + rejected.belowFloor + ' below wOBA floor ' + minWoba
+      + ', ' + rejected.belowSample + ' below sample floor ' + minSample
       + '; of the kept, ' + rejected.keptBelowOldFloor
-      + ' sit below the retired 0.210 batter floor');
+      + ' sit below the retired 0.210 batter wOBA floor');
   }
   return rows;
 }
@@ -616,8 +664,24 @@ function rosterCorrectTeams(rows, key) {
 
 function ingestWobaCSV(key, csvText, filename) {
   const isPitcher = key.startsWith('pit');
+  // Derived from the KEY, never from a caller's opinion: 'bat-act-rhp' vs
+  // 'bat-proj-rhp'. The two batter files get different admission rules and
+  // the key is the only thing that actually knows which file this is.
+  const isActuals = /-act(-|$)/.test(key);
+  // ONE PLACE WHERE ADMISSION POLICY LIVES. parseCSV takes what it is given.
+  //
+  // MIN_PA is READ so the ingest floor and blendWoba's actuals gate cannot
+  // drift. A settings read must never break an ingest, hence the try.
+  let minPa = 60;
+  try {
+    const v = Number((getSettings() || {}).MIN_PA);
+    if (isFinite(v) && v > 0) minPa = v;
+  } catch (_) { /* keep the schema default */ }
+  const floors = isPitcher ? { minWoba: 0.05, minSample: 0 }
+    : isActuals ? { minWoba: 0, minSample: minPa }
+                : { minWoba: 0.210, minSample: 0 };
   const buf = Buffer.isBuffer(csvText) ? csvText : Buffer.from(csvText, 'utf-8');
-  const rows = parseCSV(buf, isPitcher);
+  const rows = parseCSV(buf, isPitcher, floors);
   if (!rows.length) throw new Error('No valid rows parsed. Check wOBA and Name columns.');
   // The clear moved INSIDE q.upsertWobaBatch's transaction (2026-09-22)
   // so a rejected batch rolls back to the last good upload instead of
@@ -8661,6 +8725,10 @@ module.exports = router;
 // partial module — but a require inside the cron callback runs after both
 // modules have fully loaded and resolves correctly).
 module.exports.ingestWobaCSV = ingestWobaCSV;
+// Exported for scripts/test-woba-ingest-admission.js. The admission rule has
+// now been wrong twice, in two directions, so it gets a test that drives the
+// real function instead of a copy of it.
+module.exports.parseCSV = parseCSV;
 module.exports.rosterCorrectTeams = rosterCorrectTeams;
 
 
