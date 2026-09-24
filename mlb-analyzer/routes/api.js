@@ -57,8 +57,11 @@ const { listSnapshots, readSnapshot, findLatestSnapshot } = require('../services
 const { normName, stripSfx, fuzzyLookup, hasTeamTag } = require('../utils/names');
 // Display-only near-miss classifier for the batter wOBA-source badge.
 // One definition, shared with its test -- see utils/near-miss.js.
-const { nearMissFor, rosterPredicate } = require('../utils/near-miss');
-const { seasonRosterSet } = require('../services/season-roster');
+// rosterPredicate is no longer used here: the badge's predicate moved to
+// services/season-roster.js so it matches pricing. The helper stays in
+// utils/near-miss.js for its own test.
+const { nearMissFor } = require('../utils/near-miss');
+const { seasonRosterSet, onTeamPredicate } = require('../services/season-roster');
 const { calcCLV, clvForSignal } = require('../services/clv');
 const { windBadge: _windBadge } = require('../utils/wind-badge');
 const router = express.Router();
@@ -6066,19 +6069,27 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
     // of the loud one; a false positive is the defect being fixed. The
     // blast radii are not comparable.
     //
-    // Season roster UNIONED with the daily one, per #450: team_rosters is
-    // an 840-row active snapshot that drops anyone optioned, traded or
-    // shut down, and a batter whose actuals row outlives his active-roster
-    // entry is exactly the case this badge is asked about.
-    function rosterRowsFor(team) {
-      const t = (team || '').toUpperCase();
-      const sets = [];
-      try { if (q.getPositionPlayers) sets.push(q.getPositionPlayers.all(t) || []); } catch (_) {}
-      try { if (q.getSeasonPositionPlayers) sets.push(q.getSeasonPositionPlayers.all(t) || []); } catch (_) {}
-      return sets;
-    }
-    const awayOnTeam = rosterPredicate(rosterRowsFor(game.away_team));
-    const homeOnTeam = rosterPredicate(rosterRowsFor(game.home_team));
+    // SOURCE CHANGED 2026-09-24: services/season-roster.js, the SAME function
+    // getBatterWoba's predicate comes from. It was daily UNION season, built
+    // here with utils/near-miss.js rosterPredicate.
+    //
+    // WHY THE UNION HAD TO GO. #465 wired { minSample, onTeam } into pricing's
+    // actuals lookups and nothing else, so production began resolving
+    // W. Contreras [MIL] and J. Crawford [PHI] off actuals while this card
+    // still showed a near-miss badge and the projection-only rate for the same
+    // slot. Wiring the card was the fix -- but wiring it with a DIFFERENT
+    // roster than pricing uses would have replaced a card-vs-price
+    // disagreement with a subtler one, since daily UNION season is a superset
+    // of season and would resolve slots pricing does not.
+    //
+    // The union's own argument (#450: the daily table drops optioned, traded
+    // and shut-down players) argued for INCLUDING the season table, which this
+    // does. What it loses is players in the DAILY table but not yet in the
+    // season one -- a call-up between the last season-roster write and now.
+    // For those the badge stays on the ordinary no-row line instead of
+    // resolving, which is the safe direction and is counted in the PR.
+    const awayOnTeam = onTeamPredicate(seasonRosterSet(game.away_team));
+    const homeOnTeam = onTeamPredicate(seasonRosterSet(game.home_team));
 
     // WHY A BATTER'S SOURCE NEEDS A BADGE. (2026-09-23) Display only.
     //
@@ -6146,12 +6157,28 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         // findIn's minSample argument and blendWoba's internal check:
         // tiny-sample actuals (rookie's 4 PA fluke) get rejected before
         // becoming actV, so 'act' source only fires on real evidence.
+        // STAGE 9 REACHES THIS PATH TOO, as of 2026-09-24. #465 wired it into
+        // getBatterWoba only, and this card does not go through getBatterWoba
+        // -- it has its own cascade (fix/matchup-woba-use-shared-resolver,
+        // 2026-07-23). So pricing resolved W. Contreras [MIL] and
+        // J. Crawford [PHI] off actuals while the card showed a near-miss
+        // badge and the projection alone for the same slot.
+        //
+        // actOpts is byte-identical to getBatterWoba's, ON PURPOSE: same
+        // MIN_PA, same predicate source (services/season-roster.js). If these
+        // two ever differ the card stops explaining the price.
+        //
+        // ACTUALS ONLY, exactly as getBatterWoba does it (model.js:505,510
+        // take opts; 504,509 do not). A projection row's `sample` is a
+        // fractional PA share -- 0.31, 0.69 -- so a 60-PA floor on bat-proj-*
+        // would reject essentially the whole projection index.
+        const actOpts = { minSample: MIN_PA, onTeam: onTeam || null };
         function lookupProj(idxKey) {
           const hit = fuzzyLookup(ownGatedIdx[idxKey], name, teamHint);
           return hit ? hit.woba : null;
         }
         function lookupAct(idxKey) {
-          const hit = fuzzyLookup(ownGatedIdx[idxKey], name, teamHint);
+          const hit = fuzzyLookup(ownGatedIdx[idxKey], name, teamHint, actOpts);
           if (!hit) return null;
           if (hit.sample == null || hit.sample < MIN_PA) return null;
           return hit.woba;
@@ -6206,7 +6233,9 @@ router.get('/woba/game/:date/:gameId', (req, res) => {
         // the same MIN_PA the lookup above used; nothing is recomputed
         // differently and nothing here feeds pricing.
         const projHit = fuzzyLookup(ownGatedIdx[vsKey], name, teamHint) || null;
-        const actHit  = fuzzyLookup(ownGatedIdx[actKey], name, teamHint) || null;
+        // Same actOpts as lookupAct above -- the badge must describe the rate
+        // the row above it shows, so it cannot resolve differently.
+        const actHit  = fuzzyLookup(ownGatedIdx[actKey], name, teamHint, actOpts) || null;
         const actSample = actHit && Number.isFinite(Number(actHit.sample)) ? Number(actHit.sample) : null;
         const actUsed = !!(actHit && !isNaN(actHit.woba) && actSample != null && actSample >= MIN_PA);
         // The RAMP, not just the gate. getBatterWoba passes
