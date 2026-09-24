@@ -841,6 +841,88 @@ picture is a corpus large enough to move the floor, which means more
 seasons rather than more dates.
 
 
+## REBASELINE: stage 9 went live, so every batter-side number predates it (2026-09-24)
+
+`fuzzyLookup` stage 9 (#464) was inert until something passed it a roster. This
+change passes one, from `services/season-roster.js`, in **both** the production
+and harness paths. Measured over 2026 on the per-date snapshots every replay
+actually reads:
+
+```
+roster sets, all 30 teams        production === harness
+lineup slots compared            29,052
+stage 9 at the lookup level      GAINED 532   LOST 0   CHANGED 0
+priced output                    28,763 unchanged   289 moved   0 unexplained
+```
+
+**No baseline measured before 2026-09-24 is comparable to one measured after
+it.** 289 lineup slots price differently, and they are concentrated in
+everyday hitters whose abbreviated name collided with another team's player —
+W. Contreras (MIL/BOS), J. Crawford (PHI/SEA), J. Rodriguez (SEA),
+A. Garcia (PHI), E. Valdez (PIT), W. Wilson (BAL/SEA).
+
+Recorded as `roster_stage9_resolution` in `REBASELINE_EVENTS`
+(`services/feature-gate-registry.js`).
+
+### Affected registry rows — listed, NOT re-run
+
+Every row below quotes a figure computed with those 289 slots priced on the
+projection alone. They are not being re-run: three of them were dispositioned
+in the last fortnight on the grounds that the effect is a fraction of the
+0.015 log-loss floor, and re-running them now would replace one
+non-comparable number with another.
+
+**The 12 `criterion_type: 'calibration'` rows** — batter wOBA feeds p(home), so
+every calibration figure is affected:
+
+| row | quoted corpus | already marked |
+|---|---|---|
+| `defense_frv_enabled` | 658 | `harness_inputs_persisted` |
+| `defense_frv_split` | 1076 | `harness_inputs_persisted` |
+| `catcher_framing_mute` | null (forward window) | `harness_inputs_persisted` |
+| `catcher_framing_enabled` | null (forward window) | — |
+| `w_proj_w_act` | null (forward window) | — |
+| `ui_highlight_symmetric_floor` | 452 | — |
+| `ui_highlight_under_band` | 355 | — |
+| `spread_edge_display_enabled` | 7404 | — |
+| `spread_cells_market_total_axis` | 1158 | — |
+| `bsr_baserunning` | 1100 | — |
+| `totals_selection_edge` | n/a | — |
+| `sp_weight_l` | n/a | — |
+
+**The 8 rows already carrying `evidence_predates`** now predate a second event:
+`park_neutral_inputs_enabled`, `signal_edge_cap_enabled`, `defense_frv_enabled`,
+`defense_frv_split`, `use_hand_conditional_sp_weight`, `signal_edge_hard_cap_pp`,
+`catcher_framing_mute`, `bullpen_woba_neutralization`.
+
+`evidence_predates` holds ONE event per row, so annotating these against
+`roster_stage9_resolution` as well needs the field to become a list — a
+schema change with its own test updates (`test-harness-inputs-sources.js` arm 7
+pins the marked set by id and by count). Left as a follow-up rather than
+smuggled in here.
+
+### Affected ledger entries — listed, NOT re-run
+
+- **"CLOSED: W_PROJ / W_ACT is unanswerable"** — the `calibration-sweep` grid
+  (range 0.0029, 0 of 9 CIs excluding zero) and the ROI decomposition
+  (863-bet core at -7.04) were both scored with these 289 slots on projection
+  alone. The closure's *reasoning* is unaffected: the range is still far below
+  the floor. The figures are not re-derivable.
+- **"FRV gate re-run on the corrected resolver"** — the 658-game and
+  1076-game arms, delta -0.00075 / -0.00047. Same position: the disposition
+  stands on effect size, the numbers predate this.
+- **"RE-BASELINE: every FRV measurement ran with the term absent on ~17.6% of
+  fielder slots"** — its before/after figures are batter-independent, so the
+  FRV deltas hold; any log-loss level quoted alongside them does not.
+- **Regime table (A-E)** — unchanged. This is a resolver change, not an
+  ingest one, and it writes nothing to `woba_data_snapshot`.
+- **CLAUDE.md's measured floors** — the ROI plateau (±12pp) and the log-loss
+  floor (0.015, re-measured on 1268 items) are noise measurements taken on
+  the pre-stage-9 substrate. The 289 moved slots are a systematic offset
+  inside them. Both are quoted to two significant figures and the shift is
+  far smaller than that, so they are left alone deliberately rather than
+  re-run.
+
 ## Order of operations
 
 1. Resolve the dropped-player question and merge a pull fix.

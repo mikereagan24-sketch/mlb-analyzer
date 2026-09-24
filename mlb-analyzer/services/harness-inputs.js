@@ -40,6 +40,16 @@ try {
   _framingForTeam = fb.computeFramingRvPerGame || _framingForTeam;
 } catch (e) { /* harness still runs; populate() reports zero coverage */ }
 
+// THE SAME FUNCTION PRODUCTION USES. (2026-09-24) Not a copy of it, and not a
+// second query against the same table -- the identical builder, so the roster
+// the harness hands runModel is the roster production hands it. See
+// services/season-roster.js for why the season table and not the daily one,
+// and for why "as-of the game date" is not available from it.
+let _seasonRosterSet = () => null;
+try {
+  _seasonRosterSet = require('./season-roster').seasonRosterSet || _seasonRosterSet;
+} catch (e) { /* leave the roster unavailable rather than guessing at it */ }
+
 // ── FRV READ MODE (2026-09-14) ─────────────────────────────────────────
 //
 // A harness replaying a past game must read the FRV that existed THEN.
@@ -143,6 +153,9 @@ function harnessInputsMode() {
  *   stateColumn  framing only: non-null means the emit pass ran and wrote
  *                the rv, so a NULL rv beside it is a real "no framing"
  *                (no_roster_match / no_framing_data) and is kept as NULL.
+ *   source       built at replay time by a named function rather than read
+ *                from a column. The function must be the SAME one production
+ *                calls, or the harness measures a different model.
  *   unavailable  no emit-time source exists. Left undefined and reported.
  *
  * OPENER AND TANDEM ARE ALREADY CARRIED. preScreenGame spreads the whole
@@ -172,10 +185,22 @@ const FIELD_SOURCES = [
   { field: 'bulk_guy_home',           group: 'opener', column: 'bulk_guy_home' },
   { field: 'tandem_subtype_away', group: 'tandem', column: 'tandem_subtype_away' },
   { field: 'tandem_subtype_home', group: 'tandem', column: 'tandem_subtype_home' },
-  { field: 'awayRosterSet', group: 'roster', unavailable: 'built from the live team_rosters table, '
-      + 'which holds TODAY state and is not snapshotted per game date; nothing persists the set' },
-  { field: 'homeRosterSet', group: 'roster', unavailable: 'built from the live team_rosters table, '
-      + 'which holds TODAY state and is not snapshotted per game date; nothing persists the set' },
+  // POPULATED SINCE 2026-09-24. These were `unavailable`, on the reasoning that
+  // the only source was the live daily team_rosters table. That was true and it
+  // stopped being the binding fact once stage 9 started reading the roster:
+  // leaving them unavailable would have meant 548 lineup slots resolving in
+  // production and in no measurement of production. Both sides now call
+  // services/season-roster.js seasonRosterSet(), the same function
+  // processGameSignals calls.
+  //
+  // NOT as-of the game date, and the limit is recorded rather than papered
+  // over: team_rosters_season is UNIQUE(team, player_name) with one
+  // updated_at for the whole table, so it is a season accumulation with no
+  // time dimension. A player traded in August is on his new team for an April
+  // replay. Stage 9's rule needs EXACTLY ONE on-team candidate, so an
+  // over-generous roster can only fail to resolve, never resolve wrongly.
+  { field: 'awayRosterSet', group: 'roster', source: 'services/season-roster.js seasonRosterSet()' },
+  { field: 'homeRosterSet', group: 'roster', source: 'services/season-roster.js seasonRosterSet()' },
   { field: 'bullpenAvailability', group: 'availability', unavailable: 'derived at emit time from '
       + 'recent pitcher usage and never written to game_log' },
 ];
@@ -185,7 +210,8 @@ const INPUT_GROUPS = [...new Set(FIELD_SOURCES.map(f => f.group))];
 // Per-source counters for the echo line. Reset with resetHarnessInputsStats().
 let _inStats = null;
 function resetHarnessInputsStats() {
-  _inStats = { games: 0, framingPersisted: 0, framingRecomputed: 0, bullpenPersisted: 0, bullpenMissing: 0 };
+  _inStats = { games: 0, framingPersisted: 0, framingRecomputed: 0, bullpenPersisted: 0,
+    bullpenMissing: 0, rosterSides: 0 };
 }
 resetHarnessInputsStats();
 function harnessInputsStats() { return _inStats; }
@@ -258,6 +284,18 @@ function populateCallerInputs(wrapped, gameRow, settings) {
   if (!wrapped || !gameRow) return wrapped;
   const mode = harnessInputsMode();
   _inStats.games++;
+  // ROSTER, in BOTH modes. Deliberately outside the legacy/persisted switch:
+  // 'legacy' reproduces the pre-2026-09-16 FOUR-FIELD harness, and the roster
+  // is not one of those four -- it was absent from both. Withholding it under
+  // legacy would make that mode diverge from production on stage 9 as well as
+  // on the four fields, which is not what reproducing an old number means.
+  try {
+    for (const side of ['away', 'home']) {
+      const set = _seasonRosterSet(gameRow[side + '_team']);
+      wrapped[side + 'RosterSet'] = set || null;
+      if (set) _inStats.rosterSides++;
+    }
+  } catch (e) { /* leave null; getBatterWoba treats null as "cannot answer" */ }
   try {
     const rm = frvReadMode();
     const asOf = rm.mode === 'current' ? null : (rm.pinned || gameRow.game_date);

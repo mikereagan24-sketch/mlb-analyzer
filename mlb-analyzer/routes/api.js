@@ -58,6 +58,7 @@ const { normName, stripSfx, fuzzyLookup, hasTeamTag } = require('../utils/names'
 // Display-only near-miss classifier for the batter wOBA-source badge.
 // One definition, shared with its test -- see utils/near-miss.js.
 const { nearMissFor, rosterPredicate } = require('../utils/near-miss');
+const { seasonRosterSet } = require('../services/season-roster');
 const { calcCLV, clvForSignal } = require('../services/clv');
 const { windBadge: _windBadge } = require('../utils/wind-badge');
 const router = express.Router();
@@ -7752,13 +7753,14 @@ router.get('/debug/model-trace', (req, res) => {
     // build pattern as jobs.js:737; null on missing roster leaves the
     // side ungated so the trace still runs on legacy games without
     // roster snapshots.
+    // Same source as processGameSignals and the harness (2026-09-24) -- the
+    // trace must explain the price the model actually produced, so it cannot
+    // build this set differently from the path that produced it.
     let awayRosterSet = null, homeRosterSet = null;
     try {
-      if (q.getPositionPlayers) {
-        const awayRows = q.getPositionPlayers.all((awayAbbr || '').toUpperCase()) || [];
-        const homeRows = q.getPositionPlayers.all((homeAbbr || '').toUpperCase()) || [];
-        if (awayRows.length) awayRosterSet = new Set(awayRows.map(r => normName(r.player_name)));
-        if (homeRows.length) homeRosterSet = new Set(homeRows.map(r => normName(r.player_name)));
+      {
+        awayRosterSet = seasonRosterSet(awayAbbr);
+        homeRosterSet = seasonRosterSet(homeAbbr);
       }
     } catch (_) { /* leave nulls */ }
     const game = {
