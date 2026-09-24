@@ -59,9 +59,15 @@ check('every source column exists in game_log',
     .concat(hi.FIELD_SOURCES.filter(f => f.stateColumn && !columns.has(f.stateColumn)).map(f => f.stateColumn)), []);
 check('every field has exactly one of column / source / unavailable',
   hi.FIELD_SOURCES.filter(f => [f.column, f.source, f.unavailable].filter(Boolean).length !== 1).map(f => f.field), []);
-check('the no-source fields are exactly roster x2 + availability',
+// ROSTER LEFT THIS LIST 2026-09-24. awayRosterSet/homeRosterSet were
+// unavailable because the only source was the live daily team_rosters table.
+// Once stage 9 started reading the roster, leaving them unavailable meant 548
+// lineup slots resolving in production and in no measurement of it, so both
+// sides now build the set with services/season-roster.js seasonRosterSet().
+// bullpenAvailability is the only genuinely sourceless field left.
+check('the only no-source field left is availability',
   hi.FIELD_SOURCES.filter(f => f.unavailable).map(f => f.field),
-  ['awayRosterSet', 'homeRosterSet', 'bullpenAvailability']);
+  ['bullpenAvailability']);
 
 console.log('');
 console.log('2. the mode switch');
@@ -98,11 +104,54 @@ for (const f of hi.FIELD_SOURCES) {
 }
 check('framing NULL with an emit state stays NULL (a real no-framing, not a gap)',
   w.homeCatcherFramingRvPerGame, null);
-check('roster and availability are left undefined, not invented',
-  [w.awayRosterSet, w.homeRosterSet, w.bullpenAvailability], [undefined, undefined, undefined]);
+// ROSTER IS POPULATED SINCE 2026-09-24, and these assertions distinguish null
+// from undefined ON PURPOSE. `check` compares with JSON.stringify, under which
+// [null, null] and [undefined, undefined] are the SAME STRING -- so the old
+// assertion here kept passing after the field started being populated, which is
+// exactly the kind of false green this file exists to prevent. Compare booleans.
+//
+// ZZZ / YYY are not real teams, so the correct answer is NULL: "no roster
+// available", which getBatterWoba must treat as "cannot answer" rather than as
+// "nobody is on this team".
+check('an unknown team yields null, not an invented empty set',
+  [w.awayRosterSet === null, w.homeRosterSet === null], [true, true]);
+check('...and null is distinguishable from undefined here',
+  [typeof w.awayRosterSet, typeof w.bullpenAvailability], ['object', 'undefined']);
+check('availability is still the one field left with no source',
+  w.bullpenAvailability === undefined, true);
+
+
 check('counters: 2 bullpen sides persisted, 2 framing sides persisted, 0 recomputed',
   [hi.harnessInputsStats().bullpenPersisted, hi.harnessInputsStats().framingPersisted,
    hi.harnessInputsStats().framingRecomputed], [2, 2, 0]);
+
+// RUNS AFTER THE COUNTERS CHECK ON PURPOSE: it calls populateCallerInputs a
+// second time, which advances the same counters the assertion above pins.
+// AND THE AGREEMENT PROPERTY, on a real team: what the harness hands runModel
+// must be what production hands it. Both call the same builder, so this is an
+// identity check rather than a tolerance -- if it ever fails, the two paths
+// have started answering "is this player on this team" differently, which is
+// the divergence class that cost the 2026-09-16 rebaseline.
+{
+  const sr = require(path.join(R, 'services/season-roster'));
+  const real = db.prepare("SELECT team FROM team_rosters_season WHERE role='POS' "
+    + 'GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1').get();
+  if (!real) {
+    check('SKIPPED: no team_rosters_season rows to compare', true, true);
+  } else {
+    const prodSet = sr.seasonRosterSet(real.team);
+    const w2 = quiet(() => hi.populateCallerInputs({}, Object.assign({}, row,
+      { away_team: real.team, home_team: real.team }), {}));
+    check('a real team yields a non-empty Set (' + real.team + ')',
+      !!(w2.awayRosterSet && w2.awayRosterSet.size > 0), true,
+      w2.awayRosterSet ? String(w2.awayRosterSet.size) : 'null');
+    check('harness roster EQUALS production roster, name for name',
+      [...(w2.awayRosterSet || [])].sort(), [...(prodSet || [])].sort());
+    check('both sides populated, and the counter saw them',
+      [w2.awayRosterSet === w2.homeRosterSet || w2.awayRosterSet.size === w2.homeRosterSet.size,
+        hi.harnessInputsStats().rosterSides >= 2], [true, true]);
+  }
+}
 
 const noState = Object.assign({}, row, { away_catcher_framing_state: null, home_catcher_framing_state: null });
 hi.resetHarnessInputsStats();

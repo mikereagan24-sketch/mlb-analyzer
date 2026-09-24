@@ -11,6 +11,9 @@ const empiricalSpreadEdge = require('./empirical-spread-edge');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
+// One definition of the season roster, shared with the harness so the two
+// cannot answer "is this player on this team" differently.
+const { seasonRosterSet } = require('./season-roster');
 const { calcCLV, clvForSignal } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
 const { checkMarketMLPairSanity, isSaneSpreadPrice } = require('../utils/market-sanity');
@@ -825,15 +828,23 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // in woba_data (Steamer's minor-leaguers, retirees) can't preempt
   // real hitters via fuzzyLookup. Empty set on missing roster leaves
   // this side ungated — safer than gating with a stale/empty roster.
+  //
+  // SOURCE CHANGED 2026-09-24: team_rosters (daily, ~840 active rows) ->
+  // team_rosters_season (1667, keeps optioned/traded/IL'd players), through
+  // services/season-roster.js. Two reasons, and the second is the binding one:
+  //   * #450 established the daily table is wrong for anything replaying a
+  //     past date -- it is how 21.71% of fielder slots went unresolved;
+  //   * the HARNESS now builds this same set from the same function, so
+  //     production and every measurement of it resolve identically. Building
+  //     it from different tables would put 548 lineup slots in prod that no
+  //     backtest could see.
+  // The set no longer feeds only the disabled gate: getBatterWoba derives
+  // stage 9's roster tie-break from it.
   let awayRosterSet = null, homeRosterSet = null;
   try {
-    if (q.getPositionPlayers) {
-      const awayRows = q.getPositionPlayers.all((awayAbbr || '').toUpperCase()) || [];
-      const homeRows = q.getPositionPlayers.all((homeAbbr || '').toUpperCase()) || [];
-      if (awayRows.length) awayRosterSet = new Set(awayRows.map(r => normName(r.player_name)));
-      if (homeRows.length) homeRosterSet = new Set(homeRows.map(r => normName(r.player_name)));
-    }
-  } catch (_) { /* no roster table / bad row → leave nulls, gate opts out */ }
+    awayRosterSet = seasonRosterSet(awayAbbr);
+    homeRosterSet = seasonRosterSet(homeAbbr);
+  } catch (_) { /* no roster table / bad row → leave nulls, the rule opts out */ }
   const game = {
     ...gameRow,
     awayLineup: tryParse(gameRow.away_lineup_json) || [],

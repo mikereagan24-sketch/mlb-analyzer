@@ -59,6 +59,22 @@ const STATUS = {
 // `reproduce` is how to get the old figure back exactly, so a before/after
 // is always possible.
 const REBASELINE_EVENTS = {
+  roster_stage9_resolution: {
+    date: '2026-09-24',
+    summary: 'fuzzyLookup stage 9 went live. An abbreviated lineup name with two '
+      + 'candidates sharing a surname and an initial used to return null and price on the '
+      + 'projection alone; it now resolves when a sample floor at MIN_PA or the season '
+      + 'roster picks one candidate. 532 (slot x platoon side) lookups gained an actuals '
+      + 'row across 2026, moving the priced wOBA on 289 of 29,052 lineup slots. '
+      + 'awayRosterSet/homeRosterSet also changed source: team_rosters (daily, ~840 '
+      + 'active rows) -> team_rosters_season (1667, keeps optioned/traded/IL players), '
+      + 'built by services/season-roster.js in BOTH the production and harness paths so '
+      + 'they cannot diverge. Nothing measured before this date is comparable to '
+      + 'anything measured after it.',
+    reproduce: 'no flag -- the previous behaviour is reached by passing no roster set, '
+      + 'i.e. getBatterWoba(..., null); scripts/test-harness-prod-roster-agreement.js '
+      + 'scores both arms',
+  },
   harness_inputs_persisted: {
     date: '2026-09-16',
     summary: 'services/harness-inputs.js populateCallerInputs went from 4 of the 21 caller-populated '

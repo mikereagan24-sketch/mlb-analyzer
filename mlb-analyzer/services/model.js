@@ -68,6 +68,10 @@ const stintCache = require('./stint-cache');
 // Traded players are approximated with the current-team's home park
 // factor (v1 tradeoff, documented in services/park-factors-woba.js).
 
+// Pure Set -> predicate. Requiring season-roster.js does NOT open a database;
+// its only query is behind a lazy require inside seasonRosterSet.
+const { onTeamPredicate: _onTeamPredicate } = require('./season-roster');
+
 function buildWobaIndex(rows) {
   const idx = {};
   for (const r of rows) {
@@ -421,6 +425,28 @@ function resolveNeutralizationFactor(teamHint, settings, opts) {
 }
 
 function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, rosterSet) {
+  // STAGE 9's ROSTER PREDICATE, built BEFORE the dead gate nulls the set
+  // below. (2026-09-24)
+  //
+  // rosterSet now carries the SEASON roster (services/season-roster.js), and
+  // the same builder fills it on the production path and in the harness, so
+  // this predicate is identical in both. That identity is the point: stage 9
+  // resolves 548 lineup slots that used to fall to the projection, and if
+  // only one of the two paths could do it, every measurement of production
+  // would be a measurement of a different model.
+  //
+  // It is a TIE-BREAK, not a filter. It runs only after every earlier
+  // fuzzyLookup stage returned null, and only picks between candidates that
+  // already matched on surname and initial. Nothing here can reject a lookup
+  // that would otherwise have resolved -- which is the whole difference from
+  // the roster GATE immediately below, disabled in 2026-07 after it
+  // over-rejected ~90 batters a slate, twice.
+  const onTeam = _onTeamPredicate(rosterSet);
+  // minSample is MIN_PA, read from the caller rather than written here, and
+  // it applies to the ACTUALS lookups only. A projection row's `sample` is a
+  // fractional PA share (0.31, 0.69), so a 60-PA floor on bat-proj-* would
+  // reject essentially the entire projection index.
+  const actOpts = { minSample: minPA, onTeam };
   // Roster gate is INTENTIONALLY DISABLED — see buildRosterGatedIdx
   // above for the full rationale. Shadow bugs are now fixed at the
   // ingest layer (Option b — routes/api.js ingestWobaCSV dedup) and
@@ -476,12 +502,12 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, 
 
   const bL = blendWoba(
     fuzzyLookup(lookupIdx['bat-proj-lhp'], name, teamHint),
-    fuzzyLookup(lookupIdx['bat-act-lhp'], name, teamHint),
+    fuzzyLookup(lookupIdx['bat-act-lhp'], name, teamHint, actOpts),
     minPA, wProj, wAct, pf, BATTER_ACT_FULL_WEIGHT_PA
   );
   const bR = blendWoba(
     fuzzyLookup(lookupIdx['bat-proj-rhp'], name, teamHint),
-    fuzzyLookup(lookupIdx['bat-act-rhp'], name, teamHint),
+    fuzzyLookup(lookupIdx['bat-act-rhp'], name, teamHint, actOpts),
     minPA, wProj, wAct, pf, BATTER_ACT_FULL_WEIGHT_PA
   );
   const eff = hand==='S' ? 'R' : (hand||'R');
