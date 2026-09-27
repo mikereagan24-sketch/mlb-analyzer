@@ -47,6 +47,7 @@ const { db, q } = require('../db/schema');
 const model = require('./model');
 const jobs  = require('./jobs');
 const { impliedP } = require('./model');
+const { pythagWinProb } = require('../utils/pythag-win-prob');
 // Backtest-only resolver (UNIONs active 26-man + season fullSeason).
 // See services/jobs.js resolveBacktestMlbId. Imported under the
 // historical name to minimize diff churn against the team-level
@@ -145,13 +146,13 @@ function buildBacktestGame(gameRow, settings) {
 // chooseMlSignaledSide pattern in empirical-market-capture.js.
 // ============================================================
 
+// Thin adapter: this harness only ever wants the clamped home win prob.
+// The arithmetic itself lives in utils/pythag-win-prob.js, shared with the
+// two price paths in services/model.js and with /debug/model-trace, so a
+// change to how a price is formed cannot leave the harness measuring the
+// old shape.
 function pythagHomeWp(aRuns, hRuns, pythExp, hfaBoost, wpLo, wpHi) {
-  let rawHW;
-  if (aRuns <= 0 && hRuns <= 0) rawHW = 0.5;
-  else if (hRuns <= 0)          rawHW = 0.25;
-  else if (aRuns <= 0)          rawHW = 0.75;
-  else rawHW = Math.pow(hRuns, pythExp) / (Math.pow(hRuns, pythExp) + Math.pow(aRuns, pythExp));
-  return Math.min(Math.max(rawHW + hfaBoost, wpLo), wpHi);
+  return pythagWinProb(aRuns, hRuns, pythExp, hfaBoost, wpLo, wpHi).adjHW;
 }
 
 // Pick model-signaled side from per-side implied probs + market prices.

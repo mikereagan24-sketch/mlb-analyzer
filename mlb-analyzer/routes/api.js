@@ -64,6 +64,7 @@ const { nearMissFor } = require('../utils/near-miss');
 const { seasonRosterSet, onTeamPredicate } = require('../services/season-roster');
 const { calcCLV, clvForSignal } = require('../services/clv');
 const { windBadge: _windBadge } = require('../utils/wind-badge');
+const { pythagWinProb } = require('../utils/pythag-win-prob');
 const router = express.Router();
 
 // Shared admin-token middleware. Originally extracted from the
@@ -7904,10 +7905,8 @@ router.get('/debug/model-trace', (req, res) => {
     const aRuns = Math.max(0, (aTeamWoba - WOBA_BASELINE) * RUN_MULT * pf);
     const hRuns = Math.max(0, (hTeamWoba - WOBA_BASELINE) * RUN_MULT * pf);
 
-    const rawHW = (aRuns<=0&&hRuns<=0) ? 0.5 : hRuns<=0 ? 0.25 : aRuns<=0 ? 0.75 :
-      Math.pow(hRuns, PYTH_EXP) / (Math.pow(hRuns, PYTH_EXP) + Math.pow(aRuns, PYTH_EXP));
-    const adjHW = Math.min(Math.max(rawHW + HFA_BOOST, WP_CLAMP_LO), WP_CLAMP_HI);
-    const adjAW = 1 - adjHW;
+    const { rawHW, adjHW, adjAW } = pythagWinProb(
+      aRuns, hRuns, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
 
     const rawAML = adjAW >= 0.5 ? -Math.round(adjAW/(1-adjAW)*100) : Math.round((1-adjAW)/adjAW*100);
     const rawHML = adjHW >= 0.5 ? -Math.round(adjHW/(1-adjHW)*100) : Math.round((1-adjHW)/adjHW*100);

@@ -50,6 +50,7 @@ const VENUE_ID_OVERRIDES = {
 };
 
 const { normName, fuzzyLookup, stripSfx } = require('../utils/names');
+const { pythagWinProb } = require('../utils/pythag-win-prob');
 const { pickVenueOverride } = require('./scraper');
 const { getWobaParkFactor, neutralizeWoba, computeStintWeightedFactor } = require('./park-factors-woba');
 const stintCache = require('./stint-cache');
@@ -1419,10 +1420,8 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const aRuns = Math.max(0, aRunsRaw - aFramingAdj - aDefenseAdj);
   const hRuns = Math.max(0, hRunsRaw - hFramingAdj - hDefenseAdj);
 
-  const rawHW = (aRuns<=0&&hRuns<=0)?0.5 : hRuns<=0?0.25 : aRuns<=0?0.75 :
-    hRuns**PYTH_EXP/(hRuns**PYTH_EXP+aRuns**PYTH_EXP);
-  const adjHW = Math.min(Math.max(rawHW+HFA_BOOST, WP_CLAMP_LO), WP_CLAMP_HI);
-  const adjAW = 1-adjHW;
+  const { rawHW, adjHW, adjAW } = pythagWinProb(
+    aRuns, hRuns, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
 
   const rawAML = rawToML(adjAW, WP_CLAMP_LO, WP_CLAMP_HI);
   const rawHML = rawToML(adjHW, WP_CLAMP_LO, WP_CLAMP_HI);
@@ -1449,10 +1448,8 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     const hRunsRawAlt = Math.max(0,(hTeamWobaAlt-WOBA_BASELINE)*RUN_MULT*pf);
     const aRunsAlt = Math.max(0, aRunsRawAlt - aFramingAdj - aDefenseAdj);
     const hRunsAlt = Math.max(0, hRunsRawAlt - hFramingAdj - hDefenseAdj);
-    const rawHWAlt = (aRunsAlt<=0&&hRunsAlt<=0)?0.5 : hRunsAlt<=0?0.25 : aRunsAlt<=0?0.75 :
-      hRunsAlt**PYTH_EXP/(hRunsAlt**PYTH_EXP+aRunsAlt**PYTH_EXP);
-    const adjHWAlt = Math.min(Math.max(rawHWAlt+HFA_BOOST, WP_CLAMP_LO), WP_CLAMP_HI);
-    const adjAWAlt = 1-adjHWAlt;
+    const { rawHW: rawHWAlt, adjHW: adjHWAlt, adjAW: adjAWAlt } = pythagWinProb(
+      aRunsAlt, hRunsAlt, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
     const rawAMLAlt = rawToML(adjAWAlt, WP_CLAMP_LO, WP_CLAMP_HI);
     const rawHMLAlt = rawToML(adjHWAlt, WP_CLAMP_LO, WP_CLAMP_HI);
     const { adjA:aMLAlt, adjH:hMLAlt } = applySpread(rawAMLAlt, rawHMLAlt, FAV_ADJ, DOG_ADJ);
