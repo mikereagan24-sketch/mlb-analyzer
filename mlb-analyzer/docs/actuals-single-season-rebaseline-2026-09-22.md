@@ -938,3 +938,97 @@ smuggled in here.
    season stored, every sample restarts each March. A true trailing
    two-year window carries the prior season through the spring, so that
    cliff should disappear with the fix rather than need its own change.
+
+## Stored historical prices cannot be reproduced by replay, and that is a consequence of the input fixes above (2026-09-27)
+
+**Replaying an old date is not a check on what production signaled then.**
+Measured while dry-running the BsR enable: re-scoring a game through the
+sanctioned replay path — `parameter-sweep.preScreenGame` →
+`harness-inputs.populateCallerInputs` → `model.runModel` — reproduces the
+stored `game_log.model_home_ml` **exactly 2.3% of the time** across this
+corpus, and the reproduction rate decays monotonically with the age of the
+row:
+
+| window | n | exact | median \|diff\| of the rest |
+|---|---|---|---|
+| 2026-09-24 .. 26 | 43 | 37.2% | 6 ML points |
+| 2026-09-15 .. 20 | 84 | 7.1% | 5 |
+| 2026-08-01 .. 05 | 38 | 2.6% | 12 |
+| 2026-06-15 .. 20 | 69 | **1.4%** | 21 |
+
+Stride-4 over the whole forward window: 256 games, 6 exact (2.3%), median
+\|diff\| 9 ML points, p90 217, mismatches on 98 distinct dates.
+
+**The monotone decay with age is what identifies the cause.** A code
+disagreement between the harness and production would be age-independent.
+A vintage difference cannot be anything else: `woba_data_snapshot` content
+for historical dates has been **rewritten** by the ingest fixes recorded
+above — the five regimes, the 0.210 floor going on and coming off, the
+MIN_PA sample floor, the single-season re-baseline. Replaying 2026-06-20
+feeds the model the actuals that row holds *today*, not the actuals
+production read that morning. The older the row, the more rewriting has
+happened between the two.
+
+### What this does and does not invalidate
+
+**Paired within-replay comparisons remain valid, and the cancellation is
+to FIRST ORDER — not exact.** Every A/B in this ledger and in the gate
+registry scores both arms from the *same* `wrapped` object and the *same*
+`runModel` result, with the term under test applied afterwards, so a
+vintage shift moves the common baseline and drops out of the difference at
+leading order.
+
+It does not cancel exactly, and the reason is the Pythagorean step. A
+term's effect on win probability is not a constant: `pythagWinProb` is
+nonlinear in `aRuns`/`hRuns`, so the same +0.05 runs moves `adjHW` by
+slightly different amounts depending on the baseline run expectation the
+term is added to — and input vintage is precisely what shifts that
+baseline. The residual is second order in (vintage shift) x (term size).
+
+At BsR's magnitude that residual is negligible: the term is 0.03-0.15
+runs against baselines of 2.3-6 runs, and the observed `delta_log_loss`
+values are ~2e-4. It is not a reason to distrust any measured delta in
+this ledger. It IS a reason not to write "exact" — a future term an order
+of magnitude larger, or a vintage shift an order of magnitude larger,
+would not get the same free pass, and the arithmetic that licenses the
+claim should be stated rather than assumed.
+
+**What is invalidated is a narrower claim, and it is one that is easy to
+make by accident:** that a replayed price equals the price production
+emitted, or that a replayed bet decision is the signal production sent.
+It is not. A replayed `side` column answers "what would production do
+now, with current inputs" — the right question for a go-live decision,
+and the wrong one for reconstructing history.
+
+Consequences worth carrying:
+
+1. **Never difference a replayed absolute price against a stored one.**
+   Anything wanting emit-time prices must read the persisted columns
+   (`model_home_ml`, `model_away_ml`, `model_total`) or
+   `empirical_market_captures`, not a re-run.
+2. **A single-game agreement check between replay and a stored price is
+   not a test of anything** unless the row is from today. At 2.3% base
+   rate, a mismatch is the expected outcome and proves nothing; at 37%
+   even for the freshest three days, a *match* is the surprise.
+3. This is why the #465 harness/production agreement gate is specified on
+   **inputs**, not on prices. That was the right call and this
+   measurement is the reason it stays that way.
+
+### How it was found, including the wrong turn
+
+The dry run reported `model_home_ml` reproduced exactly on 13 of 14 games
+on the current slate, with one exception (chc-bos, replay −111 vs stored
+−121), and that exception was initially treated as a defect to chase. Two
+hypotheses were tested and both refuted: it is not an opener-mode
+mismatch (`is_opener_game_*` both 0, `opener_model_home_ml` null), and it
+is not a lineup swap (its projected and current lineups are identical,
+and both replay to −111 — while cle-kc, whose lineups *did* change,
+replays to its stored −121 exactly).
+
+Only then was the base rate measured, and the premise dissolved: 13/14 is
+an artifact of the slate being same-day, not evidence of general fidelity.
+chc-bos is unremarkable — it is one of the 63% of even the freshest rows
+that do not reproduce. **The generalisation from one day's 93% to "the
+replay reproduces production" was the actual error**, and it is recorded
+here because the same inference is available to anyone who spot-checks a
+recent date and stops.
