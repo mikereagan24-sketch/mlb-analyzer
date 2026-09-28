@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // The wOBA ingest admission rule, driven through the REAL parseCSV.
-//   <node20>/node.exe --max-old-space-size=1536 scripts/test-woba-ingest-admission.js
+//   <node>/node.exe --max-old-space-size=1536 scripts/test-woba-ingest-admission.js
 // Exit 1 on any failure.
 //
 // WHY THIS EXISTS. This rule has now been wrong twice, in opposite directions,

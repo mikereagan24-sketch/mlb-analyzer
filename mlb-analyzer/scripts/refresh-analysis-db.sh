@@ -97,10 +97,29 @@ PINNED_MAJOR="${PINNED%%.*}"
 # nvm-for-windows keeps versions at <root>/v<x.y.z>/node.exe; nvm on
 # POSIX uses ~/.nvm/versions/node/v<x.y.z>/bin/node. Both are tried so
 # this is not a Windows-only script.
+#
+# NVM-WINDOWS 2.x MOVED THE VERSIONS. (2026-09-28) 1.x kept them directly
+# under the nvm folder (%LOCALAPPDATA%\nvm\v20.20.2); 2.x installs to
+# %LOCALAPPDATA%\Author Software\nvm and keeps versions under installs\,
+# and does not set NVM_HOME. On this machine no root below matched, so
+# steps 2 and 3 found nothing and the script only worked by falling
+# through to PATH node. The roots are therefore derived, not written out:
+# from wherever the nvm executable itself lives (both layouts, since the
+# versions sit either beside it or in installs\), then from NVM_HOME and
+# LOCALAPPDATA in both layouts. A root that does not exist costs one
+# failed -x test.
 nvm_roots() {
-  [ -n "${NVM_HOME:-}" ] && printf "%s\n" "$NVM_HOME"
-  [ -n "${LOCALAPPDATA:-}" ] && printf "%s\n" "$LOCALAPPDATA/nvm"
-  printf "%s\n" "$HOME/AppData/Local/nvm"
+  local nvm_exe nvm_dir
+  nvm_exe="$(command -v nvm 2>/dev/null || true)"
+  if [ -n "$nvm_exe" ] && [ -f "$nvm_exe" ]; then
+    nvm_dir="$(dirname "$nvm_exe")"
+    printf "%s\n" "$nvm_dir/installs" "$nvm_dir"
+  fi
+  [ -n "${NVM_HOME:-}" ] && printf "%s\n" "$NVM_HOME/installs" "$NVM_HOME"
+  if [ -n "${LOCALAPPDATA:-}" ]; then
+    printf "%s\n" "$LOCALAPPDATA/Author Software/nvm/installs" "$LOCALAPPDATA/nvm"
+  fi
+  printf "%s\n" "$HOME/AppData/Local/Author Software/nvm/installs" "$HOME/AppData/Local/nvm"
   printf "%s\n" "$HOME/.nvm/versions/node"
 }
 
@@ -152,11 +171,12 @@ if [ -z "$NODE" ]; then
   echo "  PATH node:          $(node --version 2>/dev/null || echo none)" >&2
   echo "  tried: $(candidates | tr '\n' ' ')" >&2
   echo "" >&2
-  echo "  better-sqlite3 here is built for NODE_MODULE_VERSION 115 (Node 20)." >&2
+  echo "  better-sqlite3 here must be built for the pinned major (Node ${PINNED_MAJOR:-?})," >&2
+  echo "  and no candidate above could open a database with it." >&2
   echo "  Fix one of:" >&2
-  echo "    nvm install ${PINNED:-20.20.2} && nvm use ${PINNED:-20.20.2}" >&2
-  echo "    NODE_BIN=/path/to/node20 bash scripts/refresh-analysis-db.sh --promote" >&2
-  echo "    npm rebuild better-sqlite3   # if you MEANT to move to a new major" >&2
+  echo "    nvm install ${PINNED:-<pin>} && nvm use ${PINNED:-<pin>}" >&2
+  echo "    NODE_BIN=/path/to/node${PINNED_MAJOR:-} bash scripts/refresh-analysis-db.sh --promote" >&2
+  echo "    npm rebuild better-sqlite3 --build-from-source   # after moving the pin to a new major" >&2
   exit 4
 fi
 

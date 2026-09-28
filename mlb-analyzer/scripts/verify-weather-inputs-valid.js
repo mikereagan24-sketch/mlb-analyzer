@@ -19,7 +19,7 @@
 // the weather both ways off the same archive endpoint the 08-05 backfill
 // used, and ask which one the stored columns match.
 //
-// Run: "$NODE20" --max-old-space-size=1536 scripts/verify-weather-inputs-valid.js
+// Run: "$NODE" --max-old-space-size=1536 scripts/verify-weather-inputs-valid.js
 // Read-only, ~66 archive fetches, about 30s. Cited by the
 // weather_inputs_valid comment in db/schema.js.
 const Database = require('better-sqlite3');

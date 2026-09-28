@@ -13,8 +13,8 @@
 //
 // SHOW PROGRESS — no silent background. Logs per-game as it goes.
 //
-// Run with the Node 20 path:
-//   "<node20>" scripts/backtest-park-neutral.js
+// Run with the pinned Node (.node-version):
+//   "<node>" scripts/backtest-park-neutral.js
 
 var _schema = require('../db/schema');
 var db    = _schema.db;

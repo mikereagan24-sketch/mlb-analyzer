@@ -24,7 +24,7 @@
 // Discipline mirrors the W_PROJ sweep: rolling chronological folds,
 // date-clustered bootstrap CIs, Val:Fit, deterministic seed.
 //
-// Run: <node20>/node.exe scripts/calibration-sweep.js [param] [baseline] [from] [to]
+// Run: <node>/node.exe scripts/calibration-sweep.js [param] [baseline] [from] [to]
 //   default: W_PIT_W_BAT 0.40 2026-06-01 2026-08-07
 const path = require('path');
 const Database = require('better-sqlite3');

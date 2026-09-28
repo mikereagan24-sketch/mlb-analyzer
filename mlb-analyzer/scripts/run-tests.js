@@ -63,9 +63,10 @@ function countFailures(out, code) {
 
 // REFUSE TO RUN UNDER A NODE THAT CANNOT OPEN THE DATABASE. (2026-09-18)
 //
-// `npm test` resolves `node` from PATH, and PATH on this machine is Node
-// 24 while better-sqlite3's binding is built for Node 20 (ABI 115 vs
-// 137). Every suite that touches db/schema then dies with
+// `npm test` resolves `node` from PATH, and PATH on this machine was Node
+// 24 while better-sqlite3's binding was built for Node 20 (ABI 115 vs
+// 137). The same holds for any PATH node whose major differs from the one
+// the binding was built for -- the pin in .node-version. Every suite that touches db/schema then dies with
 // ERR_DLOPEN_FAILED before printing a single assertion, and this runner
 // counts that as "failures: unparseable (exit 1)".
 //
@@ -98,9 +99,10 @@ try {
   if (target) console.error('  pinned target: ' + target.version.join('.') + '  (' + target.source + ')');
   console.error('  error        : ' + String(e && e.message).split('\n')[0]);
   console.error('');
-  console.error('  `npm test` takes `node` from PATH. Run the suite with Node 20:');
-  console.error('    "C:\\Users\\Mike Reagan\\AppData\\Local\\nvm\\v20.20.2\\node.exe" scripts/run-tests.js');
-  console.error('  or switch the shell first (nvm use 20.20.2) and re-run npm test.');
+  const pin = target ? target.version.join('.') : '<the version in .node-version>';
+  console.error('  `npm test` takes `node` from PATH. Run the suite with the pinned Node:');
+  console.error('    nvm use ' + pin + '   then re-run npm test,');
+  console.error('  or call that version\'s node.exe by its full path: <node> scripts/run-tests.js');
   process.exit(2);   // 2, not 1 -- this is "could not run", not "tests failed"
 }
 

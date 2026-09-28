@@ -2,7 +2,7 @@
 'use strict';
 // How much of the near-miss badge's signal was cross-team noise? (2026-09-23)
 //
-//   <node20>/node.exe --max-old-space-size=1536 scripts/measure-near-miss-cross-team.js
+//   <node>/node.exe --max-old-space-size=1536 scripts/measure-near-miss-cross-team.js
 //
 // WHY. The badge flags a batter whose actuals row did not resolve but whose
 // SURNAME sits in the actuals index, on the theory that a surname present

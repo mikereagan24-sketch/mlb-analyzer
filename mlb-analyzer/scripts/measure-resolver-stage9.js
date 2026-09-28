@@ -2,7 +2,7 @@
 'use strict';
 // Stage 9's two rules, measured SEPARATELY so neither is credited with the
 // other's fixes.
-//   <node20>/node.exe --max-old-space-size=1536 scripts/measure-resolver-stage9.js
+//   <node>/node.exe --max-old-space-size=1536 scripts/measure-resolver-stage9.js
 // Exit 1 if LOST or CHANGED is non-zero in any arm.
 //
 // ARMS, each built by adding one opt to the same fuzzyLookup call:

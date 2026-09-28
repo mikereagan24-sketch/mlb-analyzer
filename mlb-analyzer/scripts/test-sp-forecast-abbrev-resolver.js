@@ -10,7 +10,7 @@
 //   - A negative case: full-name lookup should keep working via the
 //     existing exact + normalized-exact paths.
 //
-// Run: <node20>/node scripts/test-sp-forecast-abbrev-resolver.js
+// Run: <node>/node scripts/test-sp-forecast-abbrev-resolver.js
 
 'use strict';
 

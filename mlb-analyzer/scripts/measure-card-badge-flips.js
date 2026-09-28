@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // Before/after on the matchup card's near-miss badges. Read-only.
-//   <node20>/node.exe --max-old-space-size=1536 scripts/measure-card-badge-flips.js [YYYY-MM-DD]
+//   <node>/node.exe --max-old-space-size=1536 scripts/measure-card-badge-flips.js [YYYY-MM-DD]
 //
 // BEFORE  the card's resolver with no stage-9 opts, and the badge predicate
 //         built from utils/near-miss.js rosterPredicate over daily UNION season

@@ -10,7 +10,7 @@
 //   5. A second simulated rerun stays at 1 row per (type, side)
 //      (idempotency of the rerun path).
 //
-// Run: <node20>/node scripts/test-dedupe-idempotency.js
+// Run: <node>/node scripts/test-dedupe-idempotency.js
 'use strict';
 
 const Database = require('better-sqlite3');

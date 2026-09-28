@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // PRODUCTION AND HARNESS MUST RESOLVE THE SAME SLOT THE SAME WAY.
-//   <node20>/node.exe --max-old-space-size=1536 scripts/test-harness-prod-roster-agreement.js
+//   <node>/node.exe --max-old-space-size=1536 scripts/test-harness-prod-roster-agreement.js
 // Exit 1 on any disagreement, or if LOST or CHANGED is non-zero.
 //
 // WHY THIS IS THE GATE AND NOT A NICETY. Stage 9 (utils/names.js) breaks an
