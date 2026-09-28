@@ -258,29 +258,51 @@ const cands = db.prepare(
   "SELECT * FROM game_log WHERE away_bullpen_woba IS NOT NULL AND home_bullpen_woba IS NOT NULL "
   + "AND away_catcher_framing_state IS NOT NULL AND model_total IS NOT NULL "
   + "AND home_score IS NOT NULL AND market_home_ml IS NOT NULL ORDER BY game_date DESC LIMIT 200").all();
-let probe = null;
+// THE PROBE MUST BE A ROW WHERE THE SWAP IS VISIBLE. (2026-09-27)
+//
+// This used to take the newest accepted row and then assert legacy and
+// persisted p(home) differ on it. On 2026-09-27 the newest row was
+// 2026-09-25 lad-sf -- one of only 2 of the 200 candidates where the two
+// input paths happen to produce the same p(home) (the other: 2026-09-19
+// sf-lad). The assertion failed on a coincidence, not on a broken swap.
+//
+// So walk newest-first to the first row where they DIFFER, and report the
+// coincident rows passed over. The cap keeps the property with teeth: if the
+// swap stops reaching runModel, no row differs and this fails after PROBE_CAP
+// rows (~0.8s each) instead of silently scanning all 200 (~2.5 min).
+const PROBE_CAP = 20;
+const adjHW = (g, idx) => {
+  const r = quiet(() => runModel(g, idx, settings, 'opener_aware', true));
+  return r && r.adjHW != null ? r.adjHW : null;
+};
+let probe = null, accepted = 0;
+const coincident = [];
 for (const c of cands) {
+  if (accepted >= PROBE_CAP) break;
   const idx = ps.loadWobaSnapshot(db, c.game_date);
   if (!idx) continue;
-  const pre = quiet(() => ps.preScreenGame(c, idx, settings));
-  if (pre) { probe = { c, idx }; break; }
-}
-check('found a probe row preScreenGame accepts', !!probe, true);
-if (probe) {
-  const persisted = quiet(() => hi.populateCallerInputs(ps.preScreenGame(probe.c, probe.idx, settings), probe.c, settings));
+  if (!quiet(() => ps.preScreenGame(c, idx, settings))) continue;
+  accepted++;
+  const persisted = quiet(() => hi.populateCallerInputs(ps.preScreenGame(c, idx, settings), c, settings));
   process.env.HARNESS_INPUTS = 'legacy';
-  const legacy = quiet(() => hi.populateCallerInputs(ps.preScreenGame(probe.c, probe.idx, settings), probe.c, settings));
+  const legacy = quiet(() => hi.populateCallerInputs(ps.preScreenGame(c, idx, settings), c, settings));
   delete process.env.HARNESS_INPUTS;
+  const pP = adjHW(persisted, idx), pL = adjHW(legacy, idx);
+  if (pP != null && pL != null && Math.abs(pP - pL) > 1e-12) { probe = { c, persisted }; break; }
+  coincident.push(c.game_date + ' ' + c.game_id);
+}
+console.log('  probe: ' + (probe ? probe.c.game_date + ' ' + probe.c.game_id : 'none')
+  + ' after ' + accepted + ' accepted row(s); passed over where legacy == persisted: '
+  + (coincident.length ? coincident.join(', ') : 'none'));
+check('runModel p(home) differs between legacy and persisted inputs on one of the '
+  + PROBE_CAP + ' newest accepted rows (the swap is seen)', !!probe, true);
+if (probe) {
   check('persisted bullpen equals the column on ' + probe.c.game_date + ' ' + probe.c.game_id,
-    [persisted.awayBullpenWoba, persisted.homeBullpenWoba],
+    [probe.persisted.awayBullpenWoba, probe.persisted.homeBullpenWoba],
     [probe.c.away_bullpen_woba, probe.c.home_bullpen_woba]);
   check('persisted framing equals the column',
-    [persisted.awayCatcherFramingRvPerGame, persisted.homeCatcherFramingRvPerGame],
+    [probe.persisted.awayCatcherFramingRvPerGame, probe.persisted.homeCatcherFramingRvPerGame],
     [probe.c.away_catcher_framing_rv_per_game, probe.c.home_catcher_framing_rv_per_game]);
-  const pP = quiet(() => runModel(persisted, probe.idx, settings, 'opener_aware', true));
-  const pL = quiet(() => runModel(legacy, probe.idx, settings, 'opener_aware', true));
-  check('runModel p(home) differs between legacy and persisted inputs (the swap is seen)',
-    !!(pP && pL && pP.adjHW != null && pL.adjHW != null && Math.abs(pP.adjHW - pL.adjHW) > 1e-12), true);
 }
 
 console.log('');

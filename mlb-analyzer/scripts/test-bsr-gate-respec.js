@@ -133,8 +133,25 @@ console.log('  live: closing_line by type -- ML ' + sigMl.cl + '/' + sigMl.n
   + ' | prong captures (morning+gametime) ' + bothCaps + '/' + scored);
 ok('snapshot-days precondition genuinely met', snapDays >= 60, snapDays + ' >= 60');
 ok('forward-games precondition genuinely met', since >= 500, since + ' >= 500');
-ok('closing-line coverage is broad (context, not the prong population)',
-   sig.cl > 5 * sig.lg, sig.cl + ' with a closing line vs ' + sig.lg + ' logged');
+
+// THE CLOSING-LINES-VS-LOGGED RATIO IS GONE TOO. (2026-09-27)
+//
+// It read:
+//
+//   ok('closing-line coverage is broad (context, not the prong population)',
+//      sig.cl > 5 * sig.lg, ...)
+//
+// It passed pre-refresh by exactly 1 and then failed by 72 (1508 vs
+// 5 x 316) -- not because coverage fell but because logged bets grew
+// faster than closing lines. Logged bets are not an input to the prong
+// (see "the 348 are named as HARNESS-SIGNALED, not logged bets" above), so
+// the ratio measured two unrelated growth rates against a bar set so it
+// would pass on the day it was written. Its own label said "not the prong
+// population". Loosening the multiple would only re-arm the same drift.
+//
+// What it gestured at -- "are closing prices broadly available" -- is
+// asserted directly by the two coverage checks below: ML closing lines on
+// the ML-only prong, and morning+gametime captures per scored game.
 
 // THE POOLED >90% ASSERTION IS GONE. (2026-09-18)
 //
