@@ -29,16 +29,17 @@ Go to [render.com](https://render.com) and sign up (free).
 ### Step 3 — Create a new Web Service
 1. Click **New +** → **Web Service**
 2. Connect your GitHub account and select the `mlb-analyzer` repo
-3. Render will auto-detect the `render.yaml` — confirm the settings:
+3. Set these in the dashboard (the service is configured there, not by a
+   file in the repo -- see "Render" in CLAUDE.md):
    - **Runtime**: Node
-   - **Build Command**: `npm install`
+   - **Build Command**: `npm install --prefer-offline && npm rebuild better-sqlite3 --build-from-source`
    - **Start Command**: `npm start`
    - **Plan**: Free
 
 ### Step 4 — Add environment variables
 In Render dashboard → your service → **Environment**:
 - `ANTHROPIC_API_KEY` = your Anthropic API key (get from console.anthropic.com)
-- `RENDER` = `true` (already in render.yaml)
+- `RENDER` = `true`
 
 ### Step 5 — Add persistent disk
 In Render dashboard → your service → **Disks**:
