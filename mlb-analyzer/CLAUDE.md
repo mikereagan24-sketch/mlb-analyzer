@@ -1947,9 +1947,36 @@ afternoon; a false all-clear costs more.
   <running>` the moment a script opens the database; `scripts/run-tests.js`
   and `scripts/refresh-analysis-db.sh` both check for that up front. After
   changing the pin, rebuild with `npm rebuild better-sqlite3
-  --build-from-source` -- the same command Render's build runs. 9.6.0 ships
-  no Node 22 prebuilds, so this compiles; on Windows it needs the Visual
-  Studio Build Tools "Desktop development with C++" workload.
+  --build-from-source` -- the same rebuild Render's build runs (see the
+  next note). 9.6.0 ships no Node 22 prebuilds, so this compiles; on
+  Windows it needs the Visual Studio Build Tools "Desktop development
+  with C++" workload.
+- **Render: the dashboard is the source of truth for build and start.**
+  (2026-09-28) The service is NOT Blueprint-managed (checked on the
+  dashboard's Blueprints page), so no file in this repo configures it.
+  There used to be a `render.yaml`; it was dead config and was deleted.
+  It had been invalid YAML from 2026-04-03 to 06-19 with no effect on
+  deploys, and it said `plan: free` next to a `/data` disk. Its build
+  command also silently disagreed with the real one -- which is what broke
+  the first Node 22 deploy (#475). The real build command, as set in the
+  dashboard:
+
+  ```
+  npm install --prefer-offline && npm rebuild better-sqlite3 --build-from-source
+  ```
+
+  **Why the rebuild step matters.** `npm install --prefer-offline`
+  restores `node_modules` from Render's build cache, and a cached
+  better-sqlite3 keeps the native binary built for whatever Node the
+  cache was made under. After the 20 -> 22 pin change the build
+  succeeded, then startup died on `NODE_MODULE_VERSION 115 vs 127`. The
+  rebuild recompiles the binding for the running Node on every deploy,
+  so a pin change cannot ship a stale binary. Keep it for as long as
+  better-sqlite3 is a dependency. After changing the pin, also clear the
+  build cache on the first deploy ("Clear build cache & deploy"), which
+  is what fixed #475. Any change to build, start, env vars or the disk is
+  made in the dashboard and recorded here, since nothing in the repo will
+  show it.
 - **Branch discipline:** every non-trivial change lives on its own
   `feat/…`, `fix/…`, `docs/…`, `chore/…` branch. Confirm
   `git branch --show-current` matches the brief's named branch before

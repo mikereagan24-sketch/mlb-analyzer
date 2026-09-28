@@ -615,8 +615,8 @@ app.listen(PORT, () => {
         // buys it back for one boot without a code change.
         //
         // Set BOOT_PREFETCH=1 in the Render dashboard to re-enable. It is
-        // deliberately NOT in render.yaml -- committing it there with a
-        // value is how a default-off flag quietly becomes default-on.
+        // deliberately NOT given a committed default anywhere -- doing that
+        // is how a default-off flag quietly becomes default-on.
         const BOOT_PREFETCH = process.env.BOOT_PREFETCH === '1';
         const d = new Date();
         d.setDate(d.getDate() + 1);
