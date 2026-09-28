@@ -158,6 +158,13 @@ function checkDeps(opts) {
         // exports map's "require" condition, so it lands on the CJS entry
         // when one exists.
         row.resolvesToEsm = resolvedIsEsm(name);
+        // NOT REACHED AT THE CURRENT PIN. (2026-09-28) .node-version is
+        // 22.23.3, where require(ESM) works unflagged, so with no
+        // opts.target this branch never fires. It is kept, not removed,
+        // for two callers: scripts/test-dep-check.js asserts the #364 shape
+        // at an explicit 20.11.0 target, and a rollback of the pin to 20.x
+        // needs it back. It covers v20 only: 21.x and 22.0-22.11 also
+        // cannot require() ESM unflagged, and are not checked here.
         if (row.resolvesToEsm === true && target.version[0] === 20
             && cmp(target.version, REQUIRE_ESM_MIN_V20) < 0) {
           row.issues.push('require() resolves to an ESM file, but deploy target Node '

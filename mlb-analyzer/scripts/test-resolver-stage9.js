@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // Stage 9: abbreviation ambiguity broken by SAMPLE then by ROSTER.
-//   <node20>/node.exe --max-old-space-size=1536 scripts/test-resolver-stage9.js
+//   <node>/node.exe --max-old-space-size=1536 scripts/test-resolver-stage9.js
 // Exit 1 on any failure.
 //
 // WHY. Stage 6 returns a hit only on an exactly-one global match, so two

@@ -9,7 +9,7 @@
 //   node --max-old-space-size=1536 scripts/test-download-db-gzip.js --file data/mlb.db.prod-YYYYMMDD
 //       measure bytes on the wire, identity vs gzip, for a real snapshot
 //
-// Run under Node 20 (better-sqlite3). The server here mirrors the route:
+// Run under the pinned Node (.node-version; better-sqlite3). The server here mirrors the route:
 // db.backup() to a side file, stream that file, unlink on completion.
 
 const fs = require('fs');

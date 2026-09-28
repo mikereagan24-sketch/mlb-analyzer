@@ -28,7 +28,7 @@
 // edges the model reports are systematically smaller than the honest
 // ones measured here.
 //
-// Run: <node20>/node.exe scripts/edge-honesty-scope.js [from] [to]
+// Run: <node>/node.exe scripts/edge-honesty-scope.js [from] [to]
 const path = require('path');
 const Database = require('better-sqlite3');
 const ps = require('../services/parameter-sweep');

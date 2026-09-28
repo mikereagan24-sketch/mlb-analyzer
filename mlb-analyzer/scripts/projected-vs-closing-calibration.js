@@ -27,7 +27,7 @@
 // market it is scored against. If the market sharpens over the projected
 // window, this asymmetry FLATTERS THE MODEL. Quantified in section 4.
 //
-// Run: <node20>/node.exe scripts/projected-vs-closing-calibration.js [from] [to]
+// Run: <node>/node.exe scripts/projected-vs-closing-calibration.js [from] [to]
 const path = require('path');
 const Database = require('better-sqlite3');
 

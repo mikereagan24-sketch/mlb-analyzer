@@ -3,7 +3,7 @@
 // The 0.210 batter-actuals floor: the evidence for dropping it, and the
 // before/after on every lineup lookup.
 //
-//   <node20>/node.exe --max-old-space-size=1536 scripts/verify-woba-floor-change.js
+//   <node>/node.exe --max-old-space-size=1536 scripts/verify-woba-floor-change.js
 //
 // WHY A SCRIPT AND NOT A FIGURE. The floor rejected rows inside parseCSV,
 // before anything was persisted, so its effect was invisible in the database

@@ -121,10 +121,11 @@ try {
   // CURRENT pin the ESM hazard must NOT fire. If it does, either the pin
   // regressed below 20.19 or the cutoff logic is wrong, and both are
   // worth a red test.
-  let probeOld, probeLive;
+  let probeOld, probeLive, probeV20;
   try {
     probeOld  = checkDeps({ target: '20.11.0' });
     probeLive = checkDeps();
+    probeV20  = checkDeps({ target: '20.20.2' });
   } finally { fs.writeFileSync(pkgPath, orig); }
 
   const p = probeOld.deps.find(d => d.name === '__depcheck_probe__');
@@ -146,9 +147,20 @@ try {
        || (!!pl && !pl.issues.some(i => i.indexOf('cannot require() ESM') !== -1)),
      'pin ' + (t ? t.version.join('.') : '?') + ' is '
        + (pinClearsCutoff ? 'at or past' : 'below') + ' the 20.19 require(ESM) cutoff');
-  ok('DETECTOR SELFTEST: the engines>=22 miss still fails at the current pin',
-     !!pl && pl.issues.some(i => i.indexOf('MAJOR level') !== -1),
-     'a major-level miss is fatal at any v20 target -- the bump must not have softened that');
+  // THE engines>=22 MISS IS A PROPERTY OF A v20 TARGET. (2026-09-28)
+  // This asserted the miss "at the current pin", which held while the pin
+  // was 20.x. At 22.23.3 the probe's engines are satisfied, so the miss is
+  // asserted at an explicit 20.20.2 -- past the 20.19 ESM cutoff, so this
+  // isolates the engines check -- and the current pin is asserted clean.
+  const p20 = probeV20.deps.find(d => d.name === '__depcheck_probe__');
+  ok('DETECTOR SELFTEST: the engines>=22 miss fails at a v20 target past the ESM cutoff',
+     !!p20 && p20.issues.some(i => i.indexOf('MAJOR level') !== -1),
+     'a major-level miss is fatal at any v20 target -- 20.20.2 here');
+  const pinMajor = t ? t.version[0] : 0;
+  ok('DETECTOR SELFTEST: at the CURRENT pin the engines verdict matches its major',
+     !!pl && (pl.issues.some(i => i.indexOf('MAJOR level') !== -1) === (pinMajor < 22)),
+     'pin ' + (t ? t.version.join('.') : '?') + ': engines >=22 '
+       + (pinMajor < 22 ? 'must be a MAJOR-level miss' : 'must be satisfied'));
 } finally {
   try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {}
 }

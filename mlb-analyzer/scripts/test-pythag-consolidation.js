@@ -21,7 +21,7 @@
 //      a wiring mistake (wrong argument order, a swapped clamp bound) that a
 //      unit test on the function alone would pass.
 //
-// Run: <node20>/node.exe scripts/test-pythag-consolidation.js [--full]
+// Run: <node>/node.exe scripts/test-pythag-consolidation.js [--full]
 const path = require('path');
 const Database = require('better-sqlite3');
 const ps = require('../services/parameter-sweep');

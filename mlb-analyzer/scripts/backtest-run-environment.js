@@ -9,8 +9,8 @@
 // Replicates jobs.js buildGame's framing+defense resolution (the
 // optimize-params harness's local buildGame omits it).
 //
-// Run with the Node 20 path against a fresh local data/mlb.db:
-//   "<node20>" scripts/backtest-run-environment.js
+// Run with the pinned Node (.node-version) against a fresh local data/mlb.db:
+//   "<node>" scripts/backtest-run-environment.js
 
 var _schema = require('../db/schema');
 var db    = _schema.db;

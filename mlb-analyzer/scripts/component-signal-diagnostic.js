@@ -33,7 +33,7 @@
 // The base rate is cross-fitted the same way. Fitting and scoring on the
 // same rows would make every component look predictive.
 //
-// Run: <node20>/node.exe scripts/component-signal-diagnostic.js [from] [to]
+// Run: <node>/node.exe scripts/component-signal-diagnostic.js [from] [to]
 const path = require('path');
 const Database = require('better-sqlite3');
 const ps = require('../services/parameter-sweep');

@@ -1850,7 +1850,7 @@ machine must stay under 2GB total RAM. Run local Node scripts with
 `--max-old-space-size=1536`.**
 
 ```
-"$NODE20" --max-old-space-size=1536 scripts/whatever.js
+"$NODE" --max-old-space-size=1536 scripts/whatever.js
 ```
 
 Reason: heavy local runs have repeatedly frozen **Windows Explorer** on that
@@ -1936,10 +1936,20 @@ afternoon; a false all-clear costs more.
 
 ## Other project notes
 
-- **Node version:** better-sqlite3 native binding is compiled for Node 20.
-  Local scripts must run via `<node20>/node` (nvm4w path
-  `C:\Users\Mike Reagan\AppData\Local\nvm\v20.20.2\node.exe`). Node 24 fails
-  with `NODE_MODULE_VERSION 115 vs 137`.
+- **Node version:** `.node-version` is the single source of truth (22.23.3
+  since 2026-09-28). Render runs it -- production `/health` reports
+  `runtime`, `pinned` and `matches_pin` -- and better-sqlite3 in
+  `node_modules` must be built for the same major (ABI 127 for Node 22).
+  Run local scripts with that version: `nvm use` it, or call its `node.exe`
+  by full path. The path is deliberately not written here -- nvm's install
+  folder differs between machines, and a hardcoded one went stale once
+  already. A different major fails with `NODE_MODULE_VERSION <built> vs
+  <running>` the moment a script opens the database; `scripts/run-tests.js`
+  and `scripts/refresh-analysis-db.sh` both check for that up front. After
+  changing the pin, rebuild with `npm rebuild better-sqlite3
+  --build-from-source` -- the same command Render's build runs. 9.6.0 ships
+  no Node 22 prebuilds, so this compiles; on Windows it needs the Visual
+  Studio Build Tools "Desktop development with C++" workload.
 - **Branch discipline:** every non-trivial change lives on its own
   `feat/…`, `fix/…`, `docs/…`, `chore/…` branch. Confirm
   `git branch --show-current` matches the brief's named branch before
