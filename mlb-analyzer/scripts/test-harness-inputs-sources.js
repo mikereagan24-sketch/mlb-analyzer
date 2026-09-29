@@ -50,8 +50,9 @@ const listed = new Set(hi.CALLER_POPULATED_FIELDS);
 check('runModel reads found (sanity: the scan is not empty)', reads.length > 20, true);
 check('every read a row does not supply is in FIELD_SOURCES',
   callerOnly.filter(f => !listed.has(f)), []);
-check('CALLER_POPULATED_FIELDS has 21 unique fields',
-  [hi.CALLER_POPULATED_FIELDS.length, new Set(hi.CALLER_POPULATED_FIELDS).size], [21, 21]);
+// 21 -> 23 on 2026-09-28: awayBsRPerGame / homeBsRPerGame (group 'bsr').
+check('CALLER_POPULATED_FIELDS has 23 unique fields',
+  [hi.CALLER_POPULATED_FIELDS.length, new Set(hi.CALLER_POPULATED_FIELDS).size], [23, 23]);
 check('every listed field is actually read by runModel',
   hi.CALLER_POPULATED_FIELDS.filter(f => reads.indexOf(f) === -1), []);
 check('every source column exists in game_log',
@@ -95,6 +96,8 @@ const row = {
   away_bulk_forecast_ip: 4.4, home_bulk_forecast_ip: null,
   bulk_guy_away: 'Some Bulk', bulk_guy_home: null,
   tandem_subtype_away: 'opener_bulk', tandem_subtype_home: null,
+  away_bsr_per_game: 0.0573, away_bsr_state: 'ok',
+  home_bsr_per_game: null,   home_bsr_state: 'stale_snapshot',
 };
 hi.resetHarnessInputsStats();
 const w = quiet(() => hi.populateCallerInputs({}, row, {}));
@@ -104,6 +107,8 @@ for (const f of hi.FIELD_SOURCES) {
 }
 check('framing NULL with an emit state stays NULL (a real no-framing, not a gap)',
   w.homeCatcherFramingRvPerGame, null);
+check('BsR NULL with an emit state stays NULL (priced at 0, not recomputed)',
+  w.homeBsRPerGame, null);
 // ROSTER IS POPULATED SINCE 2026-09-24, and these assertions distinguish null
 // from undefined ON PURPOSE. `check` compares with JSON.stringify, under which
 // [null, null] and [undefined, undefined] are the SAME STRING -- so the old

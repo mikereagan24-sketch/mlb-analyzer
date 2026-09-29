@@ -3026,16 +3026,19 @@ function renderFramingImpact(g){
     + '</div>';
 }
 
-// Lineup BsR display (feat/matchup-lineup-bsr-display). Per-side
-// trailing-1yr lineup-sum / team_games_played from
-// services/baserunning-util — same math the trailing backtest uses.
-// DISPLAY ONLY: this block does NOT change the model line or the
-// emitted bet. The label says so explicitly so it doesn't read as a
-// scoring input.
+// Lineup BsR (2026-09-28). Per-side trailing-1yr lineup-sum / team games
+// played, from utils/bsr-term.js -- the SAME number the moneyline price
+// uses (the route reads the value processGameSignals persisted). The note
+// says whether it is in the price right now (bsr_enabled) rather than a
+// fixed "display only", because it no longer is.
 function renderLineupBsr(g){
   if (!g || !g.lineup_bsr) return '';
   const lb = g.lineup_bsr;
-  const noteLine = '<div style="font-size:10px;color:var(--text3);margin-top:4px;font-style:italic">context only — not added to the model line or bet</div>';
+  const noteLine = '<div style="font-size:10px;color:var(--text3);margin-top:4px;font-style:italic">'
+    + (lb.applied
+        ? 'in the moneyline price: each side adds its own BsR to its runs (1x); not in the total'
+        : 'bsr_enabled is off — recorded, not in the price')
+    + '</div>';
   if (lb.status === 'unavailable') {
     return '<div style="background:var(--bg2);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px">'
       + '<div style="font-size:10px;color:var(--text2);margin-bottom:2px">Lineup baserunning (trailing 1yr)</div>'
@@ -3051,8 +3054,12 @@ function renderLineupBsr(g){
     const slotsTxt = s.slots_resolved + '/' + (s.slots_total || 9) + ' slots'
       + (s.slots_with_bsr < s.slots_resolved ? ', ' + s.slots_with_bsr + ' w/ BsR' : '');
     const stintTxt = s.slots_multi_team > 0 ? ' · <span style="color:var(--yellow)" title="players with multi-team trailing-1yr aggregation">' + s.slots_multi_team + ' multi-team</span>' : '';
+    const fbTxt = (s.status && s.status !== 'ok')
+      ? ' <span style="color:var(--yellow)" title="no usable BsR for this side; priced at 0">' + s.status + ' → 0</span>' : '';
+    const recTxt = (s.recomputed_per_game != null)
+      ? ' <span style="color:var(--text3)" title="today's inputs give a different value than the one priced">(now ' + fmtSigned(s.recomputed_per_game) + ')</span>' : '';
     return '<div style="font-size:11px"><strong>' + teamCode + '</strong>: '
-      + '<span style="font-weight:500">' + fmtSigned(s.per_game) + ' runs/game</span> '
+      + '<span style="font-weight:500">' + fmtSigned(s.per_game) + ' runs/game</span>' + fbTxt + recTxt + ' '
       + '<span style="color:var(--text3)">(sum ' + fmtSigned(s.sum_bsr) + ', ' + s.games_played + ' team G; ' + slotsTxt + stintTxt + ')</span>'
       + '</div>';
   };

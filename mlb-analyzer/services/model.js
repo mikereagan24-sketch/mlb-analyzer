@@ -814,6 +814,10 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   // opposing offense's runs, muted, gated, no-op when disabled/null.
   const DEFENSE_FRV_ENABLED = !!settings.DEFENSE_FRV_ENABLED;
   const DEFENSE_FRV_MUTE = num(settings.DEFENSE_FRV_MUTE, 0.5);
+  // Lineup baserunning (BsR), 2026-09-28. One switch; the weight is FIXED
+  // at 1.0 here, not a setting -- see settings-schema.js bsr_enabled.
+  const BSR_ENABLED = !!settings.BSR_ENABLED;
+  const BSR_WEIGHT = 1.0;
   const FAV_ADJ   = num(settings.FAV_ADJ,   0);
   const DOG_ADJ   = num(settings.DOG_ADJ,   0);
   const W_PIT     = num(settings.W_PIT,     0.5);
@@ -1420,12 +1424,50 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const aRuns = Math.max(0, aRunsRaw - aFramingAdj - aDefenseAdj);
   const hRuns = Math.max(0, hRunsRaw - hFramingAdj - hDefenseAdj);
 
+  // LINEUP BASERUNNING (BsR). A team's baserunning helps its OWN offense, so
+  // awayBsRPerGame is ADDED to the away runs (the opposite direction from
+  // framing and defense, which are the other team's). Caller-computed, like
+  // framing and FRV: processGameSignals and harness-inputs.js both fill it
+  // from utils/bsr-term.js.
+  //
+  // MONEYLINE ONLY. The term feeds the win probability and nothing else:
+  // aRuns/hRuns -- and therefore estTot below -- are untouched, so the
+  // projected total is identical with the term on or off.
+  //
+  // FUSED CLAMP: max(0, raw - framing - defense + bsr), ONE clamp over the
+  // whole sum, not max(0, max(0, raw - framing - defense) + bsr). The two
+  // differ only when the adjusted runs would go negative, and the fused one
+  // is the run estimate the terms actually describe.
+  //
+  // A missing side (null / not a number) is priced at 0 and counted in
+  // bsrFallbackSides; the caller logs it. OFF means the exact pre-BsR
+  // arithmetic -- aRunsWp IS aRuns -- so no double is touched.
+  let aBsrAdj = 0, hBsrAdj = 0, bsrFallbackSides = 0;
+  if (BSR_ENABLED) {
+    const aB = game.awayBsRPerGame, hB = game.homeBsRPerGame;
+    if (typeof aB === 'number' && isFinite(aB)) aBsrAdj = aB * BSR_WEIGHT; else bsrFallbackSides++;
+    if (typeof hB === 'number' && isFinite(hB)) hBsrAdj = hB * BSR_WEIGHT; else bsrFallbackSides++;
+  }
+  const aRunsWp = BSR_ENABLED ? Math.max(0, aRunsRaw - aFramingAdj - aDefenseAdj + aBsrAdj) : aRuns;
+  const hRunsWp = BSR_ENABLED ? Math.max(0, hRunsRaw - hFramingAdj - hDefenseAdj + hBsrAdj) : hRuns;
+
   const { rawHW, adjHW, adjAW } = pythagWinProb(
-    aRuns, hRuns, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
+    aRunsWp, hRunsWp, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
 
   const rawAML = rawToML(adjAW, WP_CLAMP_LO, WP_CLAMP_HI);
   const rawHML = rawToML(adjHW, WP_CLAMP_LO, WP_CLAMP_HI);
   const { adjA:aML, adjH:hML } = applySpread(rawAML, rawHML, FAV_ADJ, DOG_ADJ);
+
+  // BsR SHADOW: the same price without the term, from the untouched aRuns /
+  // hRuns. Persisted by processGameSignals (game_log.bsr_off_*) so the
+  // term's effect on every game is recorded, not reconstructed later.
+  let bsrOff = null;
+  if (BSR_ENABLED) {
+    const w = pythagWinProb(aRuns, hRuns, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
+    const sp = applySpread(rawToML(w.adjAW, WP_CLAMP_LO, WP_CLAMP_HI),
+      rawToML(w.adjHW, WP_CLAMP_LO, WP_CLAMP_HI), FAV_ADJ, DOG_ADJ);
+    bsrOff = { rawHW: w.rawHW, adjHW: w.adjHW, adjAW: w.adjAW, aML: sp.adjA, hML: sp.adjH };
+  }
 
   const windFactor = game.wind_factor || 0;
   const tempRunAdj = game.temp_run_adj || 0;
@@ -1448,8 +1490,12 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     const hRunsRawAlt = Math.max(0,(hTeamWobaAlt-WOBA_BASELINE)*RUN_MULT*pf);
     const aRunsAlt = Math.max(0, aRunsRawAlt - aFramingAdj - aDefenseAdj);
     const hRunsAlt = Math.max(0, hRunsRawAlt - hFramingAdj - hDefenseAdj);
+    // Same BsR term and fused clamp as the price above; the total below
+    // stays on aRunsAlt / hRunsAlt.
+    const aRunsAltWp = BSR_ENABLED ? Math.max(0, aRunsRawAlt - aFramingAdj - aDefenseAdj + aBsrAdj) : aRunsAlt;
+    const hRunsAltWp = BSR_ENABLED ? Math.max(0, hRunsRawAlt - hFramingAdj - hDefenseAdj + hBsrAdj) : hRunsAlt;
     const { rawHW: rawHWAlt, adjHW: adjHWAlt, adjAW: adjAWAlt } = pythagWinProb(
-      aRunsAlt, hRunsAlt, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
+      aRunsAltWp, hRunsAltWp, PYTH_EXP, HFA_BOOST, WP_CLAMP_LO, WP_CLAMP_HI);
     const rawAMLAlt = rawToML(adjAWAlt, WP_CLAMP_LO, WP_CLAMP_HI);
     const rawHMLAlt = rawToML(adjHWAlt, WP_CLAMP_LO, WP_CLAMP_HI);
     const { adjA:aMLAlt, adjH:hMLAlt } = applySpread(rawAMLAlt, rawHMLAlt, FAV_ADJ, DOG_ADJ);
@@ -1503,7 +1549,16 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     awayBullpenWeightUsed: awayOpenerOpts ? awayOpenerOpts.bullpenWeightUsed : null,
     homeOpenerWeightUsed:  homeOpenerOpts ? homeOpenerOpts.openerWeightUsed  : null,
     homeBulkWeightUsed:    homeOpenerOpts ? homeOpenerOpts.bulkWeightUsed    : null,
-    homeBullpenWeightUsed: homeOpenerOpts ? homeOpenerOpts.bullpenWeightUsed : null };
+    homeBullpenWeightUsed: homeOpenerOpts ? homeOpenerOpts.bullpenWeightUsed : null,
+    // BsR (2026-09-28). Present ONLY with the term on, so an off run returns
+    // exactly the pre-BsR object -- no new keys, not even undefined ones that
+    // a serialiser might keep.
+    ...(BSR_ENABLED ? {
+      awayBsrUsed: aBsrAdj, homeBsrUsed: hBsrAdj,
+      aRunsWp: aRunsWp, hRunsWp: hRunsWp,
+      bsrFallbackSides: bsrFallbackSides,
+      bsrOff: bsrOff,
+    } : {}) };
 }
 
 function catKey(signalType, signalSide, signalLabel, marketLine) {

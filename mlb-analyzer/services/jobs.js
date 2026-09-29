@@ -329,6 +329,13 @@ function getSettings() {
     CATCHER_FRAMING_ABS_FACTOR:       num('catcher_framing_abs_factor',       _d('catcher_framing_abs_factor', 0.80)),
     CATCHER_FRAMING_MIN_PITCHES_2026: num('catcher_framing_min_pitches_2026', _d('catcher_framing_min_pitches_2026', 750)),
     CATCHER_FRAMING_TAKES_PER_GAME:   num('catcher_framing_takes_per_game',   _d('catcher_framing_takes_per_game', 58)),
+    // Lineup baserunning (BsR) term. Boolean, TEXT-coerced like the two
+    // above. Weight is fixed at 1.0 in model.js -- there is no knob.
+    BSR_ENABLED: (function() {
+      const raw = s['bsr_enabled'];
+      if (raw == null) return _d('bsr_enabled', false);
+      return raw === true || raw === 'true' || raw === '1' || raw === 1;
+    })(),
     // Defensive impact (Build B). Same dormant-until-enabled pattern as framing.
     DEFENSE_FRV_ENABLED: (function() {
       const raw = s['defense_frv_enabled'];
@@ -812,6 +819,30 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     awayFieldingRunsPerGame = frvArgs(awayAbbr, gameRow.away_lineup_json);
     homeFieldingRunsPerGame = frvArgs(homeAbbr, gameRow.home_lineup_json);
   } catch (e) { /* missing table / ingest not built → null, no-op */ }
+  // Lineup baserunning (BsR), 2026-09-28. ONE implementation,
+  // utils/bsr-term.js, shared with the harness, the card and
+  // /debug/model-trace. Computed on every pass whether or not bsr_enabled is
+  // on, so the value is persisted (and the card shows it) before the switch
+  // flips; runModel applies it only when BSR_ENABLED. A side with no number
+  // prices at 0 there -- counted and logged here, never silent.
+  const _bsr = { away: null, home: null };
+  try {
+    const { lineupBsrTerm, recordBsrSide } = require('../utils/bsr-term');
+    for (const [side, abbr] of [['away', awayAbbr], ['home', homeAbbr]]) {
+      _bsr[side] = lineupBsrTerm(q, abbr, gameRow[side + '_lineup_json'], gameRow.game_date, resolveCatcherMlbId);
+      recordBsrSide(_bsr[side].status);
+    }
+    if (_bsr.away.status !== 'ok' || _bsr.home.status !== 'ok') {
+      console.warn('[bsr] ' + gameRow.game_date + '/' + gameRow.game_id + ': FALLBACK -- '
+        + 'away=' + _bsr.away.status + ' home=' + _bsr.home.status
+        + ' (snapshot ' + (_bsr.away.snapshot_date || 'none') + ')'
+        + (settings && settings.BSR_ENABLED ? '; the missing side(s) price at 0' : '; term is off'));
+    }
+  } catch (e) {
+    console.warn('[bsr] ' + gameRow.game_id + ': term failed, pricing both sides at 0: ' + (e && e.message));
+    _bsr.away = _bsr.away || { value: null, status: 'error' };
+    _bsr.home = _bsr.home || { value: null, status: 'error' };
+  }
   // Projected IP/start for each SP, drives the dynamic SP/RP split in runModel.
   // Null when no projection row exists — runModel falls back to flat SP weight.
   // NOTE: existing bullpen code at line ~86 reads gameRow.away_pitcher which
@@ -869,6 +900,10 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     // only when DEFENSE_FRV_ENABLED.
     awayFieldingRunsPerGame: awayFieldingRunsPerGame,
     homeFieldingRunsPerGame: homeFieldingRunsPerGame,
+    // Lineup BsR per game (null = no usable number; runModel prices it at 0
+    // and counts it). Applied only when BSR_ENABLED.
+    awayBsRPerGame: _bsr.away ? _bsr.away.value : null,
+    homeBsRPerGame: _bsr.home ? _bsr.home.value : null,
     // Active-roster gate: null on either side → getBatterWoba opts out
     // of the gate for that side. Backtest game-builders (frv-backtest,
     // baserunning-backtest, temp-backtest, etc.) never attach these,
@@ -1209,6 +1244,40 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     } catch (e) {
       console.warn('[weight-persist] ' + gameRow.game_id + ': ' + e.message);
     }
+  }
+  // BsR inputs + shadow. The inputs are written on every pass (term on or
+  // off) so the harness and the card read the number the price used. The
+  // shadow is written only with the term on: the win prob and ML decision
+  // WITHOUT BsR, beside the decision WITH it. getSignals is pure, so the
+  // shadow decision is the same function on the no-BsR lines. Non-critical.
+  try {
+    let offWp = null, offDec = null, onDec = null;
+    if (!suppressed && model && model.bsrOff) {
+      const mlSide = (sigs) => { const m = (sigs || []).find(x => x.type === 'ML'); return m ? m.side : 'none'; };
+      const shadowModel = Object.assign({}, model, {
+        rawHW: model.bsrOff.rawHW, adjHW: model.bsrOff.adjHW, adjAW: model.bsrOff.adjAW,
+        aML: model.bsrOff.aML, hML: model.bsrOff.hML });
+      offWp = model.bsrOff.adjHW;
+      offDec = mlSide(getSignals(game, shadowModel, settings, []));
+      onDec = mlSide(signals);
+      if (offDec !== onDec) {
+        console.log('[bsr-shadow] ' + gameRow.game_date + '/' + gameRow.game_id
+          + ' ML decision ' + offDec + ' -> ' + onDec
+          + ' (home wp ' + offWp.toFixed(4) + ' -> ' + model.adjHW.toFixed(4) + ')');
+      }
+    }
+    db.prepare(`UPDATE game_log SET
+      away_bsr_per_game=?, home_bsr_per_game=?, away_bsr_state=?, home_bsr_state=?,
+      bsr_off_home_wp=?, bsr_off_ml_decision=?, bsr_on_ml_decision=?
+      WHERE game_date=? AND game_id=?`)
+      .run(
+        _bsr.away ? _bsr.away.value : null, _bsr.home ? _bsr.home.value : null,
+        _bsr.away ? _bsr.away.status : null, _bsr.home ? _bsr.home.status : null,
+        offWp, offDec, onDec,
+        gameRow.game_date, gameRow.game_id
+      );
+  } catch (e) {
+    console.warn('[bsr-persist] ' + gameRow.game_id + ': ' + e.message);
   }
   const gl = q.getGameById.get(gameRow.game_date, gameRow.game_id);
   if (!gl) return;
