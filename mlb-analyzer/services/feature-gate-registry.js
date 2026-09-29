@@ -1155,10 +1155,12 @@ const GATES = [
         + 'merits, not a side effect of a wiring fix.' },
 
   // ---- non-settings gates ----
-  // KEY SET 2026-09-28: the term now exists as one switch, bsr_enabled
-  // (weight fixed at 1.0 in model.js). decision stays null until the enable
-  // is merged, deployed and verified; it is recorded then, with its docs/ record.
-  { id: 'bsr_baserunning', key: 'bsr_enabled',
+  // KEY SET 2026-09-28: the term exists as one switch, bsr_enabled (weight
+  // fixed at 1.0 in model.js, no knob). DECIDED 2026-09-29: ON at 1x,
+  // construction `current`, for the mechanism -- right sign, scaled about
+  // right, benefit below what this corpus resolves. Record, grids and
+  // scorecards: docs/bsr-gate-decision-2026-09-29.md.
+  { id: 'bsr_baserunning', key: 'bsr_enabled', on_expected: true,
     criterion: 'RE-SPEC 2026-08-23: calibration (log loss over all games) PRIMARY, accuracy (margin MAE) second, '
              + 'CLV demoted to context and split by same-side vs churn. Was: accuracy + CLV with CLV weighted heaviest.\n'
              + 'CLV PRONG RE-SPECIFIED 2026-09-12: MARGINAL ROWS ONLY. The prong reads forward-honest CLV on the '
@@ -1168,7 +1170,9 @@ const GATES = [
              + '378 differ) and they contribute exactly zero to the delta.\n'
              + 'PRECONDITIONS ARE MET as of 2026-09-12: 88 snapshot days (bar 60) and 1,110 graded games since the '
              + 'first snapshot (bar 500). Sample is no longer what blocks this gate and has not been for weeks.',
-    criterion_type: 'calibration', window_end: '2026-09-28', decision: null,
+    criterion_type: 'calibration', window_end: '2026-09-28',
+    decision: { date: '2026-09-29', outcome: 'on_for_mechanism',
+                ref: 'docs/bsr-gate-decision-2026-09-29.md' },
     precondition: 'bsr_snapshots_60d',
     corpus_size: 1100,
     note: 'Gate window opened 2026-08-13. WINDOW_END MOVED 2026-09-14 -> 2026-09-28 so the call lands after the '
