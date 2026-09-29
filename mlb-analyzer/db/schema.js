@@ -1727,6 +1727,29 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN home_bsr_state TEXT"); } catch(e)
 try { db.exec("ALTER TABLE game_log ADD COLUMN bsr_off_home_wp REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bsr_off_ml_decision TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN bsr_on_ml_decision TEXT"); } catch(e) {}
+// TRENDS backtest (2026-09-29), display only. One trend_runs row per run of
+// services/trends-backtest.js, carrying the pre-registration it ran under
+// (docs/trends-preregistration-2026-09-29.md: commit + content sha256), and
+// one trend_results row per scenario x variant x split. Nothing in the price
+// or bet path reads either table.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS trend_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    prereg_path TEXT NOT NULL, prereg_commit TEXT NOT NULL, prereg_sha256 TEXT NOT NULL,
+    window_from TEXT NOT NULL, window_to TEXT NOT NULL, holdout_from TEXT NOT NULL,
+    summary_json TEXT
+  );
+  CREATE TABLE IF NOT EXISTS trend_results (
+    run_id INTEGER NOT NULL, scenario_id TEXT NOT NULL, name TEXT, kind TEXT,
+    variant TEXT NOT NULL, split TEXT NOT NULL,
+    n INTEGER, w INTEGER, l INTEGER, pushes INTEGER,
+    win_pct REAL, win_lo REAL, win_hi REAL, implied_pct REAL, edge REAL,
+    p_value REAL, q_value REAL, roi REAL, roi_lo REAL, roi_hi REAL, dollars REAL,
+    both_teams_games INTEGER, too_small INTEGER, holdout TEXT, source_mix_json TEXT,
+    PRIMARY KEY (run_id, scenario_id, variant, split)
+  );
+`);
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
