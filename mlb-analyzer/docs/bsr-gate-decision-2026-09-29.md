@@ -57,10 +57,12 @@ gap; `pa_weighted` 22). ΔlogLoss vs the 0x baseline, CI95:
 - **Scale.** Quadratic optimum 1.09x (`current`, depth 0.00016) and 0.78x
   (`pt_neutral`, depth 0.00009). Production's 1x sits on the optimum; there is
   no headroom anywhere in the grid.
-- **Sign.** The −3x placebo is the worst cell on log loss, MAE and pooled CLV
-  in both sound constructions, and 1x the best on all three. +3x and −3x do not
-  separate beyond their intervals — consistency across metrics, not
-  replication, since the constructions share games and players.
+- **Sign.** Right sign: the −3x placebo is worse than +3x in both sound
+  constructions. It is the worst cell overall in the `current` construction
+  (−3x +0.00232 vs 5x +0.00193); in `pt_neutral`, 5x is worse (+0.00249 vs
+  +0.00226 for −3x). +3x and −3x do not separate beyond their intervals —
+  consistency, not replication, since the constructions share games and
+  players.
 - **`pa_weighted` is sign-symmetric** (−3x +0.00249 vs +3x +0.00211): a pure
   m² curve with no optimum. The sign information lives only in the two
   constructions that weight players defensibly — modest corroboration that the
@@ -168,6 +170,11 @@ and without the term on that pass (phi-atl away/away, chc-sd away/away,
 cws-hou none/none, bos-nyy none/none).
 
 ## What judges it from here
+
+**No outcome evaluation has been done.** The shadow columns
+(`bsr_off_home_wp`, `bsr_off_ml_decision`, `bsr_on_ml_decision`) are
+populated in production, but no game with a final score has values yet, so
+evaluation is pending final games and #469.
 
 - **The shadow columns** — every priced game now records the win prob and ML
   decision with and without the term.
