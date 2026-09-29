@@ -195,6 +195,13 @@ const SETTINGS_SCHEMA = {
     help: 'Leaguewide shadow-zone called takes per full team-game (~58). The framing pitches column counts these takes, not total pitches; per-game framing = (rv_tot/pitches) x this. Environmental constant, not a per-catcher estimate.' },
 
   // --- Defensive impact / Fielding Run Value (Build B) ---------------------
+  // --- Lineup baserunning (BsR), 2026-09-28 --------------------------------
+  // ONE switch and no weight knob, by design: the term enters at 1x in
+  // code (model.js BSR_WEIGHT). The gate decided the construction and the
+  // scale; a tunable weight would reopen both one settings edit at a time.
+  bsr_enabled: { type: 'boolean', default: false,
+    help: 'Add each lineup baserunning runs (trailing-1yr BsR of the 9 starters / team games played, utils/bsr-term.js) to its OWN offense in the moneyline price, at 1x. Moneyline only: the projected total is unchanged. A side with no usable BsR (no snapshot, snapshot older than 2 days, lineup pending, nothing resolved) is priced at 0 and counted in the [bsr] log. With it on, game_log.bsr_off_* records the win prob and ML decision the model would have made without it.' },
+
   defense_frv_enabled: { type: 'boolean', default: false,
     help: 'Apply team defensive Fielding Run Value (sum of 7 non-catcher fielders) to the opposing offense run estimate. Default OFF — requires the fielding_frv table to be populated. No-op when off or when no fielders resolve. Catcher defense is handled separately by the framing feature.' },
   defense_frv_mute: { type: 'number', min: 0.0, max: 1.0, default: 0.5,

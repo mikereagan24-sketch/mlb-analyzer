@@ -1709,6 +1709,24 @@ try { db.exec("ALTER TABLE game_log ADD COLUMN away_opener_weight_used REAL"); }
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_opener_weight_used REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN away_bullpen_weight_used REAL"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN home_bullpen_weight_used REAL"); } catch(e) {}
+// Lineup baserunning (BsR) term, 2026-09-28 (utils/bsr-term.js). The
+// per-side value processGameSignals computed and the status behind it
+// ('ok', or why there is no number -- priced at 0 then). Written on every
+// scoring pass, whether or not bsr_enabled is on, so the card and the
+// harness read the number the price used: the harness replays it the way
+// it replays framing (non-null state = the emit pass ran).
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bsr_per_game REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bsr_per_game REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN away_bsr_state TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN home_bsr_state TEXT"); } catch(e) {}
+// BsR SHADOW. With the term on, the home win prob and the ML bet decision
+// the model would have produced WITHOUT it, next to the decision it did
+// produce -- so every game the term moves across the bet line is a query,
+// not a replay. Decision is 'away' | 'home' | 'none'. NULL while the term
+// is off (there is nothing to shadow).
+try { db.exec("ALTER TABLE game_log ADD COLUMN bsr_off_home_wp REAL"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bsr_off_ml_decision TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN bsr_on_ml_decision TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_away INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_planned_batters_home INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN opener_detected_at TEXT"); } catch(e) {}
@@ -4150,6 +4168,14 @@ q.getPlayerBaserunningTrailingSnapshotDates = db.prepare(
   + "       MAX(window_enddate)   AS window_enddate "
   + "FROM player_baserunning_trailing_snapshot "
   + "GROUP BY snapshot_date ORDER BY snapshot_date"
+);
+// The BsR term's denominator: every game completed STRICTLY BEFORE the date,
+// one row per game (utils/bsr-term.js explodes it to both teams). Strictly
+// before, because the price for a game must not count games that finish
+// after it is priced.
+q.getCompletedGameIdsBefore = db.prepare(
+  "SELECT game_id FROM game_log "
+  + "WHERE game_date < ? AND away_score IS NOT NULL AND home_score IS NOT NULL"
 );
 q.getPlayerBaserunningTrailingSnapshotCoverage = db.prepare(
   "SELECT COUNT(DISTINCT snapshot_date) AS n_snapshot_days, "

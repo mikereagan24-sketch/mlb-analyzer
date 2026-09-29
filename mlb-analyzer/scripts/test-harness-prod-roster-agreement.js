@@ -92,8 +92,9 @@ check('...and the sets are non-empty', teams.length > 0 && !!sr.seasonRosterSet(
 // ---------------------------------------------------------------- 2/3. slots
 console.log('\n2. every 2026 lineup slot resolves identically, and the change is additive');
 const games = db.prepare(
-  'SELECT game_date, away_team, home_team, away_sp_hand, home_sp_hand, '
-  + 'away_lineup_json, home_lineup_json FROM game_log '
+  'SELECT game_date, game_id, away_team, home_team, away_sp_hand, home_sp_hand, '
+  + 'away_lineup_json, home_lineup_json, '
+  + 'away_bsr_per_game, home_bsr_per_game, away_bsr_state, home_bsr_state FROM game_log '
   + "WHERE game_date >= '2026-01-01' "
   + 'AND (away_lineup_json IS NOT NULL OR home_lineup_json IS NOT NULL) ORDER BY game_date').all();
 
@@ -110,6 +111,10 @@ let lkGained = 0, lkLost = 0, lkChanged = 0;
 let priceMoved = 0, priceUnexplained = 0;
 const dis = new Map(), gl = new Map(), un = new Map();
 let curDate = null, idx = null;
+const { q } = require(path.join(R, 'db/schema'));
+const bsrTerm = require(path.join(R, 'utils/bsr-term'));
+let bsrSides = 0, bsrDisagree = 0, bsrPersisted = 0, bsrNull = 0;
+const bsrDis = [];
 
 let gi = -1;
 for (const g of games) {
@@ -120,6 +125,26 @@ for (const g of games) {
   // ONCE per game, not once per side: populateCallerInputs recomputes FRV for
   // both teams on every call, which was the bulk of the runtime.
   const hw = quiet(() => hi.populateCallerInputs({}, g, settings));
+  // ---- 4. BsR: production's call vs the harness's value, per side
+  for (const side of ['away', 'home']) {
+    bsrSides++;
+    const st = g[side + '_bsr_state'];
+    // Production's inputs exactly: team from game_id (lowercase, as
+    // processGameSignals derives it), the resolver it passes, the game date.
+    // A row whose emit pass already wrote a state is replayed from the
+    // column, so that is what the harness must return.
+    const want = st != null ? g[side + '_bsr_per_game']
+      : quiet(() => bsrTerm.lineupBsrTerm(q, String(g.game_id || '').split('-')[side === 'away' ? 0 : 1],
+          g[side + '_lineup_json'], g.game_date, jobs.resolveCatcherMlbId)).value;
+    const got = hw[side + 'BsRPerGame'];
+    if (st != null) bsrPersisted++;
+    if (got == null) bsrNull++;
+    const f = (v) => v == null ? null : Number(v).toFixed(9);
+    if (f(got) !== f(want)) {
+      bsrDisagree++;
+      if (bsrDis.length < 10) bsrDis.push(g.game_date + ' ' + g.game_id + ' ' + side + ' prod=' + f(want) + ' harness=' + f(got));
+    }
+  }
   for (const side of ['away', 'home']) {
     const raw = g[side + '_lineup_json']; if (!raw) continue;
     let lu = null; try { lu = JSON.parse(raw); } catch (e) { continue; }
@@ -218,6 +243,24 @@ for (const [k, n] of [...un.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)) 
   console.log('      ' + String(n).padStart(4) + '  ' + k);
 }
 check('every priced move is explained by a lookup gain on that side', priceUnexplained, 0);
+
+// ---------------------------------------------------------------- 4. BsR
+console.log('');
+console.log('4. lineup BsR: production and harness give the same number (2026-09-28)');
+console.log('   sides compared ' + bsrSides + ', replayed from the persisted column ' + bsrPersisted
+  + ', no number (priced at 0 when on) ' + bsrNull);
+check('production and harness agree on every BsR side', bsrDisagree, 0);
+for (const d of bsrDis) console.log('      ' + d);
+// The persisted path, on a synthetic row: a state means the emit pass ran, so
+// its value is used as-is -- including a NULL, which must NOT be recomputed.
+{
+  const base = { game_date: '2026-09-27', game_id: 'ari-sd', away_team: 'ARI', home_team: 'SD',
+    away_lineup_json: '[{"name":"Ketel Marte"}]', home_lineup_json: '[{"name":"Manny Machado"}]' };
+  const w1 = quiet(() => hi.populateCallerInputs({}, Object.assign({}, base,
+    { away_bsr_per_game: 0.1234, away_bsr_state: 'ok', home_bsr_per_game: null, home_bsr_state: 'no_snapshot' }), settings));
+  check('persisted BsR value is replayed as-is', w1.awayBsRPerGame, 0.1234);
+  check('persisted NULL with a state stays NULL (not recomputed)', w1.homeBsRPerGame, null);
+}
 
 console.log('');
 console.log(failures ? failures + ' FAILURE(S)' : 'all checks passed');

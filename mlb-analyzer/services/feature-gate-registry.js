@@ -1155,7 +1155,10 @@ const GATES = [
         + 'merits, not a side effect of a wiring fix.' },
 
   // ---- non-settings gates ----
-  { id: 'bsr_baserunning', key: null,
+  // KEY SET 2026-09-28: the term now exists as one switch, bsr_enabled
+  // (weight fixed at 1.0 in model.js). decision stays null until the enable
+  // is merged, deployed and verified; it is recorded then, with its docs/ record.
+  { id: 'bsr_baserunning', key: 'bsr_enabled',
     criterion: 'RE-SPEC 2026-08-23: calibration (log loss over all games) PRIMARY, accuracy (margin MAE) second, '
              + 'CLV demoted to context and split by same-side vs churn. Was: accuracy + CLV with CLV weighted heaviest.\n'
              + 'CLV PRONG RE-SPECIFIED 2026-09-12: MARGINAL ROWS ONLY. The prong reads forward-honest CLV on the '

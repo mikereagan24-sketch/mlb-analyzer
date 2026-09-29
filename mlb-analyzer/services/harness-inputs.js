@@ -45,6 +45,22 @@ try {
 // the harness hands runModel is the roster production hands it. See
 // services/season-roster.js for why the season table and not the daily one,
 // and for why "as-of the game date" is not available from it.
+// The BsR term, lazily: utils/bsr-term.js needs `q`, and the resolver is
+// jobs.resolveCatcherMlbId -- the one processGameSignals passes. jobs is
+// required on first use rather than at load, as frv-backtest.js does.
+let _bsrTermFn = null;
+function _bsrTerm() {
+  if (_bsrTermFn) return _bsrTermFn;
+  try {
+    const { q } = require('../db/schema');
+    const { resolveCatcherMlbId } = require('./jobs');
+    const { lineupBsrTerm } = require('../utils/bsr-term');
+    _bsrTermFn = (side, gameRow) => lineupBsrTerm(q, gameRow[side + '_team'],
+      gameRow[side + '_lineup_json'], gameRow.game_date, resolveCatcherMlbId);
+  } catch (e) { _bsrTermFn = () => null; }
+  return _bsrTermFn;
+}
+
 let _seasonRosterSet = () => null;
 try {
   _seasonRosterSet = require('./season-roster').seasonRosterSet || _seasonRosterSet;
@@ -142,7 +158,7 @@ function harnessInputsMode() {
 }
 
 /**
- * The fields runModel reads but never computes -- all 21 of them, each with
+ * The fields runModel reads but never computes -- all 23 of them, each with
  * where an offline replay gets it. Anything listed here is a field whose
  * absence silently disables a feature rather than raising.
  *
@@ -199,6 +215,14 @@ const FIELD_SOURCES = [
   // time dimension. A player traded in August is on his new team for an April
   // replay. Stage 9's rule needs EXACTLY ONE on-team candidate, so an
   // over-generous roster can only fail to resolve, never resolve wrongly.
+  // LINEUP BsR (2026-09-28). Persisted by processGameSignals on every pass
+  // since the term was built; read from the column where the emit pass
+  // recorded a state (a NULL value beside a state is a real "no number",
+  // priced at 0, and is kept NULL). Rows older than the columns are
+  // RECOMPUTED with utils/bsr-term.js -- the function production calls, with
+  // the resolver production passes -- as of the game date.
+  { field: 'awayBsRPerGame', group: 'bsr', column: 'away_bsr_per_game', stateColumn: 'away_bsr_state' },
+  { field: 'homeBsRPerGame', group: 'bsr', column: 'home_bsr_per_game', stateColumn: 'home_bsr_state' },
   { field: 'awayRosterSet', group: 'roster', source: 'services/season-roster.js seasonRosterSet()' },
   { field: 'homeRosterSet', group: 'roster', source: 'services/season-roster.js seasonRosterSet()' },
   { field: 'bullpenAvailability', group: 'availability', unavailable: 'derived at emit time from '
@@ -211,7 +235,7 @@ const INPUT_GROUPS = [...new Set(FIELD_SOURCES.map(f => f.group))];
 let _inStats = null;
 function resetHarnessInputsStats() {
   _inStats = { games: 0, framingPersisted: 0, framingRecomputed: 0, bullpenPersisted: 0,
-    bullpenMissing: 0, rosterSides: 0 };
+    bullpenMissing: 0, rosterSides: 0, bsrPersisted: 0, bsrRecomputed: 0, bsrNull: 0 };
 }
 resetHarnessInputsStats();
 function harnessInputsStats() { return _inStats; }
@@ -226,6 +250,8 @@ function harnessInputsLine() {
   return 'harness inputs: persisted   games ' + s.games
     + ', bullpen sides persisted ' + s.bullpenPersisted + ' / missing ' + s.bullpenMissing
     + ', framing sides persisted ' + s.framingPersisted + ' / recomputed ' + s.framingRecomputed
+    + ', BsR sides persisted ' + s.bsrPersisted + ' / recomputed ' + s.bsrRecomputed
+    + ' (no number, priced at 0 when on: ' + s.bsrNull + ')'
     + ', no source: ' + unavailable.join(', ');
 }
 
@@ -259,7 +285,10 @@ function injectGroup(wrapped, gameRow, group, tally) {
   for (const f of FIELD_SOURCES) {
     if (f.group !== group || !f.column) continue;
     if (!Object.prototype.hasOwnProperty.call(gameRow, f.column)) continue;
-    if (f.stateColumn) {
+    if (f.stateColumn && f.group === 'bsr') {
+      if (gameRow[f.stateColumn] == null) continue;
+      _inStats.bsrPersisted++;
+    } else if (f.stateColumn) {
       // Framing: persisted only where the emit pass recorded a state. With
       // no state the row predates the column, so the old recompute stands
       // in and is counted. States begin 2026-04-04, before any wOBA
@@ -337,6 +366,27 @@ function populateCallerInputs(wrapped, gameRow, settings) {
         wrapped[field] = _framingForTeam(gameRow[side + '_team'], gameRow[side + '_lineup_json'], settings);
         if (mode === 'persisted') _inStats.framingRecomputed++;
       }
+    }
+  } catch (e) { /* ditto */ }
+  // LINEUP BsR, in BOTH modes, for the reason the roster is: 'legacy' is
+  // about the four pre-2026-09-16 fields, and BsR was never one of them.
+  // Persisted where the emit pass wrote a state; otherwise the production
+  // function, as of the game date.
+  try {
+    const persisted = {};
+    injectGroup(persisted, gameRow, 'bsr');
+    for (const side of ['away', 'home']) {
+      const field = side + 'BsRPerGame';
+      let v;
+      if (Object.prototype.hasOwnProperty.call(persisted, field)) {
+        v = persisted[field];
+      } else {
+        const t = _bsrTerm()(side, gameRow);
+        v = t ? t.value : null;
+        _inStats.bsrRecomputed++;
+      }
+      wrapped[field] = v;
+      if (v == null) _inStats.bsrNull++;
     }
   } catch (e) { /* ditto */ }
   if (mode === 'persisted') {
