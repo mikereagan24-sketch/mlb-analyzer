@@ -188,6 +188,10 @@ app.get('/api/version', (req, res) => res.json({
 
 // API routes
 app.use('/api', require('./routes/api'));
+// Trends results tab (display only). Its own router so the trends artifact
+// stays out of routes/api.js, which the pricing path requires. See the
+// header of routes/trends-results.js.
+app.use('/api', require('./routes/trends-results'));
 
 // Health check for Render. Surfaces today's odds-coverage summary so the
 // demote-completion regression gate is visible to an ops check without

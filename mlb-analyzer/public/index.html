@@ -335,6 +335,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <button class="tab active" onclick="sw('games')">Today's Games</button>
 <button class="tab" onclick="sw('matchups')">Matchups</button>
 <button class="tab" onclick="sw('backtest');loadBacktest()">Backtest</button>
+<button class="tab" onclick="sw('trends')">Trends</button>
 <button class="tab" onclick="sw('clv')">CLV</button>
 <button class="tab" onclick="sw('data')">Data Import</button>
 <button class="tab" onclick="sw('model')">Model</button>
@@ -473,6 +474,12 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
 <div id="cron-log"></div>
 <button class="btn btn-ghost btn-sm" onclick="loadCronLog()" style="margin-top:8px">Refresh log</button>
 </div>
+</div>
+
+<!-- TRENDS (2026-09-29). Display only: the fixed pre-registered backtest run,
+     both sides of every scenario, from GET /api/trends/results. -->
+<div id="sec-trends" class="sec">
+<div class="card"><div id="trends-body"><div class="notice">Loading trends results…</div></div></div>
 </div>
 
 <!-- DATA IMPORT -->
@@ -3504,6 +3511,100 @@ function sw(name){
   if(name==='data')refreshPitIPTable();
   if(name==='matchups'&&muSelectedGame)renderMatchupGame(muSelectedGame);
   if(name==='clv')loadClvTab();
+  if(name==='trends')loadTrendsResults();
+}
+
+// TRENDS TAB (2026-09-29). DISPLAY ONLY -- nothing here feeds the model or a
+// bet. Shows the one recorded run of the pre-registered trends backtest
+// (docs/trends-preregistration-2026-09-29.md), read from the committed
+// artifact via GET /api/trends/results. Every scenario is shown with BOTH
+// sides: the pre-registered test is two-sided against no-vig implied %, so
+// the other side of the same games has the identical p-value -- one test, so
+// p and q are shown once. Neutral styling on purpose: no colours, no
+// highlighting, no sorting by edge or ROI; rows stay in ID order.
+let _trendsLoaded = false;
+async function loadTrendsResults(){
+  const el = document.getElementById('trends-body');
+  if (!el || _trendsLoaded) return;
+  el.innerHTML = '<div class="notice">Loading trends results…</div>';
+  try {
+    const r = await fetch('/api/trends/results');
+    const d = await r.json();
+    if (!r.ok || d.error) { el.innerHTML = '<div class="notice">Trends results unavailable: ' + (d.detail || d.error || r.status) + '</div>'; return; }
+    el.innerHTML = renderTrendsResults(d);
+    _trendsLoaded = true;
+  } catch (e) {
+    el.innerHTML = '<div class="notice">Trends results unavailable: ' + (e && e.message ? e.message : e) + '</div>';
+  }
+}
+function renderTrendsResults(d){
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const pct = (v, dp) => v == null ? '–' : (100 * v).toFixed(dp == null ? 1 : dp);
+  const sgn = (v, dp) => v == null ? '–' : ((v >= 0 ? '+' : '−') + Math.abs(100 * v).toFixed(dp == null ? 1 : dp));
+  const p3 = (v) => v == null ? '–' : (v < 0.001 ? '<0.001' : v.toFixed(3));
+  const wlp = (r) => r.w + '–' + r.l + (r.pushes ? '–' + r.pushes : '');
+  const inPrim = (d.trend_results || []).filter(r => r.variant === 'primary' && r.split === 'in')
+    .sort((a, b) => a.scenario_id < b.scenario_id ? -1 : 1);
+  const other = {}; ((d.other_side && d.other_side.rows) || []).forEach(o => { other[o.scenario_id] = o; });
+  const betLabel = (b) => ({ 'team ML': 'Scenario team ML', 'opponent ML': 'Opponent ML', over: 'Over', under: 'Under' }[b] || b);
+  const nTests = inPrim.length;
+  const sigAfter = inPrim.filter(r => r.q_value != null && r.q_value < 0.10).length;
+  const holdoutReached = inPrim.some(r => r.holdout);
+  const td = 'padding:4px 6px;border-top:.5px solid var(--border);vertical-align:top';
+  const th = 'padding:4px 6px;font-weight:500;color:var(--text2);text-align:left';
+  const grp = 'padding:4px 6px;font-weight:500;color:var(--text);text-align:left;border-bottom:.5px solid var(--border)';
+  const side = (r, bet) => '<td style="' + td + '">' + esc(betLabel(bet)) + '</td>'
+    + '<td style="' + td + '">' + wlp(r) + '</td>'
+    + '<td style="' + td + '">' + pct(r.win_pct) + '% <span style="color:var(--text2)">[' + pct(r.win_lo, 0) + ', ' + pct(r.win_hi, 0) + ']</span></td>'
+    + '<td style="' + td + '">' + sgn(r.edge) + '</td>'
+    + '<td style="' + td + '">' + sgn(r.roi) + '% <span style="color:var(--text2)">[' + sgn(r.roi_lo, 0) + ', ' + sgn(r.roi_hi, 0) + ']</span></td>';
+  const rows = inPrim.map(r => {
+    const o = other[r.scenario_id] || {};
+    const small = r.n < 30 ? '<div style="font-size:10px;color:var(--text2)">too small to read</div>' : '';
+    return '<tr><td style="' + td + '">' + esc(r.scenario_id) + '</td><td style="' + td + '">' + esc(r.name) + '</td>'
+      + '<td style="' + td + '">' + r.n + small + '</td>'
+      + side(r, o.this_side_bet) + side(o, o.bet)
+      + '<td style="' + td + '">' + p3(r.p_value) + '</td><td style="' + td + '">' + p3(r.q_value) + '</td></tr>';
+  }).join('');
+  // Footnotes, from the artifact's own numbers.
+  const byId = {}; inPrim.forEach(r => { byId[r.scenario_id] = r; });
+  const notes = [];
+  const s30 = byId.S30, o30 = other.S30;
+  if (s30 && o30) {
+    const excl = (s30.roi_lo > 0 || s30.roi_hi < 0);
+    notes.push('S30: the ' + betLabel(o30.this_side_bet) + '’s ROI interval ' + (excl ? 'excludes zero' : 'includes zero')
+      + ' (' + sgn(s30.roi) + '% [' + sgn(s30.roi_lo, 0) + ', ' + sgn(s30.roi_hi, 0) + ']), but the pre-registered test is the win-rate test (p '
+      + p3(s30.p_value) + ', the same for Over and Under), so neither side is significant. The ' + betLabel(o30.bet) + '’s ROI is '
+      + sgn(o30.roi) + '% [' + sgn(o30.roi_lo, 0) + ', ' + sgn(o30.roi_hi, 0) + '].');
+  }
+  const o20 = other.S20, s20 = byId.S20;
+  if (o20 && s20 && o20.both_teams_games) {
+    const games = s20.n - o20.both_teams_games;
+    notes.push('S20: in ' + o20.both_teams_games + ' of its ' + games + ' games both teams qualify (' + o20.both_teams_rows + ' of its '
+      + s20.n + ' bets), so the other side is almost the same set of bets.');
+  }
+  const partial = inPrim.filter(r => r.scenario_id !== 'S20' && other[r.scenario_id] && other[r.scenario_id].both_teams_games > 0)
+    .map(r => r.scenario_id + ' ' + other[r.scenario_id].both_teams_games);
+  if (partial.length) notes.push('Games where both teams qualify, so those bets appear on both sides: ' + partial.join(', ') + '.');
+  notes.push('ROI is not a mirror image: both sides pay the vig, so both sides can lose money.');
+  notes.push('Rows with n < 30 are too small to read. p and q belong to one two-sided test that covers both directions, so each is shown once.');
+  return '<div style="font-size:13px;line-height:1.6;margin-bottom:10px">Pre-registered test of ' + nTests + ' betting trends, each tested in both directions '
+      + '(the test is two-sided, so betting the other side of the same games was covered). ' + sigAfter + ' of ' + nTests
+      + ' were significant in either direction after correction. Display only — not used by the model.</div>'
+    + '<div style="font-size:11px;color:var(--text2);line-height:1.6;margin-bottom:12px">'
+      + 'Pre-registration: ' + esc(d.prereg_path) + ' @ ' + esc(String(d.prereg_commit || '').slice(0, 7))
+      + ' · content sha256 <span style="font-family:monospace">' + esc(d.prereg_sha256) + '</span><br>'
+      + 'In-sample window: ' + esc(d.window_from) + ' to the day before ' + esc(d.holdout_from)
+      + ' · September holdout (' + esc(d.holdout_from) + ' to ' + esc(d.window_to) + '): '
+      + (holdoutReached ? 'reached for some scenarios' : 'not reached — nothing was significant in-sample, so no scenario was carried to it')
+      + '<br>' + esc(d.other_side && d.other_side.note) + '</div>'
+    + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">'
+    + '<thead><tr><th style="' + th + '" colspan="3"></th><th style="' + grp + '" colspan="5">This side</th><th style="' + grp + '" colspan="5">Other side</th><th style="' + grp + '" colspan="2">Shared (one test)</th></tr>'
+    + '<tr><th style="' + th + '">ID</th><th style="' + th + '">Scenario</th><th style="' + th + '">n</th>'
+    + '<th style="' + th + '">Bet</th><th style="' + th + '">W–L–P</th><th style="' + th + '">Win % [95% CI]</th><th style="' + th + '">Edge (pts)</th><th style="' + th + '">ROI [95% CI]</th>'
+    + '<th style="' + th + '">Bet</th><th style="' + th + '">W–L–P</th><th style="' + th + '">Win % [95% CI]</th><th style="' + th + '">Edge (pts)</th><th style="' + th + '">ROI [95% CI]</th>'
+    + '<th style="' + th + '">p</th><th style="' + th + '">q</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + '<div style="font-size:11px;color:var(--text2);line-height:1.6;margin-top:10px">' + notes.map(n => '<div>' + esc(n) + '</div>').join('') + '</div>';
 }
 
 // --- Pitcher IP projections UI ---
