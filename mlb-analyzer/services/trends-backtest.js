@@ -358,4 +358,4 @@ function persistRun(db, run) {
 }
 
 module.exports = { runTrendsBacktest, persistRun, buildRows,
-  _internals: { wilson, normTwoSided, bhQ, binomTailGe, summarize, mulberry32, inPopulation, prevDay } };
+  _internals: { wilson, normTwoSided, bhQ, binomTailGe, summarize, bootRoi, mulberry32, inPopulation, prevDay } };
