@@ -29,6 +29,11 @@
  *      reads only its artifact, every figure comes from the artifact (whose
  *      pre-registration hash matches the pinned one), q only on the main
  *      in-sample rows, sensitivity collapsed and display only.
+ *      Since #498: the route returns { corrected, original } (either missing ->
+ *      the error JSON); the main table, verdict and sensitivity are the
+ *      corrected artifact, the correction note reads its count and fix PR from
+ *      it, and the collapsed "Original result (superseded)" table is the
+ *      original artifact; no figure from either is written into the renderer.
  *
  *   node scripts/test-trends-results-tab.js
  */
@@ -445,11 +450,12 @@ console.log('\nh. the backtest still reproduces the committed artifact exactly (
 }
 
 // ---------------------------------------------------------------- i
-console.log('\ni. the Polymarket top-traders section (2026-10-01)');
+console.log('\ni. the Polymarket top-traders section (2026-10-01; corrected beside the original since 2026-10-01, #498)');
 {
   const vm = require('vm');
-  const TT = JSON.parse(read('docs/polymarket-top-traders-results-2026-09-30.json'));
-  // (a) wired in
+  const ORIG_FILE = 'docs/polymarket-top-traders-results-2026-09-30.json', CORR_FILE = 'docs/polymarket-top-traders-results-2026-09-30-corrected.json';
+  const TO = JSON.parse(read(ORIG_FILE)), TC = JSON.parse(read(CORR_FILE));
+  // wired in
   const defS = where(/function\s+renderTopTradersSection\s*\(/), defLT = where(/async function\s+loadTopTradersSection\s*\(/);
   ok('renderTopTradersSection and loadTopTradersSection each defined once, outside <style>',
     defS.length === 1 && defLT.length === 1 && !insideStyle(defS[0]) && !insideStyle(defLT[0]));
@@ -459,75 +465,126 @@ console.log('\ni. the Polymarket top-traders section (2026-10-01)');
   const secStart = html.indexOf('<div id="sec-trends" class="sec">');
   const iBody = html.indexOf('id="trends-body"', secStart), iTT = html.indexOf('id="trends-tt-body"', secStart);
   ok('its mount point sits in the Trends section, below the 31-scenario table', secStart > 0 && iBody > secStart && iTT > iBody && iTT - iBody < 400);
-  // (b) the route reads only the artifact
+
+  // (c) the route reads only the two artifacts; either missing or unreadable -> the error JSON
   const ttHandler = (code.match(/router\.get\('\/trends\/top-traders'[\s\S]*?\n\}\);/) || [''])[0];
-  ok('GET /trends/top-traders reads only its artifact (no database, settings, model or computation)',
-    /loadTopTraders\(\)/.test(ttHandler) && !/readDb|slateFits|\bdb\b|better-sqlite3|getSettings|runModel|getSignals|processGameSignals/.test(ttHandler)
-    && /path\.join\(__dirname,\s*'\.\.',\s*'docs',\s*'polymarket-top-traders-results-2026-09-30\.json'\)/.test(code));
+  const ORIG_EXPR = "path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30.json')";
+  const CORR_EXPR = "path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30-corrected.json')";
+  const docsNamed = [...code.matchAll(/path\.join\(__dirname,\s*'\.\.',\s*'docs',\s*'([^']+)'\)/g)].map(m => m[1]).sort();
+  ok('the route names exactly three docs files: the trends artifact and the two top-traders artifacts',
+    JSON.stringify(docsNamed) === JSON.stringify(['polymarket-top-traders-results-2026-09-30-corrected.json', 'polymarket-top-traders-results-2026-09-30.json', 'trends-results-2026-09-29.json']),
+    docsNamed.join(','));
+  ok('GET /trends/top-traders reads only the two cached artifacts (no database, settings, model or computation)',
+    /loadTopTradersCorrected\(\)/.test(ttHandler) && /loadTopTraders\(\)/.test(ttHandler)
+    && !/readDb|slateFits|\bdb\b|better-sqlite3|getSettings|runModel|getSignals|processGameSignals|readFileSync/.test(ttHandler)
+    && code.includes(ORIG_EXPR) && code.includes(CORR_EXPR));
   const callTT = (router) => { const l = router.stack.find(x => x.route && x.route.path === '/trends/top-traders');
     const res = { code: 200, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } }; l.route.stack[0].handle({}, res); return res; };
   const realTT = callTT(require(path.join(R, 'routes/trends-results')));
-  ok('real artifact: 200 with its 16 result rows', realTT.code === 200 && realTT.body.results.length === 16);
-  const loadTTWith = (expr) => {
-    const src = routeSrc.replace("path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30.json')", expr);
+  ok('real artifacts: 200 with { corrected, original }, each exactly its file',
+    realTT.code === 200 && JSON.stringify(Object.keys(realTT.body).sort()) === '["corrected","original"]'
+    && JSON.stringify(realTT.body.corrected) === JSON.stringify(TC) && JSON.stringify(realTT.body.original) === JSON.stringify(TO));
+  const loadTTWith = (origExpr, corrExpr) => {
+    const src = routeSrc.replace(ORIG_EXPR, origExpr).replace(CORR_EXPR, corrExpr);
     const fname = path.join(R, 'routes', '__tt_results_probe.js');
     const m = new Module(fname, module); m.filename = fname; m.paths = Module._nodeModulePaths(path.dirname(fname)); m._compile(src, fname);
     return m.exports;
   };
-  const missTT = callTT(loadTTWith(JSON.stringify(path.join(os.tmpdir(), '__no_such_tt_artifact__.json'))));
+  const NO = JSON.stringify(path.join(os.tmpdir(), '__no_such_tt_artifact__.json'));
   const badTT = path.join(os.tmpdir(), '__corrupt_tt_artifact__.json'); fs.writeFileSync(badTT, '{ nope');
-  const corTT = callTT(loadTTWith(JSON.stringify(badTT))); fs.unlinkSync(badTT);
-  ok('missing / corrupt artifact: 503 with an error JSON, no throw',
-    missTT.code === 503 && /not found/.test(missTT.body.detail) && corTT.code === 503 && /unreadable/.test(corTT.body.detail));
-  // (c) numbers come from the artifact; the artifact is the pinned pre-registration
+  const missC = callTT(loadTTWith(ORIG_EXPR, NO)), missO = callTT(loadTTWith(NO, CORR_EXPR));
+  const corC = callTT(loadTTWith(ORIG_EXPR, JSON.stringify(badTT))), corO = callTT(loadTTWith(JSON.stringify(badTT), CORR_EXPR));
+  fs.unlinkSync(badTT);
+  ok('corrected artifact missing / corrupt: 503 with an error JSON naming it, no throw',
+    missC.code === 503 && /not found/.test(missC.body.detail) && /corrected/.test(missC.body.error)
+    && corC.code === 503 && /unreadable/.test(corC.body.detail) && /corrected/.test(corC.body.error), missC.body.error + ' | ' + corC.body.error);
+  ok('original artifact missing / corrupt: 503 with an error JSON naming it, no throw',
+    missO.code === 503 && /not found/.test(missO.body.detail) && /original/.test(missO.body.error)
+    && corO.code === 503 && /unreadable/.test(corO.body.detail) && /original/.test(corO.body.error), missO.body.error + ' | ' + corO.body.error);
+
+  // both artifacts are the pinned pre-registration
   const pinnedTT = (read('services/polymarket-top-traders-backtest.js').match(/const PREREG_SHA256 = '([0-9a-f]{64})'/) || [])[1];
-  const docHash = require('crypto').createHash('sha256').update(read(TT.prereg_path).replace(/\r\n/g, '\n')).digest('hex');
-  ok('the artifact\'s pre-registration hash equals the hash pinned in the backtest code and the document\'s own hash',
-    !!pinnedTT && TT.prereg_sha256 === pinnedTT && docHash === pinnedTT, (pinnedTT || '').slice(0, 12));
+  const docHash = require('crypto').createHash('sha256').update(read(TC.prereg_path).replace(/\r\n/g, '\n')).digest('hex');
+  ok('both artifacts carry the pre-registration hash pinned in the backtest code, equal to the document\'s own hash',
+    !!pinnedTT && TC.prereg_sha256 === pinnedTT && TO.prereg_sha256 === pinnedTT && docHash === pinnedTT, (pinnedTT || '').slice(0, 12));
+
+  // (a) render: main table + verdict = corrected; superseded table + its verdict = original
   const a = html.indexOf('let _trendsLoaded = false;'), b = html.indexOf('// --- Pitcher IP projections UI ---');
   const ctx = vm.createContext({ document: { getElementById: () => null }, fetch: async () => ({}), console });
   vm.runInContext(html.slice(a, b), ctx);
-  const out = vm.runInContext('renderTopTradersSection(__tt)', Object.assign(ctx, { __tt: TT }));
+  const render = (d) => vm.runInContext('renderTopTradersSection(__tt)', Object.assign(ctx, { __tt: d }));
+  const out = render({ corrected: TC, original: TO });
   const P = (v, dp) => (100 * v).toFixed(dp == null ? 1 : dp);
   const S = (v, dp) => (v >= 0 ? '+' : '−') + Math.abs(100 * v).toFixed(dp == null ? 1 : dp);
   const p3 = (v) => (v < 0.001 ? '<0.001' : v.toFixed(3));
   const M = (v) => (v < 0 ? '−$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
-  let rowsOk = 0, rowsBad = [];
-  for (const r of TT.results.filter(x => x.sourceFilter === 'all')) {
-    const tr = (out.match(new RegExp('<tr data-tt="' + r.set + '-' + r.variant + '-' + r.split + '">[\\s\\S]*?</tr>')) || [''])[0];
-    const cells = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].replace(/<[^>]+>/g, ''));
-    const want = [String(r.n), r.W + '–' + r.L, P(r.winPct) + '% [' + P(r.winLo, 0) + ', ' + P(r.winHi, 0) + ']', P(r.implied) + '%', S(r.edge),
-      S(r.roi) + '% [' + S(r.roiLo, 0) + ', ' + S(r.roiHi, 0) + ']', M(r.dollars), p3(r.pValue)];
-    if (JSON.stringify(cells.slice(2, 10)) === JSON.stringify(want)) rowsOk++; else rowsBad.push(r.set + '-' + r.variant + '-' + r.split + ' ' + JSON.stringify(cells.slice(2, 10)));
-  }
-  ok('every rendered row (main and sensitivity, both periods) shows exactly the artifact\'s figures', rowsOk === 8, rowsBad.join(' | ') || '8 of 8 rows');
-  ok('verdict, pre-registration, windows and the #488 link come from the artifact',
-    out.includes('No edge after correction (q = ' + p3(TT.results.find(x => x.set === 'main' && x.variant === 'primary' && x.split === 'in' && x.sourceFilter === 'all').qValue) + ' for both tests). No holdout label applies. Display only — not used by the model.')
-    && out.includes(TT.prereg_commit.slice(0, 7)) && out.includes(TT.prereg_sha256) && out.includes(TT.window.in_sample) && out.includes(TT.window.holdout)
+  const rowCells = (key) => { const tr = (out.match(new RegExp('<tr data-tt="' + key + '">[\\s\\S]*?</tr>')) || [''])[0];
+    return [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].replace(/<[^>]+>/g, '')); };
+  const want = (r) => [String(r.n), r.W + '–' + r.L, P(r.winPct) + '% [' + P(r.winLo, 0) + ', ' + P(r.winHi, 0) + ']', P(r.implied) + '%', S(r.edge),
+    S(r.roi) + '% [' + S(r.roiLo, 0) + ', ' + S(r.roiHi, 0) + ']', M(r.dollars), p3(r.pValue)];
+  const checkRows = (art, sets, prefix) => {
+    let good = 0; const bad = [];
+    for (const r of art.results.filter(x => x.sourceFilter === 'all' && sets.includes(x.set))) {
+      const key = prefix + r.set + '-' + r.variant + '-' + r.split, cells = rowCells(key);
+      if (JSON.stringify(cells.slice(2, 10)) === JSON.stringify(want(r))) good++; else bad.push(key + ' ' + JSON.stringify(cells.slice(2, 10)));
+    }
+    return { good, bad };
+  };
+  const mainC = checkRows(TC, ['main', 'confirmed'], ''), supO = checkRows(TO, ['main'], 'original-');
+  ok('main table and sensitivity rows show exactly the CORRECTED artifact\'s figures', mainC.good === 8, mainC.bad.join(' | ') || '8 of 8 rows');
+  ok('the superseded table shows exactly the ORIGINAL artifact\'s main figures', supO.good === 4, supO.bad.join(' | ') || '4 of 4 rows');
+  ok('the superseded table has no sensitivity rows (it is the original main table)', !/data-tt="original-confirmed-/.test(out));
+  const qIn = (art) => p3(art.results.find(x => x.set === 'main' && x.variant === 'primary' && x.split === 'in' && x.sourceFilter === 'all').qValue);
+  const verdictText = (art) => 'No edge after correction (q = ' + qIn(art) + ' for both tests). No holdout label applies. Display only — not used by the model.';
+  const vC = (out.match(/data-tt-verdict="corrected">([^<]*)</) || [])[1], vO = (out.match(/data-tt-verdict="original">([^<]*)</) || [])[1];
+  ok('the verdict reads the corrected artifact\'s q values', vC === verdictText(TC) && qIn(TC) !== qIn(TO), vC);
+  ok('the superseded table carries the original verdict as published', vO === verdictText(TO), vO);
+  const cnote = (out.match(/data-tt-correction="1">([^<]*)</) || [])[1];
+  const wantNote = 'Corrected: the first backfill dropped ' + TC.correction.store.trades_dropped_by_the_old_run.toLocaleString('en-US')
+    + ' real trades (identical repeats). Restoring them (#' + TC.correction.data_fix.pr + ', #498) left the verdict unchanged.';
+  ok('the correction note sits directly under the verdict and reads its count and fix PR from the corrected artifact',
+    cnote === wantNote
+    && /^<div[^>]*data-tt-correction="1">/.test(out.slice(out.indexOf('</div>', out.indexOf('data-tt-verdict="corrected">')) + 6)), cnote);
+  const altered = JSON.parse(JSON.stringify(TC)); altered.multiple_comparisons.significant = ['primary'];
+  ok('SELF-TEST: the note says "changed the verdict" when the two artifacts\' verdicts differ',
+    /changed the verdict\./.test(render({ corrected: altered, original: TO })));
+  ok('"Original result (superseded)" is a collapsed <details>, after the main table and before the sensitivity sub-section',
+    /<details style="[^"]*" data-tt-superseded="1"><summary[^>]*>Original result \(superseded\)<\/summary>/.test(out)
+    && !/data-tt-superseded="1"[^>]*\bopen\b/.test(out)
+    && out.indexOf('data-tt="main-secondary-hold"') < out.indexOf('data-tt-superseded') && out.indexOf('data-tt-superseded') < out.indexOf('Sensitivity: games'));
+  ok('pre-registration, windows and the #488 link come from the corrected artifact',
+    out.includes(TC.prereg_commit.slice(0, 7)) && out.includes(TC.prereg_sha256) && out.includes(TC.window.in_sample) && out.includes(TC.window.holdout)
     && /issues\/488/.test(out) && /Polymarket top traders — pre-registered test/.test(out));
-  // No figure from the artifact is written into the renderer: collect distinctive formatted values, look for them in its source.
-  const src = html.slice(html.indexOf('function renderTopTradersSection('), b);
-  const figures = new Set();
-  for (const r of TT.results) for (const f of [String(r.n), String(r.W), String(r.L), p3(r.pValue), r.qValue != null ? p3(r.qValue) : null,
-    P(r.winPct), P(r.implied), M(r.dollars).replace(/^−\$|^\$/, ''), Math.round(Math.abs(r.dollars)).toString()]) if (f && f.length >= 3) figures.add(f);
-  figures.add(TT.prereg_sha256.slice(0, 12)); figures.add(TT.prereg_commit.slice(0, 7));
-  figures.delete('100');   // also the renderer's own constant (100 * v, "a flat $100"); an artifact W of 100 is not a hard-coded figure
-  const hard = [...figures].filter(f => src.includes(f));
-  ok('no artifact figure is hard-coded in the renderer', hard.length === 0, hard.join(',') || figures.size + ' figures checked');
-  // (d) q only on the two main in-sample rows
-  const qCell = (key) => { const tr = (out.match(new RegExp('<tr data-tt="' + key + '">[\\s\\S]*?</tr>')) || [''])[0];
-    const c = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1]); return c[c.length - 1]; };
-  const withQ = ['main-primary-in', 'main-secondary-in'];
-  const noQ = ['main-primary-hold', 'main-secondary-hold', 'confirmed-primary-in', 'confirmed-primary-hold', 'confirmed-secondary-in', 'confirmed-secondary-hold'];
-  ok('q is shown only on the main in-sample rows; every other row shows "—"',
+  // q only on the main in-sample rows, in both tables
+  const qCell = (key) => { const c = rowCells(key); return c[c.length - 1]; };
+  const withQ = ['main-primary-in', 'main-secondary-in', 'original-main-primary-in', 'original-main-secondary-in'];
+  const noQ = ['main-primary-hold', 'main-secondary-hold', 'confirmed-primary-in', 'confirmed-primary-hold', 'confirmed-secondary-in', 'confirmed-secondary-hold',
+    'original-main-primary-hold', 'original-main-secondary-hold'];
+  ok('q is shown only on the main in-sample rows (both tables); every other row shows "—"',
     withQ.every(k => /^\d\.\d{3}$/.test(qCell(k))) && noQ.every(k => qCell(k) === '—'), withQ.map(qCell).join(',') + ' | ' + noQ.map(qCell).join(','));
-  ok('the sensitivity sub-section is collapsed (<details>), labelled display only, and says it cannot set significance',
+  ok('the sensitivity sub-section is collapsed (<details>), labelled display only, says it cannot set significance, and is the corrected run',
     /<details[^>]*><summary[^>]*>Sensitivity: games with a confirmed pre-game locked price \(display only\)<\/summary>/.test(out)
-    && /Outside the multiple-comparison correction; it cannot set significance\./.test(out) && /Unrecorded price source excluded: /.test(out));
+    && /Outside the multiple-comparison correction; it cannot set significance\./.test(out) && /Unrecorded price source excluded: /.test(out)
+    && out.includes('Confirmed set secondary Apr–Aug: n ' + TC.results.find(x => x.set === 'confirmed' && x.variant === 'secondary' && x.split === 'in' && x.sourceFilter === 'recorded_only').n));
   ok('neutral styling: no green / red, no colour literal, no background highlight in the section',
     !/\b(green|red)\b|#[0-9a-f]{6}\b|rgb\(|background:/i.test(out.replace(/var\(--[a-z0-9-]+\)/g, '')));
   ok('the footnotes say the lean is dollar-weighted and ROI is at the locked price with the vig',
     /dollar-weighted/.test(out) && /one wallet supplies most of the lean-side money/.test(out) && /includes the vig/.test(out));
+
+  // (b) no distinctive figure from either artifact is written into the renderer
+  const src = html.slice(html.indexOf('function renderTopTradersSection('), b);
+  const figures = new Set();
+  for (const T of [TC, TO]) {
+    for (const r of T.results) for (const f of [String(r.n), String(r.W), String(r.L), p3(r.pValue), r.qValue != null ? p3(r.qValue) : null,
+      P(r.winPct), P(r.implied), M(r.dollars).replace(/^−\$|^\$/, ''), Math.round(Math.abs(r.dollars)).toString()]) if (f && f.length >= 3) figures.add(f);
+    figures.add(T.prereg_sha256.slice(0, 12)); figures.add(T.prereg_commit.slice(0, 7));
+  }
+  const dr = TC.correction.store.trades_dropped_by_the_old_run;
+  figures.add(String(dr)); figures.add(dr.toLocaleString('en-US')); figures.add('#' + TC.correction.data_fix.pr);
+  figures.delete('100');   // also the renderer's own constant (100 * v, "a flat $100"); an artifact W of 100 is not a hard-coded figure
+  const hard = [...figures].filter(f => src.includes(f));
+  ok('no figure from either artifact (results, q, hashes, the 18,671 count, the fix PR) is hard-coded in the renderer', hard.length === 0, hard.join(',') || figures.size + ' figures checked');
+  ok('SELF-TEST: the figure scan catches a planted figure', [...figures].some(f => (src + '\nconst x = "' + qIn(TC) + '";').includes(f)));
 }
 
 cleanupTmpDb();

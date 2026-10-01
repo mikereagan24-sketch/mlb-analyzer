@@ -32,8 +32,12 @@ const { slateFits } = require('../services/trends-slate');
 const ARTIFACT = path.join(__dirname, '..', 'docs', 'trends-results-2026-09-29.json');
 // GET /api/trends/top-traders (2026-10-01): the pre-registered Polymarket
 // top-traders backtest (#489 / #490), as recorded. Same rule as the trends
-// artifact: this committed file and nothing else -- no database, no computation.
+// artifact: committed files and nothing else -- no database, no computation.
+// Two artifacts, returned labelled: the corrected run (prereg §9, repeat
+// trades restored -- #496 / #498), which the tab shows, and the original run,
+// shown as superseded. Either one missing or unreadable -> the error JSON.
 const TOP_TRADERS_ARTIFACT = path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30.json');
+const TOP_TRADERS_CORRECTED_ARTIFACT = path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30-corrected.json');
 const router = express.Router();
 
 // Read once, cache in memory. A failure is cached too (as an error) so a
@@ -55,7 +59,8 @@ function cachedArtifact(file, label) {
   };
 }
 const load = cachedArtifact(ARTIFACT, 'trends results');
-const loadTopTraders = cachedArtifact(TOP_TRADERS_ARTIFACT, 'top-traders results');
+const loadTopTraders = cachedArtifact(TOP_TRADERS_ARTIFACT, 'top-traders original results');
+const loadTopTradersCorrected = cachedArtifact(TOP_TRADERS_CORRECTED_ARTIFACT, 'top-traders corrected results');
 
 router.get('/trends/results', (req, res) => {
   const c = load();
@@ -64,9 +69,10 @@ router.get('/trends/results', (req, res) => {
 });
 
 router.get('/trends/top-traders', (req, res) => {
-  const c = loadTopTraders();
+  const c = loadTopTradersCorrected(), o = loadTopTraders();
   if (!c.ok) return res.status(503).json(c.body);
-  res.json(c.body);
+  if (!o.ok) return res.status(503).json(o.body);
+  res.json({ corrected: c.body, original: o.body });
 });
 
 // ---- slate fits
