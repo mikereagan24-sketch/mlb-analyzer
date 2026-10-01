@@ -28,6 +28,11 @@
  *      discovery of an event whose end_date is a week after its game
  *   i. regular season only: spring training ends at MLB's real opening day
  *      (2026-03-25), not game_log's first date; postseason is excluded
+ *   j. KEEP EVERY ROW (2026-10-01): identical repeat rows are all stored; a
+ *      real-shape transaction's maker shares sum to the taker's; a trade on a
+ *      split boundary is stored exactly once (half-open windows); re-fetch mode
+ *      replaces only the affected market, wholesale; a kill mid-market in
+ *      re-fetch mode resumes to the identical result
  *
  *   node scripts/test-polymarket-backfill.js
  */
@@ -127,10 +132,10 @@ const quietClient = (fetchImpl) => bf.makeClient({ fetchImpl, minGapMs: 0, sleep
     const distinct = db.prepare('SELECT COUNT(*) c FROM (SELECT DISTINCT wallet_id, ts, side, outcome, price, size FROM fills WHERE market_id = ?)').get(mid).c;
     const ref = new Set(trades.map(t => ['0x' + '', t.proxyWallet, t.timestamp, t.side, t.outcomeIndex, t.price, t.size].join('|'))).size;
     ok('no fill duplicated at window edges (distinct rows == reference distinct rows)', distinct === ref, distinct + ' vs ' + ref);
-    ok('windows tile the range with no gap or overlap', (() => {
-      const ws = db.prepare("SELECT t_start, t_end FROM windows WHERE market_id = ? AND status = 'done' ORDER BY t_start").all(mid);
-      if (ws[0].t_start !== 0 || ws[ws.length - 1].t_end !== cutoff - 1) return false;
-      for (let i = 1; i < ws.length; i++) if (ws[i].t_start !== ws[i - 1].t_end + 1) return false;
+    ok('half-open windows tile [0, cutoff) with no gap or overlap (each starts where the last ended)', (() => {
+      const ws = db.prepare("SELECT t_start, t_end, half_open FROM windows WHERE market_id = ? AND status = 'done' ORDER BY t_start").all(mid);
+      if (ws[0].t_start !== 0 || ws[ws.length - 1].t_end !== cutoff || ws.some(w => w.half_open !== 1)) return false;
+      for (let i = 1; i < ws.length; i++) if (ws[i].t_start !== ws[i - 1].t_end) return false;
       return true;
     })());
     // Resume: crash after 30 requests -- past the probes and splits, part-way
@@ -358,7 +363,8 @@ const quietClient = (fetchImpl) => bf.makeClient({ fetchImpl, minGapMs: 0, sleep
     const E = mk('0xr4', 'mlb-bos-nyy-2026-04-01', 'Boston Red Sox', 'New York Yankees', 'bos-nyy', U('2026-04-01T16:00:00Z'));
     const W = (addr) => { db.prepare('INSERT OR IGNORE INTO wallets (addr) VALUES (?)').run(addr); return db.prepare('SELECT id FROM wallets WHERE addr = ?').get(addr).id; };
     const F = (mid, w, ts, side, outcome, price, size) => db.prepare('INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?)').run(mid, W(w), ts, side, outcome, price, size);
-    const WIN = (mid, a, b, status, fills) => db.prepare('INSERT INTO windows VALUES (?, ?, ?, ?, ?, 0)').run(mid, a, b, status, fills);
+    // Legacy CLOSED windows [a, b] (half_open = 0), as the pre-2026-10-01 runs wrote them.
+    const WIN = (mid, a, b, status, fills) => db.prepare('INSERT INTO windows (market_id, t_start, t_end, status, fills, dups) VALUES (?, ?, ?, ?, ?, 0)').run(mid, a, b, status, fills);
     F(A, '0xa', S - 3600, 1, 0, 0.50, 10);        // pre-game buy
     F(A, '0xb', S - 1, 1, 1, 0.40, 10);           // pre-game buy, one second before first pitch
     F(A, '0xa', S, -1, 0, 0.90, 10);              // IN-GAME sell, at first pitch
@@ -436,6 +442,125 @@ const quietClient = (fetchImpl) => bf.makeClient({ fetchImpl, minGapMs: 0, sleep
     ok('the last regular-season day still matches', M('mlb-bos-nyy-2026-09-27').status === 'matched');
     ok('the day after it (Wild Card) is postseason_out_of_scope', M('mlb-bos-nyy-2026-09-29').reason === 'postseason_out_of_scope');
     ok('a year with no recorded season dates is excluded, not guessed', M('mlb-bos-nyy-2027-05-01').reason === 'season_dates_unknown');
+  }
+
+  // ------------------------------------------------------------------ j
+  console.log('\nj. keep every row: repeats, boundaries, re-fetch, resume');
+  {
+    const S = 1790533379;
+    const tr = (o) => Object.assign({ transactionHash: '0xtx', proxyWallet: '0xw', side: 'BUY', outcomeIndex: 1, price: 0.64, size: 200, timestamp: S }, o);
+    // Formatted in JS (SQL string concatenation would print a REAL 1 as '1.0').
+    const multiset = (db, mid) => db.prepare(`SELECT w.addr, f.ts, f.side, f.outcome, f.price, f.size
+      FROM fills f JOIN wallets w ON w.id = f.wallet_id WHERE f.market_id = ?`).all(mid)
+      .map(r => [r.addr, r.ts, r.side, r.outcome, r.price, r.size].join('|')).sort();
+    // (a) identical repeat rows are all kept
+    {
+      const CID = '0xrep', cut = S + 100;
+      const trades = [tr({}), tr({}), tr({}), tr({ proxyWallet: '0xother', size: 5 })];
+      const db = store(); const mid = addMarket(db, { cid: CID, cutoff: cut });
+      await bf.fetchMarket(db, quietClient(mockTrades({ [CID]: trades })), db.prepare('SELECT * FROM markets WHERE id = ?').get(mid));
+      const n = db.prepare("SELECT COUNT(*) c FROM fills f JOIN wallets w ON w.id = f.wallet_id WHERE f.market_id = ? AND w.addr = '0xw'").get(mid).c;
+      ok('three identical rows (same tx, wallet, side, outcome, price, size, ts) are all stored', n === 3 && db.prepare('SELECT COUNT(*) c FROM fills WHERE market_id = ?').get(mid).c === 4, n + ' of 3');
+      ok('nothing is reported as dropped', db.prepare('SELECT duplicates_dropped d FROM markets WHERE id = ?').get(mid).d === 0);
+    }
+    // (b) a real-shape transaction: one taker against several makers, with repeated identical maker rows
+    {
+      const CID = '0xshape', cut = S + 100, TX = '0x669ae54a';
+      const makers = [
+        tr({ transactionHash: TX, proxyWallet: '0xm1', side: 'BUY', outcomeIndex: 1, price: 0.64, size: 5000 }),
+        tr({ transactionHash: TX, proxyWallet: '0xm1', side: 'BUY', outcomeIndex: 1, price: 0.64, size: 5000 }),
+        tr({ transactionHash: TX, proxyWallet: '0xm1', side: 'BUY', outcomeIndex: 1, price: 0.64, size: 5000 }),
+        tr({ transactionHash: TX, proxyWallet: '0xm2', side: 'BUY', outcomeIndex: 1, price: 0.64, size: 200 }),
+        tr({ transactionHash: TX, proxyWallet: '0xm2', side: 'BUY', outcomeIndex: 1, price: 0.64, size: 200 }),
+        tr({ transactionHash: TX, proxyWallet: '0xm2', side: 'SELL', outcomeIndex: 0, price: 0.36, size: 200 }),
+        tr({ transactionHash: TX, proxyWallet: '0xm3', side: 'SELL', outcomeIndex: 0, price: 0.36, size: 387.21 }),
+      ];
+      const takerSize = makers.reduce((s, x) => s + x.size, 0);                 // 15,987.21
+      const trades = [tr({ transactionHash: TX, proxyWallet: '0xtaker', side: 'BUY', outcomeIndex: 0, price: 0.36, size: takerSize }), ...makers];
+      const db = store(); const mid = addMarket(db, { cid: CID, cutoff: cut });
+      await bf.fetchMarket(db, quietClient(mockTrades({ [CID]: trades })), db.prepare('SELECT * FROM markets WHERE id = ?').get(mid));
+      const makerSum = db.prepare("SELECT SUM(f.size) s, COUNT(*) n FROM fills f JOIN wallets w ON w.id = f.wallet_id WHERE f.market_id = ? AND w.addr <> '0xtaker'").get(mid);
+      const takerRow = db.prepare("SELECT SUM(f.size) s FROM fills f JOIN wallets w ON w.id = f.wallet_id WHERE f.market_id = ? AND w.addr = '0xtaker'").get(mid);
+      ok('all 7 maker rows stored, and their shares sum to the taker\'s (' + takerSize + ')',
+        makerSum.n === 7 && Math.abs(makerSum.s - takerRow.s) < 1e-9, makerSum.n + ' rows, ' + makerSum.s + ' vs ' + takerRow.s);
+    }
+    // (c) a trade exactly on a split boundary is stored once
+    {
+      const CID = '0xsplit', T0 = 1700000000, N = 12000;      // 10 trades every second for 1,200 seconds: over the 10,000 cap
+      const trades = [];
+      for (let i = 0; i < N; i++) trades.push(tr({ transactionHash: '0xs' + i, proxyWallet: '0xw' + (i % 50), timestamp: T0 + Math.floor(i / 10), size: 1 + (i % 7) }));
+      trades.sort((x, y) => y.timestamp - x.timestamp);
+      const cut = T0 + 1200;
+      const db = store(); const mid = addMarket(db, { cid: CID, cutoff: cut });
+      await bf.fetchMarket(db, quietClient(mockTrades({ [CID]: trades })), db.prepare('SELECT * FROM markets WHERE id = ?').get(mid));
+      const ws = db.prepare("SELECT t_start, t_end FROM windows WHERE market_id = ? AND status = 'done' ORDER BY t_start").all(mid);
+      const inside = ws.map(w => w.t_start).filter(b => b > T0 && b < cut);          // split points that land inside the data
+      const perBoundary = inside.map(b => ({ b, stored: db.prepare('SELECT COUNT(*) c FROM fills WHERE market_id = ? AND ts = ?').get(mid, b).c,
+        source: trades.filter(t => t.timestamp === b).length }));
+      ok('the market split (' + ws.length + ' half-open windows) and every trade is stored exactly once', ws.length > 1
+        && db.prepare('SELECT COUNT(*) c FROM fills WHERE market_id = ?').get(mid).c === N && JSON.stringify(multiset(db, mid)) === JSON.stringify(trades.map(t => t.proxyWallet + '|' + t.timestamp + '|1|1|0.64|' + t.size).sort()));
+      ok('a trade exactly on each split boundary is stored once (by the later window), not twice and not zero times',
+        inside.length > 0 && perBoundary.every(x => x.stored === x.source && x.source === 10), JSON.stringify(perBoundary.slice(0, 3)));
+    }
+    // (d) re-fetch replaces only the affected market, wholesale; (e) a kill mid-market resumes to the identical result
+    {
+      const CID_A = '0xaffected', CID_B = '0xclean', T0 = 1700000000, cut = T0 + 5000;
+      const mk = (n, salt) => { const a = []; for (let i = 0; i < n; i++) a.push(tr({ transactionHash: '0x' + salt + (i % 900), proxyWallet: '0xw' + (i % 40),
+        side: i % 4 ? 'BUY' : 'SELL', outcomeIndex: i % 2, price: 0.3 + (i % 30) / 100, size: 1 + (i % 9), timestamp: T0 + Math.floor(i / 3) })); return a.sort((x, y) => y.timestamp - x.timestamp); };
+      const tradesA = mk(12600, 'a').concat(mk(30, 'a').slice(0, 30));   // includes exact repeats
+      tradesA.sort((x, y) => y.timestamp - x.timestamp);
+      const build = () => {
+        const db = store();
+        const A = addMarket(db, { cid: CID_A, cutoff: cut, slug: 'mlb-a-b-2026-07-01' }), B = addMarket(db, { cid: CID_B, cutoff: cut, slug: 'mlb-c-d-2026-07-01' });
+        const W = (addr) => { db.prepare('INSERT OR IGNORE INTO wallets (addr) VALUES (?)').run(addr); return db.prepare('SELECT id FROM wallets WHERE addr = ?').get(addr).id; };
+        // The OLD state: legacy closed windows, a de-duplicated fill set, plus a stale row the API would never return.
+        db.prepare("INSERT INTO fills VALUES (?, ?, ?, 1, 0, 0.5, 999)").run(A, W('0xstale'), T0 + 10);
+        db.prepare("INSERT INTO fills VALUES (?, ?, ?, 1, 1, 0.4, 3)").run(B, W('0xbwallet'), T0 + 20);
+        db.prepare("INSERT INTO windows (market_id, t_start, t_end, status, fills, dups) VALUES (?, 0, ?, 'done', 1, 7)").run(A, cut - 1);
+        db.prepare("INSERT INTO windows (market_id, t_start, t_end, status, fills, dups) VALUES (?, 0, ?, 'done', 1, 0)").run(B, cut - 1);
+        bf.aggregateMarket(db, A); bf.aggregateMarket(db, B);
+        db.prepare('UPDATE markets SET duplicates_dropped = 7 WHERE id = ?').run(A);
+        return { db, A, B };
+      };
+      const snapB = (db, B) => JSON.stringify([multiset(db, B), db.prepare('SELECT * FROM wallet_game WHERE market_id = ? ORDER BY wallet_id').all(B),
+        db.prepare('SELECT * FROM net_short WHERE market_id = ?').all(B), db.prepare('SELECT * FROM windows WHERE market_id = ?').all(B),
+        db.prepare('SELECT status, fills_stored, duplicates_dropped, repeats_refetch FROM markets WHERE id = ?').get(B)]);
+      const result = (db, A) => JSON.stringify([multiset(db, A), db.prepare('SELECT spent, received, payout, profit, volume, fills FROM wallet_game WHERE market_id = ? ORDER BY wallet_id').all(A),
+        db.prepare('SELECT net_shares FROM net_short WHERE market_id = ? ORDER BY wallet_id, outcome').all(A),
+        db.prepare('SELECT status, fills_stored, duplicates_dropped, repeats_refetch, repeats_dropped_v1, split_needed, window_count FROM markets WHERE id = ?').get(A)]);
+      // uninterrupted
+      const u = build();
+      const before = snapB(u.db, u.B);
+      ok('initRepeatsRefetch marks only the market that dropped repeats', bf.initRepeatsRefetch(u.db) === 1
+        && u.db.prepare('SELECT repeats_refetch r FROM markets WHERE id = ?').get(u.B).r === null);
+      await bf.refetchMarket(u.db, quietClient(mockTrades({ [CID_A]: tradesA })), u.A);
+      const ref = tradesA.map(t => t.proxyWallet + '|' + t.timestamp + '|' + (t.side === 'BUY' ? 1 : -1) + '|' + t.outcomeIndex + '|' + t.price + '|' + t.size).sort();
+      ok('re-fetch replaces the market\'s fills wholesale: exactly the API\'s rows, repeats included, no stale leftover',
+        JSON.stringify(multiset(u.db, u.A)) === JSON.stringify(ref) && !multiset(u.db, u.A).some(k => k.startsWith('0xstale')), multiset(u.db, u.A).length + ' rows');
+      ok('its windows are all half-open and tile [0, cutoff); legacy windows are gone', (() => {
+        const ws = u.db.prepare("SELECT t_start, t_end, half_open FROM windows WHERE market_id = ? AND status = 'done' ORDER BY t_start").all(u.A);
+        return ws.length > 1 && ws.every(w => w.half_open === 1) && ws[0].t_start === 0 && ws[ws.length - 1].t_end === cut
+          && ws.every((w, i) => i === 0 || w.t_start === ws[i - 1].t_end) && !u.db.prepare('SELECT 1 FROM windows WHERE market_id = ? AND half_open = 0').get(u.A);
+      })());
+      ok('its wallet_game / net_short are recomputed from the new fills (the stale wallet is gone)',
+        !u.db.prepare("SELECT 1 FROM wallet_game g JOIN wallets w ON w.id = g.wallet_id WHERE g.market_id = ? AND w.addr = '0xstale'").get(u.A)
+        && u.db.prepare('SELECT COUNT(*) c FROM wallet_game WHERE market_id = ?').get(u.A).c + u.db.prepare('SELECT COUNT(DISTINCT wallet_id) c FROM net_short WHERE market_id = ?').get(u.A).c === 40);
+      ok('the market is marked done with the old count kept; duplicates_dropped is now 0',
+        JSON.parse(result(u.db, u.A))[3].repeats_refetch === 'done' && JSON.parse(result(u.db, u.A))[3].repeats_dropped_v1 === 7 && JSON.parse(result(u.db, u.A))[3].duplicates_dropped === 0);
+      ok('the unaffected market is untouched (fills, wallet_game, net_short, windows, status)', snapB(u.db, u.B) === before);
+      ok('a second run skips the finished market (resumable per market, not redone)', (await bf.refetchMarket(u.db, quietClient(mockTrades({})), u.A)).skipped === true);
+      // killed mid-market, then resumed
+      const k = build();
+      bf.initRepeatsRefetch(k.db);
+      let crashed = false;
+      // failAfter 30: past the split probes, part-way through paging, so committed pages of an unfinished window are on disk
+      try { await bf.refetchMarket(k.db, quietClient(mockTrades({ [CID_A]: tradesA }, { failAfter: 30 })), k.A); } catch (e) { crashed = /simulated crash|giving up/.test(e.message); }
+      const mid = k.db.prepare('SELECT status, repeats_refetch r FROM markets WHERE id = ?').get(k.A);
+      const partial = k.db.prepare('SELECT COUNT(*) c FROM fills WHERE market_id = ?').get(k.A).c;
+      await bf.refetchMarket(k.db, quietClient(mockTrades({ [CID_A]: tradesA })), k.A);
+      ok('killed mid-market (' + partial + ' rows on disk, status ' + mid.status + ', still pending), resumed: identical to the uninterrupted run',
+        crashed && mid.r === 'pending' && partial > 0 && partial < tradesA.length && result(k.db, k.A) === result(u.db, u.A));
+    }
   }
 
   try { require(path.join(R, 'db/schema')).db.close(); } catch (e) { /* not loaded */ }

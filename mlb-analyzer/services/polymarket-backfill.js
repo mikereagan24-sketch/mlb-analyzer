@@ -19,6 +19,16 @@
 //      is split in half by time, repeatedly, until every window fits. Per
 //      market: whether splitting was needed, and the window count. No
 //      market is ever silently truncated.
+//      KEEP EVERY ROW (2026-10-01). /trades has no fill id, and identical
+//      rows are real, distinct fills: one taker matched against several
+//      orders of the same maker at the same price and size (measured: tx
+//      0x669ae54a... in mlb-tb-phi-2026-09-27 -- its 48 maker rows sum to the
+//      taker's 71,787.21 shares only with the repeats kept). Paging by offset
+//      is stable (5 page sizes, identical multisets), so nothing is
+//      de-duplicated. Windows are HALF-OPEN [t_start, t_end) on the trade
+//      timestamp and never overlap: a trade at ts belongs to the one window
+//      with t_start <= ts < t_end, so a trade exactly on a split boundary is
+//      fetched once, by the later window.
 //   2. Net-short positions (a wallet net SHORT one team pre-game -- shares it
 //      never bought, i.e. share splitting) are excluded from profit and
 //      counted, per market and in total.
@@ -68,7 +78,9 @@ CREATE TABLE IF NOT EXISTS markets (
 CREATE TABLE IF NOT EXISTS windows (
   market_id INTEGER NOT NULL, t_start INTEGER NOT NULL, t_end INTEGER NOT NULL,
   status TEXT NOT NULL,                         -- pending | done | split
-  fills INTEGER, dups INTEGER, PRIMARY KEY (market_id, t_start, t_end)) WITHOUT ROWID;
+  fills INTEGER, dups INTEGER,
+  half_open INTEGER NOT NULL DEFAULT 0,         -- 1: [t_start, t_end) (since 2026-10-01); 0: legacy closed [t_start, t_end]
+  PRIMARY KEY (market_id, t_start, t_end)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS fills (
   market_id INTEGER NOT NULL, wallet_id INTEGER NOT NULL, ts INTEGER NOT NULL,
   side INTEGER NOT NULL,                        -- +1 buy, -1 sell
@@ -93,6 +105,16 @@ function openStore(Database, file) {
   // Stores created before cutoff_source existed (the pilot databases).
   if (!db.prepare('PRAGMA table_info(markets)').all().some(c => c.name === 'cutoff_source')) {
     db.exec('ALTER TABLE markets ADD COLUMN cutoff_source TEXT');
+  }
+  // 2026-10-01: half-open windows, and the per-market marker for the re-fetch
+  // of markets whose repeats the old de-duplication dropped.
+  if (!db.prepare('PRAGMA table_info(windows)').all().some(c => c.name === 'half_open')) {
+    db.exec('ALTER TABLE windows ADD COLUMN half_open INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!db.prepare('PRAGMA table_info(markets)').all().some(c => c.name === 'repeats_refetch')) {
+    db.exec('ALTER TABLE markets ADD COLUMN repeats_refetch TEXT');          // NULL | pending | done
+    db.exec('ALTER TABLE markets ADD COLUMN repeats_dropped_v1 INTEGER');   // the old run's duplicates_dropped, kept
+    db.exec('ALTER TABLE markets ADD COLUMN repeats_refetched_at TEXT');
   }
   return db;
 }
@@ -422,11 +444,15 @@ function recutDoneMarkets(db, gi, opts) {
         // cutoff, shorten the one it falls in, and recount it. Its dropped-
         // duplicate count is kept (it cannot be split by time).
         // Split (parent) windows are history only and are left as they were.
+        // Legacy windows are closed [t_start, t_end]; windows written since
+        // 2026-10-01 are half-open [t_start, t_end) (half_open = 1).
         db.prepare("DELETE FROM windows WHERE market_id = ? AND t_start >= ? AND status = 'done'").run(m.id, cut);
-        const w = db.prepare("SELECT t_start, t_end FROM windows WHERE market_id = ? AND t_end >= ? AND status = 'done'").get(m.id, cut);
+        const w = db.prepare(`SELECT t_start, t_end, half_open FROM windows WHERE market_id = ? AND status = 'done'
+          AND ((half_open = 0 AND t_end >= ?) OR (half_open = 1 AND t_end > ?))`).get(m.id, cut, cut);
         if (w) {
-          const n = db.prepare('SELECT COUNT(*) c FROM fills WHERE market_id = ? AND ts BETWEEN ? AND ?').get(m.id, w.t_start, cut - 1).c;
-          db.prepare('UPDATE windows SET t_end = ?, fills = ? WHERE market_id = ? AND t_start = ? AND t_end = ?').run(cut - 1, n, m.id, w.t_start, w.t_end);
+          const n = db.prepare('SELECT COUNT(*) c FROM fills WHERE market_id = ? AND ts >= ? AND ts < ?').get(m.id, w.t_start, cut).c;
+          db.prepare('UPDATE windows SET t_end = ?, fills = ? WHERE market_id = ? AND t_start = ? AND t_end = ?')
+            .run(w.half_open ? cut : cut - 1, n, m.id, w.t_start, w.t_end);
         }
         const wc = db.prepare("SELECT COUNT(*) c, SUM(fills) f, SUM(dups) d FROM windows WHERE market_id = ? AND status = 'done'").get(m.id);
         db.prepare('UPDATE markets SET cutoff_utc = ?, cutoff_source = ?, window_count = ?, fills_stored = ?, duplicates_dropped = ? WHERE id = ?')
@@ -453,52 +479,54 @@ function walletIdFn(db) {
 const tradesUrl = (cid, a, b, offset, limit) => DATA + '/trades?' + new URLSearchParams({
   market: cid, takerOnly: 'false', start: String(a), end: String(b), offset: String(offset), limit: String(limit) });
 
-// Fetch every pre-game fill of one matched market. Resumable at window level:
-// a window left 'pending' by a crash has its rows deleted and is fetched again.
+// Fetch every pre-game fill of one matched market, KEEPING EVERY ROW (decision
+// 1). Windows are half-open [t_start, t_end): the first is [0, cutoff), so a
+// fill at or after the cutoff is never in any window. A trade at ts belongs to
+// the one window with t_start <= ts < t_end. The API's start/end are INCLUSIVE
+// seconds, so a window is requested as start = t_start, end = t_end - 1.
+// Resumable at window level: a window left 'pending' by a crash has its rows
+// deleted and is fetched again.
 async function fetchMarket(db, client, m, opts) {
   const o = Object.assign({ onPage: () => {} }, opts || {});
+  if (db.prepare('SELECT 1 FROM windows WHERE market_id = ? AND half_open = 0').get(m.id)) {
+    throw new Error(m.slug + ' still has legacy closed windows; reset it first (resetMarketForRefetch)');
+  }
   const walletId = walletIdFn(db);
   const req0 = client.stats.requests;
-  const cutoffEnd = m.cutoff_utc - 1;                          // strictly before scheduled start
   if (!db.prepare('SELECT 1 FROM windows WHERE market_id = ?').get(m.id)) {
-    db.prepare("INSERT INTO windows (market_id, t_start, t_end, status) VALUES (?, 0, ?, 'pending')").run(m.id, cutoffEnd);
+    db.prepare("INSERT INTO windows (market_id, t_start, t_end, status, half_open) VALUES (?, 0, ?, 'pending', 1)").run(m.id, m.cutoff_utc);
   }
   const insFill = db.prepare('INSERT INTO fills (market_id, wallet_id, ts, side, outcome, price, size) VALUES (?, ?, ?, ?, ?, ?, ?)');
-  const delWin = db.prepare('DELETE FROM fills WHERE market_id = ? AND ts BETWEEN ? AND ?');
-  // Duplicates are counted PER WINDOW and summed at the end, so a count from a
-  // run killed mid-market is not lost when the market is resumed.
-  const setWin = db.prepare('UPDATE windows SET status = ?, fills = ?, dups = ? WHERE market_id = ? AND t_start = ? AND t_end = ?');
-  const addWin = db.prepare("INSERT OR IGNORE INTO windows (market_id, t_start, t_end, status) VALUES (?, ?, ?, 'pending')");
+  const delWin = db.prepare('DELETE FROM fills WHERE market_id = ? AND ts >= ? AND ts < ?');
+  const setWin = db.prepare('UPDATE windows SET status = ?, fills = ?, dups = 0 WHERE market_id = ? AND t_start = ? AND t_end = ?');
+  const addWin = db.prepare("INSERT OR IGNORE INTO windows (market_id, t_start, t_end, status, half_open) VALUES (?, ?, ?, 'pending', 1)");
   for (;;) {
     const w = db.prepare("SELECT t_start, t_end FROM windows WHERE market_id = ? AND status = 'pending' ORDER BY t_end DESC LIMIT 1").get(m.id);
     if (!w) break;
     delWin.run(m.id, w.t_start, w.t_end);                      // resume safety: drop a partial window
     // Over the cap? One row at offset MAX_OFFSET means > MAX_OFFSET fills.
-    const probe = await client.getJson(tradesUrl(m.condition_id, w.t_start, w.t_end, MAX_OFFSET, 1));
+    const probe = await client.getJson(tradesUrl(m.condition_id, w.t_start, w.t_end - 1, MAX_OFFSET, 1));
     if (Array.isArray(probe) && probe.length) {
-      if (w.t_start >= w.t_end) throw new Error('window ' + w.t_start + ' is a single second over the offset cap: cannot split -- ' + m.slug);
+      if (w.t_end - w.t_start <= 1) throw new Error('window [' + w.t_start + ', ' + w.t_end + ') is a single second over the offset cap: cannot split -- ' + m.slug);
+      // [a, b) -> [a, mid) + [mid, b): a trade at exactly mid goes to the second, only.
       const mid = Math.floor((w.t_start + w.t_end) / 2);
       db.transaction(() => {
-        setWin.run('split', null, null, m.id, w.t_start, w.t_end);
+        setWin.run('split', null, m.id, w.t_start, w.t_end);
         addWin.run(m.id, w.t_start, mid);
-        addWin.run(m.id, mid + 1, w.t_end);
+        addWin.run(m.id, mid, w.t_end);
         db.prepare('UPDATE markets SET split_needed = 1 WHERE id = ?').run(m.id);
       })();
       continue;
     }
     // Page it. Newest first; the window is under the cap, so offsets never pass it.
-    const seen = new Set();
-    let n = 0, dups = 0;
+    let n = 0;
     for (let off = 0; off <= MAX_OFFSET; off += PAGE) {
-      const page = await client.getJson(tradesUrl(m.condition_id, w.t_start, w.t_end, off, PAGE));
+      const page = await client.getJson(tradesUrl(m.condition_id, w.t_start, w.t_end - 1, off, PAGE));
       if (!Array.isArray(page)) throw new Error('non-array page for ' + m.slug);
       db.transaction(() => {
         for (const t of page) {
           const ts = Number(t.timestamp);
-          if (!(ts >= w.t_start && ts <= w.t_end && ts < m.cutoff_utc)) continue;   // defensive: the API filters too
-          const key = [t.transactionHash, t.proxyWallet, t.side, t.outcomeIndex, t.price, t.size, ts].join('|');
-          if (seen.has(key)) { dups++; continue; }
-          seen.add(key);
+          if (!(ts >= w.t_start && ts < w.t_end && ts < m.cutoff_utc)) continue;   // defensive: the API filters too
           insFill.run(m.id, walletId(t.proxyWallet), ts, t.side === 'BUY' ? 1 : -1, Number(t.outcomeIndex), Number(t.price), Number(t.size));
           n++;
         }
@@ -506,11 +534,40 @@ async function fetchMarket(db, client, m, opts) {
       o.onPage();
       if (page.length < PAGE) break;
     }
-    setWin.run('done', n, dups, m.id, w.t_start, w.t_end);
+    setWin.run('done', n, m.id, w.t_start, w.t_end);
   }
-  const wc = db.prepare("SELECT COUNT(*) c, SUM(fills) f, SUM(dups) d FROM windows WHERE market_id = ? AND status = 'done'").get(m.id);
-  db.prepare("UPDATE markets SET status = 'fetched', window_count = ?, fills_stored = ?, duplicates_dropped = ?, requests = requests + ? WHERE id = ?")
-    .run(wc.c, wc.f || 0, wc.d || 0, client.stats.requests - req0, m.id);
+  const wc = db.prepare("SELECT COUNT(*) c, SUM(fills) f FROM windows WHERE market_id = ? AND status = 'done'").get(m.id);
+  db.prepare("UPDATE markets SET status = 'fetched', window_count = ?, fills_stored = ?, duplicates_dropped = 0, requests = requests + ? WHERE id = ?")
+    .run(wc.c, wc.f || 0, client.stats.requests - req0, m.id);
+}
+
+// ---------------------------------------------------------------- re-fetch (2026-10-01)
+// Markets the old run fetched with within-window de-duplication, which dropped
+// real repeated fills. initRepeatsRefetch marks them once (the old count kept in
+// repeats_dropped_v1); refetchMarket then replaces each one's fills and windows
+// wholesale and recomputes only its wallet_game / net_short rows. Resumable per
+// market: a market killed mid-way is in 'matched'/'fetched' with half-open
+// windows and continues where it stopped; one already finished is not redone.
+function initRepeatsRefetch(db) {
+  return db.prepare(`UPDATE markets SET repeats_refetch = 'pending', repeats_dropped_v1 = duplicates_dropped
+    WHERE status = 'done' AND duplicates_dropped > 0 AND repeats_refetch IS NULL`).run().changes;
+}
+function resetMarketForRefetch(db, id) {
+  db.transaction(() => {
+    for (const t of ['fills', 'windows', 'wallet_game', 'net_short']) db.prepare('DELETE FROM ' + t + ' WHERE market_id = ?').run(id);
+    db.prepare(`UPDATE markets SET status = 'matched', split_needed = 0, window_count = NULL, fills_stored = NULL, duplicates_dropped = 0,
+      net_short_positions = NULL, net_short_wallet_games = NULL, wallet_games = NULL, done_at = NULL WHERE id = ?`).run(id);
+  })();
+}
+async function refetchMarket(db, client, marketId, opts) {
+  let m = db.prepare('SELECT * FROM markets WHERE id = ?').get(marketId);
+  if (m.repeats_refetch !== 'pending') return { skipped: true };
+  const legacy = db.prepare('SELECT 1 FROM windows WHERE market_id = ? AND half_open = 0').get(m.id);
+  if (m.status === 'done' && legacy) { resetMarketForRefetch(db, m.id); m = db.prepare('SELECT * FROM markets WHERE id = ?').get(m.id); }
+  if (m.status === 'matched') { await fetchMarket(db, client, m, opts); m = db.prepare('SELECT * FROM markets WHERE id = ?').get(m.id); }
+  const agg = m.status === 'fetched' ? aggregateMarket(db, m.id) : null;      // 'done' with half-open windows: already aggregated
+  db.prepare("UPDATE markets SET repeats_refetch = 'done', repeats_refetched_at = datetime('now') WHERE id = ?").run(m.id);
+  return { skipped: false, agg };
 }
 
 // ---------------------------------------------------------------- profit
@@ -567,6 +624,7 @@ function aggregateMarket(db, marketId) {
 
 module.exports = { openStore, makeClient, discoverSlugs, discoverRange, marketFromEvent, upsertMarket,
   loadGameIndex, matchMarket, matchAll, fetchMarket, aggregateMarket, parseStart, slugDate,
+  initRepeatsRefetch, resetMarketForRefetch, refetchMarket,
   etGameTimeToUtc, resolveCutoff, auditGameTimeRule, FALLBACK_TOLERANCE_S,
   MANUAL_EXCLUSIONS, REGULAR_SEASON, scrubMarket, applyManualExclusions, recutDoneMarkets, END_DATE_SLACK_DAYS,
   PAGE, MAX_OFFSET, SCHEMA };
