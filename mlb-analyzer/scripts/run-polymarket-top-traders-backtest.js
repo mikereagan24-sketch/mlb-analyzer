@@ -13,6 +13,18 @@
 //      (and §2 / §5 tables) -- if any differs, it stops BEFORE a single
 //      resolution is read;
 //   3. only then are outcomes attached and the statistics computed.
+//
+//   --corrected   the prereg §9 correction run (2026-10-01, #496: identical repeat
+//                 trades restored). Gate 1 is the same 27 fields, with two sources:
+//                 the game_log-only fields (CORRECTED_GAME_LOG_ONLY, and the price
+//                 skips of each counts row) must still equal §10; the
+//                 trade-dependent fields must equal the values recorded in
+//                 docs/polymarket-top-traders-results-2026-09-30-corrected.json
+//                 (or --corrected-artifact PATH). Any mismatch stops before
+//                 outcomes, as in the default mode. --json then writes that
+//                 artifact's shape (correction record, Gate 1 a/b). Without the
+//                 flag nothing below runs differently: the default mode checks
+//                 all 27 fields against §10, as it always has.
 
 const path = require('path');
 const fs = require('fs');
@@ -26,6 +38,8 @@ const arg = (k) => { const i = argv.indexOf(k); return i === -1 ? null : argv[i 
 const PM = path.resolve(arg('--pm-db') || path.join(R, 'data/polymarket.db'));
 const MLB = path.resolve(arg('--mlb-db') || path.join(R, 'data/mlb.db'));
 const JSON_OUT = arg('--json');
+const CORRECTED = argv.includes('--corrected');
+const CORRECTED_ARTIFACT = path.resolve(arg('--corrected-artifact') || path.join(R, 'docs/polymarket-top-traders-results-2026-09-30-corrected.json'));
 
 let peak = 0;
 const tick = () => { const r = process.memoryUsage().rss; if (r > peak) peak = r; };
@@ -90,6 +104,80 @@ function actualFor(f) {
 }
 const canon = (v) => JSON.stringify(v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort()) : v);
 
+// ---------------------------------------------------------------- --corrected (prereg §9 correction run)
+// Fields that depend only on game_log and the market cutoffs: unchanged by #496, so still §10's.
+const CORRECTED_GAME_LOG_ONLY = ['done_markets', 'excluded_dates_markets', 'lock_vs_cutoff.in_scope_games', 'lock_vs_cutoff',
+  'lock_after_first_pitch', 'lock_after_first_pitch.first_capture_date', 'lock_after_first_pitch.by_month'];
+const PRICE_SKIP_IDX = [1, 2, 3];                     // counts rows: [eligible, no lock, contaminated, ML missing, ...]
+const PREREG_EXPECTED = JSON.parse(JSON.stringify(EXPECTED));
+// -> { field: 'game_log' | 'trades' | 'mixed' }
+const correctedSourceOf = (k) => (CORRECTED_GAME_LOG_ONLY.includes(k) ? 'game_log' : k.startsWith('counts.') ? 'mixed' : 'trades');
+let correctedRecord = null;
+if (CORRECTED) {
+  const recorded = actualFor(JSON.parse(fs.readFileSync(CORRECTED_ARTIFACT, 'utf8')).feasibility);
+  for (const k of Object.keys(EXPECTED)) {
+    const src = correctedSourceOf(k);
+    if (src === 'trades') EXPECTED[k] = recorded[k];
+    else if (src === 'mixed') EXPECTED[k] = recorded[k].map((v, i) => (PRICE_SKIP_IDX.includes(i) ? PREREG_EXPECTED[k][i] : v));
+  }
+}
+// Gate 1 a/b record and the correction block for the --corrected artifact. pm: READ-ONLY.
+function correctedArtifact(artifact, act, pm) {
+  const pick = (v, idx) => idx.map(i => v[i]);
+  const OTHER_IDX = [0, 4, 5, 6, 7];
+  const a = [], b = [];
+  for (const k of Object.keys(PREREG_EXPECTED)) {
+    const src = correctedSourceOf(k);
+    if (src === 'game_log') a.push({ field: k, prereg: PREREG_EXPECTED[k], actual: act[k], match: canon(PREREG_EXPECTED[k]) === canon(act[k]) });
+    if (src === 'mixed') {
+      a.push({ field: k + ' price skips [no lock, contaminated, ML missing]', prereg: pick(PREREG_EXPECTED[k], PRICE_SKIP_IDX), actual: pick(act[k], PRICE_SKIP_IDX),
+        match: canon(pick(PREREG_EXPECTED[k], PRICE_SKIP_IDX)) === canon(pick(act[k], PRICE_SKIP_IDX)) });
+      b.push({ field: k + ' [eligible, no money, tie, tested, both<=0]', prereg: pick(PREREG_EXPECTED[k], OTHER_IDX), corrected: pick(act[k], OTHER_IDX),
+        changed: canon(pick(PREREG_EXPECTED[k], OTHER_IDX)) !== canon(pick(act[k], OTHER_IDX)) });
+    }
+    if (src === 'trades') b.push({ field: k, prereg: PREREG_EXPECTED[k], corrected: act[k], changed: canon(PREREG_EXPECTED[k]) !== canon(act[k]) });
+  }
+  const q = (s) => pm.prepare(s).get();
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const run = q("SELECT started_at, finished_at, args, requests, retries, http429, peak_rss_mb, markets_done FROM runs WHERE args LIKE '--refetch-dropped-repeats%' ORDER BY id DESC LIMIT 1");
+  const season = "FROM wallet_game wg JOIN markets m ON m.id = wg.market_id WHERE m.status = 'done' AND m.game_date <= '2026-09-27'";
+  const correction = {
+    of: 'docs/polymarket-top-traders-results-2026-09-30.json (unchanged; the original stands beside this one)',
+    under: 'pre-registration §9: an implementation bug fixed in code, the run repeated with a note. No rule or definition changed.',
+    cause: 'Polymarket /trades has no trade id, and identical rows are separate real fills (one taker order matched against several identical maker orders). '
+      + 'The backfill de-duplicated within each time window and dropped 18,671 real trades in 1,846 of the 2,247 done markets.',
+    data_fix: { pr: 496, commit: '1e3330d6e5a26d684fd6f66a9958e05119b7cc2d', merged_in: 'c8dd5079a7b867d298315d6ee6f6191c7ba5437c', refetch_run: run },
+    store: {                                          // the corrected data/polymarket.db, as read by this run
+      markets_refetched: q("SELECT COUNT(*) c FROM markets WHERE repeats_refetch = 'done'").c,
+      markets_refetch_pending: q("SELECT COUNT(*) c FROM markets WHERE repeats_refetch IS NOT NULL AND repeats_refetch <> 'done'").c,
+      trades_dropped_by_the_old_run: q('SELECT SUM(repeats_dropped_v1) s FROM markets').s,
+      done_markets: q("SELECT COUNT(*) c FROM markets WHERE status = 'done'").c,
+      pending_windows: q("SELECT COUNT(*) c FROM windows WHERE status = 'pending'").c,
+      fills: q('SELECT COUNT(*) c FROM fills').c,
+      fills_at_or_after_cutoff: q('SELECT COUNT(*) c FROM fills f JOIN markets m ON m.id = f.market_id WHERE f.ts >= m.cutoff_utc').c,
+      distinct_wallets_with_fills: q('SELECT COUNT(DISTINCT wallet_id) c FROM fills').c,
+      wallet_game_rows: q('SELECT COUNT(*) c FROM wallet_game').c,
+      net_short_positions: q('SELECT COUNT(*) c FROM net_short').c,
+      season_wallet_profit_usd: r2(q('SELECT SUM(wg.profit) s ' + season).s),
+      season_wallet_volume_usd: r2(q('SELECT SUM(wg.volume) s ' + season).s),
+    },
+    verification_against_the_pre_fix_backup: 'docs/polymarket-top-traders-results-2026-09-30.md, section Correction',
+    reproduce: { runner: 'scripts/run-polymarket-top-traders-backtest.js', committed_with: 'this artifact (same commit)',
+      command: 'node --max-old-space-size=1536 scripts/run-polymarket-top-traders-backtest.js --corrected --mlb-db <scratch copy of data/mlb.db> --json <file>',
+      checked_by: 'scripts/test-top-traders-card-a.js check a' },
+  };
+  const gate1 = { mode: 'corrected', fields: Object.keys(PREREG_EXPECTED).length, matched: artifact.gate1.matched,
+    a: { rule: 'game_log / cutoff only: must equal §10', fields: a.length, matched: a.filter(x => x.match).length, rows: a },
+    b: { rule: 'depend on trades: must equal the values recorded in this artifact; shown against §10', fields: b.length,
+      changed_from_prereg: b.filter(x => x.changed).length, rows: b } };
+  const ordered = Object.assign({}, artifact, { correction, gate1 });
+  const keys = ['artifact', 'version', 'display_only', 'local_only', 'correction'];
+  for (const k of Object.keys(artifact)) delete artifact[k];
+  for (const k of keys) artifact[k] = ordered[k];
+  for (const k of Object.keys(ordered)) if (!keys.includes(k)) artifact[k] = ordered[k];
+  return artifact;
+}
+
 // ---------------------------------------------------------------- 1. pin
 let hash;
 try { hash = bt.assertPrereg(R); } catch (e) { console.error(e.message); process.exit(2); }
@@ -102,6 +190,8 @@ const act = actualFor(blind.feasibility);
 const diffs = Object.keys(EXPECTED).filter(k => canon(EXPECTED[k]) !== canon(act[k]));
 console.log('POLYMARKET TOP-TRADERS BACKTEST   pre-registration ' + bt.PREREG_PATH + ' @ ' + bt.PREREG_COMMIT.slice(0, 7)
   + '   sha256 ' + hash.slice(0, 12) + ' (pinned, matches)');
+if (CORRECTED) console.log('--corrected: game_log-only fields and price skips checked against §10; trade-dependent fields against '
+  + path.relative(R, CORRECTED_ARTIFACT).replace(/\\/g, '/'));
 console.log('\nGATE 1 -- outcome-blind reproduction of §2 / §5 / §10: ' + (Object.keys(EXPECTED).length - diffs.length)
   + ' of ' + Object.keys(EXPECTED).length + ' fields match');
 for (const k of Object.keys(EXPECTED)) console.log('  ' + (diffs.includes(k) ? 'DIFF ' : 'ok   ') + k.padEnd(44) + canon(act[k])
@@ -162,6 +252,7 @@ if (JSON_OUT) {
     results,
     runtime_seconds: +secs.toFixed(1), peak_rss_mb: Math.round(peak / 1e6),
   };
+  if (CORRECTED) correctedArtifact(artifact, act, pm);
   fs.writeFileSync(path.resolve(JSON_OUT), JSON.stringify(artifact, null, 1) + '\n');
   console.log('wrote ' + JSON_OUT);
 }
