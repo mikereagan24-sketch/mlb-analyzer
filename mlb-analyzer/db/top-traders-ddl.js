@@ -24,6 +24,11 @@
 //   top_trader_lean_log   one row per displayed lean snapshot, plus one final
 //                         row per game with the locked price (decision 8), for
 //                         a 2027 pre-registered test. Empty until the card ships.
+//   top_trader_seed_stage_wallets / top_trader_seed_stage_qualified
+//                         the seed upload's staging area: a file is streamed in
+//                         here, and only a file with no rejected row replaces
+//                         the two tables above, in one transaction. Empty
+//                         between uploads.
 
 const TOP_TRADERS_DDL = `
 CREATE TABLE IF NOT EXISTS top_trader_wallets (
@@ -62,6 +67,19 @@ CREATE TABLE IF NOT EXISTS top_trader_lean_log (
   CHECK (kind = 'final' OR (locked_away_ml IS NULL AND locked_home_ml IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_top_trader_lean_log_game ON top_trader_lean_log (game_date, game_id);
+CREATE TABLE IF NOT EXISTS top_trader_seed_stage_wallets (
+  wallet_id   INTEGER PRIMARY KEY,
+  addr        TEXT NOT NULL UNIQUE,
+  games       INTEGER NOT NULL,
+  profit      REAL NOT NULL,
+  volume      REAL NOT NULL,
+  both_teams  INTEGER NOT NULL,
+  as_of       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS top_trader_seed_stage_qualified (
+  wallet_id   INTEGER PRIMARY KEY,
+  line        INTEGER NOT NULL
+);
 `;
 
 function applyTopTradersDdl(db) {
