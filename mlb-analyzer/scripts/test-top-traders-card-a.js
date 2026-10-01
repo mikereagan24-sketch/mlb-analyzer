@@ -11,8 +11,10 @@
  *   b. utils/top-traders/rules.js imports nothing; the isolation walk -- roots
  *      server.js, services/model.js, services/jobs.js, utils/pythag-win-prob.js
  *      -- passes with the new router; planted-violation self-tests.
- *   c. POST /api/upload/top-trader-seed: missing / wrong token refused, malformed
- *      rows rejected, idempotent, and streamed (flat memory on a large file).
+ *   c. POST /api/upload/top-trader-seed: missing / wrong token refused; a second
+ *      upload leaves exactly the second file's contents (replace, not upsert);
+ *      any rejected row (or a cut-off body) changes nothing; one upload at a
+ *      time; idempotent; streamed (flat memory on a large file).
  *   d. no route returns a wallet address.
  *   e. the table migration runs twice cleanly.
  *
@@ -196,10 +198,74 @@ function ok(label, cond, detail) {
       'qualified,9008,' + addr(9008) + ',,,,,2026-09-28',                        // qualified with an address
       wrow(9009)].join('\n') + '\n';
     const r3 = await post(bad.replace(SEED_HEADER + '\n', SEED_HEADER + '\n' + wrow(9010) + '\n'), H());
-    ok('malformed rows are rejected and counted; the valid ones are written',
-      r3.code === 200 && r3.body.rejected === 8 && r3.body.wallet_rows_written === 2 && r3.body.ok === false
+    ok('malformed rows are rejected and counted (422), and NOTHING changes -- not even the 2 valid rows',
+      r3.code === 422 && r3.body.rejected === 8 && r3.body.wallet_rows_written === 0 && r3.body.ok === false && r3.body.replaced === false
+      && tableHash() === h1
       && r3.body.rejected_samples.length === 8 && r3.body.rejected_samples.every(s => Number.isInteger(s.line) && typeof s.reason === 'string'),
       JSON.stringify(r3.body && r3.body.rejected_samples.map(s => s.line + ':' + s.reason.slice(0, 18))));
+
+    // REPLACE: a second upload leaves exactly the second file's contents.
+    // (2026-10-01 regression: the first version upserted, so wallets missing from a second upload stayed.)
+    const tableRows = () => ({ w: db.prepare('SELECT wallet_id, addr, games, profit, volume, both_teams, as_of FROM top_trader_wallets ORDER BY wallet_id').all(),
+      q: db.prepare("SELECT wallet_id FROM top_trader_qualified WHERE as_of = '2026-09-28' ORDER BY wallet_id").all().map(r => r.wallet_id) });
+    const fileRows = (csv) => {
+      const w = [], q = [];
+      for (const l of csv.split('\n').slice(1).filter(Boolean)) {
+        const f = l.split(',');
+        if (f[0] === 'wallet') w.push({ wallet_id: +f[1], addr: f[2], games: +f[3], profit: +f[4], volume: +f[5], both_teams: +f[6], as_of: f[7] });
+        else q.push(+f[1]);
+      }
+      return { w: w.sort((a, b) => a.wallet_id - b.wallet_id), q: q.sort((a, b) => a - b) };
+    };
+    db.prepare("INSERT INTO top_trader_qualified (as_of, wallet_id) VALUES ('2026-09-20', 7)").run();   // another date's set
+    const second = [SEED_HEADER,
+      ...Array.from({ length: 250 }, (_, k) => k + 1 === 2 ? ['wallet', 2, addr(2), 61, 9.5, 4321.25, 3, '2026-09-28'].join(',') : wrow(k + 1)),
+      wrow(400),
+      ...[5, 400].map(i => ['qualified', i, '', '', '', '', '', '2026-09-28'].join(','))].join('\n') + '\n';
+    const r4 = await post(second, H());
+    const after = tableRows(), want = fileRows(second);
+    ok('second upload: the tables hold exactly the second file (wallets 251-300 and qualified 10, 15 gone; wallet 2 updated; wallet 400 added)',
+      r4.code === 200 && r4.body.replaced === true && JSON.stringify(after) === JSON.stringify(want)
+      && after.w.length === 251 && !after.w.some(r => r.wallet_id > 250 && r.wallet_id !== 400)
+      && JSON.stringify(after.q) === '[5,400]' && after.w[1].games === 61 && after.w[1].profit === 9.5 && after.w[1].volume === 4321.25,
+      JSON.stringify(r4.body && { w: r4.body.wallet_rows_written, q: r4.body.qualified_rows_written, wr: r4.body.wallets_removed, qr: r4.body.qualified_removed }));
+    ok('second upload reports what it removed (50 wallets, 2 qualified rows)', r4.body.wallets_removed === 50 && r4.body.qualified_removed === 2);
+    ok("another as_of date's qualified set is untouched",
+      db.prepare("SELECT COUNT(*) c FROM top_trader_qualified WHERE as_of = '2026-09-20' AND wallet_id = 7").get().c === 1);
+    db.prepare("DELETE FROM top_trader_qualified WHERE as_of = '2026-09-20'").run();
+    const h2 = tableHash();
+
+    // ALL OR NOTHING: one bad row in an otherwise valid file changes nothing.
+    const oneBad = goodCsv.replace(wrow(150) + '\n', 'wallet,150,' + addr(150) + ',50,1,2,77,2026-09-28\n');   // both_teams > games
+    const r5 = await post(oneBad, H());
+    ok('a file with one bad row (line 151) changes nothing and returns that row', r5.code === 422 && r5.body.rejected === 1 && r5.body.replaced === false
+      && r5.body.wallet_rows_written === 0 && tableHash() === h2 && r5.body.rejected_samples[0].line === 151,
+      JSON.stringify(r5.body && r5.body.rejected_samples));
+    const dupId = goodCsv.replace(wrow(9) + '\n', wrow(9) + '\n' + ['wallet', 9, addr(99999), 1, 1, 1, 0, '2026-09-28'].join(',') + '\n');
+    const dupAddr = goodCsv.replace(wrow(9) + '\n', wrow(9) + '\n' + ['wallet', 99999, addr(9), 1, 1, 1, 0, '2026-09-28'].join(',') + '\n');
+    const orphan = goodCsv + ['qualified', 4242, '', '', '', '', '', '2026-09-28'].join(',') + '\n';
+    const [r6, r7, r8] = [await post(dupId, H()), await post(dupAddr, H()), await post(orphan, H())];
+    ok('a repeated wallet_id, a repeated address, or a qualified row with no wallet row is rejected and changes nothing',
+      [r6, r7, r8].every(r => r.code === 422 && r.body.rejected === 1 && r.body.replaced === false) && tableHash() === h2,
+      [r6, r7, r8].map(r => r.code + ' ' + (r.body && r.body.rejected_samples.map(s => s.line + ':' + s.reason).join(';'))).join(' | '));
+    // A body cut off mid-upload changes nothing; a second upload meanwhile is refused (409); the lock is released after.
+    const cut = await new Promise((resolve) => {
+      const rq = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/upload/top-trader-seed', headers: H() });
+      rq.on('error', () => { /* we cut it */ });
+      rq.write(SEED_HEADER + '\n' + Array.from({ length: 5000 }, (_, k) => wrow(k + 1)).join('\n') + '\n');
+      setTimeout(async () => {
+        const during = await post(goodCsv, H());
+        rq.destroy();
+        setTimeout(() => resolve(during), 300);
+      }, 300);
+    });
+    ok('a second upload while one is in progress -> 409, nothing changed', cut.code === 409 && tableHash() === h2, String(cut.code));
+    ok('an upload cut off mid-body changes nothing', tableHash() === h2);
+    const r9 = await post(goodCsv, H());
+    ok('the lock is released after a cut-off upload, and a valid upload then replaces (back to the first file)',
+      r9.code === 200 && tableHash() === h1 && r9.body.wallets_removed === 1 && r9.body.qualified_removed === 1, String(r9.code));
+    ok('the staging tables are empty between uploads',
+      db.prepare('SELECT (SELECT COUNT(*) FROM top_trader_seed_stage_wallets) + (SELECT COUNT(*) FROM top_trader_seed_stage_qualified) c').get().c === 0);
     // Streaming: synthetic files built by a generator (never held whole), small then 5x larger.
     // Flat = (1) nothing retained once the upload ends (heap after GC back to its start), and
     // (2) peak growth does NOT scale with the file: a 5x larger upload must not grow memory ~5x.
@@ -258,7 +324,8 @@ function ok(label, cond, detail) {
     const fresh = new Database(':memory:');
     applyTopTradersDdl(fresh); applyTopTradersDdl(fresh);
     const tables = fresh.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'top_trader_%' ORDER BY name").all().map(r => r.name);
-    ok('a fresh database gets exactly the three tables', JSON.stringify(tables) === JSON.stringify(['top_trader_lean_log', 'top_trader_qualified', 'top_trader_wallets']), tables.join(','));
+    ok('a fresh database gets exactly the three tables plus the two seed staging tables', JSON.stringify(tables) === JSON.stringify(['top_trader_lean_log',
+      'top_trader_qualified', 'top_trader_seed_stage_qualified', 'top_trader_seed_stage_wallets', 'top_trader_wallets']), tables.join(','));
     const cols = fresh.prepare('PRAGMA table_info(top_trader_lean_log)').all().map(c => c.name);
     const want = ['game_date', 'game_id', 'shown_at', 'cut_utc', 'lean_team', 'lean_dollars', 'other_dollars', 'wallets_with_money', 'top_wallet_share',
       'qualified_count', 'away_ml_shown', 'home_ml_shown', 'price_source', 'kind', 'phase', 'locked_away_ml', 'locked_home_ml'];
