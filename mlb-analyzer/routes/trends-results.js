@@ -30,27 +30,41 @@ const express = require('express');
 const { slateFits } = require('../services/trends-slate');
 
 const ARTIFACT = path.join(__dirname, '..', 'docs', 'trends-results-2026-09-29.json');
+// GET /api/trends/top-traders (2026-10-01): the pre-registered Polymarket
+// top-traders backtest (#489 / #490), as recorded. Same rule as the trends
+// artifact: this committed file and nothing else -- no database, no computation.
+const TOP_TRADERS_ARTIFACT = path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30.json');
 const router = express.Router();
 
 // Read once, cache in memory. A failure is cached too (as an error) so a
 // missing or corrupt file is reported on every request without re-reading.
-let _cache = null;
-function load() {
-  if (_cache) return _cache;
-  try {
-    _cache = { ok: true, body: JSON.parse(fs.readFileSync(ARTIFACT, 'utf8')) };
-  } catch (e) {
-    _cache = { ok: false, body: {
-      error: 'trends results unavailable',
-      detail: (e && e.code === 'ENOENT' ? 'artifact not found: ' : 'artifact unreadable: ')
-        + path.basename(ARTIFACT) + (e && e.message ? ' (' + e.message + ')' : ''),
-    } };
-  }
-  return _cache;
+function cachedArtifact(file, label) {
+  let cache = null;
+  return function () {
+    if (cache) return cache;
+    try {
+      cache = { ok: true, body: JSON.parse(fs.readFileSync(file, 'utf8')) };
+    } catch (e) {
+      cache = { ok: false, body: {
+        error: label + ' unavailable',
+        detail: (e && e.code === 'ENOENT' ? 'artifact not found: ' : 'artifact unreadable: ')
+          + path.basename(file) + (e && e.message ? ' (' + e.message + ')' : ''),
+      } };
+    }
+    return cache;
+  };
 }
+const load = cachedArtifact(ARTIFACT, 'trends results');
+const loadTopTraders = cachedArtifact(TOP_TRADERS_ARTIFACT, 'top-traders results');
 
 router.get('/trends/results', (req, res) => {
   const c = load();
+  if (!c.ok) return res.status(503).json(c.body);
+  res.json(c.body);
+});
+
+router.get('/trends/top-traders', (req, res) => {
+  const c = loadTopTraders();
   if (!c.ok) return res.status(503).json(c.body);
   res.json(c.body);
 });
