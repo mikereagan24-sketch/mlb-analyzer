@@ -1,0 +1,1227 @@
+{
+ "artifact": "polymarket-top-traders-results",
+ "version": 1,
+ "display_only": true,
+ "local_only": true,
+ "correction": {
+  "of": "docs/polymarket-top-traders-results-2026-09-30.json (unchanged; the original stands beside this one)",
+  "under": "pre-registration §9: an implementation bug fixed in code, the run repeated with a note. No rule or definition changed.",
+  "cause": "Polymarket /trades has no trade id, and identical rows are separate real fills (one taker order matched against several identical maker orders). The backfill de-duplicated within each time window and dropped 18,671 real trades in 1,846 of the 2,247 done markets.",
+  "data_fix": {
+   "pr": 496,
+   "commit": "1e3330d6e5a26d684fd6f66a9958e05119b7cc2d",
+   "merged_in": "c8dd5079a7b867d298315d6ee6f6191c7ba5437c",
+   "refetch_run": {
+    "started_at": "2026-10-01 20:12:55",
+    "finished_at": "2026-10-01 21:19:31",
+    "args": "--refetch-dropped-repeats --backup data/polymarket-before-repeats.db",
+    "requests": 7357,
+    "retries": 5,
+    "http429": 5,
+    "peak_rss_mb": 129.9,
+    "markets_done": 1846
+   }
+  },
+  "store": {
+   "markets_refetched": 1846,
+   "markets_refetch_pending": 0,
+   "trades_dropped_by_the_old_run": 18671,
+   "done_markets": 2247,
+   "pending_windows": 0,
+   "fills": 2547035,
+   "fills_at_or_after_cutoff": 0,
+   "distinct_wallets_with_fills": 77397,
+   "wallet_game_rows": 730161,
+   "net_short_positions": 4192,
+   "season_wallet_profit_usd": 25507.17,
+   "season_wallet_volume_usd": 518087588.51
+  },
+  "verification_against_the_pre_fix_backup": "docs/polymarket-top-traders-results-2026-09-30.md, section Correction",
+  "reproduce": {
+   "runner": "scripts/run-polymarket-top-traders-backtest.js",
+   "committed_with": "this artifact (same commit)",
+   "command": "node --max-old-space-size=1536 scripts/run-polymarket-top-traders-backtest.js --corrected --mlb-db <scratch copy of data/mlb.db> --json <file>",
+   "checked_by": "scripts/test-top-traders-card-a.js check a"
+  }
+ },
+ "generated_at": "2026-10-01T22:09:50.443Z",
+ "generated_from_commit": "ee37f3e51e3c898bff0e5909545271a710d37182",
+ "generated_with_uncommitted_tracked_changes": [
+  "M mlb-analyzer/docs/polymarket-top-traders-results-2026-09-30.md",
+  " M mlb-analyzer/scripts/export-top-trader-seed.js",
+  " M mlb-analyzer/scripts/run-polymarket-top-traders-backtest.js",
+  " M mlb-analyzer/scripts/test-top-traders-card-a.js"
+ ],
+ "prereg_path": "docs/polymarket-top-traders-prereg-2026-09-30.md",
+ "prereg_commit": "f23d86f28bcf2b168e193cd04056e06a2dd8c801",
+ "prereg_sha256": "1d67059c01621b40a90eca4255026c68eb3474507c49677f2953bcd1b13b9edc",
+ "window": {
+  "in_sample": "2026-04-06..2026-08-31 (eligible from 2026-04-13)",
+  "holdout": "2026-09-01..2026-09-27"
+ },
+ "bootstrap": {
+  "resamples": 10000,
+  "seed": 20260930,
+  "rng": "mulberry32 (services/trends-backtest.js)"
+ },
+ "gate1": {
+  "mode": "corrected",
+  "fields": 27,
+  "matched": 27,
+  "a": {
+   "rule": "game_log / cutoff only: must equal §10",
+   "fields": 11,
+   "matched": 11,
+   "rows": [
+    {
+     "field": "done_markets",
+     "prereg": 2247,
+     "actual": 2247,
+     "match": true
+    },
+    {
+     "field": "excluded_dates_markets",
+     "prereg": 19,
+     "actual": 19,
+     "match": true
+    },
+    {
+     "field": "lock_vs_cutoff.in_scope_games",
+     "prereg": 2228,
+     "actual": 2228,
+     "match": true
+    },
+    {
+     "field": "counts.primary.in price skips [no lock, contaminated, ML missing]",
+     "prereg": [
+      288,
+      166,
+      0
+     ],
+     "actual": [
+      288,
+      166,
+      0
+     ],
+     "match": true
+    },
+    {
+     "field": "counts.primary.hold price skips [no lock, contaminated, ML missing]",
+     "prereg": [
+      57,
+      28,
+      0
+     ],
+     "actual": [
+      57,
+      28,
+      0
+     ],
+     "match": true
+    },
+    {
+     "field": "counts.secondary.in price skips [no lock, contaminated, ML missing]",
+     "prereg": [
+      288,
+      166,
+      0
+     ],
+     "actual": [
+      288,
+      166,
+      0
+     ],
+     "match": true
+    },
+    {
+     "field": "counts.secondary.hold price skips [no lock, contaminated, ML missing]",
+     "prereg": [
+      57,
+      28,
+      0
+     ],
+     "actual": [
+      57,
+      28,
+      0
+     ],
+     "match": true
+    },
+    {
+     "field": "lock_vs_cutoff",
+     "prereg": [
+      980,
+      20,
+      50,
+      351,
+      21
+     ],
+     "actual": [
+      980,
+      20,
+      50,
+      351,
+      21
+     ],
+     "match": true
+    },
+    {
+     "field": "lock_after_first_pitch",
+     "prereg": [
+      622,
+      330,
+      15,
+      277,
+      273,
+      4,
+      0.43,
+      0.92,
+      1.89,
+      13
+     ],
+     "actual": [
+      622,
+      330,
+      15,
+      277,
+      273,
+      4,
+      0.43,
+      0.92,
+      1.89,
+      13
+     ],
+     "match": true
+    },
+    {
+     "field": "lock_after_first_pitch.first_capture_date",
+     "prereg": "2026-06-11",
+     "actual": "2026-06-11",
+     "match": true
+    },
+    {
+     "field": "lock_after_first_pitch.by_month",
+     "prereg": {
+      "2026-04": [
+       22,
+       0,
+       0,
+       22
+      ],
+      "2026-05": [
+       187,
+       0,
+       0,
+       187
+      ],
+      "2026-06": [
+       159,
+       88,
+       3,
+       68
+      ],
+      "2026-07": [
+       67,
+       67,
+       0,
+       0
+      ],
+      "2026-08": [
+       84,
+       80,
+       4,
+       0
+      ],
+      "2026-09": [
+       103,
+       95,
+       8,
+       0
+      ]
+     },
+     "actual": {
+      "2026-04": [
+       22,
+       0,
+       0,
+       22
+      ],
+      "2026-05": [
+       187,
+       0,
+       0,
+       187
+      ],
+      "2026-06": [
+       159,
+       88,
+       3,
+       68
+      ],
+      "2026-07": [
+       67,
+       67,
+       0,
+       0
+      ],
+      "2026-08": [
+       84,
+       80,
+       4,
+       0
+      ],
+      "2026-09": [
+       103,
+       95,
+       8,
+       0
+      ]
+     },
+     "match": true
+    }
+   ]
+  },
+  "b": {
+   "rule": "depend on trades: must equal the values recorded in this artifact; shown against §10",
+   "fields": 20,
+   "changed_from_prereg": 7,
+   "rows": [
+    {
+     "field": "first_eligible.date",
+     "prereg": "2026-04-13",
+     "corrected": "2026-04-13",
+     "changed": false
+    },
+    {
+     "field": "first_eligible.qualified",
+     "prereg": 32,
+     "corrected": 32,
+     "changed": false
+    },
+    {
+     "field": "not_eligible.in",
+     "prereg": 64,
+     "corrected": 64,
+     "changed": false
+    },
+    {
+     "field": "not_eligible.hold",
+     "prereg": 0,
+     "corrected": 0,
+     "changed": false
+    },
+    {
+     "field": "qualified_by_month.2026-04",
+     "prereg": [
+      "2026-04-04",
+      0,
+      "2026-04-30",
+      196
+     ],
+     "corrected": [
+      "2026-04-04",
+      0,
+      "2026-04-30",
+      196
+     ],
+     "changed": false
+    },
+    {
+     "field": "qualified_by_month.2026-05",
+     "prereg": [
+      "2026-05-01",
+      196,
+      "2026-05-31",
+      450
+     ],
+     "corrected": [
+      "2026-05-01",
+      196,
+      "2026-05-31",
+      451
+     ],
+     "changed": true
+    },
+    {
+     "field": "qualified_by_month.2026-06",
+     "prereg": [
+      "2026-06-01",
+      453,
+      "2026-06-30",
+      622
+     ],
+     "corrected": [
+      "2026-06-01",
+      453,
+      "2026-06-30",
+      625
+     ],
+     "changed": true
+    },
+    {
+     "field": "qualified_by_month.2026-07",
+     "prereg": [
+      "2026-07-01",
+      627,
+      "2026-07-31",
+      821
+     ],
+     "corrected": [
+      "2026-07-01",
+      630,
+      "2026-07-31",
+      823
+     ],
+     "changed": true
+    },
+    {
+     "field": "qualified_by_month.2026-08",
+     "prereg": [
+      "2026-08-01",
+      829,
+      "2026-08-31",
+      964
+     ],
+     "corrected": [
+      "2026-08-01",
+      831,
+      "2026-08-31",
+      964
+     ],
+     "changed": true
+    },
+    {
+     "field": "qualified_by_month.2026-09",
+     "prereg": [
+      "2026-09-01",
+      956,
+      "2026-09-27",
+      1050
+     ],
+     "corrected": [
+      "2026-09-01",
+      956,
+      "2026-09-27",
+      1051
+     ],
+     "changed": true
+    },
+    {
+     "field": "counts.primary.in [eligible, no money, tie, tested, both<=0]",
+     "prereg": [
+      1814,
+      0,
+      0,
+      1360,
+      0
+     ],
+     "corrected": [
+      1814,
+      0,
+      0,
+      1360,
+      0
+     ],
+     "changed": false
+    },
+    {
+     "field": "counts.primary.hold [eligible, no money, tie, tested, both<=0]",
+     "prereg": [
+      350,
+      0,
+      0,
+      265,
+      0
+     ],
+     "corrected": [
+      350,
+      0,
+      0,
+      265,
+      0
+     ],
+     "changed": false
+    },
+    {
+     "field": "counts.secondary.in [eligible, no money, tie, tested, both<=0]",
+     "prereg": [
+      1814,
+      82,
+      0,
+      1278,
+      1
+     ],
+     "corrected": [
+      1814,
+      76,
+      0,
+      1284,
+      1
+     ],
+     "changed": true
+    },
+    {
+     "field": "counts.secondary.hold [eligible, no money, tie, tested, both<=0]",
+     "prereg": [
+      350,
+      66,
+      0,
+      199,
+      0
+     ],
+     "corrected": [
+      350,
+      66,
+      0,
+      199,
+      0
+     ],
+     "changed": false
+    },
+    {
+     "field": "confirmed.primary.in",
+     "prereg": [
+      711,
+      235,
+      946,
+      277,
+      130,
+      7
+     ],
+     "corrected": [
+      711,
+      235,
+      946,
+      277,
+      130,
+      7
+     ],
+     "changed": false
+    },
+    {
+     "field": "confirmed.primary.hold",
+     "prereg": [
+      162,
+      95,
+      257,
+      0,
+      0,
+      8
+     ],
+     "corrected": [
+      162,
+      95,
+      257,
+      0,
+      0,
+      8
+     ],
+     "changed": false
+    },
+    {
+     "field": "confirmed.secondary.in",
+     "prereg": [
+      652,
+      214,
+      866,
+      276,
+      130,
+      6
+     ],
+     "corrected": [
+      656,
+      214,
+      870,
+      277,
+      130,
+      7
+     ],
+     "changed": true
+    },
+    {
+     "field": "confirmed.secondary.hold",
+     "prereg": [
+      119,
+      75,
+      194,
+      0,
+      0,
+      5
+     ],
+     "corrected": [
+      119,
+      75,
+      194,
+      0,
+      0,
+      5
+     ],
+     "changed": false
+    },
+    {
+     "field": "source_mix.in",
+     "prereg": {
+      "kalshi": 613,
+      "polymarket": 540,
+      "unrecorded": 200,
+      "prophet-exchange": 6,
+      "novig": 1
+     },
+     "corrected": {
+      "unrecorded": 200,
+      "kalshi": 613,
+      "prophet-exchange": 6,
+      "polymarket": 540,
+      "novig": 1
+     },
+     "changed": false
+    },
+    {
+     "field": "source_mix.hold",
+     "prereg": {
+      "kalshi": 207,
+      "polymarket": 58
+     },
+     "corrected": {
+      "kalshi": 207,
+      "polymarket": 58
+     },
+     "changed": false
+    }
+   ]
+  }
+ },
+ "feasibility": {
+  "done_markets": 2247,
+  "excluded_dates_markets": 19,
+  "first_eligible": {
+   "date": "2026-04-13",
+   "qualified": 32
+  },
+  "not_eligible": {
+   "in": 64,
+   "hold": 0
+  },
+  "qualified_by_month": {
+   "2026-04": {
+    "first_date": "2026-04-04",
+    "first_qualified": 0,
+    "last_date": "2026-04-30",
+    "last_qualified": 196
+   },
+   "2026-05": {
+    "first_date": "2026-05-01",
+    "first_qualified": 196,
+    "last_date": "2026-05-31",
+    "last_qualified": 451
+   },
+   "2026-06": {
+    "first_date": "2026-06-01",
+    "first_qualified": 453,
+    "last_date": "2026-06-30",
+    "last_qualified": 625
+   },
+   "2026-07": {
+    "first_date": "2026-07-01",
+    "first_qualified": 630,
+    "last_date": "2026-07-31",
+    "last_qualified": 823
+   },
+   "2026-08": {
+    "first_date": "2026-08-01",
+    "first_qualified": 831,
+    "last_date": "2026-08-31",
+    "last_qualified": 964
+   },
+   "2026-09": {
+    "first_date": "2026-09-01",
+    "first_qualified": 956,
+    "last_date": "2026-09-27",
+    "last_qualified": 1051
+   }
+  },
+  "counts": {
+   "primary": {
+    "in": {
+     "eligible": 1814,
+     "price_skip": {
+      "no_odds_locked_at": 288,
+      "contaminated": 166,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 0,
+      "tie": 0
+     },
+     "tested": 1360,
+     "neg_lean": 0,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 711,
+      "confirmed_equals_capture": 235,
+      "outside_no_capture": 277,
+      "outside_no_first_pitch": 130,
+      "outside_differs": 7
+     }
+    },
+    "hold": {
+     "eligible": 350,
+     "price_skip": {
+      "no_odds_locked_at": 57,
+      "contaminated": 28,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 0,
+      "tie": 0
+     },
+     "tested": 265,
+     "neg_lean": 0,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 162,
+      "confirmed_equals_capture": 95,
+      "outside_no_capture": 0,
+      "outside_no_first_pitch": 0,
+      "outside_differs": 8
+     }
+    }
+   },
+   "secondary": {
+    "in": {
+     "eligible": 1814,
+     "price_skip": {
+      "no_odds_locked_at": 288,
+      "contaminated": 166,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 76,
+      "tie": 0
+     },
+     "tested": 1284,
+     "neg_lean": 1,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 656,
+      "confirmed_equals_capture": 214,
+      "outside_no_capture": 277,
+      "outside_no_first_pitch": 130,
+      "outside_differs": 7
+     }
+    },
+    "hold": {
+     "eligible": 350,
+     "price_skip": {
+      "no_odds_locked_at": 57,
+      "contaminated": 28,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 66,
+      "tie": 0
+     },
+     "tested": 199,
+     "neg_lean": 0,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 119,
+      "confirmed_equals_capture": 75,
+      "outside_no_capture": 0,
+      "outside_no_first_pitch": 0,
+      "outside_differs": 5
+     }
+    }
+   }
+  },
+  "lock_vs_cutoff": {
+   "in_scope_games": 2228,
+   "at_or_after_cutoff": 980,
+   "minutes_after_median": 20.216666666666665,
+   "minutes_after_p90": 50.18333333333333,
+   "minutes_after_max": 351.26666666666665,
+   "more_than_60_before": 21
+  },
+  "source_mix_tested_primary": {
+   "in": {
+    "unrecorded": 200,
+    "kalshi": 613,
+    "prophet-exchange": 6,
+    "polymarket": 540,
+    "novig": 1
+   },
+   "hold": {
+    "kalshi": 207,
+    "polymarket": 58
+   }
+  },
+  "lock_at_or_after_first_pitch": {
+   "total": 622,
+   "exact": 330,
+   "differ": 15,
+   "no_capture": 277,
+   "no_capture_before_first_capture_date": 273,
+   "no_capture_inside_capture_window": 4,
+   "first_capture_date": "2026-06-11",
+   "diff_pp_median": 0.43297540699688275,
+   "diff_pp_p90": 0.9178752606712082,
+   "diff_pp_max": 1.8910897291899043,
+   "diff_pp_under_1": 13,
+   "by_month": {
+    "2026-04": {
+     "total": 22,
+     "exact": 0,
+     "differ": 0,
+     "no_capture": 22
+    },
+    "2026-05": {
+     "total": 187,
+     "exact": 0,
+     "differ": 0,
+     "no_capture": 187
+    },
+    "2026-06": {
+     "total": 159,
+     "exact": 88,
+     "differ": 3,
+     "no_capture": 68
+    },
+    "2026-07": {
+     "total": 67,
+     "exact": 67,
+     "differ": 0,
+     "no_capture": 0
+    },
+    "2026-08": {
+     "total": 84,
+     "exact": 80,
+     "differ": 4,
+     "no_capture": 0
+    },
+    "2026-09": {
+     "total": 103,
+     "exact": 95,
+     "differ": 8,
+     "no_capture": 0
+    }
+   }
+  }
+ },
+ "multiple_comparisons": {
+  "method": "Benjamini-Hochberg across the 2 main in-sample p-values",
+  "significant_if": "q < 0.10",
+  "significant": []
+ },
+ "results": [
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 1360,
+   "W": 725,
+   "L": 635,
+   "P": 0,
+   "winPct": 0.5330882352941176,
+   "winLo": 0.5065169996214763,
+   "winHi": 0.5594730752614382,
+   "implied": 0.5183613230454691,
+   "edge": 0.014726912248648527,
+   "pValue": 0.2715031118416642,
+   "roi": -0.012062745682442762,
+   "dollars": -1640.5334128122156,
+   "mix": {
+    "unrecorded": 200,
+    "kalshi": 613,
+    "prophet-exchange": 6,
+    "polymarket": 540,
+    "novig": 1
+   },
+   "roiLo": -0.06226620294657797,
+   "roiHi": 0.03949203786838543,
+   "qValue": 0.29675304202466063,
+   "significant": false,
+   "holdout": null
+  },
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 1160,
+   "W": 623,
+   "L": 537,
+   "P": 0,
+   "winPct": 0.5370689655172414,
+   "winLo": 0.5082996675948613,
+   "winHi": 0.5655935584487138,
+   "implied": 0.5186010978687127,
+   "edge": 0.018467867648528702,
+   "pValue": 0.20307905344052435,
+   "roi": -0.003782544359314829,
+   "dollars": -438.77514568052015,
+   "mix": {
+    "kalshi": 613,
+    "prophet-exchange": 6,
+    "polymarket": 540,
+    "novig": 1
+   },
+   "roiLo": -0.05911859065126552,
+   "roiHi": 0.05205242573068394
+  },
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 265,
+   "W": 132,
+   "L": 133,
+   "P": 0,
+   "winPct": 0.4981132075471698,
+   "winLo": 0.4383724147465654,
+   "winHi": 0.557907920867736,
+   "implied": 0.5124126042223408,
+   "edge": -0.014299396675170994,
+   "pValue": 0.6356108807424474,
+   "roi": -0.09620272328692059,
+   "dollars": -2549.3721671033954,
+   "mix": {
+    "kalshi": 207,
+    "polymarket": 58
+   },
+   "roiLo": -0.2073955376763244,
+   "roiHi": 0.014135644473948342
+  },
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 265,
+   "W": 132,
+   "L": 133,
+   "P": 0,
+   "winPct": 0.4981132075471698,
+   "winLo": 0.4383724147465654,
+   "winHi": 0.557907920867736,
+   "implied": 0.5124126042223408,
+   "edge": -0.014299396675170994,
+   "pValue": 0.6356108807424474,
+   "roi": -0.09620272328692059,
+   "dollars": -2549.3721671033954,
+   "mix": {
+    "kalshi": 207,
+    "polymarket": 58
+   },
+   "roiLo": -0.2073955376763244,
+   "roiHi": 0.014135644473948342
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 1284,
+   "W": 680,
+   "L": 604,
+   "P": 0,
+   "winPct": 0.5295950155763239,
+   "winLo": 0.5022466609552521,
+   "winHi": 0.556766814248457,
+   "implied": 0.5152124358262457,
+   "edge": 0.014382579750078284,
+   "pValue": 0.29675304202466063,
+   "roi": -0.01284643338249474,
+   "dollars": -1649.4820463123247,
+   "mix": {
+    "unrecorded": 192,
+    "kalshi": 566,
+    "prophet-exchange": 6,
+    "polymarket": 519,
+    "novig": 1
+   },
+   "roiLo": -0.0647081932875647,
+   "roiHi": 0.038122460805056026,
+   "qValue": 0.29675304202466063,
+   "significant": false,
+   "holdout": null
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 1092,
+   "W": 583,
+   "L": 509,
+   "P": 0,
+   "winPct": 0.5338827838827839,
+   "winLo": 0.5042282398722772,
+   "winHi": 0.5632997765212108,
+   "implied": 0.5153786085314955,
+   "edge": 0.018504175351288343,
+   "pValue": 0.21599093661318597,
+   "roi": -0.0038072542567417073,
+   "dollars": -415.7521648361944,
+   "mix": {
+    "kalshi": 566,
+    "prophet-exchange": 6,
+    "polymarket": 519,
+    "novig": 1
+   },
+   "roiLo": -0.06020450373620237,
+   "roiHi": 0.05051683947719255
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 199,
+   "W": 100,
+   "L": 99,
+   "P": 0,
+   "winPct": 0.5025125628140703,
+   "winLo": 0.4336577046607968,
+   "winHi": 0.5712722539655863,
+   "implied": 0.5124292600586028,
+   "edge": -0.00991669724453248,
+   "pValue": 0.7756748531478982,
+   "roi": -0.08134951228911123,
+   "dollars": -1618.8552945533136,
+   "mix": {
+    "polymarket": 41,
+    "kalshi": 158
+   },
+   "roiLo": -0.21459211851839574,
+   "roiHi": 0.04989444094931312
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 199,
+   "W": 100,
+   "L": 99,
+   "P": 0,
+   "winPct": 0.5025125628140703,
+   "winLo": 0.4336577046607968,
+   "winHi": 0.5712722539655863,
+   "implied": 0.5124292600586028,
+   "edge": -0.00991669724453248,
+   "pValue": 0.7756748531478982,
+   "roi": -0.08134951228911123,
+   "dollars": -1618.8552945533136,
+   "mix": {
+    "polymarket": 41,
+    "kalshi": 158
+   },
+   "roiLo": -0.21459211851839574,
+   "roiHi": 0.04989444094931312
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 946,
+   "W": 511,
+   "L": 435,
+   "P": 0,
+   "winPct": 0.540169133192389,
+   "winLo": 0.5083115725691439,
+   "winHi": 0.5717017804903354,
+   "implied": 0.5188278909943901,
+   "edge": 0.021341242197998933,
+   "pValue": 0.18398617850950577,
+   "roi": 0.001489984225927925,
+   "dollars": 140.9525077727817,
+   "mix": {
+    "kalshi": 472,
+    "polymarket": 388,
+    "unrecorded": 85,
+    "novig": 1
+   },
+   "roiLo": -0.05933394875683606,
+   "roiHi": 0.06213767745793774,
+   "qValue": 0.18398617850950577,
+   "significant": null,
+   "clearsQ10ForDisplayOnly": false
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 861,
+   "W": 470,
+   "L": 391,
+   "P": 0,
+   "winPct": 0.5458768873403019,
+   "winLo": 0.5124896111910154,
+   "winHi": 0.5788566109271857,
+   "implied": 0.5181195128393509,
+   "edge": 0.02775737450095106,
+   "pValue": 0.09911740404635415,
+   "roi": 0.014637958989652863,
+   "dollars": 1260.3282690091114,
+   "mix": {
+    "kalshi": 472,
+    "polymarket": 388,
+    "novig": 1
+   },
+   "roiLo": -0.04988264358766564,
+   "roiHi": 0.0779194086626813
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 257,
+   "W": 129,
+   "L": 128,
+   "P": 0,
+   "winPct": 0.5019455252918288,
+   "winLo": 0.4412395310273258,
+   "winHi": 0.5625942153575043,
+   "implied": 0.5134659594971697,
+   "edge": -0.01152043420534088,
+   "pValue": 0.7068703113301894,
+   "roi": -0.09188558543751643,
+   "dollars": -2361.4595457441724,
+   "mix": {
+    "kalshi": 205,
+    "polymarket": 52
+   },
+   "roiLo": -0.20418516959467944,
+   "roiHi": 0.020768641011407137
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 257,
+   "W": 129,
+   "L": 128,
+   "P": 0,
+   "winPct": 0.5019455252918288,
+   "winLo": 0.4412395310273258,
+   "winHi": 0.5625942153575043,
+   "implied": 0.5134659594971697,
+   "edge": -0.01152043420534088,
+   "pValue": 0.7068703113301894,
+   "roi": -0.09188558543751643,
+   "dollars": -2361.4595457441724,
+   "mix": {
+    "kalshi": 205,
+    "polymarket": 52
+   },
+   "roiLo": -0.20418516959467944,
+   "roiHi": 0.020768641011407137
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 870,
+   "W": 468,
+   "L": 402,
+   "P": 0,
+   "winPct": 0.5379310344827586,
+   "winLo": 0.5047080059585588,
+   "winHi": 0.5708205688523619,
+   "implied": 0.5142101349544383,
+   "edge": 0.02372089952832024,
+   "pValue": 0.15676118777547332,
+   "roi": 0.005821116621696693,
+   "dollars": 506.4371460876123,
+   "mix": {
+    "kalshi": 425,
+    "polymarket": 367,
+    "unrecorded": 77,
+    "novig": 1
+   },
+   "roiLo": -0.0597251197864761,
+   "roiHi": 0.0698259252373144,
+   "qValue": 0.18398617850950577,
+   "significant": null,
+   "clearsQ10ForDisplayOnly": false
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 793,
+   "W": 434,
+   "L": 359,
+   "P": 0,
+   "winPct": 0.5472887767969735,
+   "winLo": 0.5124994714449436,
+   "winHi": 0.581622137269159,
+   "implied": 0.5136442943529825,
+   "edge": 0.033644482443990986,
+   "pValue": 0.0550873488657895,
+   "roi": 0.02579167607870502,
+   "dollars": 2045.2799130413082,
+   "mix": {
+    "kalshi": 425,
+    "polymarket": 367,
+    "novig": 1
+   },
+   "roiLo": -0.038995039166520154,
+   "roiHi": 0.09396008419442055
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 194,
+   "W": 99,
+   "L": 95,
+   "P": 0,
+   "winPct": 0.5103092783505154,
+   "winLo": 0.4404514408081391,
+   "winHi": 0.5797667683711614,
+   "implied": 0.5136123497230246,
+   "edge": -0.003303071372509181,
+   "pValue": 0.9253198551753256,
+   "roi": -0.06803377806975847,
+   "dollars": -1319.8552945533143,
+   "mix": {
+    "polymarket": 38,
+    "kalshi": 156
+   },
+   "roiLo": -0.200264509717466,
+   "roiHi": 0.06558512279537654
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 194,
+   "W": 99,
+   "L": 95,
+   "P": 0,
+   "winPct": 0.5103092783505154,
+   "winLo": 0.4404514408081391,
+   "winHi": 0.5797667683711614,
+   "implied": 0.5136123497230246,
+   "edge": -0.003303071372509181,
+   "pValue": 0.9253198551753256,
+   "roi": -0.06803377806975847,
+   "dollars": -1319.8552945533143,
+   "mix": {
+    "polymarket": 38,
+    "kalshi": 156
+   },
+   "roiLo": -0.200264509717466,
+   "roiHi": 0.06558512279537654
+  }
+ ],
+ "runtime_seconds": 37,
+ "peak_rss_mb": 204
+}

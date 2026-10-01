@@ -81,8 +81,13 @@ if (require.main === module) {
   const size = fs.statSync(OUT).size;
   console.log('seed as of ' + AS_OF + ': ' + wallets + ' wallet rows, ' + qualified.length + ' qualified rows -> ' + OUT
     + ' (' + (size / 1e6).toFixed(2) + ' MB, ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s)');
+  // The corrected backtest's figure for that date (prereg §9 correction, #496), read, not hard-coded.
+  const ART = 'docs/polymarket-top-traders-results-2026-09-30-corrected.json';
+  const sep = JSON.parse(fs.readFileSync(path.join(R, ART), 'utf8')).feasibility.qualified_by_month['2026-09'];
+  const reported = sep && sep.last_date === RULES.SEASON_TO ? sep.last_qualified : null;
   console.log('check: qualified as of 2026-09-27 (history strictly before it) = ' + qualifiedOn0927
-    + ' -- the backtest reported 1050 for that date (results artifact, feasibility.qualified_by_month)');
+    + ' -- the corrected backtest reported ' + (reported == null ? 'unknown' : reported) + ' for that date (' + ART
+    + ', feasibility.qualified_by_month) -> ' + (reported === qualifiedOn0927 ? 'MATCHES' : 'DIFFERS'));
 }
 
 module.exports = { buildSeed, HEADER, AS_OF };

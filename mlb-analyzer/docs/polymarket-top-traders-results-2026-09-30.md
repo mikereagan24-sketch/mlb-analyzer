@@ -107,3 +107,144 @@ more.
 - **Bootstrap reuse.** The trends test's `bootRoi` gained an optional `seed`
   argument so this run could reuse it with its own registered seed. The trends
   runs are unchanged, because they pass no seed.
+
+## Correction (2026-10-01): repeat trades restored
+
+The results above stand as first reported. This section repeats the run on
+corrected data under pre-registration §9: an implementation bug was fixed in
+code and the run repeated with a note. No rule or definition changed. The
+document hash pin passed.
+
+**Verdict: unchanged, no edge.** Neither main test is significant after
+correction: q = 0.297 for both, against q < 0.10. No holdout label applies.
+
+**Full numbers:** `docs/polymarket-top-traders-results-2026-09-30-corrected.json`.
+The original JSON is unchanged.
+
+**Reproduce.** The committed runner reproduces both files:
+- `scripts/run-polymarket-top-traders-backtest.js --corrected` on
+  `data/polymarket.db` gives the corrected file;
+- the default mode on the pre-fix backup gives the original.
+
+`scripts/test-top-traders-card-a.js` (check a) asserts both, field by field.
+
+### Cause
+
+Polymarket's `/trades` response has **no trade ID**. Identical rows are
+separate real fills: one taker order matched against several identical maker
+orders. The backfill removed identical rows within each time window, so it
+**dropped 18,671 real trades in 1,846 of the 2,247 markets** (0.73% of
+pre-game trades).
+
+### Fix and re-fetch
+
+- **Code:** #496 (commit `1e3330d`, merged in `c8dd507`) keeps every row and
+  uses half-open time windows.
+- **Re-fetch:** the 1,846 affected markets were re-fetched on 2026-10-01: 7,357
+  requests, 5 retries (all 429s), peak 130 MB.
+- **Backup:** the pre-fix store is kept at `data/polymarket-before-repeats.db`.
+
+Checks on the corrected store:
+- **Nothing pending.** Every market's windows tile [0, cutoff) with no gaps or
+  overlaps, and no fill is at or after its cutoff.
+- **Every count adds up.** For 1,844 of the 1,846 re-fetched markets, new fills
+  = old fills + the old run's dropped count, exactly.
+  - The two exceptions, `mlb-pit-hou-2026-06-02` (−1) and `mlb-sf-atl-2026-06-16`
+    (−25), are among the 21 markets truncated by the earlier recut. That recut
+    kept the dropped count of the window the new cutoff fell in, so part of the
+    count belonged to trades after the cutoff.
+  - The 401 unaffected markets are unchanged.
+- **Spot check.** In `mlb-tb-phi-2026-09-27`, the 71,787.21-share buy now has
+  all 48 counterparty rows, totalling 71,787.21 shares (before: 44 rows,
+  61,387.21).
+
+| store | before | after |
+|---|---|---|
+| fills | 2,528,390 | 2,547,035 |
+| wallet-game rows | 729,647 | 730,161 |
+| net-short positions | 4,712 | 4,192 |
+| season wallet profit, all wallets | −$520,374 | +$25,507 |
+| season wallet volume | $513.26M | $518.09M |
+
+The season profit summed over every wallet should be close to zero, because
+every trade has two sides. The dropped repeats pushed it to −$520k; restored,
+it is +$26k.
+
+### Gate 1, split by what the fix can affect
+
+**a. game_log only: must match §10.** All 11 fields match:
+- done markets 2,247, and the 4/04–4/05 exclusion of 19;
+- 2,228 in-scope games;
+- price skips by reason;
+- lock versus cutoff;
+- the 622-game lock table, with its by-month rows and the first capture date.
+
+**b. Depend on trades: may differ.** 13 of 20 unchanged.
+
+| field | original | corrected |
+|---|---|---|
+| first eligible date (qualified) | 04-13 (32) | 04-13 (32) |
+| games not eligible, in / holdout | 64 / 0 | 64 / 0 |
+| qualified, May 31 | 450 | 451 |
+| qualified, Jun 30 | 622 | 625 |
+| qualified, Jul 1 / Jul 31 | 627 / 821 | 630 / 823 |
+| qualified, Aug 1 / Aug 31 | 829 / 964 | 831 / 964 |
+| qualified, Sep 27 | 1,050 | 1,051 |
+| eligible games, in / holdout | 1,814 / 350 | 1,814 / 350 |
+| secondary lean skips, in-sample (no qualified money) | 82 | 76 |
+| tested: primary in / hold, secondary in / hold | 1,360 / 265 / 1,278 / 199 | 1,360 / 265 / **1,284** / 199 |
+| confirmed set, secondary in-sample | 866 | 870 |
+| confirmed set, other three | 946 / 257 / 194 | unchanged |
+
+The other qualified counts (Apr, May 1, Jun 1, Sep 1) and the primary tested
+source mix are unchanged.
+
+**Leans that changed:**
+- primary: 6 in-sample and 1 September game flipped side;
+- secondary: 5 in-sample games flipped, and 6 are newly tested.
+
+### Corrected results
+
+The format is as above.
+
+**Main tests**
+
+| test | split | n | W–L | win % | implied % | edge | p | BH q | ROI [95%] | $ won |
+|---|---|---|---|---|---|---|---|---|---|---|
+| primary | Apr–Aug | 1,360 | 725–635 | 53.3 [50.7, 55.9] | 51.8 | +1.5 | 0.272 | 0.297 | −1.2% [−6.2, +3.9] | −1,641 |
+| primary | Sept | 265 | 132–133 | 49.8 [43.8, 55.8] | 51.2 | −1.4 | 0.636 | — | −9.6% [−20.7, +1.4] | −2,549 |
+| secondary | Apr–Aug | 1,284 | 680–604 | 53.0 [50.2, 55.7] | 51.5 | +1.4 | 0.297 | 0.297 | −1.3% [−6.5, +3.8] | −1,649 |
+| secondary | Sept | 199 | 100–99 | 50.3 [43.4, 57.1] | 51.2 | −1.0 | 0.776 | — | −8.1% [−21.5, +5.0] | −1,619 |
+
+**Sensitivity: the confirmed set.** Outside BH; its q is for display only.
+
+| test | split | n | W–L | win % | implied % | edge | p | q (display) | ROI [95%] | $ won |
+|---|---|---|---|---|---|---|---|---|---|---|
+| primary | Apr–Aug | 946 | 511–435 | 54.0 [50.8, 57.2] | 51.9 | +2.1 | 0.184 | 0.184 | +0.1% [−5.9, +6.2] | +141 |
+| primary | Sept | 257 | 129–128 | 50.2 [44.1, 56.3] | 51.3 | −1.2 | 0.707 | — | −9.2% [−20.4, +2.1] | −2,361 |
+| secondary | Apr–Aug | 870 | 468–402 | 53.8 [50.5, 57.1] | 51.4 | +2.4 | 0.157 | 0.184 | +0.6% [−6.0, +7.0] | +506 |
+| secondary | Sept | 194 | 99–95 | 51.0 [44.0, 58.0] | 51.4 | −0.3 | 0.925 | — | −6.8% [−20.0, +6.6] | −1,320 |
+
+**Sources with no recorded price source excluded** (§5 sensitivity):
+
+| | in-sample p (n) | in-sample ROI | Sept ROI |
+|---|---|---|---|
+| main primary | 0.203 (1,160) | −0.4% | −9.6% |
+| main secondary | 0.216 (1,092) | −0.4% | −8.1% |
+| confirmed primary | 0.099 (861) | +1.5% | −9.2% |
+| confirmed secondary | 0.055 (793) | +2.6% | −6.8% |
+
+As in the original, none of these are corrected or significance-bearing. The
+0.099 and 0.055 are sensitivity cuts of a sensitivity run; under §6 they are
+reported and nothing more.
+
+**Original versus corrected, main in-sample:**
+- **primary:** edge +1.2 → +1.5 points, p 0.386 → 0.272, ROI −1.8% → −1.2%;
+- **secondary:** edge +1.2 → +1.4 points, p 0.377 → 0.297, ROI −1.7% → −1.3%;
+- **both:** BH q 0.386 → 0.297.
+
+**Reading.** The restored trades moved the in-sample numbers slightly in the
+lean's favour. Neither test is anywhere near significant, the lean still loses
+money at the actual price, and September is still negative. The card can
+show what top traders are on as information. Nothing here supports calling
+it predictive.

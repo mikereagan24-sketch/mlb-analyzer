@@ -4,8 +4,13 @@
  * Top-traders card, PR A (2026-10-01): shared rules, production tables, the
  * seed upload route. Display only; nothing live.
  *
- *   a. the backtest still reproduces docs/polymarket-top-traders-results-2026-09-30.json
- *      exactly (Gate 1: 27 of 27) after the rules moved to utils/top-traders/rules.js.
+ *   a. the committed runner reproduces both result artifacts exactly:
+ *      - --corrected on data/polymarket.db (repeats restored, #496) ->
+ *        docs/polymarket-top-traders-results-2026-09-30-corrected.json;
+ *      - the default mode on data/polymarket-before-repeats.db (the pre-fix
+ *        store) -> docs/polymarket-top-traders-results-2026-09-30.json; skipped
+ *        with a "backup not present" NOTE when that file is absent.
+ *      Self-tests: one figure altered in either artifact is caught.
  *      Needs data/polymarket.db (read-only) and a SCRATCH COPY of mlb.db via
  *      MLB_DB_PATH (the suite passes one); skipped with a NOTE otherwise.
  *   b. utils/top-traders/rules.js imports nothing; the isolation walk -- roots
@@ -43,29 +48,72 @@ function ok(label, cond, detail) {
 
 (async () => {
   // ---------------------------------------------------------------- a
-  console.log('a. the backtest reproduces its published artifact exactly (rules moved)');
+  console.log('a. the committed runner reproduces both result artifacts exactly');
   {
     const PM = path.join(R, 'data/polymarket.db');
+    const BACKUP = path.join(R, 'data/polymarket-before-repeats.db');
+    const ORIGINAL = 'docs/polymarket-top-traders-results-2026-09-30.json';
+    const CORRECTED = 'docs/polymarket-top-traders-results-2026-09-30-corrected.json';
     const realMlb = path.resolve(R, 'data/mlb.db');
-    if (!SCRATCH_COPY || !fs.existsSync(PM)) {
-      console.log('  NOTE  needs data/polymarket.db and MLB_DB_PATH=<scratch copy outside the repo> (the suite passes one)');
-    } else if (path.resolve(SCRATCH_COPY) === realMlb || path.resolve(SCRATCH_COPY).startsWith(path.resolve(R) + path.sep)) {
-      ok('refuses a database inside the repo (never data/mlb.db)', false, SCRATCH_COPY);
-    } else {
-      const out = path.join(os.tmpdir(), '__tt_repro_' + process.pid + '.json');
-      const log = execFileSync(process.execPath, ['--max-old-space-size=1536', path.join(R, 'scripts/run-polymarket-top-traders-backtest.js'),
-        '--pm-db', PM, '--mlb-db', SCRATCH_COPY, '--json', out], { cwd: R, encoding: 'utf8', env: Object.assign({}, process.env, { MLB_DB_PATH: SCRATCH_COPY }) });
-      ok('Gate 1 still matches 27 of 27', /27 of 27 fields match/.test(log), (log.match(/GATE 1[^\n]*/) || [''])[0]);
-      const A = JSON.parse(read('docs/polymarket-top-traders-results-2026-09-30.json')), B = JSON.parse(fs.readFileSync(out, 'utf8'));
-      fs.unlinkSync(out);
-      const skip = new Set(['generated_at', 'generated_from_commit', 'generated_with_uncommitted_tracked_changes', 'runtime_seconds', 'peak_rss_mb']);
+    // Every field compared; only timestamp, commit, runtime and memory fields are excluded.
+    const SKIP = new Set(['generated_at', 'generated_from_commit', 'generated_with_uncommitted_tracked_changes', 'runtime_seconds', 'peak_rss_mb']);
+    const compare = (A, B) => {
       let fields = 0; const diffs = [];
       const walk = (x, y, p) => {
         if (x && typeof x === 'object') { for (const k of new Set([...Object.keys(x), ...Object.keys(y || {})])) walk(x[k], y && y[k], p + '.' + k); return; }
         fields++; if (!Object.is(x, y)) diffs.push(p);
       };
-      for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) if (!skip.has(k)) walk(A[k], B[k], k);
-      ok('every field matches (only timestamp / commit / runtime fields excluded)', diffs.length === 0, fields + ' fields' + (diffs.length ? ' | ' + diffs.slice(0, 5).join(', ') : ''));
+      for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) if (!SKIP.has(k)) walk(A[k], B[k], k);
+      return { fields, diffs };
+    };
+    // -> { status, log, json }   (status 3 = Gate 1 stopped the run before outcomes)
+    const runRunner = (pmDb, extra) => {
+      const out = path.join(os.tmpdir(), '__tt_repro_' + process.pid + '_' + Math.random().toString(36).slice(2) + '.json');
+      let status = 0, log;
+      try {
+        log = execFileSync(process.execPath, ['--max-old-space-size=1536', path.join(R, 'scripts/run-polymarket-top-traders-backtest.js'),
+          '--pm-db', pmDb, '--mlb-db', SCRATCH_COPY, '--json', out, ...extra],
+        { cwd: R, encoding: 'utf8', env: Object.assign({}, process.env, { MLB_DB_PATH: SCRATCH_COPY }) });
+      } catch (e) { status = e.status; log = String(e.stdout || '') + String(e.stderr || ''); }
+      const json = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null;
+      try { fs.unlinkSync(out); } catch (e) { /* not written */ }
+      return { status, log, json };
+    };
+    const gateLine = (log) => (log.match(/GATE 1[^\n]*/) || [''])[0];
+    // Self-test: one figure altered in the reference artifact must be caught by the comparison.
+    const altered = (ref) => { const x = JSON.parse(JSON.stringify(ref)); x.results[0].W += 1; return x; };
+    if (!SCRATCH_COPY || !fs.existsSync(PM)) {
+      console.log('  NOTE  needs data/polymarket.db and MLB_DB_PATH=<scratch copy outside the repo> (the suite passes one)');
+    } else if (path.resolve(SCRATCH_COPY) === realMlb || path.resolve(SCRATCH_COPY).startsWith(path.resolve(R) + path.sep)) {
+      ok('refuses a database inside the repo (never data/mlb.db)', false, SCRATCH_COPY);
+    } else {
+      // The corrected data: --corrected mode must reproduce the corrected artifact.
+      const C = JSON.parse(read(CORRECTED));
+      const rc = runRunner(PM, ['--corrected']);
+      ok('--corrected on data/polymarket.db: Gate 1 matches 27 of 27 (11 game_log-only fields vs §10, the rest vs the corrected artifact)',
+        rc.status === 0 && /27 of 27 fields match/.test(rc.log), gateLine(rc.log) || 'exit ' + rc.status);
+      const dc = rc.json ? compare(C, rc.json) : { fields: 0, diffs: ['no output'] };
+      ok('--corrected reproduces ' + CORRECTED + ' exactly', dc.diffs.length === 0, dc.fields + ' fields' + (dc.diffs.length ? ' | ' + dc.diffs.slice(0, 5).join(', ') : ''));
+      ok('SELF-TEST: the corrected artifact with one figure altered (results[0].W + 1) is caught', rc.json && compare(altered(C), rc.json).diffs.length === 1);
+      // A trade-dependent Gate 1 value altered in a copy of the corrected artifact stops the run before outcomes.
+      const tmpRef = path.join(os.tmpdir(), '__tt_ref_' + process.pid + '.json');
+      const bad = JSON.parse(JSON.stringify(C)); bad.feasibility.qualified_by_month['2026-09'].last_qualified += 1;
+      fs.writeFileSync(tmpRef, JSON.stringify(bad));
+      const rg = runRunner(PM, ['--corrected', '--corrected-artifact', tmpRef, '--gate1-only']);
+      fs.unlinkSync(tmpRef);
+      ok('SELF-TEST: one Gate 1 figure altered in the corrected artifact -> Gate 1 fails and stops before outcomes (exit 3)',
+        rg.status === 3 && /FAILED: 1 field\(s\) differ/.test(rg.log), gateLine(rg.log));
+      // The pre-fix store: the default mode must reproduce the original artifact.
+      if (!fs.existsSync(BACKUP)) {
+        console.log('  NOTE  backup not present (data/polymarket-before-repeats.db): reproduction of ' + ORIGINAL + ' skipped, not failed');
+      } else {
+        const O = JSON.parse(read(ORIGINAL));
+        const ro = runRunner(BACKUP, []);
+        ok('default mode on the pre-fix backup: Gate 1 matches 27 of 27 against §10', ro.status === 0 && /27 of 27 fields match/.test(ro.log), gateLine(ro.log) || 'exit ' + ro.status);
+        const dO = ro.json ? compare(O, ro.json) : { fields: 0, diffs: ['no output'] };
+        ok('default mode reproduces ' + ORIGINAL + ' exactly', dO.diffs.length === 0, dO.fields + ' fields' + (dO.diffs.length ? ' | ' + dO.diffs.slice(0, 5).join(', ') : ''));
+        ok('SELF-TEST: the original artifact with one figure altered (results[0].W + 1) is caught', ro.json && compare(altered(O), ro.json).diffs.length === 1);
+      }
     }
   }
 
