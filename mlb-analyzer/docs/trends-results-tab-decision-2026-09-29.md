@@ -54,7 +54,8 @@ footnotes these counts.
   inside the pricing path's require graph, and the trends artifact must stay
   out of that graph.
 - A "Trends" tab next to Backtest, neutral styling, rows in ID order, p and q
-  shown once per scenario (one test, both directions).
+  shown once per scenario (one test, both directions). (2026-09-30: now
+  sortable, with a slate-fit column. See the addendum.)
 - `scripts/test-trends-results-tab.js` — the renderer is wired in; the route
   reads only the artifact; the artifact is the pre-registered run with both
   sides of one test; and no file in the pricing path's full require graph
@@ -85,9 +86,102 @@ Also for that future block: the backtest builds its per-game context only
 for population (scored) games (`services/trends-backtest.js:145`); a live
 evaluator needs that context assembly extracted, not the backtest re-run.
 
+## Addendum 2026-09-30: sortable table and a "Fits the slate" column
+
+**Added at the owner's request, for interest only.** The tab states this
+directly: "Fits are for interest only. No trend passed the test." Display only;
+nothing here feeds the model, a signal or a bet. It is still the tab, not a
+per-game block on slate cards or Matchups, which remain deferred.
+
+**Sorting.** Click any column header to sort by it; click again to reverse.
+The default is still scenario ID ascending. Numbers sort numerically. On every
+column except ID and Scenario, "too small to read" rows (n < 30) and blank
+values sort last in both directions, so the default view is unchanged. The
+active column shows ▲ or ▼. Styling stays neutral.
+
+**The slate column.** `GET /api/trends/slate[?date=]` defaults to the current
+PT date. It is served from `routes/trends-results.js`, still not
+`routes/api.js`.
+- **Same definitions.** It uses the same predicates
+  (`utils/trends/scenarios.js`, unchanged) and the same context code. The
+  team-game context was moved, unchanged, from `buildRows` into
+  `utils/trends/context.js`, and both the backtest and
+  `services/trends-slate.js` call it.
+- **Refactor proof.** The re-run on a scratch copy reproduces
+  `docs/trends-results-2026-09-29.json` exactly (192 rows, 3,648 fields), and
+  `buildRows` output is row-identical (3,342 team rows, 3,334 totals rows).
+- **Live = test where they should coincide.** On all 167 population dates, the
+  slate's fits equal the backtest's own scenario membership on locked,
+  unflagged games: 56,755 of 56,755 checks.
+
+**How each live-matching caveat is handled**
+
+1. **Price before the odds lock** (S01–S10, S12, S19, S21–S29). The game's
+   current stored price is used, and a fit is labelled "provisional — price not
+   locked" until `odds_locked_at` is set.
+   - **"No reliable price" blocks only on a MONEYLINE problem** (narrowed on
+     2026-09-30). The game is not classified when any of these hold:
+     - its moneyline is flagged;
+     - it carries a flag that cannot be attributed to one market;
+     - `market_contamination_reason` is set.
+   - **How a flag is attributed.** `odds_flag_reason` is the odds job's
+     reasons joined with " | " (`services/jobs.js:5208`). Each fragment is
+     attributed by where its text is produced (`FLAG_RULES` in
+     `services/trends-slate.js`).
+     - **Moneyline, blocks:**
+       - `single-source, no cross-check available` (`jobs.js:5090`);
+       - `no sane odds` (`jobs.js:5088`);
+       - `impossible line pair` / `implausible line magnitude`
+         (`utils/market-sanity.js:101,108,116`, via `jobs.js:5092`);
+       - `extreme line` (`jobs.js:475-476`);
+       - `Kalshi vs … disagree on favorite` / `divergence`
+         (`jobs.js:508,516`).
+     - **Totals only, does not block:**
+       - `no sane totals` (`jobs.js:5146`);
+       - `single-source total, no cross-check available` (`jobs.js:5148`);
+       - the historical `totals [juice|line] divergence` and
+         `no primary totals; …` texts (`jobs.js:4924,4977,4980` at
+         `83bb54a^`, removed 2026-09-17).
+     - **Unattributable, still blocks:**
+       - the double-header start-time guard
+         (`utils/dh-assignment-guard.js:97`), which rejects a source's whole
+         write for the game, moneyline and totals alike
+         (`jobs.js:5566-5567`, `5731-5732`);
+       - a flag with no reason text;
+       - any unrecognised text.
+
+       No stored flag this season is unattributable.
+   - **Effect in September.** Of 361 games with a stored moneyline, 53
+     changed from "no reliable price" to classified, all of them
+     totals-divergence-only flags. 137 still block: 103 single-source
+     moneylines and 34 contaminated.
+   - A game with no stored moneyline yet shows "no price yet".
+2. **S25/S26 need the lock price.** They show "pending lock" until it exists,
+   then compare the morning open with the lock price, as the test does.
+3. **The hardcoded population window** (`services/trends-backtest.js`
+   `inPopulation`). The live rule is: **the previous game counts as priced
+   when it has both stored moneylines, `odds_locked_at` set and no
+   `market_contamination_reason`, whatever its date.** That is the population
+   rule without its 2026-04-09..2026-09-27 window, so S01–S07 can match after
+   09-27.
+4. **S23 when the next game isn't loaded.** The slate reads 7 days ahead.
+   - If the team's next game is not in `game_log`, a finale is never assumed.
+     When the answer depends on it, the fit shows **"unknown"**.
+   - Otherwise the series grouping is the test's own.
+5. **Context only for population games.** The context code was extracted, as
+   noted above, rather than re-running the backtest. The slate reads one
+   bounded date range (45 days back, widened only if a streak reaches the
+   window's start) through its own read-only connection.
+   - It is cached per date for 10 minutes.
+   - Measured on the local copy: 49 ms mean and 100 ms max per date, across
+     167 dates.
+6. **Postseason.** Games after 2026-09-27 are matched, and each fit carries
+   "tested on regular season only".
+
 ## Related
 
 - `docs/trends-preregistration-2026-09-29.md` (#478), the backtest (#480)
+- `utils/trends/context.js`, `services/trends-slate.js` (2026-09-30)
 - `services/trends-backtest.js`, `utils/trends/scenarios.js`, `utils/trends/teams.js`
 - `scripts/run-trends-backtest.js`, `scripts/export-trends-results.js`,
   `scripts/test-trends-backtest.js`, `scripts/test-trends-results-tab.js`
