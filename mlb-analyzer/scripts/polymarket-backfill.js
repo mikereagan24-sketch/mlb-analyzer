@@ -15,6 +15,12 @@
 //     --recut [--apply] [--only a,b]       re-apply the CURRENT matching / cutoff rule to markets
 //                                          already fetched: list every change (no network); with
 //                                          --apply, make them (truncate / refetch / exclude)
+//     --refetch-dropped-repeats --backup PATH [--only slug,...] [--limit N]
+//                                          (2026-10-01) re-fetch ONLY the markets whose repeats the old
+//                                          run dropped, keeping every row; replaces each one's fills and
+//                                          windows wholesale and recomputes its wallet_game / net_short.
+//                                          Resumable per market. Refuses to start unless --backup is an
+//                                          openable copy of the same store (made before this writes).
 //
 // Resumable: each market is checkpointed (status 'done'), and each of its time
 // windows too; rerunning the same command continues where a kill stopped it.
@@ -59,7 +65,52 @@ if (has('--recut')) {
   process.exit(0);
 }
 
-(async () => {
+if (has('--refetch-dropped-repeats')) {
+  (async () => {
+    const t0 = Date.now();
+    // The backup is checked READ-ONLY before the store is opened read-write
+    // (openStore itself writes: it adds the 2026-10-01 columns).
+    const BK = arg('--backup');
+    if (!BK) { console.error('refusing: --refetch-dropped-repeats needs --backup PATH (a copy of ' + DB + ' made first)'); process.exit(2); }
+    if (path.resolve(BK) === DB) { console.error('refusing: --backup must be a different file from --db'); process.exit(2); }
+    let bk, live;
+    try { bk = new Database(path.resolve(BK), { readonly: true, fileMustExist: true }); } catch (e) { console.error('refusing: cannot open backup ' + BK + ': ' + e.message); process.exit(2); }
+    live = new Database(DB, { readonly: true, fileMustExist: true });
+    const cnt = (d) => d.prepare('SELECT COUNT(*) c FROM markets').get().c;
+    const bkDropped = bk.prepare("SELECT COUNT(*) c FROM markets WHERE status = 'done' AND duplicates_dropped > 0").get().c;
+    if (cnt(bk) !== cnt(live) || bkDropped === 0) {
+      console.error('refusing: ' + BK + ' does not look like the pre-fix copy of ' + DB + ' (markets ' + cnt(bk) + ' vs ' + cnt(live)
+        + ', markets with dropped repeats in the backup ' + bkDropped + ')');
+      process.exit(2);
+    }
+    console.log('backup ok: ' + BK + ' (' + cnt(bk) + ' markets, ' + bkDropped + ' with dropped repeats)');
+    bk.close(); live.close();
+    const db = bf.openStore(Database, DB);
+    const client = bf.makeClient({});
+    const run = db.prepare('INSERT INTO runs (started_at, args) VALUES (datetime(\'now\'), ?)').run(argv.join(' '));
+    const marked = bf.initRepeatsRefetch(db);
+    const only = arg('--only') ? new Set(arg('--only').split(',').map(s => s.trim()).filter(Boolean)) : null;   // e.g. a one-market check
+    const queue = db.prepare("SELECT id, slug, fills_stored, repeats_dropped_v1 FROM markets WHERE repeats_refetch = 'pending' ORDER BY cutoff_utc").all()
+      .filter(m => !only || only.has(m.slug));
+    console.log('marked now ' + marked + '; pending ' + queue.length + ' (of ' + db.prepare("SELECT COUNT(*) c FROM markets WHERE repeats_refetch IS NOT NULL").get().c + ' to re-fetch)');
+    let done = 0;
+    for (const m of queue) {
+      if (done >= LIMIT) break;
+      const r0 = client.stats.requests;
+      await bf.refetchMarket(db, client, m.id, { onPage: sampleRss });
+      sampleRss(); done++;
+      const after = db.prepare('SELECT fills_stored, window_count, split_needed FROM markets WHERE id = ?').get(m.id);
+      console.log('[refetched ' + done + '] ' + m.slug + ' | fills ' + (m.fills_stored == null ? '(resumed)' : m.fills_stored) + ' -> ' + after.fills_stored
+        + ' (old run dropped ' + m.repeats_dropped_v1 + ') | windows ' + after.window_count + (after.split_needed ? ' (SPLIT)' : '')
+        + ' | requests ' + (client.stats.requests - r0) + ' | rss ' + Math.round(process.memoryUsage().rss / 1e6) + ' MB');
+      db.prepare('UPDATE runs SET finished_at = datetime(\'now\'), requests = ?, retries = ?, http429 = ?, peak_rss_mb = ?, markets_done = ? WHERE id = ?')
+        .run(client.stats.requests, client.stats.retries, client.stats.http429, Math.round(peakRss / 1e5) / 10, done, run.lastInsertRowid);
+    }
+    const left = db.prepare("SELECT COUNT(*) c FROM markets WHERE repeats_refetch = 'pending'").get().c;
+    console.log('run: ' + done + ' markets re-fetched, ' + left + ' still pending, ' + client.stats.requests + ' requests, ' + client.stats.retries
+      + ' retries (' + client.stats.http429 + ' x 429), peak RSS ' + Math.round(peakRss / 1e6) + ' MB, ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
+  })().catch(e => { console.error('FATAL ' + (e && e.stack || e)); process.exit(1); });
+} else (async () => {
   const t0 = Date.now();
   const db = bf.openStore(Database, DB);
   const mlb = new Database(MLB, { readonly: true, fileMustExist: true });
