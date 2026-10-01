@@ -14,10 +14,20 @@
 // the pricing path's require graph. A trends route there would place the
 // trends artifact in that graph; here it stays out of it, and
 // scripts/test-trends-results-tab.js asserts that structurally.
+//
+// GET /api/trends/slate[?date=YYYY-MM-DD] (2026-09-30) -- which of a date's
+// games fit each scenario (services/trends-slate.js), for the tab's "Fits the
+// slate" column. Display only, for interest only. Default date: today in PT.
+// Reads game_log through its OWN read-only connection, opened lazily, with
+// bounded queries; cached per date for SLATE_TTL_MS so a page view does not
+// recompute (a computation measured 49 ms mean / 100 ms max per date). It
+// imports nothing from the pricing path; /trends/results above is unchanged
+// and still reads only the artifact.
 
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const { slateFits } = require('../services/trends-slate');
 
 const ARTIFACT = path.join(__dirname, '..', 'docs', 'trends-results-2026-09-29.json');
 const router = express.Router();
@@ -44,5 +54,44 @@ router.get('/trends/results', (req, res) => {
   if (!c.ok) return res.status(503).json(c.body);
   res.json(c.body);
 });
+
+// ---- slate fits
+const SLATE_TTL_MS = 10 * 60 * 1000;       // prices move pre-lock; refresh at most every 10 minutes
+const SLATE_CACHE_MAX = 14;                // dates kept
+const _slateCache = new Map();             // date -> { at, body }
+let _readDb = null;
+function readDb() {
+  // Own READ-ONLY handle on the app database. db/schema is already loaded by
+  // server.js; only its path is used here, never its read-write handle.
+  if (!_readDb) {
+    const Database = require('better-sqlite3');
+    _readDb = new Database(require('../db/schema').DB_PATH, { readonly: true, fileMustExist: true });
+  }
+  return _readDb;
+}
+const ptToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+
+router.get('/trends/slate', (req, res) => {
+  const date = req.query && req.query.date ? String(req.query.date) : ptToday();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const hit = _slateCache.get(date);
+  if (hit && Date.now() - hit.at < SLATE_TTL_MS) return res.json(Object.assign({}, hit.body, { cached: true }));
+  try {
+    const t0 = process.hrtime.bigint();
+    const body = Object.assign(slateFits(readDb(), date), {
+      generated_at: new Date().toISOString(),
+      compute_ms: Math.round(Number(process.hrtime.bigint() - t0) / 1e5) / 10,
+      note: 'Fits are for interest only. No trend passed the test.',
+    });
+    _slateCache.set(date, { at: Date.now(), body });
+    while (_slateCache.size > SLATE_CACHE_MAX) _slateCache.delete(_slateCache.keys().next().value);
+    res.json(Object.assign({}, body, { cached: false }));
+  } catch (e) {
+    res.status(503).json({ error: 'slate fits unavailable', detail: e && e.message ? e.message : String(e) });
+  }
+});
+
+// For tests: release the read-only handle (Windows cannot delete an open file) and drop the cache.
+router._closeSlateDb = () => { if (_readDb) { _readDb.close(); _readDb = null; } _slateCache.clear(); };
 
 module.exports = router;

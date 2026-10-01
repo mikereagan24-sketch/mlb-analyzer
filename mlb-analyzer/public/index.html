@@ -3521,8 +3521,14 @@ function sw(name){
 // sides: the pre-registered test is two-sided against no-vig implied %, so
 // the other side of the same games has the identical p-value -- one test, so
 // p and q are shown once. Neutral styling on purpose: no colours, no
-// highlighting, no sorting by edge or ROI; rows stay in ID order.
+// highlighting. SORTING (2026-09-30, owner's request): any column header
+// sorts, a second click reverses, default ID ascending; "too small to read"
+// rows and blanks sort last in both directions (except on ID / Scenario,
+// so the default view is plain ID order). The "Fits the slate" column (GET
+// /api/trends/slate) is for interest only: no trend passed the test.
 let _trendsLoaded = false;
+let _trendsData = null, _trendsSlate = null;
+let _trendsSort = { col: 'id', dir: 1 };
 async function loadTrendsResults(){
   const el = document.getElementById('trends-body');
   if (!el || _trendsLoaded) return;
@@ -3531,11 +3537,53 @@ async function loadTrendsResults(){
     const r = await fetch('/api/trends/results');
     const d = await r.json();
     if (!r.ok || d.error) { el.innerHTML = '<div class="notice">Trends results unavailable: ' + (d.detail || d.error || r.status) + '</div>'; return; }
+    _trendsData = d;
     el.innerHTML = renderTrendsResults(d);
     _trendsLoaded = true;
+    loadTrendsSlate();
   } catch (e) {
     el.innerHTML = '<div class="notice">Trends results unavailable: ' + (e && e.message ? e.message : e) + '</div>';
   }
+}
+async function loadTrendsSlate(){
+  try {
+    const r = await fetch('/api/trends/slate');
+    const s = await r.json();
+    _trendsSlate = (r.ok && !s.error) ? s : { error: s.detail || s.error || r.status };
+  } catch (e) {
+    _trendsSlate = { error: e && e.message ? e.message : String(e) };
+  }
+  const el = document.getElementById('trends-body');
+  if (el && _trendsData) el.innerHTML = renderTrendsResults(_trendsData);
+}
+function trendsSortBy(col){
+  _trendsSort = (_trendsSort.col === col) ? { col: col, dir: -_trendsSort.dir } : { col: col, dir: 1 };
+  const el = document.getElementById('trends-body');
+  if (el && _trendsData) el.innerHTML = renderTrendsResults(_trendsData);
+}
+// Sort keys per column. x = { r: in-sample primary row, o: its other-side row, sl: slate entry or undefined }.
+const TRENDS_SORT_KEYS = {
+  id: x => x.r.scenario_id, name: x => x.r.name, n: x => x.r.n,
+  t_bet: x => x.o.this_side_bet, t_wlp: x => x.r.w, t_win: x => x.r.win_pct, t_edge: x => x.r.edge, t_roi: x => x.r.roi,
+  o_bet: x => x.o.bet, o_wlp: x => x.o.w, o_win: x => x.o.win_pct, o_edge: x => x.o.edge, o_roi: x => x.o.roi,
+  p: x => x.r.p_value, q: x => x.r.q_value,
+  slate: x => (x.sl ? x.sl.fits.length : null),
+};
+const TRENDS_IDENTITY_COLS = { id: 1, name: 1 };
+// Pure: returns a new array. Numbers numerically, text by localeCompare; ties
+// and the "last" group keep ID order.
+function trendsSortRows(items, col, dir){
+  const key = TRENDS_SORT_KEYS[col] || TRENDS_SORT_KEYS.id;
+  const byId = (a, b) => (a.r.scenario_id < b.r.scenario_id ? -1 : a.r.scenario_id > b.r.scenario_id ? 1 : 0);
+  const last = (x) => !TRENDS_IDENTITY_COLS[col] && (x.r.n < 30 || key(x) == null || key(x) === '');
+  return items.slice().sort((a, b) => {
+    const la = last(a), lb = last(b);
+    if (la !== lb) return la ? 1 : -1;
+    if (la) return byId(a, b);
+    const ka = key(a), kb = key(b);
+    const c = (typeof ka === 'number' && typeof kb === 'number') ? ka - kb : String(ka).localeCompare(String(kb));
+    return c !== 0 ? c * dir : byId(a, b);
+  });
 }
 function renderTrendsResults(d){
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -3558,14 +3606,40 @@ function renderTrendsResults(d){
     + '<td style="' + td + '">' + pct(r.win_pct) + '% <span style="color:var(--text2)">[' + pct(r.win_lo, 0) + ', ' + pct(r.win_hi, 0) + ']</span></td>'
     + '<td style="' + td + '">' + sgn(r.edge) + '</td>'
     + '<td style="' + td + '">' + sgn(r.roi) + '% <span style="color:var(--text2)">[' + sgn(r.roi_lo, 0) + ', ' + sgn(r.roi_hi, 0) + ']</span></td>';
-  const rows = inPrim.map(r => {
+  // "Fits the slate" (GET /api/trends/slate): for interest only.
+  const slate = _trendsSlate;
+  const slateBy = {}; ((slate && slate.scenarios) || []).forEach(s => { slateBy[s.id] = s; });
+  const muted = (t) => ' <span style="color:var(--text2)">' + esc(t) + '</span>';
+  const slateCell = (sl) => {
+    if (!slate) return '<span style="color:var(--text2)">loading…</span>';
+    if (slate.error) return '<span style="color:var(--text2)">unavailable</span>';
+    if (!sl) return '–';
+    const fits = sl.fits.map(f => esc(f.game) + ' (' + esc(f.team || f.bet) + ')'
+      + (f.status === 'provisional' ? muted('provisional — price not locked') : f.status === 'unknown' ? muted('unknown') : '')
+      + (f.notes && f.notes.length ? muted(f.notes.join('; ')) : ''));
+    const extra = [];
+    if (sl.noReliablePrice.length) extra.push('no reliable price: ' + sl.noReliablePrice.join(', '));
+    if (sl.noPrice.length) extra.push('no price yet: ' + sl.noPrice.join(', '));
+    if (sl.pendingLock.length) extra.push('pending lock: ' + sl.pendingLock.join(', '));
+    return (fits.length ? fits.join('<br>') : 'none')
+      + extra.map(t => '<div style="font-size:10px;color:var(--text2)">' + esc(t) + '</div>').join('');
+  };
+  const items = inPrim.map(r => {
     const o = other[r.scenario_id] || {};
+    const sl = slateBy[r.scenario_id];
     const small = r.n < 30 ? '<div style="font-size:10px;color:var(--text2)">too small to read</div>' : '';
-    return '<tr><td style="' + td + '">' + esc(r.scenario_id) + '</td><td style="' + td + '">' + esc(r.name) + '</td>'
+    const html = '<tr><td style="' + td + '">' + esc(r.scenario_id) + '</td><td style="' + td + '">' + esc(r.name) + '</td>'
       + '<td style="' + td + '">' + r.n + small + '</td>'
       + side(r, o.this_side_bet) + side(o, o.bet)
-      + '<td style="' + td + '">' + p3(r.p_value) + '</td><td style="' + td + '">' + p3(r.q_value) + '</td></tr>';
-  }).join('');
+      + '<td style="' + td + '">' + p3(r.p_value) + '</td><td style="' + td + '">' + p3(r.q_value) + '</td>'
+      + '<td style="' + td + ';min-width:160px">' + slateCell(sl) + '</td></tr>';
+    return { r: r, o: o, sl: sl, html: html };
+  });
+  const rows = trendsSortRows(items, _trendsSort.col, _trendsSort.dir).map(x => x.html).join('');
+  // Sortable header cell: click sorts, a second click reverses; arrow on the active column.
+  const thS = (col, label) => '<th style="' + th + ';cursor:pointer;user-select:none;white-space:nowrap" onclick="trendsSortBy(\'' + col + '\')">'
+    + label + (_trendsSort.col === col ? (_trendsSort.dir > 0 ? ' ▲' : ' ▼') : '') + '</th>';
+  const slateDate = slate && slate.date ? slate.date : new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   // Footnotes, from the artifact's own numbers.
   const byId = {}; inPrim.forEach(r => { byId[r.scenario_id] = r; });
   const notes = [];
@@ -3598,12 +3672,15 @@ function renderTrendsResults(d){
       + ' · September holdout (' + esc(d.holdout_from) + ' to ' + esc(d.window_to) + '): '
       + (holdoutReached ? 'reached for some scenarios' : 'not reached — nothing was significant in-sample, so no scenario was carried to it')
       + '<br>' + esc(d.other_side && d.other_side.note) + '</div>'
+    + '<div style="font-size:11px;color:var(--text2);line-height:1.6;margin-bottom:6px">'
+      + 'Fits the slate: ' + esc(slateDate) + ' (PT)' + (slate && slate.postseason ? ' — postseason games: tested on regular season only' : '') + '<br>'
+      + 'Fits are for interest only. No trend passed the test.</div>'
     + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">'
-    + '<thead><tr><th style="' + th + '" colspan="3"></th><th style="' + grp + '" colspan="5">This side</th><th style="' + grp + '" colspan="5">Other side</th><th style="' + grp + '" colspan="2">Shared (one test)</th></tr>'
-    + '<tr><th style="' + th + '">ID</th><th style="' + th + '">Scenario</th><th style="' + th + '">n</th>'
-    + '<th style="' + th + '">Bet</th><th style="' + th + '">W–L–P</th><th style="' + th + '">Win % [95% CI]</th><th style="' + th + '">Edge (pts)</th><th style="' + th + '">ROI [95% CI]</th>'
-    + '<th style="' + th + '">Bet</th><th style="' + th + '">W–L–P</th><th style="' + th + '">Win % [95% CI]</th><th style="' + th + '">Edge (pts)</th><th style="' + th + '">ROI [95% CI]</th>'
-    + '<th style="' + th + '">p</th><th style="' + th + '">q</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + '<thead><tr><th style="' + th + '" colspan="3"></th><th style="' + grp + '" colspan="5">This side</th><th style="' + grp + '" colspan="5">Other side</th><th style="' + grp + '" colspan="2">Shared (one test)</th><th style="' + grp + '">' + esc(slateDate) + '</th></tr>'
+    + '<tr>' + thS('id', 'ID') + thS('name', 'Scenario') + thS('n', 'n')
+    + thS('t_bet', 'Bet') + thS('t_wlp', 'W–L–P') + thS('t_win', 'Win % [95% CI]') + thS('t_edge', 'Edge (pts)') + thS('t_roi', 'ROI [95% CI]')
+    + thS('o_bet', 'Bet') + thS('o_wlp', 'W–L–P') + thS('o_win', 'Win % [95% CI]') + thS('o_edge', 'Edge (pts)') + thS('o_roi', 'ROI [95% CI]')
+    + thS('p', 'p') + thS('q', 'q') + thS('slate', 'Fits the slate') + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
     + '<div style="font-size:11px;color:var(--text2);line-height:1.6;margin-top:10px">' + notes.map(n => '<div>' + esc(n) + '</div>').join('') + '</div>';
 }
 

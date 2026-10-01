@@ -12,7 +12,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { SCENARIOS, noVig, cents, profit } = require('../utils/trends/scenarios');
+const { SCENARIOS, noVig, profit } = require('../utils/trends/scenarios');
 const { TEAM_TZ, DIVISION, leagueOf, isTeam, localParts } = require('../utils/trends/teams');
 
 const PREREG_PATH = 'docs/trends-preregistration-2026-09-29.md';
@@ -60,21 +60,15 @@ function loadOpens(db) {
   return m;
 }
 
-const scored = (g) => g.away_score != null && g.home_score != null;
-const startUtc = (g) => g.first_pitch_utc || g.scheduled_start_utc || null;
-const orderKey = (g) => g.game_date + '|' + (startUtc(g) || '') + '|' + g.game_id;
-const key = (g) => g.game_date + '|' + g.game_id;
+// Context helpers live in utils/trends/context.js (shared with the slate
+// check, services/trends-slate.js); moved there unchanged 2026-09-30.
+const { scored, startUtc, key, prevDay, teamContexts, teamGameContext, gameTotalsContext } = require('../utils/trends/context');
 
 // §1
 function inPopulation(g) {
   return scored(g) && g.odds_locked_at != null && g.market_contamination_reason == null
     && g.market_away_ml != null && g.market_home_ml != null
     && g.game_date >= WINDOW_FROM && g.game_date <= WINDOW_TO;
-}
-
-function prevDay(d) {
-  const t = Date.parse(d + 'T12:00:00Z') - 864e5;
-  return new Date(t).toISOString().slice(0, 10);
 }
 
 // ---------------------------------------------------------------- rows
@@ -91,96 +85,31 @@ function buildRows(db) {
     if (!byTeam.has(t)) byTeam.set(t, []);
     byTeam.get(t).push(g);
   }
-  const ctxByTeamGame = new Map();         // team|key -> { P, lossStreak, winStreak, seriesId, seriesFirst, seriesLast }
+  const ctxByTeamGame = new Map();         // team|key -> utils/trends/context teamContexts() entry
   for (const [t, list] of byTeam) {
-    list.sort((a, b) => (orderKey(a) < orderKey(b) ? -1 : orderKey(a) > orderKey(b) ? 1 : 0));
-    // §5 series: maximal run vs the same opponent at the same home ballpark.
-    let sid = 0;
-    const series = list.map((g, i) => {
-      const opp = g.home_team === t ? g.away_team : g.home_team;
-      const prev = list[i - 1];
-      const same = prev && (prev.home_team === t ? prev.away_team : prev.home_team) === opp
-        && prev.home_team === g.home_team;
-      if (!same) sid++;
-      return sid;
-    });
-    const hist = [];                         // scored games so far, in order
-    for (let i = 0; i < list.length; i++) {
-      const g = list[i];
-      let P = null, lossStreak = 0, winStreak = 0;
-      if (hist.length) {
-        const h = hist[hist.length - 1];
-        P = h;
-        for (let j = hist.length - 1; j >= 0 && !hist[j].won; j--) lossStreak++;
-        for (let j = hist.length - 1; j >= 0 && hist[j].won; j--) winStreak++;
-      }
-      ctxByTeamGame.set(t + '|' + key(g), {
-        P, lossStreak, winStreak, seriesId: series[i],
-        seriesFirst: i === 0 || series[i - 1] !== series[i],
-        seriesLast: i === list.length - 1 || series[i + 1] !== series[i],
-      });
-      if (scored(g)) {
-        const home = g.home_team === t;
-        const rf = home ? g.home_score : g.away_score, ra = home ? g.away_score : g.home_score;
-        const lp = local.get(key(g));
-        const priced = pop.has(key(g));
-        const nv = priced ? noVig(home ? g.market_home_ml : g.market_away_ml,
-          home ? g.market_away_ml : g.market_home_ml) : null;
-        hist.push({ won: rf > ra, margin: rf - ra, runsFor: rf, runsAgainst: ra, home, priced,
-          fav: nv != null && nv > 0.5, dog: nv != null && nv < 0.5,
-          opp: home ? g.away_team : g.home_team, seriesId: series[i],
-          night: lp ? lp.hour >= 17 : null, localDate: lp ? lp.date : null,
-          total: g.home_score + g.away_score });
-      }
-    }
+    for (const [k, v] of teamContexts(t, list, (g) => pop.has(key(g)), local)) ctxByTeamGame.set(t + '|' + k, v);
   }
 
   const mlRows = [], totRows = [];
-  const dayAfterNightFor = (g, P) => {
-    const lp = local.get(key(g));
-    if (!lp || !P || P.night == null || !P.localDate) return false;
-    return lp.hour < 17 && P.night === true && P.localDate === prevDay(lp.date);
-  };
   for (const g of games) {
     if (!pop.has(key(g))) continue;
     const split = g.game_date >= HOLDOUT_FROM ? 'out' : 'in';
     const open = opens.get(key(g));
-    let dan = false, prev15 = false;
+    const sides = [];
     for (const side of ['away', 'home']) {
       const T = side === 'home' ? g.home_team : g.away_team;
-      const O = side === 'home' ? g.away_team : g.home_team;
       const x = ctxByTeamGame.get(T + '|' + key(g));
-      const P = x.P ? Object.assign({}, x.P, { sameSeries: x.P.seriesId === x.seriesId }) : null;
-      const mT = side === 'home' ? g.market_home_ml : g.market_away_ml;
-      const mO = side === 'home' ? g.market_away_ml : g.market_home_ml;
-      const nv = noVig(mT, mO);
-      let moveCents = null;
-      if (g.game_date >= OPEN_FROM && open) {
-        const oT = side === 'home' ? open.home_price_ml : open.away_price_ml;
-        if (oT != null) moveCents = cents(oT) - cents(mT);
-      }
-      const dAN = dayAfterNightFor(g, P);
-      if (dAN) dan = true;
-      if (P && P.total >= 15) prev15 = true;
-      const c = {
-        home: side === 'home', fav: nv > 0.5, dog: nv < 0.5, ml: mT, P,
-        lossStreak: x.lossStreak, winStreak: x.winStreak,
-        seriesFirst: x.seriesFirst, seriesLast: x.seriesLast,
-        g2: /-g2$/.test(g.game_id),
-        sameDivision: DIVISION[T] === DIVISION[O],
-        interleague: leagueOf(T) !== leagueOf(O),
-        ownOpener: (side === 'home' ? g.is_opener_game_home : g.is_opener_game_away) === 1,
-        moveCents, dayAfterNight: dAN,
-      };
+      const s = teamGameContext(g, side, x, open, local.get(key(g)), OPEN_FROM, DIVISION, leagueOf);
+      sides.push(s);
       const rf = side === 'home' ? g.home_score : g.away_score;
       const ra = side === 'home' ? g.away_score : g.home_score;
-      mlRows.push({ key: key(g), game_date: g.game_date, game_id: g.game_id, team: T, split, c,
-        price: mT, p: nv, result: rf > ra ? 'W' : 'L',
+      mlRows.push({ key: key(g), game_date: g.game_date, game_id: g.game_id, team: s.T, split, c: s.c,
+        price: s.mT, p: s.nv, result: rf > ra ? 'W' : 'L',
         source: g.ml_source || 'unrecorded' });
     }
     if (g.market_total != null && g.over_price != null && g.under_price != null) {
       const tot = g.home_score + g.away_score;
-      const x = { prevTotalGe15: prev15, dayAfterNight: dan };
+      const x = gameTotalsContext(sides);
       const pOver = noVig(g.over_price, g.under_price);
       for (const bet of ['over', 'under']) {
         const res = tot === g.market_total ? 'P'
@@ -362,4 +291,5 @@ function persistRun(db, run) {
 }
 
 module.exports = { runTrendsBacktest, persistRun, buildRows,
+  WINDOW_TO, OPEN_FROM,       // read by services/trends-slate.js (regular-season end; first morning capture)
   _internals: { wilson, normTwoSided, bhQ, binomTailGe, summarize, bootRoi, mulberry32, inPopulation, prevDay } };
