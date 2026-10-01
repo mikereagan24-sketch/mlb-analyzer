@@ -480,6 +480,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
      both sides of every scenario, from GET /api/trends/results. -->
 <div id="sec-trends" class="sec">
 <div class="card"><div id="trends-body"><div class="notice">Loading trends results…</div></div></div>
+<div class="card" style="margin-top:14px"><div id="trends-tt-body"><div class="notice">Loading top-traders results…</div></div></div>
 </div>
 
 <!-- DATA IMPORT -->
@@ -3533,6 +3534,7 @@ async function loadTrendsResults(){
   const el = document.getElementById('trends-body');
   if (!el || _trendsLoaded) return;
   el.innerHTML = '<div class="notice">Loading trends results…</div>';
+  loadTopTradersSection();      // its own artifact; independent of the scenarios table
   try {
     const r = await fetch('/api/trends/results');
     const d = await r.json();
@@ -3682,6 +3684,86 @@ function renderTrendsResults(d){
     + thS('o_bet', 'Bet') + thS('o_wlp', 'W–L–P') + thS('o_win', 'Win % [95% CI]') + thS('o_edge', 'Edge (pts)') + thS('o_roi', 'ROI [95% CI]')
     + thS('p', 'p') + thS('q', 'q') + thS('slate', 'Fits the slate') + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
     + '<div style="font-size:11px;color:var(--text2);line-height:1.6;margin-top:10px">' + notes.map(n => '<div>' + esc(n) + '</div>').join('') + '</div>';
+}
+
+// TOP-TRADERS SECTION (2026-10-01). DISPLAY ONLY -- not used by the model.
+// The pre-registered Polymarket top-traders backtest (#489, results #490),
+// read from its committed artifact via GET /api/trends/top-traders. Every
+// number on screen comes from that artifact; none are written here. Neutral
+// styling: no colours, no highlighting.
+let _ttLoaded = false;
+async function loadTopTradersSection(){
+  const el = document.getElementById('trends-tt-body');
+  if (!el || _ttLoaded) return;
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  try {
+    const r = await fetch('/api/trends/top-traders');
+    const d = await r.json();
+    if (!r.ok || d.error) { el.innerHTML = '<div class="notice">Top-traders results unavailable: ' + esc(d.detail || d.error || r.status) + '</div>'; return; }
+    el.innerHTML = renderTopTradersSection(d);
+    _ttLoaded = true;
+  } catch (e) {
+    el.innerHTML = '<div class="notice">Top-traders results unavailable: ' + esc(e && e.message ? e.message : e) + '</div>';
+  }
+}
+function renderTopTradersSection(d){
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const pct = (v, dp) => v == null ? '–' : (100 * v).toFixed(dp == null ? 1 : dp);
+  const sgn = (v, dp) => v == null ? '–' : ((v >= 0 ? '+' : '−') + Math.abs(100 * v).toFixed(dp == null ? 1 : dp));
+  const p3 = (v) => v == null ? '–' : (v < 0.001 ? '<0.001' : v.toFixed(3));
+  const money = (v) => v == null ? '–' : (v < 0 ? '−$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
+  const res = d.results || [];
+  const pick = (set, variant, split, src) => res.find(r => r.set === set && r.variant === variant && r.split === split && r.sourceFilter === (src || 'all'));
+  const VARIANTS = [['primary', 'Primary (all qualified wallets)'], ['secondary', 'Secondary (top 25 by profit)']];
+  const SPLITS = [['in', 'Apr–Aug'], ['hold', 'September']];
+  const td = 'padding:4px 6px;border-top:.5px solid var(--border);vertical-align:top';
+  const th = 'padding:4px 6px;font-weight:500;color:var(--text2);text-align:left';
+  const note = 'font-size:11px;color:var(--text2);line-height:1.6';
+  const table = (set) => '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>'
+    + ['Test', 'Period', 'n', 'W–L', 'Win % [95% CI]', 'Implied %', 'Edge (pts)', 'ROI [95% CI]', '$ won', 'p', 'q']
+      .map(h => '<th style="' + th + '">' + h + '</th>').join('') + '</tr></thead><tbody>'
+    + VARIANTS.map(([v, vl]) => SPLITS.map(([s, sl]) => {
+      const r = pick(set, v, s);
+      if (!r) return '';
+      const showQ = set === 'main' && s === 'in';          // BH q exists only for the 2 main in-sample tests
+      return '<tr data-tt="' + set + '-' + v + '-' + s + '"><td style="' + td + '">' + esc(vl) + '</td><td style="' + td + '">' + sl + '</td>'
+        + '<td style="' + td + '">' + r.n + '</td><td style="' + td + '">' + r.W + '–' + r.L + '</td>'
+        + '<td style="' + td + '">' + pct(r.winPct) + '% <span style="color:var(--text2)">[' + pct(r.winLo, 0) + ', ' + pct(r.winHi, 0) + ']</span></td>'
+        + '<td style="' + td + '">' + pct(r.implied) + '%</td><td style="' + td + '">' + sgn(r.edge) + '</td>'
+        + '<td style="' + td + '">' + sgn(r.roi) + '% <span style="color:var(--text2)">[' + sgn(r.roiLo, 0) + ', ' + sgn(r.roiHi, 0) + ']</span></td>'
+        + '<td style="' + td + '">' + money(r.dollars) + '</td><td style="' + td + '">' + p3(r.pValue) + '</td>'
+        + '<td style="' + td + '">' + (showQ ? p3(r.qValue) : '—') + '</td></tr>';
+    }).join('')).join('') + '</tbody></table></div>';
+  // Verdict, from the artifact's own multiple-comparison and holdout fields.
+  const mainIn = VARIANTS.map(([v]) => pick('main', v, 'in')).filter(Boolean);
+  const qs = mainIn.map(r => p3(r.qValue));
+  const sig = ((d.multiple_comparisons && d.multiple_comparisons.significant) || []);
+  const labels = mainIn.filter(r => r.holdout).map(r => r.variant + ': ' + r.holdout);
+  const qText = qs.length && qs.every(q => q === qs[0]) ? 'q = ' + qs[0] + ' for both tests'
+    : mainIn.map(r => r.variant + ' q = ' + p3(r.qValue)).join(', ');
+  const verdict = (sig.length ? 'Significant after correction: ' + sig.join(', ') : 'No edge after correction') + ' (' + qText + '). '
+    + (labels.length ? 'Holdout: ' + labels.join('; ') + '.' : 'No holdout label applies.') + ' Display only — not used by the model.';
+  // Unrecorded-source-excluded figures (footnote of the sensitivity sub-section).
+  const recorded = [['main', 'Main'], ['confirmed', 'Confirmed set']].map(([set, setl]) => VARIANTS.map(([v]) => SPLITS.map(([s, sl]) => {
+    const r = pick(set, v, s, 'recorded_only');
+    return r ? setl + ' ' + v + ' ' + sl + ': n ' + r.n + ', p ' + p3(r.pValue) + ', ROI ' + sgn(r.roi) + '%' : '';
+  }).filter(Boolean).join('; ')).join('; ')).join('; ');
+  const w = d.window || {};
+  return '<div style="font-size:15px;font-weight:500;margin-bottom:6px">Polymarket top traders — pre-registered test</div>'
+    + '<div style="font-size:13px;line-height:1.6;margin-bottom:8px">' + esc(verdict) + '</div>'
+    + '<div style="' + note + ';margin-bottom:10px">Pre-registration: ' + esc(d.prereg_path) + ' @ ' + esc(String(d.prereg_commit || '').slice(0, 7))
+      + ' · content sha256 <span style="font-family:monospace">' + esc(d.prereg_sha256) + '</span><br>'
+      + 'In-sample window: ' + esc(w.in_sample) + ' · holdout: ' + esc(w.holdout) + '</div>'
+    + table('main')
+    + '<div style="' + note + ';margin-top:8px">'
+      + '<div>The lean is dollar-weighted: the side qualified wallets put more net pre-game dollars on, so one large wallet can decide a game’s lean. In a typical game one wallet supplies most of the lean-side money (distribution in docs/polymarket-top-traders-card-decisions-2026-10-01.md).</div>'
+      + '<div>ROI is a flat $100 on the lean at the locked price, which includes the vig. Edge is against the no-vig implied probability.</div></div>'
+    + '<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--text)">Sensitivity: games with a confirmed pre-game locked price (display only)</summary>'
+      + '<div style="' + note + ';margin:6px 0">Outside the multiple-comparison correction; it cannot set significance. Restricted to games whose lock was before first pitch, or whose locked moneylines equal the last pre-first-pitch capture — see '
+      + '<a href="https://github.com/mikereagan24-sketch/mlb-analyzer/issues/488" target="_blank" rel="noopener">#488</a>.</div>'
+      + table('confirmed')
+      + '<div style="' + note + ';margin-top:6px">Unrecorded price source excluded: ' + esc(recorded) + '.</div>'
+    + '</details>';
 }
 
 // --- Pitcher IP projections UI ---

@@ -23,6 +23,13 @@
  *      for ingestWobaCSV), which is why the route lives in its own router.
  *      A self-test proves the check catches a planted violation.
  *
+ *   (2026-09-30) d-h: the route graph, sorting, the shared context, a
+ *      synthetic slate, and the backtest reproduction on a scratch copy.
+ *   (2026-10-01) i. the Polymarket top-traders section: wired in, its route
+ *      reads only its artifact, every figure comes from the artifact (whose
+ *      pre-registration hash matches the pinned one), q only on the main
+ *      in-sample rows, sensitivity collapsed and display only.
+ *
  *   node scripts/test-trends-results-tab.js
  */
 const path = require('path');
@@ -105,9 +112,9 @@ ok('the slate database handle is READ-ONLY', /new Database\(require\('\.\.\/db\/
   && (code.match(/new Database\(/g) || []).length === 1);
 ok('nothing from the pricing path is named in the route',
   !/getSettings|runModel|getSignals|processGameSignals|pythag|services\/model|services\/jobs|routes\/api/.test(code));
-ok('defines exactly two routes: GET /trends/results and GET /trends/slate',
-  (code.match(/router\.(get|post|put|patch|delete|use)\(/g) || []).length === 2
-  && /router\.get\('\/trends\/results'/.test(code) && /router\.get\('\/trends\/slate'/.test(code));
+ok('defines exactly three routes: GET /trends/results, /trends/top-traders and /trends/slate',
+  (code.match(/router\.(get|post|put|patch|delete|use)\(/g) || []).length === 3
+  && /router\.get\('\/trends\/results'/.test(code) && /router\.get\('\/trends\/top-traders'/.test(code) && /router\.get\('\/trends\/slate'/.test(code));
 const serverSrc = read('server.js');
 ok('server.js mounts it under /api', /app\.use\('\/api',\s*require\('\.\/routes\/trends-results'\)\)/.test(serverSrc));
 ok('routes/api.js does not reference trends', !/trends/i.test(read('routes/api.js')));
@@ -170,7 +177,7 @@ const PRICING_ROOTS = ['services/model.js', 'utils/pythag-win-prob.js', 'service
 // the text "utils/trends/" -- the self-test below plants exactly that).
 const FORBIDDEN_TARGET = /^(utils\/trends\/.+|services\/trends-backtest\.js|services\/trends-slate\.js|routes\/trends-results\.js|scripts\/(run|export)-trends-[\w-]+\.js)$/;
 // And code (comments stripped) that names the artifact or the modules.
-const FORBIDDEN_TEXT = /trends-results-2026-09-29\.json|trends-backtest|trends-slate|trends-results|utils\/trends\//;
+const FORBIDDEN_TEXT = /trends-results-2026-09-29\.json|polymarket-top-traders-results|trends-backtest|trends-slate|trends-results|utils\/trends\//;
 // fsLike: { exists(abs), read(abs) } -- the real filesystem, or a planted one.
 function isolationViolations(roots, fsLike, root) {
   const rel = (f) => path.relative(root, f).replace(/\\/g, '/');
@@ -435,6 +442,92 @@ console.log('\nh. the backtest still reproduces the committed artifact exactly (
     ok('every result row and figure matches docs/trends-results-2026-09-29.json exactly (scratch copy, read-only)',
       bad2.length === 0 && run.results.length === A3.trend_results.length, run.results.length + ' rows, ' + fields + ' fields' + (bad2.length ? ' | ' + bad2.slice(0, 5).join(' | ') : ''));
   }
+}
+
+// ---------------------------------------------------------------- i
+console.log('\ni. the Polymarket top-traders section (2026-10-01)');
+{
+  const vm = require('vm');
+  const TT = JSON.parse(read('docs/polymarket-top-traders-results-2026-09-30.json'));
+  // (a) wired in
+  const defS = where(/function\s+renderTopTradersSection\s*\(/), defLT = where(/async function\s+loadTopTradersSection\s*\(/);
+  ok('renderTopTradersSection and loadTopTradersSection each defined once, outside <style>',
+    defS.length === 1 && defLT.length === 1 && !insideStyle(defS[0]) && !insideStyle(defLT[0]));
+  ok('loadTrendsResults calls loadTopTradersSection; it fetches /api/trends/top-traders and renders the section',
+    /async function loadTrendsResults\(\)\{[\s\S]*?loadTopTradersSection\(\);[\s\S]*?\n\}/.test(html)
+    && /fetch\('\/api\/trends\/top-traders'\)/.test(html) && /renderTopTradersSection\(d\)/.test(html));
+  const secStart = html.indexOf('<div id="sec-trends" class="sec">');
+  const iBody = html.indexOf('id="trends-body"', secStart), iTT = html.indexOf('id="trends-tt-body"', secStart);
+  ok('its mount point sits in the Trends section, below the 31-scenario table', secStart > 0 && iBody > secStart && iTT > iBody && iTT - iBody < 400);
+  // (b) the route reads only the artifact
+  const ttHandler = (code.match(/router\.get\('\/trends\/top-traders'[\s\S]*?\n\}\);/) || [''])[0];
+  ok('GET /trends/top-traders reads only its artifact (no database, settings, model or computation)',
+    /loadTopTraders\(\)/.test(ttHandler) && !/readDb|slateFits|\bdb\b|better-sqlite3|getSettings|runModel|getSignals|processGameSignals/.test(ttHandler)
+    && /path\.join\(__dirname,\s*'\.\.',\s*'docs',\s*'polymarket-top-traders-results-2026-09-30\.json'\)/.test(code));
+  const callTT = (router) => { const l = router.stack.find(x => x.route && x.route.path === '/trends/top-traders');
+    const res = { code: 200, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } }; l.route.stack[0].handle({}, res); return res; };
+  const realTT = callTT(require(path.join(R, 'routes/trends-results')));
+  ok('real artifact: 200 with its 16 result rows', realTT.code === 200 && realTT.body.results.length === 16);
+  const loadTTWith = (expr) => {
+    const src = routeSrc.replace("path.join(__dirname, '..', 'docs', 'polymarket-top-traders-results-2026-09-30.json')", expr);
+    const fname = path.join(R, 'routes', '__tt_results_probe.js');
+    const m = new Module(fname, module); m.filename = fname; m.paths = Module._nodeModulePaths(path.dirname(fname)); m._compile(src, fname);
+    return m.exports;
+  };
+  const missTT = callTT(loadTTWith(JSON.stringify(path.join(os.tmpdir(), '__no_such_tt_artifact__.json'))));
+  const badTT = path.join(os.tmpdir(), '__corrupt_tt_artifact__.json'); fs.writeFileSync(badTT, '{ nope');
+  const corTT = callTT(loadTTWith(JSON.stringify(badTT))); fs.unlinkSync(badTT);
+  ok('missing / corrupt artifact: 503 with an error JSON, no throw',
+    missTT.code === 503 && /not found/.test(missTT.body.detail) && corTT.code === 503 && /unreadable/.test(corTT.body.detail));
+  // (c) numbers come from the artifact; the artifact is the pinned pre-registration
+  const pinnedTT = (read('services/polymarket-top-traders-backtest.js').match(/const PREREG_SHA256 = '([0-9a-f]{64})'/) || [])[1];
+  const docHash = require('crypto').createHash('sha256').update(read(TT.prereg_path).replace(/\r\n/g, '\n')).digest('hex');
+  ok('the artifact\'s pre-registration hash equals the hash pinned in the backtest code and the document\'s own hash',
+    !!pinnedTT && TT.prereg_sha256 === pinnedTT && docHash === pinnedTT, (pinnedTT || '').slice(0, 12));
+  const a = html.indexOf('let _trendsLoaded = false;'), b = html.indexOf('// --- Pitcher IP projections UI ---');
+  const ctx = vm.createContext({ document: { getElementById: () => null }, fetch: async () => ({}), console });
+  vm.runInContext(html.slice(a, b), ctx);
+  const out = vm.runInContext('renderTopTradersSection(__tt)', Object.assign(ctx, { __tt: TT }));
+  const P = (v, dp) => (100 * v).toFixed(dp == null ? 1 : dp);
+  const S = (v, dp) => (v >= 0 ? '+' : '−') + Math.abs(100 * v).toFixed(dp == null ? 1 : dp);
+  const p3 = (v) => (v < 0.001 ? '<0.001' : v.toFixed(3));
+  const M = (v) => (v < 0 ? '−$' : '$') + Math.abs(Math.round(v)).toLocaleString('en-US');
+  let rowsOk = 0, rowsBad = [];
+  for (const r of TT.results.filter(x => x.sourceFilter === 'all')) {
+    const tr = (out.match(new RegExp('<tr data-tt="' + r.set + '-' + r.variant + '-' + r.split + '">[\\s\\S]*?</tr>')) || [''])[0];
+    const cells = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1].replace(/<[^>]+>/g, ''));
+    const want = [String(r.n), r.W + '–' + r.L, P(r.winPct) + '% [' + P(r.winLo, 0) + ', ' + P(r.winHi, 0) + ']', P(r.implied) + '%', S(r.edge),
+      S(r.roi) + '% [' + S(r.roiLo, 0) + ', ' + S(r.roiHi, 0) + ']', M(r.dollars), p3(r.pValue)];
+    if (JSON.stringify(cells.slice(2, 10)) === JSON.stringify(want)) rowsOk++; else rowsBad.push(r.set + '-' + r.variant + '-' + r.split + ' ' + JSON.stringify(cells.slice(2, 10)));
+  }
+  ok('every rendered row (main and sensitivity, both periods) shows exactly the artifact\'s figures', rowsOk === 8, rowsBad.join(' | ') || '8 of 8 rows');
+  ok('verdict, pre-registration, windows and the #488 link come from the artifact',
+    out.includes('No edge after correction (q = ' + p3(TT.results.find(x => x.set === 'main' && x.variant === 'primary' && x.split === 'in' && x.sourceFilter === 'all').qValue) + ' for both tests). No holdout label applies. Display only — not used by the model.')
+    && out.includes(TT.prereg_commit.slice(0, 7)) && out.includes(TT.prereg_sha256) && out.includes(TT.window.in_sample) && out.includes(TT.window.holdout)
+    && /issues\/488/.test(out) && /Polymarket top traders — pre-registered test/.test(out));
+  // No figure from the artifact is written into the renderer: collect distinctive formatted values, look for them in its source.
+  const src = html.slice(html.indexOf('function renderTopTradersSection('), b);
+  const figures = new Set();
+  for (const r of TT.results) for (const f of [String(r.n), String(r.W), String(r.L), p3(r.pValue), r.qValue != null ? p3(r.qValue) : null,
+    P(r.winPct), P(r.implied), M(r.dollars).replace(/^−\$|^\$/, ''), Math.round(Math.abs(r.dollars)).toString()]) if (f && f.length >= 3) figures.add(f);
+  figures.add(TT.prereg_sha256.slice(0, 12)); figures.add(TT.prereg_commit.slice(0, 7));
+  figures.delete('100');   // also the renderer's own constant (100 * v, "a flat $100"); an artifact W of 100 is not a hard-coded figure
+  const hard = [...figures].filter(f => src.includes(f));
+  ok('no artifact figure is hard-coded in the renderer', hard.length === 0, hard.join(',') || figures.size + ' figures checked');
+  // (d) q only on the two main in-sample rows
+  const qCell = (key) => { const tr = (out.match(new RegExp('<tr data-tt="' + key + '">[\\s\\S]*?</tr>')) || [''])[0];
+    const c = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m => m[1]); return c[c.length - 1]; };
+  const withQ = ['main-primary-in', 'main-secondary-in'];
+  const noQ = ['main-primary-hold', 'main-secondary-hold', 'confirmed-primary-in', 'confirmed-primary-hold', 'confirmed-secondary-in', 'confirmed-secondary-hold'];
+  ok('q is shown only on the main in-sample rows; every other row shows "—"',
+    withQ.every(k => /^\d\.\d{3}$/.test(qCell(k))) && noQ.every(k => qCell(k) === '—'), withQ.map(qCell).join(',') + ' | ' + noQ.map(qCell).join(','));
+  ok('the sensitivity sub-section is collapsed (<details>), labelled display only, and says it cannot set significance',
+    /<details[^>]*><summary[^>]*>Sensitivity: games with a confirmed pre-game locked price \(display only\)<\/summary>/.test(out)
+    && /Outside the multiple-comparison correction; it cannot set significance\./.test(out) && /Unrecorded price source excluded: /.test(out));
+  ok('neutral styling: no green / red, no colour literal, no background highlight in the section',
+    !/\b(green|red)\b|#[0-9a-f]{6}\b|rgb\(|background:/i.test(out.replace(/var\(--[a-z0-9-]+\)/g, '')));
+  ok('the footnotes say the lean is dollar-weighted and ROI is at the locked price with the vig',
+    /dollar-weighted/.test(out) && /one wallet supplies most of the lean-side money/.test(out) && /includes the vig/.test(out));
 }
 
 cleanupTmpDb();
