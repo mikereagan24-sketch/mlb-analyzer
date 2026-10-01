@@ -240,10 +240,14 @@ function summarize(rows) {
     pValue: z != null ? normTwoSided(z) : null,
     roi: n ? dollars / (100 * n) : null, dollars, prof, mix };
 }
-function bootRoi(prof) {
+// `seed` is optional and the trends runs never pass it, so they keep
+// BOOT_SEED. It exists so another pre-registered test can reuse this
+// bootstrap with its own registered seed instead of copying it (the
+// Polymarket top-traders backtest: seed 20260930).
+function bootRoi(prof, seed) {
   const n = prof.length;
   if (n < 2) return [null, null];
-  const rnd = mulberry32(BOOT_SEED);
+  const rnd = mulberry32(seed == null ? BOOT_SEED : seed);
   const out = new Float64Array(BOOT_N);
   for (let b = 0; b < BOOT_N; b++) {
     let s = 0;

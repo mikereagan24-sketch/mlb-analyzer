@@ -1,0 +1,660 @@
+{
+ "artifact": "polymarket-top-traders-results",
+ "version": 1,
+ "display_only": true,
+ "local_only": true,
+ "generated_at": "2026-10-01T00:38:04.994Z",
+ "generated_from_commit": "b686e59be525824549cadba1772ed6724c75a802",
+ "generated_with_uncommitted_tracked_changes": [
+  "M mlb-analyzer/services/trends-backtest.js"
+ ],
+ "prereg_path": "docs/polymarket-top-traders-prereg-2026-09-30.md",
+ "prereg_commit": "f23d86f28bcf2b168e193cd04056e06a2dd8c801",
+ "prereg_sha256": "1d67059c01621b40a90eca4255026c68eb3474507c49677f2953bcd1b13b9edc",
+ "window": {
+  "in_sample": "2026-04-06..2026-08-31 (eligible from 2026-04-13)",
+  "holdout": "2026-09-01..2026-09-27"
+ },
+ "bootstrap": {
+  "resamples": 10000,
+  "seed": 20260930,
+  "rng": "mulberry32 (services/trends-backtest.js)"
+ },
+ "gate1": {
+  "fields": 27,
+  "matched": 27
+ },
+ "feasibility": {
+  "done_markets": 2247,
+  "excluded_dates_markets": 19,
+  "first_eligible": {
+   "date": "2026-04-13",
+   "qualified": 32
+  },
+  "not_eligible": {
+   "in": 64,
+   "hold": 0
+  },
+  "qualified_by_month": {
+   "2026-04": {
+    "first_date": "2026-04-04",
+    "first_qualified": 0,
+    "last_date": "2026-04-30",
+    "last_qualified": 196
+   },
+   "2026-05": {
+    "first_date": "2026-05-01",
+    "first_qualified": 196,
+    "last_date": "2026-05-31",
+    "last_qualified": 450
+   },
+   "2026-06": {
+    "first_date": "2026-06-01",
+    "first_qualified": 453,
+    "last_date": "2026-06-30",
+    "last_qualified": 622
+   },
+   "2026-07": {
+    "first_date": "2026-07-01",
+    "first_qualified": 627,
+    "last_date": "2026-07-31",
+    "last_qualified": 821
+   },
+   "2026-08": {
+    "first_date": "2026-08-01",
+    "first_qualified": 829,
+    "last_date": "2026-08-31",
+    "last_qualified": 964
+   },
+   "2026-09": {
+    "first_date": "2026-09-01",
+    "first_qualified": 956,
+    "last_date": "2026-09-27",
+    "last_qualified": 1050
+   }
+  },
+  "counts": {
+   "primary": {
+    "in": {
+     "eligible": 1814,
+     "price_skip": {
+      "no_odds_locked_at": 288,
+      "contaminated": 166,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 0,
+      "tie": 0
+     },
+     "tested": 1360,
+     "neg_lean": 0,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 711,
+      "confirmed_equals_capture": 235,
+      "outside_no_capture": 277,
+      "outside_no_first_pitch": 130,
+      "outside_differs": 7
+     }
+    },
+    "hold": {
+     "eligible": 350,
+     "price_skip": {
+      "no_odds_locked_at": 57,
+      "contaminated": 28,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 0,
+      "tie": 0
+     },
+     "tested": 265,
+     "neg_lean": 0,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 162,
+      "confirmed_equals_capture": 95,
+      "outside_no_capture": 0,
+      "outside_no_first_pitch": 0,
+      "outside_differs": 8
+     }
+    }
+   },
+   "secondary": {
+    "in": {
+     "eligible": 1814,
+     "price_skip": {
+      "no_odds_locked_at": 288,
+      "contaminated": 166,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 82,
+      "tie": 0
+     },
+     "tested": 1278,
+     "neg_lean": 1,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 652,
+      "confirmed_equals_capture": 214,
+      "outside_no_capture": 276,
+      "outside_no_first_pitch": 130,
+      "outside_differs": 6
+     }
+    },
+    "hold": {
+     "eligible": 350,
+     "price_skip": {
+      "no_odds_locked_at": 57,
+      "contaminated": 28,
+      "moneyline_missing": 0
+     },
+     "lean_skip": {
+      "no_qualified_money": 66,
+      "tie": 0
+     },
+     "tested": 199,
+     "neg_lean": 0,
+     "confirmed": {
+      "confirmed_lock_before_first_pitch": 119,
+      "confirmed_equals_capture": 75,
+      "outside_no_capture": 0,
+      "outside_no_first_pitch": 0,
+      "outside_differs": 5
+     }
+    }
+   }
+  },
+  "lock_vs_cutoff": {
+   "in_scope_games": 2228,
+   "at_or_after_cutoff": 980,
+   "minutes_after_median": 20.216666666666665,
+   "minutes_after_p90": 50.18333333333333,
+   "minutes_after_max": 351.26666666666665,
+   "more_than_60_before": 21
+  },
+  "source_mix_tested_primary": {
+   "in": {
+    "unrecorded": 200,
+    "kalshi": 613,
+    "prophet-exchange": 6,
+    "polymarket": 540,
+    "novig": 1
+   },
+   "hold": {
+    "kalshi": 207,
+    "polymarket": 58
+   }
+  },
+  "lock_at_or_after_first_pitch": {
+   "total": 622,
+   "exact": 330,
+   "differ": 15,
+   "no_capture": 277,
+   "no_capture_before_first_capture_date": 273,
+   "no_capture_inside_capture_window": 4,
+   "first_capture_date": "2026-06-11",
+   "diff_pp_median": 0.43297540699688275,
+   "diff_pp_p90": 0.9178752606712082,
+   "diff_pp_max": 1.8910897291899043,
+   "diff_pp_under_1": 13,
+   "by_month": {
+    "2026-04": {
+     "total": 22,
+     "exact": 0,
+     "differ": 0,
+     "no_capture": 22
+    },
+    "2026-05": {
+     "total": 187,
+     "exact": 0,
+     "differ": 0,
+     "no_capture": 187
+    },
+    "2026-06": {
+     "total": 159,
+     "exact": 88,
+     "differ": 3,
+     "no_capture": 68
+    },
+    "2026-07": {
+     "total": 67,
+     "exact": 67,
+     "differ": 0,
+     "no_capture": 0
+    },
+    "2026-08": {
+     "total": 84,
+     "exact": 80,
+     "differ": 4,
+     "no_capture": 0
+    },
+    "2026-09": {
+     "total": 103,
+     "exact": 95,
+     "differ": 8,
+     "no_capture": 0
+    }
+   }
+  }
+ },
+ "multiple_comparisons": {
+  "method": "Benjamini-Hochberg across the 2 main in-sample p-values",
+  "significant_if": "q < 0.10",
+  "significant": []
+ },
+ "results": [
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 1360,
+   "W": 721,
+   "L": 639,
+   "P": 0,
+   "winPct": 0.5301470588235294,
+   "winLo": 0.5035742448077025,
+   "winHi": 0.5565500456411752,
+   "implied": 0.5185346503221187,
+   "edge": 0.011612408501410765,
+   "pValue": 0.38590983786385374,
+   "roi": -0.018120361804489716,
+   "dollars": -2464.3692054106014,
+   "mix": {
+    "unrecorded": 200,
+    "kalshi": 613,
+    "prophet-exchange": 6,
+    "polymarket": 540,
+    "novig": 1
+   },
+   "roiLo": -0.06856448397387675,
+   "roiHi": 0.03335216040703078,
+   "qValue": 0.38590983786385374,
+   "significant": false,
+   "holdout": null
+  },
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 1160,
+   "W": 619,
+   "L": 541,
+   "P": 0,
+   "winPct": 0.5336206896551724,
+   "winLo": 0.5048487803863785,
+   "winHi": 0.5621706571880268,
+   "implied": 0.5188043091585777,
+   "edge": 0.014816380496594728,
+   "pValue": 0.3071770548745518,
+   "roi": -0.010884577054128508,
+   "dollars": -1262.610938278907,
+   "mix": {
+    "kalshi": 613,
+    "prophet-exchange": 6,
+    "polymarket": 540,
+    "novig": 1
+   },
+   "roiLo": -0.06638457077192764,
+   "roiHi": 0.04470562091640235
+  },
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 265,
+   "W": 133,
+   "L": 132,
+   "P": 0,
+   "winPct": 0.5018867924528302,
+   "winLo": 0.442092079132264,
+   "winHi": 0.5616275852534345,
+   "implied": 0.5126642804404965,
+   "edge": -0.010777487987666312,
+   "pValue": 0.7209889065598936,
+   "roi": -0.0894342297259742,
+   "dollars": -2370.0070877383164,
+   "mix": {
+    "kalshi": 207,
+    "polymarket": 58
+   },
+   "roiLo": -0.20129621041708784,
+   "roiHi": 0.021454781643216667
+  },
+  {
+   "set": "main",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 265,
+   "W": 133,
+   "L": 132,
+   "P": 0,
+   "winPct": 0.5018867924528302,
+   "winLo": 0.442092079132264,
+   "winHi": 0.5616275852534345,
+   "implied": 0.5126642804404965,
+   "edge": -0.010777487987666312,
+   "pValue": 0.7209889065598936,
+   "roi": -0.0894342297259742,
+   "dollars": -2370.0070877383164,
+   "mix": {
+    "kalshi": 207,
+    "polymarket": 58
+   },
+   "roiLo": -0.20129621041708784,
+   "roiHi": 0.021454781643216667
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 1278,
+   "W": 674,
+   "L": 604,
+   "P": 0,
+   "winPct": 0.5273865414710485,
+   "winLo": 0.49997378731317577,
+   "winHi": 0.5546351500987028,
+   "implied": 0.5151689316275776,
+   "edge": 0.012217609843470867,
+   "pValue": 0.3765528640345538,
+   "roi": -0.016922270969021803,
+   "dollars": -2162.6662298409865,
+   "mix": {
+    "unrecorded": 192,
+    "kalshi": 561,
+    "prophet-exchange": 6,
+    "polymarket": 518,
+    "novig": 1
+   },
+   "roiLo": -0.06834867476568138,
+   "roiHi": 0.036801222889886825,
+   "qValue": 0.38590983786385374,
+   "significant": false,
+   "holdout": null
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 1086,
+   "W": 577,
+   "L": 509,
+   "P": 0,
+   "winPct": 0.5313075506445673,
+   "winLo": 0.5015702841822345,
+   "winHi": 0.5608241122190558,
+   "implied": 0.5153283310640312,
+   "edge": 0.015979219580536053,
+   "pValue": 0.28666756839573565,
+   "roi": -0.008553741697650627,
+   "dollars": -928.936348364858,
+   "mix": {
+    "kalshi": 561,
+    "prophet-exchange": 6,
+    "polymarket": 518,
+    "novig": 1
+   },
+   "roiLo": -0.06555213644772613,
+   "roiHi": 0.04808847641633553
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 199,
+   "W": 100,
+   "L": 99,
+   "P": 0,
+   "winPct": 0.5025125628140703,
+   "winLo": 0.4336577046607968,
+   "winHi": 0.5712722539655863,
+   "implied": 0.5124292600586028,
+   "edge": -0.00991669724453248,
+   "pValue": 0.7756748531478982,
+   "roi": -0.08134951228911123,
+   "dollars": -1618.8552945533136,
+   "mix": {
+    "polymarket": 41,
+    "kalshi": 158
+   },
+   "roiLo": -0.21459211851839574,
+   "roiHi": 0.04989444094931312
+  },
+  {
+   "set": "main",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 199,
+   "W": 100,
+   "L": 99,
+   "P": 0,
+   "winPct": 0.5025125628140703,
+   "winLo": 0.4336577046607968,
+   "winHi": 0.5712722539655863,
+   "implied": 0.5124292600586028,
+   "edge": -0.00991669724453248,
+   "pValue": 0.7756748531478982,
+   "roi": -0.08134951228911123,
+   "dollars": -1618.8552945533136,
+   "mix": {
+    "polymarket": 41,
+    "kalshi": 158
+   },
+   "roiLo": -0.21459211851839574,
+   "roiHi": 0.04989444094931312
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 946,
+   "W": 510,
+   "L": 436,
+   "P": 0,
+   "winPct": 0.5391120507399577,
+   "winLo": 0.5072534404661,
+   "winHi": 0.5706542980391824,
+   "implied": 0.5190789859910051,
+   "edge": 0.02003306474895261,
+   "pValue": 0.21234554382202864,
+   "roi": -0.0009319266304611495,
+   "dollars": -88.16025924162474,
+   "mix": {
+    "kalshi": 472,
+    "polymarket": 388,
+    "unrecorded": 85,
+    "novig": 1
+   },
+   "roiLo": -0.062353771344699965,
+   "roiHi": 0.06014900961192347,
+   "qValue": 0.21234554382202864,
+   "significant": null,
+   "clearsQ10ForDisplayOnly": false
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 861,
+   "W": 469,
+   "L": 392,
+   "P": 0,
+   "winPct": 0.5447154471544715,
+   "winLo": 0.5113263199215232,
+   "winHi": 0.577707339611407,
+   "implied": 0.5183953965406259,
+   "edge": 0.02632005061384557,
+   "pValue": 0.11787589298291484,
+   "roi": 0.0119769512426795,
+   "dollars": 1031.215501994705,
+   "mix": {
+    "kalshi": 472,
+    "polymarket": 388,
+    "novig": 1
+   },
+   "roiLo": -0.052079218046546125,
+   "roiHi": 0.0754315610804543
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 257,
+   "W": 130,
+   "L": 127,
+   "P": 0,
+   "winPct": 0.5058365758754864,
+   "winLo": 0.4450768981429279,
+   "winHi": 0.5664243410115625,
+   "implied": 0.5137254699944899,
+   "edge": -0.007888894119003509,
+   "pValue": 0.7967789987362973,
+   "roi": -0.0849063994700036,
+   "dollars": -2182.0944663790924,
+   "mix": {
+    "kalshi": 205,
+    "polymarket": 52
+   },
+   "roiLo": -0.198910081121311,
+   "roiHi": 0.028819926606803162
+  },
+  {
+   "set": "confirmed",
+   "variant": "primary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 257,
+   "W": 130,
+   "L": 127,
+   "P": 0,
+   "winPct": 0.5058365758754864,
+   "winLo": 0.4450768981429279,
+   "winHi": 0.5664243410115625,
+   "implied": 0.5137254699944899,
+   "edge": -0.007888894119003509,
+   "pValue": 0.7967789987362973,
+   "roi": -0.0849063994700036,
+   "dollars": -2182.0944663790924,
+   "mix": {
+    "kalshi": 205,
+    "polymarket": 52
+   },
+   "roiLo": -0.198910081121311,
+   "roiHi": 0.028819926606803162
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "all",
+   "n": 866,
+   "W": 465,
+   "L": 401,
+   "P": 0,
+   "winPct": 0.5369515011547344,
+   "winLo": 0.5036512451104257,
+   "winHi": 0.5699253812351505,
+   "implied": 0.5144814306946061,
+   "edge": 0.02247007046012839,
+   "pValue": 0.18081810348836616,
+   "roi": 0.003996752711809952,
+   "dollars": 346.1187848427419,
+   "mix": {
+    "kalshi": 422,
+    "polymarket": 366,
+    "unrecorded": 77,
+    "novig": 1
+   },
+   "roiLo": -0.06082337590157559,
+   "roiHi": 0.06772506284603892,
+   "qValue": 0.21234554382202864,
+   "significant": null,
+   "clearsQ10ForDisplayOnly": false
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "in",
+   "sourceFilter": "recorded_only",
+   "n": 789,
+   "W": 431,
+   "L": 358,
+   "P": 0,
+   "winPct": 0.5462610899873257,
+   "winLo": 0.5113818474111387,
+   "winHi": 0.5806920460290497,
+   "implied": 0.513939197709864,
+   "edge": 0.03232189227746174,
+   "pValue": 0.06605457567222621,
+   "roi": 0.023890513964466852,
+   "dollars": 1884.9615517964346,
+   "mix": {
+    "kalshi": 422,
+    "polymarket": 366,
+    "novig": 1
+   },
+   "roiLo": -0.04250884521920863,
+   "roiHi": 0.09224415334755791
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "all",
+   "n": 194,
+   "W": 99,
+   "L": 95,
+   "P": 0,
+   "winPct": 0.5103092783505154,
+   "winLo": 0.4404514408081391,
+   "winHi": 0.5797667683711614,
+   "implied": 0.5136123497230246,
+   "edge": -0.003303071372509181,
+   "pValue": 0.9253198551753256,
+   "roi": -0.06803377806975847,
+   "dollars": -1319.8552945533143,
+   "mix": {
+    "polymarket": 38,
+    "kalshi": 156
+   },
+   "roiLo": -0.200264509717466,
+   "roiHi": 0.06558512279537654
+  },
+  {
+   "set": "confirmed",
+   "variant": "secondary",
+   "split": "hold",
+   "sourceFilter": "recorded_only",
+   "n": 194,
+   "W": 99,
+   "L": 95,
+   "P": 0,
+   "winPct": 0.5103092783505154,
+   "winLo": 0.4404514408081391,
+   "winHi": 0.5797667683711614,
+   "implied": 0.5136123497230246,
+   "edge": -0.003303071372509181,
+   "pValue": 0.9253198551753256,
+   "roi": -0.06803377806975847,
+   "dollars": -1319.8552945533143,
+   "mix": {
+    "polymarket": 38,
+    "kalshi": 156
+   },
+   "roiLo": -0.200264509717466,
+   "roiHi": 0.06558512279537654
+  }
+ ],
+ "runtime_seconds": 39.3,
+ "peak_rss_mb": 209
+}
