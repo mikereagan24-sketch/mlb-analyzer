@@ -187,6 +187,11 @@ app.get('/api/version', (req, res) => res.json({
 }));
 
 // API routes
+// Top-traders card seed upload (display only; admin-token gated). Its own
+// router, mounted BEFORE routes/api.js so that file's catch-all
+// POST /upload/:key? cannot take /upload/top-trader-seed. See the header of
+// routes/top-traders-upload.js.
+app.use('/api', require('./routes/top-traders-upload'));
 app.use('/api', require('./routes/api'));
 // Trends results tab (display only). Its own router so the trends artifact
 // stays out of routes/api.js, which the pricing path requires. See the

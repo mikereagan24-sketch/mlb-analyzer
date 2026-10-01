@@ -3317,6 +3317,12 @@ q.countParkFactors = db.prepare('SELECT COUNT(*) c FROM park_factors').pluck();
 const { applyLineupCapturesDdl } = require('./lineup-captures-ddl');
 applyLineupCapturesDdl(db);
 
+// Polymarket top-traders card tables (2026-10-01, display only): wallet
+// running totals, the daily qualified snapshot and the lean log. Wallet
+// addresses are stored, never served. DDL in db/top-traders-ddl.js.
+const { applyTopTradersDdl } = require('./top-traders-ddl');
+applyTopTradersDdl(db);
+
 q.insertLineupCapture = db.prepare(
   'INSERT OR IGNORE INTO lineup_captures (game_date,game_id,source,horizon,capture_time,side,' +
   ' lineup_json,lineup_status,sp_name,sp_hand,hand_source,n_slots,page_has_started,' +

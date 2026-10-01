@@ -23,6 +23,10 @@ const path = require('path');
 const { _internals: TR } = require('./trends-backtest');
 const { noVig } = require('../utils/trends/scenarios');
 const { ptToUtcMs } = require('../utils/post-start-pricing');
+// §2-§5 rules shared with the live card (decision 10), moved unchanged 2026-10-01.
+const RULES = require('../utils/top-traders/rules');
+const { EXCLUDED_DATES, SEASON_TO, MIN_QUALIFIED, parseUtc, priceStep, leanFrom, qualified, topN,
+  newLeanAcc, addFill, newWalletTotals, addWalletGame } = RULES;
 
 const PREREG_PATH = 'docs/polymarket-top-traders-prereg-2026-09-30.md';
 const PREREG_COMMIT = 'f23d86f28bcf2b168e193cd04056e06a2dd8c801';   // PR #489
@@ -31,12 +35,7 @@ const PREREG_COMMIT = 'f23d86f28bcf2b168e193cd04056e06a2dd8c801';   // PR #489
 // the run refuses (header, §9).
 const PREREG_SHA256 = '1d67059c01621b40a90eca4255026c68eb3474507c49677f2953bcd1b13b9edc';
 
-const EXCLUDED_DATES = new Set(['2026-04-04', '2026-04-05']);   // §2 (#486)
-const SEASON_TO = '2026-09-27';                                  // §2 regular season
 const IN_SAMPLE_TO = '2026-08-31';                               // §7
-const MIN_GAMES = 40, MAX_VOL_PER_PROFIT = 50, BOTH_MAX = 0.20;  // §3
-const MIN_QUALIFIED = 25, TOP_N = 25;                            // §3
-const TIE_DOLLARS = 0.005;                                       // §4.5
 const BOOT_SEED = 20260930;                                      // §6
 const Q_SIGNIFICANT = 0.10;                                      // §6
 
@@ -57,20 +56,7 @@ function assertPrereg(root, opts) {
 }
 
 // ---------------------------------------------------------------- helpers
-const parseUtc = (s) => {
-  if (!s) return null;
-  const t = Date.parse(String(s).replace(' ', 'T') + (/[zZ]$|[+-]\d\d:?\d\d$/.test(String(s)) ? '' : 'Z'));
-  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
-};
 const splitOf = (d) => (d <= IN_SAMPLE_TO ? 'in' : 'hold');                 // §7
-
-// §5: the trends price rule. -> { skip } | { lock }
-function priceStep(g) {
-  if (!g || g.odds_locked_at == null) return { skip: 'no_odds_locked_at' };
-  if (g.market_contamination_reason != null) return { skip: 'contaminated' };
-  if (g.market_away_ml == null || g.market_home_ml == null) return { skip: 'moneyline_missing' };
-  return { lock: parseUtc(g.odds_locked_at) };
-}
 
 // §5 "Locks stamped at or after first pitch": the confirmed set.
 // lastCapture(g, beforeUtcSec) -> {a, h} | null  (last empirical_market_captures
@@ -85,35 +71,37 @@ function confirmedStatus(g, lock, lastCapture) {
   return 'outside_differs';
 }
 const isConfirmed = (s) => s.startsWith('confirmed_');
+// §3 qualification, §4 lean and §5 price step: utils/top-traders/rules.js.
 
-// §4 steps 4-5 for one wallet set, from accumulated per-outcome net dollars.
-// -> { skip } | { leanOutcome, negLean }
-function leanFrom(acc) {
-  if (!acc.any) return { skip: 'no_qualified_money' };
-  if (Math.abs(acc.net[0] - acc.net[1]) < TIE_DOLLARS) return { skip: 'tie' };
-  return { leanOutcome: acc.net[0] > acc.net[1] ? 0 : 1, negLean: acc.net[0] <= 0 && acc.net[1] <= 0 };
-}
-
-// §3: qualified wallets from the running per-wallet history.
-function qualified(cum) {
-  const q = [];
-  for (const [w, s] of cum) {
-    if (s.games >= MIN_GAMES && s.profit > 0 && s.volume / s.profit <= MAX_VOL_PER_PROFIT && s.both / s.games < BOTH_MAX) {
-      q.push({ w, profit: s.profit });
-    }
+// ---------------------------------------------------------------- history inputs
+// The §3 qualification inputs from data/polymarket.db (READ-ONLY handle):
+// done markets in date order (NO winner_idx), each market's wallet_game rows,
+// and which wallet-games bought both teams. Shared with
+// scripts/export-top-trader-seed.js so the production seed is built from the
+// same inputs as the test.
+function loadHistoryInputs(pm) {
+  const markets = pm.prepare(`SELECT id, game_date, game_id, cutoff_utc, outcome0_is_home FROM markets
+    WHERE status = 'done' ORDER BY game_date, cutoff_utc, id`).all();
+  const wgByMarket = new Map();
+  for (const r of pm.prepare('SELECT market_id, wallet_id, profit, volume FROM wallet_game').iterate()) {
+    let a = wgByMarket.get(r.market_id);
+    if (!a) wgByMarket.set(r.market_id, (a = []));
+    a.push([r.wallet_id, r.profit, r.volume]);
   }
-  return q;
+  const boughtBoth = new Set();
+  for (const r of pm.prepare(`SELECT market_id, wallet_id FROM fills WHERE side = 1
+      GROUP BY market_id, wallet_id HAVING COUNT(DISTINCT outcome) = 2`).iterate()) {
+    boughtBoth.add(r.market_id + '|' + r.wallet_id);
+  }
+  return { markets, wgByMarket, boughtBoth };
 }
-// §3 top 25: profit descending, ties by wallets.id ascending.
-const topN = (q) => [...q].sort((a, b) => b.profit - a.profit || a.w - b.w).slice(0, TOP_N);
 
 // ---------------------------------------------------------------- phase 1: outcome-blind
 // pm, mlb: READ-ONLY better-sqlite3 handles. opts.onTick(): memory sampling hook.
 function buildOutcomeBlind(pm, mlb, opts) {
   const o = Object.assign({ onTick: () => {} }, opts || {});
   // NO winner_idx here (outcome-blind until Gate 1 passes).
-  const markets = pm.prepare(`SELECT id, game_date, game_id, cutoff_utc, outcome0_is_home FROM markets
-    WHERE status = 'done' ORDER BY game_date, cutoff_utc, id`).all();
+  const { markets, wgByMarket, boughtBoth } = loadHistoryInputs(pm);
   const gl = new Map();
   for (const g of mlb.prepare(`SELECT game_date, game_id, odds_locked_at, market_away_ml, market_home_ml,
       market_contamination_reason, ml_source, first_pitch_utc FROM game_log WHERE COALESCE(is_removed, 0) = 0`).iterate()) {
@@ -130,18 +118,6 @@ function buildOutcomeBlind(pm, mlb, opts) {
     return last;
   };
 
-  // §3 history inputs: wallet_game rows per market, and the both-teams-bought set.
-  const wgByMarket = new Map();
-  for (const r of pm.prepare('SELECT market_id, wallet_id, profit, volume FROM wallet_game').iterate()) {
-    let a = wgByMarket.get(r.market_id);
-    if (!a) wgByMarket.set(r.market_id, (a = []));
-    a.push([r.wallet_id, r.profit, r.volume]);
-  }
-  const boughtBoth = new Set();
-  for (const r of pm.prepare(`SELECT market_id, wallet_id FROM fills WHERE side = 1
-      GROUP BY market_id, wallet_id HAVING COUNT(DISTINCT outcome) = 2`).iterate()) {
-    boughtBoth.add(r.market_id + '|' + r.wallet_id);
-  }
   o.onTick();
   const fillsStmt = pm.prepare('SELECT wallet_id, outcome, side, price * size usd FROM fills WHERE market_id = ? AND ts < ?');
 
@@ -194,10 +170,10 @@ function buildOutcomeBlind(pm, mlb, opts) {
         if (ps.skip) { for (const v of ['primary', 'secondary']) counts[v][split].price_skip[ps.skip]++; continue; }
         // §4 lean: one streamed pass over this market's fills before min(L, cutoff)
         const cut = Math.min(ps.lock, m.cutoff_utc);
-        const acc = { primary: { any: false, net: [0, 0] }, secondary: { any: false, net: [0, 0] } };
+        const acc = { primary: newLeanAcc(), secondary: newLeanAcc() };
         for (const f of fillsStmt.iterate(m.id, cut)) {
-          if (qSet.has(f.wallet_id)) { acc.primary.any = true; acc.primary.net[f.outcome] += f.side * f.usd; }
-          if (topSet.has(f.wallet_id)) { acc.secondary.any = true; acc.secondary.net[f.outcome] += f.side * f.usd; }
+          if (qSet.has(f.wallet_id)) addFill(acc.primary, f.outcome, f.side, f.usd);
+          if (topSet.has(f.wallet_id)) addFill(acc.secondary, f.outcome, f.side, f.usd);
         }
         const conf = confirmedStatus(g, ps.lock, lastCapture);
         for (const v of ['primary', 'secondary']) {
@@ -240,9 +216,8 @@ function buildOutcomeBlind(pm, mlb, opts) {
       for (const m of day) {
         for (const [w, profit, volume] of (wgByMarket.get(m.id) || [])) {
           let s = cum.get(w);
-          if (!s) cum.set(w, (s = { games: 0, profit: 0, volume: 0, both: 0 }));
-          s.games++; s.profit += profit; s.volume += volume;
-          if (boughtBoth.has(m.id + '|' + w)) s.both++;
+          if (!s) cum.set(w, (s = newWalletTotals()));
+          addWalletGame(s, profit, volume, boughtBoth.has(m.id + '|' + w));
         }
       }
     }
@@ -327,6 +302,6 @@ function computeResults(rows) {
 
 module.exports = {
   PREREG_PATH, PREREG_COMMIT, PREREG_SHA256, BOOT_SEED,
-  preregHash, assertPrereg, buildOutcomeBlind, attachOutcomes, computeResults,
+  preregHash, assertPrereg, loadHistoryInputs, buildOutcomeBlind, attachOutcomes, computeResults,
   _internals: { priceStep, confirmedStatus, leanFrom, qualified, topN, splitOf, parseUtc, stats },
 };
