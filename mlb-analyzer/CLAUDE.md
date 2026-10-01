@@ -1892,6 +1892,32 @@ be able to take down the thing it observes" — there, a synchronous stringify
 of an 88MB feed OOM-killed a 512MB instance for a capability nothing read.
 Same shape, with the laptop as the instance.
 
+## Point MLB_DB_PATH at a copy before anything loads db/schema (2026-10-01)
+
+**Before requiring any module that loads db/schema (directly or indirectly,
+including routes/api.js and services/jobs.js), set MLB_DB_PATH to a scratch or
+throwaway copy outside the repo. Never let a script, test or check open the real
+data/mlb.db; its on-load migrations open it read-write.**
+
+Reason: `db/schema.js` opens `MLB_DB_PATH`, or `data/mlb.db` when it is unset,
+**read-write** the moment it is required, and runs its migrations. Many modules
+pull it in without saying so: `routes/api.js` and `services/jobs.js` among them.
+On 2026-10-01 a one-line "does `routes/api.js` still load?" check, run without
+`MLB_DB_PATH`, opened the real database read-write during PR #493. Nothing was
+written (the modified time and size were unchanged), but the read-only rule was
+broken by a check that looked harmless.
+
+How to apply:
+
+- **In a script or test:** set `process.env.MLB_DB_PATH` as the first statement,
+  before any `require` that could reach `db/schema`. For an example, see the top
+  of `scripts/test-trends-results-tab.js` or `scripts/test-top-traders-card-a.js`.
+- **For a one-off `node -e` check:** pass `MLB_DB_PATH=<throwaway path>` on the
+  command line. A non-existent temp file is fine, because `db/schema` creates it.
+- **For a read-only measurement on real data:** open a copy (`.backup()` to the
+  scratchpad) or open `data/mlb.db` itself with `{ readonly: true }` through
+  `better-sqlite3` directly. Never open it through `db/schema`.
+
 ## The admin token lives in the environment and nowhere on disk (2026-09-18)
 
 **`DB_DOWNLOAD_TOKEN` is read from the shell. There is no file fallback,
