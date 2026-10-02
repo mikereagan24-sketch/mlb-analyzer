@@ -196,6 +196,9 @@ app.use('/api', require('./routes/top-traders-upload'));
 // never an address). Its own router, before routes/api.js. See the header of
 // routes/top-traders.js.
 app.use('/api', require('./routes/top-traders'));
+// game_log repair against statsapi (#486; admin token; diff by default). Its
+// own router, before routes/api.js. See the header of routes/game-log-repair.js.
+app.use('/api', require('./routes/game-log-repair'));
 app.use('/api', require('./routes/api'));
 // Trends results tab (display only). Its own router so the trends artifact
 // stays out of routes/api.js, which the pricing path requires. See the

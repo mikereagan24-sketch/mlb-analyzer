@@ -3812,6 +3812,77 @@ function runFirstPitchBackfillIfMissing() {
     .catch(e => console.error('[first-pitch-backfill] boot batch failed (non-fatal):', e && e.message));
 }
 
+// Grade every bet_signals row (active + inactive) for one finished game, and
+// its runline companion. Moved out of runScoreJob unchanged (2026-10-02, #486)
+// so the game_log repair route's "grade" mode can call exactly this and
+// nothing else. Pure grading: calcPnl / calcRunlinePnl (services/model.js)
+// are arithmetic -- no model run, no odds, no signal generation.
+// gameRow: the game_log row (market_total, over_price, under_price are read).
+// -> number of bet_signals rows written.
+function gradeBetSignalsForGame(dateStr, gameId, gameRow, awayScore, homeScore) {
+  // Grade ALL locked signals (active + inactive) so P&L is complete
+  const signals = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(dateStr, gameId);
+  const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
+  // Step 2 runline companion: parallel grading on captured
+  // spread snapshot. ML-only; Total signals never enter this loop.
+  const updateRunline = db.prepare(`UPDATE bet_signals SET companion_spread_outcome=?, companion_spread_pnl=? WHERE id=?`);
+  const _ay = awayScore;
+  const _hy = homeScore;
+  for (const sig of signals) {
+    const { outcome } = calcPnl(
+      { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line, bet_line: sig.bet_line },
+      _ay, _hy, gameRow.market_total
+    );
+    // To-win-100 P&L
+    let _pnl = 0;
+    if (outcome !== 'pending' && outcome !== 'push') {
+      if (sig.signal_type === 'ML') {
+        // ML: use locked bet_line price, else market ML price
+        const _ml = parseFloat(sig.bet_line || sig.market_line);
+        if (!isNaN(_ml) && _ml !== 0) {
+          const _stake = _ml > 0 ? parseFloat((10000/_ml).toFixed(2)) : Math.abs(_ml);
+          _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
+        }
+      } else {
+        // Total: bet_line is the O/U number, NOT the price
+        // Use over/under price from game_log, NOT closing_line (which stores the total number)
+        //
+        // ---- CLV / P&L CAVEAT ----
+        // When kalshi_direct_totals_enabled is on, gameRow.over_price
+        // / under_price are FEE-ADJUSTED Kalshi asks (set in
+        // runOddsJob's totals override block) — NOT raw market
+        // prices. Any P&L computed against them inherits the same
+        // per-contract fee skew documented at the ML CLV site
+        // (~line 1206) and at the override site itself. Known,
+        // accepted; see feat/kalshi-fee-adjusted-lines and the
+        // totals override block for the design rationale.
+        // bet_price first (2026-09-23), matching calcPnl's own
+        // precedence. This branch re-derives the P&L instead of
+        // using calcPnl's, so it never inherited the struck-price
+        // rule when that landed on 2026-08-23 -- the same split
+        // that let the grading sites disagree with each other.
+        const _price = (sig.bet_price != null && sig.bet_price !== '')
+          ? Number(sig.bet_price)
+          : (sig.signal_side === 'over' ? (gameRow.over_price || -110) : (gameRow.under_price || -110));
+        const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
+        _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
+      }
+    }
+    updateSignal.run(outcome, parseFloat(_pnl.toFixed(2)), sig.id);
+    // Runline grading runs independently — only for ML signals,
+    // only when the companion outcome is currently un-graded
+    // (NULL or 'pending'), and only when a spread snapshot was
+    // captured at fire time. Pre-Step-2 ML rows have null
+    // companion_spread_line, so calcRunlinePnl returns 'pending'
+    // and the row stays untouched.
+    if (sig.signal_type !== 'ML') continue;
+    if (sig.companion_spread_outcome != null && sig.companion_spread_outcome !== 'pending') continue;
+    const r = calcRunlinePnl(sig.signal_side, sig.companion_spread_line, sig.companion_spread_price, _ay, _hy);
+    if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, sig.id);
+  }
+  return signals.length;
+}
+
 async function runScoreJob(dateStr) {
   dateStr = dateStr || yesterdayStr();
   console.log('[score-job] Starting for ' + dateStr);
@@ -3840,66 +3911,7 @@ async function runScoreJob(dateStr) {
       });
       const gameRow = db.prepare(`SELECT * FROM game_log WHERE game_date=? AND game_id=?`).get(dateStr, gameId);
       if (gameRow) {
-        // Grade ALL locked signals (active + inactive) so P&L is complete
-        const signals = db.prepare('SELECT * FROM bet_signals WHERE game_date=? AND game_id=?').all(dateStr, gameId);
-        const updateSignal = db.prepare(`UPDATE bet_signals SET outcome=?, pnl=? WHERE id=?`);
-        // Step 2 runline companion: parallel grading on captured
-        // spread snapshot. ML-only; Total signals never enter this loop.
-        const updateRunline = db.prepare(`UPDATE bet_signals SET companion_spread_outcome=?, companion_spread_pnl=? WHERE id=?`);
-        const _ay = s.awayScore ?? s.away_score;
-        const _hy = s.homeScore ?? s.home_score;
-        for (const sig of signals) {
-          const { outcome } = calcPnl(
-            { type: sig.signal_type, side: sig.signal_side, marketLine: sig.market_line, bet_line: sig.bet_line },
-            _ay, _hy, gameRow.market_total
-          );
-          // To-win-100 P&L
-          let _pnl = 0;
-          if (outcome !== 'pending' && outcome !== 'push') {
-            if (sig.signal_type === 'ML') {
-              // ML: use locked bet_line price, else market ML price
-              const _ml = parseFloat(sig.bet_line || sig.market_line);
-              if (!isNaN(_ml) && _ml !== 0) {
-                const _stake = _ml > 0 ? parseFloat((10000/_ml).toFixed(2)) : Math.abs(_ml);
-                _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
-              }
-            } else {
-              // Total: bet_line is the O/U number, NOT the price
-              // Use over/under price from game_log, NOT closing_line (which stores the total number)
-              //
-              // ---- CLV / P&L CAVEAT ----
-              // When kalshi_direct_totals_enabled is on, gameRow.over_price
-              // / under_price are FEE-ADJUSTED Kalshi asks (set in
-              // runOddsJob's totals override block) — NOT raw market
-              // prices. Any P&L computed against them inherits the same
-              // per-contract fee skew documented at the ML CLV site
-              // (~line 1206) and at the override site itself. Known,
-              // accepted; see feat/kalshi-fee-adjusted-lines and the
-              // totals override block for the design rationale.
-              // bet_price first (2026-09-23), matching calcPnl's own
-              // precedence. This branch re-derives the P&L instead of
-              // using calcPnl's, so it never inherited the struck-price
-              // rule when that landed on 2026-08-23 -- the same split
-              // that let the grading sites disagree with each other.
-              const _price = (sig.bet_price != null && sig.bet_price !== '')
-                ? Number(sig.bet_price)
-                : (sig.signal_side === 'over' ? (gameRow.over_price || -110) : (gameRow.under_price || -110));
-              const _stake = _price < 0 ? Math.abs(_price) : parseFloat((10000/_price).toFixed(2));
-              _pnl = outcome === 'win' ? 100 : parseFloat((-_stake).toFixed(2));
-            }
-          }
-          updateSignal.run(outcome, parseFloat(_pnl.toFixed(2)), sig.id);
-          // Runline grading runs independently — only for ML signals,
-          // only when the companion outcome is currently un-graded
-          // (NULL or 'pending'), and only when a spread snapshot was
-          // captured at fire time. Pre-Step-2 ML rows have null
-          // companion_spread_line, so calcRunlinePnl returns 'pending'
-          // and the row stays untouched.
-          if (sig.signal_type !== 'ML') continue;
-          if (sig.companion_spread_outcome != null && sig.companion_spread_outcome !== 'pending') continue;
-          const r = calcRunlinePnl(sig.signal_side, sig.companion_spread_line, sig.companion_spread_price, _ay, _hy);
-          if (r.outcome !== 'pending') updateRunline.run(r.outcome, r.pnl, sig.id);
-        }
+        gradeBetSignalsForGame(dateStr, gameId, gameRow, s.awayScore ?? s.away_score, s.homeScore ?? s.home_score);
         // Empirical-spread grading. Before fix/empirical-spread-grading
         // -wiring this never fired from cron: the grader lived only
         // inside processGameSignals's game-final branch, which no cron
@@ -8694,4 +8706,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { gradeBetSignalsForGame, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
