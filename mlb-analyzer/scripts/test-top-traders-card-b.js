@@ -294,8 +294,13 @@ const asStored = (t) => ({ wallet_id: t.w, outcome: t.outcome, side: t.side, pri
     // Schedule
     const sdb = fresh();
     const due = (t) => live.duePasses(sdb, t, [D]).filter(x => x.game_id === GA.id).map(x => x.pass).join(',');
-    ok('nothing is due more than 3 hours before the start', due(SA - 3 * 3600 - 60) === '');
-    ok('T-3h, T-1h and T-15m become due at their times', due(SA - 3 * 3600) === 't180' && due(SA - 3600) === 't60' && due(SA - 15 * 60) === 't15');
+    // (2026-10-02) Five offsets: T-24h, T-12h, T-3h, T-1h, T-15m (T-36h dropped -- game_log loads ~32 h ahead).
+    ok('the pass list is exactly T-24h, T-12h, T-3h, T-1h, T-15m, earliest first',
+      JSON.stringify(live._internals.PASSES.map(([, o]) => o / 60)) === JSON.stringify([1440, 720, 180, 60, 15]));
+    ok('nothing is due more than 24 hours before the start', due(SA - 24 * 3600 - 60) === '');
+    ok('the five offsets fire in order at their times (T-24h, T-12h, T-3h, T-1h, T-15m)',
+      [24 * 3600, 12 * 3600, 3 * 3600, 3600, 900].map(o => due(SA - o)).join(',') === 't1440,t720,t180,t60,t15');
+    ok('a late load runs only the latest due pass (loaded 2 h before the start: T-3h only, not T-24h / T-12h)', due(SA - 2 * 3600) === 't180');
     live._internals.setState(sdb, { game_date: D, game_id: GA.id }, '2026-07-01', 0, 't180', SA - 3 * 3600);
     ok('a pass already run is not due again; a late start runs only the latest due pass', due(SA - 3 * 3600 + 600) === '' && due(SA - 10 * 60) === 't15');
     ok('no provisional pass at or after the cutoff; no final before the lock', due(SA + 60) === '');
@@ -312,6 +317,82 @@ const asStored = (t) => ({ wallet_id: t.w, outcome: t.outcome, side: t.side, pri
     release(); await new Promise(r => setTimeout(r, 10)); s.tick();
     ok('after that job finishes, the next tick may enqueue again', calls === 2);
     s.stop();
+  }
+
+  // ---------------------------------------------------------------- d2 (2026-10-02)
+  console.log('\nd2. earlier passes: look-ahead, moved starts, missing markets, the placeholder guard');
+  {
+    // b. Look-ahead: previous PT date through ONE PT date ahead.
+    const nowMs = Date.UTC(2026, 6, 15, 18, 0) ;                                // 11:00 PT on 2026-07-15
+    ok('look-ahead dates are the previous PT date, today and one PT date ahead', JSON.stringify(live.lookAheadDates(nowMs)) === '["2026-07-14","2026-07-15","2026-07-16"]',
+      JSON.stringify(live.lookAheadDates(nowMs)));
+    const ldb = appDb(); seed(ldb, '2026-07-01', QUAL);
+    const G1 = { date: '2026-07-16', id: 'sea-tex', start: utc(2026, 7, 16, 17, 0) };   // 23 h ahead: T-24h due
+    const G2 = { date: '2026-07-17', id: 'hou-oak', start: utc(2026, 7, 17, 17, 0) };   // two PT dates out
+    insGame(ldb, glRow(G1)); insGame(ldb, glRow(G2));
+    const dueL = live.duePasses(ldb, nowMs / 1000, live.lookAheadDates(nowMs)).map(x => x.game_id + ':' + x.pass);
+    ok('a game one PT date ahead is included (its T-24h pass is due)', dueL.includes('sea-tex:t1440'), dueL.join(','));
+    ok('a game two PT dates ahead is not considered', !dueL.some(x => x.startsWith('hou-oak')));
+    // c. A moved start re-times the remaining passes (CURRENT scheduled_start_utc on every tick).
+    const mdb = fresh();
+    const dueM = (t) => live.duePasses(mdb, t, [D]).filter(x => x.game_id === GA.id).map(x => x.pass).join(',');
+    live._internals.setState(mdb, { game_date: D, game_id: GA.id }, '2026-07-01', 0, 't1440', SA - 24 * 3600);
+    ok('before the move: T-12h falls due at the original start - 12 h', dueM(SA - 12 * 3600) === 't720');
+    setGame(mdb, GA, { scheduled_start_utc: new Date((SA + 6 * 3600) * 1000).toISOString().replace('.000Z', 'Z') });
+    ok('after the start moves 6 h later: nothing at the old time, T-12h at the NEW start - 12 h, T-15m at the new start - 15 min',
+      dueM(SA - 12 * 3600) === '' && dueM(SA - 6 * 3600) === 't720' && dueM(SA + 6 * 3600 - 900) === 't15');
+    // d. A missing market logs and retries without writing.
+    const gdb = fresh(), games = [];                                              // no market listed for the date yet
+    const api = fakeApi(games, TRADES), logs = [];
+    const c0 = gdb.prepare('SELECT total_changes() c').get().c;
+    const r1 = await live.runGame({ db: gdb, client: api.client, nowS: SA - 24 * 3600, env: ON, log: (m) => logs.push(m) }, D, GA.id, 'provisional', 't1440');
+    ok('no market listed yet: the pass logs it, fetches no trades and writes nothing (not even a market row)',
+      r1.skipped === 'no_polymarket_market' && api.st.trades === 0 && gdb.prepare('SELECT total_changes() c').get().c === c0
+      && logs.some(m => /no Polymarket market listed yet -- nothing written; the next pass tries again/.test(m)), logs.join(' | '));
+    let nowT = SA - 24 * 3600, queued = 0;
+    const sch = live.startTopTradersLive({ env: ON, log: () => {}, db: gdb, tickMs: 3600000, nowMs: () => nowT * 1000, makeClient: () => api.client,
+      queued: async (label, fn) => { queued++; await fn(); } });
+    await sch.tick(); await new Promise(r => setTimeout(r, 5));
+    const ev1 = api.st.events;
+    await sch.tick(); await new Promise(r => setTimeout(r, 5));
+    ok('the scheduler tries that pass once, then not again on the next tick (no hammering)', queued === 1 && api.st.events === ev1, queued + ' jobs');
+    nowT = SA - 12 * 3600;
+    await sch.tick(); await new Promise(r => setTimeout(r, 5));
+    ok('the next pass (T-12h) tries the market again', queued === 2 && api.st.events > ev1 && gdb.prepare('SELECT total_changes() c').get().c === c0);
+    games.push(GA);                                                               // the market is listed now
+    nowT = SA - 3 * 3600;
+    await sch.tick(); await new Promise(r => setTimeout(r, 5));
+    ok('once the market is listed, the next pass finds it and writes its provisional row',
+      gdb.prepare("SELECT COUNT(*) c FROM top_trader_lean_log WHERE game_id = ? AND kind = 'provisional'").get(GA.id).c === 1);
+    sch.stop();
+    // e. The placeholder guard.
+    ok('validGameId: two valid team codes (and the doubleheader suffix) only',
+      live.validGameId('atl-lad') && live.validGameId('nyy-bos-g2') && live.validGameId('chc-cle-2') && !live.validGameId('atl/phi-lad')
+      && !live.validGameId('al-nl') && !live.validGameId('nyy-nyy') && !live.validGameId('xyz-bos') && !live.validGameId('atl-lad-3'));
+    const pdb = appDb(); seed(pdb, '2026-09-28', QUAL);
+    const PD = '2026-10-03', PS = utc(2026, 10, 3, 20, 0);
+    const PH = { date: PD, id: 'atl/phi-lad', start: PS }, REAL = { date: PD, id: 'atl-lad', start: PS }, GONE = { date: PD, id: 'nyy-tb', start: PS + 9000 };
+    insGame(pdb, glRow(PH)); insGame(pdb, glRow(REAL)); insGame(pdb, Object.assign(glRow(GONE), { is_removed: 1 }));
+    const papi = fakeApi([Object.assign({ cid: '0xR', slug: 'mlb-atl-lad-' + PD, outcomes: ['Atlanta Braves', 'Los Angeles Dodgers'] }, REAL)], { '0xR': TA.slice(0, 50).map(t => Object.assign({}, t, { ts: PS - 7200 + (t.ts % 3000) })) });
+    const skips = [];
+    const dueP = live.duePasses(pdb, PS - 3600, [PD], { onSkip: (d, id, why) => skips.push(id + ': ' + why) }).map(x => x.game_id);
+    ok('the scheduler only schedules "atl-lad": the placeholder and the removed row are skipped, with their reasons',
+      JSON.stringify(dueP) === '["atl-lad"]' && skips.includes('atl/phi-lad: not two valid team codes') && skips.includes('nyy-tb: removed in game_log'), skips.join(' | '));
+    const plogs = [], cP = pdb.prepare('SELECT total_changes() c').get().c;
+    const rPh = [], rGone = [];
+    for (const kind of ['provisional', 'final']) {
+      rPh.push(await live.runGame({ db: pdb, client: papi.client, nowS: kind === 'final' ? PS + 9 * 3600 : PS - 3600, env: ON, log: (m) => plogs.push(m) }, PD, PH.id, kind, kind === 'final' ? 'final' : 't60'));
+      rGone.push(await live.runGame({ db: pdb, client: papi.client, nowS: kind === 'final' ? PS + 9 * 3600 : PS - 3600, env: ON, log: (m) => plogs.push(m) }, PD, GONE.id, kind, kind === 'final' ? 'final' : 't60'));
+    }
+    ok('"atl/phi-lad" and the removed row: no fetch, no provisional row, no final row (provisional and final passes both)',
+      rPh.every(r => r.skipped === 'invalid_game_id') && rGone.every(r => r.skipped === 'removed') && papi.st.requests === 0
+      && pdb.prepare('SELECT total_changes() c').get().c === cP);
+    ok('each skipped game id is logged once (not once per pass)',
+      plogs.filter(m => /atl\/phi-lad: skipped/.test(m)).length === 1 && plogs.filter(m => /nyy-tb: skipped/.test(m)).length === 1, plogs.join(' | '));
+    const rReal = await live.runGame({ db: pdb, client: papi.client, nowS: PS - 3600, env: ON }, PD, REAL.id, 'provisional', 't60');
+    ok('"atl-lad" is processed: market found, trades fetched, a provisional row written',
+      rReal.market === 'mlb-atl-lad-' + PD && rReal.fetched === 50 && pdb.prepare("SELECT COUNT(*) c FROM top_trader_lean_log WHERE game_id = 'atl-lad'").get().c === 1,
+      JSON.stringify({ market: rReal.market, fetched: rReal.fetched, kept: rReal.kept }));
   }
 
   // ---------------------------------------------------------------- e

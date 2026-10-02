@@ -45,6 +45,32 @@ top-traders section shows the test itself.
    - The **final** lean uses the backtest's cut, `min(odds_locked_at, cutoff)`.
      It is computed only after both times have passed, because locks are
      stamped whenever a job happens to run (#488).
+   - **Amended 2026-10-02 at the owner's request: provisional pass times.**
+     - **Times:** T−24h, T−12h, T−3h, T−1h and T−15m before the scheduled
+       start (previously T−3h, T−1h and T−15m).
+     - **Moved starts:** pass times come from the current
+       `scheduled_start_utc` on every check, so a moved start re-times the
+       passes still to come.
+     - **Late loads:** a game that loads late runs only the latest pass that
+       is due. No provisional pass runs after the cutoff.
+     - **Look-ahead:** the previous PT date through one PT date ahead.
+     - **Missing market:** if Polymarket has no market listed yet, the pass
+       records nothing and the next pass tries again.
+     - The final pass, its cut, retention and the snapshot rule are unchanged.
+     - *Why T−36h was dropped:* game_log loads a date's games only once, at
+       7:30 AM PT the day before. That is about **32 hours** ahead (median of
+       259 games, 9/09–9/30), and only 1.9% of games were present 36 hours
+       ahead. Polymarket itself lists markets about 6 days ahead.
+   - **Placeholder guard (2026-10-02).** The live job processes only game_log
+     rows that are not removed and whose `game_id` is exactly two valid team
+     codes (the backfill matcher's set), allowing the doubleheader suffix the
+     matcher accepts.
+     - Anything else is skipped and logged once, with no fetch and no lean-log
+       row of any kind. Examples: the stale postseason placeholder
+       `atl/phi-lad`, left beside the real `atl-lad` on 2026-10-03, and the
+       All-Star `al-nl`.
+     - The production lean log had no rows for such ids, so nothing needed
+       removing.
 7. **Settlement.** It runs nightly, after the morning score pull, through the
    existing job queue.
 8. **Lean log.** One row per displayed snapshot, plus a final row with the
