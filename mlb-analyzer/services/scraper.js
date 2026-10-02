@@ -472,8 +472,11 @@ async function fetchScoresRaw(dateStr) {
   const [year, month, day] = dateStr.split('-');
   const mmdd = month.padStart(2,'0')+'/'+day.padStart(2,'0')+'/'+year;
   const url = 'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date='+mmdd+'&hydrate=linescore';
-  const resp = await fetch(url+'&_t='+Date.now(), {headers:{'Accept':'application/json','Cache-Control':'no-cache'}});
-  if (!resp.ok) throw new Error('MLB API error: '+resp.status);
+  // timeout: a hung socket fails (and is retried by runScoreJob, #505) rather
+  // than holding the serial job queue. err.status lets the retry tell a 5xx/429
+  // from a 4xx; the message is unchanged.
+  const resp = await fetch(url+'&_t='+Date.now(), {headers:{'Accept':'application/json','Cache-Control':'no-cache'}, timeout: 30000});
+  if (!resp.ok) { const e = new Error('MLB API error: '+resp.status); e.status = resp.status; throw e; }
   return await resp.json();
 }
 

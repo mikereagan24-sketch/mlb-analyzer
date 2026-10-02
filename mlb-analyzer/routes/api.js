@@ -8197,6 +8197,38 @@ router.get('/health/:date', (req, res) => {
       }
     }
 
+    // ---- check 7b2: scores_catchup (#505) ----
+    // The daily score catch-up (services/score-catchup.js) re-ran this date's
+    // score job and finished games were STILL unscored, so their bets and
+    // captures cannot grade. Reads the catch-up's last 'warn' row and keeps
+    // only the games still unscored now, so a later fix (e.g. the #486 repair
+    // route) clears the warning without another catch-up run. One check per
+    // date, however many mornings the catch-up has looked at it.
+    {
+      const row = db.prepare(
+        "SELECT games_skipped_ids, ran_at FROM cron_log " +
+        "WHERE job_type = 'score-catchup' AND run_date = ? AND status = 'warn' ORDER BY id DESC LIMIT 1"
+      ).get(date);
+      const ids = row ? String(row.games_skipped_ids || '').split(',').map(s => s.trim()).filter(Boolean) : [];
+      const still = ids.filter(id => {
+        const g = db.prepare("SELECT away_score, home_score FROM game_log WHERE game_date = ? AND game_id = ? AND COALESCE(is_removed, 0) = 0").get(date, id);
+        return g && (g.away_score == null || g.home_score == null);
+      });
+      if (!still.length) {
+        checks.push({ id: 'scores_catchup', status: 'pass', severity: 'warn',
+          message: 'No finished games left unscored after the score catch-up' });
+      } else {
+        checks.push({
+          id: 'scores_catchup',
+          status: 'warn',
+          severity: 'warn',
+          message: still.length + ' finished game(s) still unscored after the score catch-up (' + row.ran_at + ' UTC): '
+            + still.join(', '),
+          affected_games: cap(still),
+        });
+      }
+    }
+
     // ---- check 7c: opener_model_populated ----
     // Phase 2 always computes the opener-aware shadow alongside the
     // standard model when a side is opener-led. Warn when a game has

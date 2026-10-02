@@ -16,6 +16,7 @@ const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
 const { seasonRosterSet } = require('./season-roster');
 const { calcCLV, clvForSignal } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
+const { retryTransient } = require('../utils/transient-retry');
 const { checkMarketMLPairSanity, isSaneSpreadPrice } = require('../utils/market-sanity');
 const {
   parseEtWallClockStringMin,
@@ -3883,6 +3884,44 @@ function gradeBetSignalsForGame(dateStr, gameId, gameRow, awayScore, homeScore) 
   return signals.length;
 }
 
+// THE SCORE FETCH RETRIES TRANSIENT FAILURES. (2026-10-02, #505)
+//
+// 2026-07-23's pull failed once on `connect ETIMEDOUT` and was never tried
+// again: five finished games stayed unscored for ten weeks. 3 attempts in all,
+// waiting 30s then 120s (a statsapi blip clears in seconds; a two-minute wait
+// covers a short outage without holding the serial queue for long). Only
+// socket errors, HTTP 5xx and 429 are retried (utils/transient-retry.js); any
+// other 4xx fails at once. Every retry, and a give-up, writes a cron_log row
+// under job_type 'scores-retry' -- NOT 'scores', whose rows mean "a pull
+// finished" to the health check's cron_health and to the catch-up below.
+// The final outcome stays the existing 'scores' success / error row.
+const SCORE_RETRY_DELAYS_MS = [30000, 120000];
+
+function _logCronSafe(jobType, runDate, status, message, gamesUpdated) {
+  try { q.logCron.run(jobType, runDate, status, message, gamesUpdated || 0); }
+  catch (e) { console.warn('[' + jobType + '] cron_log write failed (non-fatal): ' + (e && e.message)); }
+}
+
+// o (tests): { fetchRaw, delaysMs, sleep }. -> { value, attempts }
+async function fetchScoresWithRetry(dateStr, o) {
+  o = o || {};
+  const fetchRaw = o.fetchRaw || fetchScoresRaw;
+  return retryTransient(() => fetchRaw(dateStr), {
+    delaysMs: o.delaysMs || SCORE_RETRY_DELAYS_MS,
+    sleep: o.sleep,
+    onRetry: (attempt, attempts, err, delay) => {
+      const msg = 'attempt ' + attempt + '/' + attempts + ' failed (' + (err && err.message) + '); retrying in ' + Math.round(delay / 1000) + 's';
+      console.warn('[score-job] ' + dateStr + ' ' + msg);
+      _logCronSafe('scores-retry', dateStr, 'retry', msg, 0);
+    },
+    onGiveUp: (attempts, err) => {
+      const msg = 'gave up after ' + attempts + ' attempts: ' + (err && err.message);
+      console.error('[score-job] ' + dateStr + ' ' + msg);
+      _logCronSafe('scores-retry', dateStr, 'gave-up', msg, 0);
+    },
+  });
+}
+
 async function runScoreJob(dateStr) {
   dateStr = dateStr || yesterdayStr();
   console.log('[score-job] Starting for ' + dateStr);
@@ -3897,7 +3936,8 @@ async function runScoreJob(dateStr) {
   try {
     // Snapshot raw statsapi JSON before parsing; /api/replay/scores re-runs
     // parseScoresJson against the captured payload.
-    const rawScoresJson = await fetchScoresRaw(dateStr);
+    const fetched = await fetchScoresWithRetry(dateStr);
+    const rawScoresJson = fetched.value;
     writeSnapshot('scores', dateStr, rawScoresJson);
     const scores = parseScoresJson(rawScoresJson);
     for (const s of scores) {
@@ -3973,16 +4013,46 @@ async function runScoreJob(dateStr) {
     } catch(e) {
       console.log('[score-job] pitcher-usage fetch failed: ' + e.message);
     }
-    q.logCron.run('scores', dateStr, 'success', 'Updated ' + scores.length + ' scores, ' + pitcherRecords + ' pitcher apps', gamesUpdated);
+    q.logCron.run('scores', dateStr, 'success', 'Updated ' + scores.length + ' scores, ' + pitcherRecords + ' pitcher apps'
+      + (fetched.attempts > 1 ? ' (score fetch succeeded on attempt ' + fetched.attempts + ')' : ''), gamesUpdated);
     console.log('[score-job] Done — ' + gamesUpdated + ' games updated');
     return { success: true, gamesUpdated, date: dateStr };
   } catch (err) {
     console.error('[score-job] Error:', err.message);
-    q.logCron.run('scores', dateStr, 'error', err.message, 0);
+    const tries = err && err.attempts > 1 ? ' (after ' + err.attempts + ' attempts)' : '';
+    q.logCron.run('scores', dateStr, 'error', err.message + tries, 0);
     return { success: false, error: err.message, date: dateStr };
   }
 }
 
+
+// Daily score catch-up (#505): services/score-catchup.js has the design. This
+// only wires the real dependencies. statsapi reads use the same transient
+// retry as the score fetch, with short waits (they are small, read-only
+// requests). runScoreJob is called DIRECTLY, never through _queued: the caller
+// (the 4:30AM PT cron) already holds the queue, and nesting would deadlock.
+async function _statsapiJson(url) {
+  const fetch = require('node-fetch');
+  const r = await retryTransient(async () => {
+    const resp = await fetch(url, { headers: { Accept: 'application/json' }, timeout: 20000 });
+    if (!resp.ok) { const e = new Error('HTTP ' + resp.status + ' ' + url); e.status = resp.status; throw e; }
+    return resp.json();
+  }, { delaysMs: [5000, 15000] });
+  return r.value;
+}
+
+async function runScoreCatchupJob(o) {
+  o = o || {};
+  const out = await require('./score-catchup').run({
+    db, q, today: o.today || todayStr(),
+    runScoreJob: o.runScoreJob || runScoreJob,
+    fetchJson: o.fetchJson || _statsapiJson,
+  });
+  console.log('[score-catchup] done: ran ' + out.ran.length + ', caught up ' + out.caught_up.length
+    + ', still unscored ' + out.still_unscored.length + ', already reported ' + out.already_reported.length
+    + ', errors ' + out.errors.length);
+  return out;
+}
 
 // Run weather for all games on a given date. Returns { success, updated, date }.
 async function runWeatherJob(date, opts) {
@@ -4630,6 +4700,15 @@ function startCronJobs() {
   cron.schedule('0 4 * * *', () => {
     console.log('[cron] 4AM PT score pull');
     _cronFire('4AM PT score pull', _queued('score', () => runScoreJob(yesterdayStr())));
+  }, { timezone: 'America/Los_Angeles' });
+
+  // --- 4:30AM PT score catch-up (#505): the last 7 days' finished-but-
+  // unscored games, and dates with no logged score run. Queued, so it waits
+  // for the 4AM pull (and its retries) to finish. Score job only: no model,
+  // odds, weather, lineup or signal work. See services/score-catchup.js.
+  cron.schedule('30 4 * * *', () => {
+    console.log('[cron] 4:30AM PT score catch-up');
+    _cronFire('4:30AM PT score catch-up', _queued('score-catchup', () => runScoreCatchupJob()));
   }, { timezone: 'America/Los_Angeles' });
 
   // --- 5:30AM PT FG wOBA sync: projections + actuals with retry/backoff ---
@@ -8706,4 +8785,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { gradeBetSignalsForGame, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { gradeBetSignalsForGame, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
