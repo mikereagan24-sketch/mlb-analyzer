@@ -24,6 +24,17 @@ top-traders section shows the test itself.
    - A daily snapshot of the qualified set, frozen before the day's first game,
      which keeps "strictly before D" exact.
    - About 20 MB in total. **No fills in production.**
+   - **Amended 2026-10-01 (card PR B).** Production stores the **qualified
+     wallets' fills only, and only for games in progress**. A game's fills are
+     deleted in the same transaction that writes its final lean-log row,
+     whether that row is a lean or a skip; the lean log keeps the summary.
+     There are still **no backfill fills in production**.
+     - *Why:* Polymarket's trades have no unique ID, so the live job cannot
+       merge passes by ID. Instead, each pre-game pass fetches only the new
+       half-open range since the last one and keeps every row. That needs the
+       game's earlier rows on hand until the final pass replaces them with a
+       full re-fetch.
+     - *Size:* in the 2026-10-01 dry run, about 250–500 rows per game.
 4. **Seeding.** Upload the totals as of 2026-09-27 through a new streaming
    admin-token route, following the existing `/upload/*` pattern and parsing line
    by line. **No backfill runs on Render.**

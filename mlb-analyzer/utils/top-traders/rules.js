@@ -70,7 +70,26 @@ function leanFrom(acc) {
   return { leanOutcome: acc.net[0] > acc.net[1] ? 0 : 1, negLean: acc.net[0] <= 0 && acc.net[1] <= 0 };
 }
 
+// ---------------------------------------------------------------- card decision 2: concentration
+// (2026-10-01, the live card -- not part of the pre-registered test.) The
+// largest single wallet's net dollars on the lean outcome over the lean
+// outcome's net total: the measure behind the card decisions' distribution
+// table (docs/polymarket-top-traders-card-decisions-2026-10-01.md). Shown,
+// never filtered; flagged at CONCENTRATION_FLAG or more.
+// perWallet: Map wallet -> [net0, net1]. -> share | null (lean side net <= 0)
+const CONCENTRATION_FLAG = 0.75;
+// Decisions 9 and 11: the card's label, and the postseason note.
+const CARD_LABEL = 'Top Polymarket traders — display only. Tested on 2026 regular season (#490): no edge found. Not used by the model.';
+const POSTSEASON_NOTE = 'tested on 2026 regular season only — no edge found';
+function largestWalletShare(perWallet, leanOutcome, leanNet) {
+  if (!(leanNet > 0)) return null;
+  let top = -Infinity;
+  for (const w of perWallet.values()) if (w[leanOutcome] > top) top = w[leanOutcome];
+  return top === -Infinity ? null : top / leanNet;
+}
+
 module.exports = {
-  EXCLUDED_DATES, SEASON_TO, MIN_GAMES, MAX_VOL_PER_PROFIT, BOTH_MAX, MIN_QUALIFIED, TOP_N, TIE_DOLLARS,
+  EXCLUDED_DATES, SEASON_TO, MIN_GAMES, MAX_VOL_PER_PROFIT, BOTH_MAX, MIN_QUALIFIED, TOP_N, TIE_DOLLARS, CONCENTRATION_FLAG,
   parseUtc, newWalletTotals, addWalletGame, isQualified, qualified, topN, priceStep, newLeanAcc, addFill, leanFrom,
+  largestWalletShare, CARD_LABEL, POSTSEASON_NOTE,
 };

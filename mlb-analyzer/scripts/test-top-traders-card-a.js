@@ -372,7 +372,9 @@ function ok(label, cond, detail) {
     const fresh = new Database(':memory:');
     applyTopTradersDdl(fresh); applyTopTradersDdl(fresh);
     const tables = fresh.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'top_trader_%' ORDER BY name").all().map(r => r.name);
-    ok('a fresh database gets exactly the three tables plus the two seed staging tables', JSON.stringify(tables) === JSON.stringify(['top_trader_lean_log',
+    // + PR B (2026-10-01): the live job's three tables (scripts/test-top-traders-card-b.js covers them).
+    ok('a fresh database gets exactly the three tables, the two seed staging tables and the live job\'s three tables', JSON.stringify(tables) === JSON.stringify(['top_trader_lean_log',
+      'top_trader_live_fills', 'top_trader_live_markets', 'top_trader_live_state',
       'top_trader_qualified', 'top_trader_seed_stage_qualified', 'top_trader_seed_stage_wallets', 'top_trader_wallets']), tables.join(','));
     const cols = fresh.prepare('PRAGMA table_info(top_trader_lean_log)').all().map(c => c.name);
     const want = ['game_date', 'game_id', 'shown_at', 'cut_utc', 'lean_team', 'lean_dollars', 'other_dollars', 'wallets_with_money', 'top_wallet_share',

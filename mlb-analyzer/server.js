@@ -192,6 +192,10 @@ app.get('/api/version', (req, res) => res.json({
 // POST /upload/:key? cannot take /upload/top-trader-seed. See the header of
 // routes/top-traders-upload.js.
 app.use('/api', require('./routes/top-traders-upload'));
+// Top-traders card data, GET /api/top-traders/:date (display only; stored rows,
+// never an address). Its own router, before routes/api.js. See the header of
+// routes/top-traders.js.
+app.use('/api', require('./routes/top-traders'));
 app.use('/api', require('./routes/api'));
 // Trends results tab (display only). Its own router so the trends artifact
 // stays out of routes/api.js, which the pricing path requires. See the
@@ -541,6 +545,12 @@ try {
 app.listen(PORT, () => {
   console.log(`MLB Analyzer running on port ${PORT}`);
   startCronJobs();
+  // Top-traders live lean job (display only). Off unless TOP_TRADERS_LIVE=on;
+  // its state is logged here. Its passes run through the same serial job
+  // queue (withMemLog = services/jobs.js _queued), so never alongside another
+  // job. Scheduled here, not in services/jobs.js, which the pricing path
+  // requires. See the header of services/top-traders-live.js.
+  require('./services/top-traders-live').startTopTradersLive({ queued: withMemLog });
 
   // BOOT IS SERIAL AND DEFERRED. (2026-09-03)
   //
