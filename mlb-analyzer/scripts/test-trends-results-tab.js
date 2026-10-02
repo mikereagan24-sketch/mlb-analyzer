@@ -24,7 +24,9 @@
  *      A self-test proves the check catches a planted violation.
  *
  *   (2026-09-30) d-h: the route graph, sorting, the shared context, a
- *      synthetic slate, and the backtest reproduction on a scratch copy.
+ *      synthetic slate, and the backtest reproduction -- since #486
+ *      (2026-10-02) on the pinned pre-fix copy data/mlb-before-486.db,
+ *      read-only, skipped with a NOTE when that copy is absent.
  *   (2026-10-01) i. the Polymarket top-traders section: wired in, its route
  *      reads only its artifact, every figure comes from the artifact (whose
  *      pre-registration hash matches the pinned one), q only on the main
@@ -49,9 +51,8 @@ const read = (p) => fs.readFileSync(path.join(R, p), 'utf8');
 // runs its idempotent migrations. Point it at a throwaway file first, and
 // remove that file on the way out.
 const TMP_DB = path.join(os.tmpdir(), '__trends_results_tab_' + process.pid + '.db');
-// Check h re-runs the backtest on the SCRATCH COPY the suite passes in
-// (MLB_DB_PATH, outside the repo) -- captured here, before it is redirected.
-const SCRATCH_COPY = process.env.MLB_DB_PATH || null;
+// Check h re-runs the backtest on the pinned pre-#486 copy (data/mlb-before-486.db),
+// read-only -- not on MLB_DB_PATH, which is redirected to the throwaway file here.
 process.env.MLB_DB_PATH = TMP_DB;
 function cleanupTmpDb() {
   try { require(path.join(R, 'db/schema')).db.close(); } catch (e) { /* never opened */ }
@@ -419,15 +420,19 @@ console.log('\ng. a synthetic slate');
 // ---------------------------------------------------------------- h
 console.log('\nh. the backtest still reproduces the committed artifact exactly (context refactor)');
 {
+  // (2026-10-02, #486) Reproduced from the PINNED pre-#486 copy, read-only: the
+  // artifact was computed before the game_log repair, so a refreshed
+  // data/mlb.db must not be what reproduces it. Absent -> a NOTE, not a failure.
   const realDb = path.resolve(R, 'data/mlb.db');
-  if (!SCRATCH_COPY) {
-    console.log('  NOTE  no MLB_DB_PATH scratch copy given -- run with MLB_DB_PATH=<copy outside the repo> (the suite does)');
-  } else if (path.resolve(SCRATCH_COPY) === realDb || path.resolve(SCRATCH_COPY).startsWith(path.resolve(R) + path.sep)) {
-    ok('refuses a database inside the repo (never data/mlb.db)', false, SCRATCH_COPY);
+  const PRE486 = path.join(R, 'data/mlb-before-486.db');
+  if (!fs.existsSync(PRE486)) {
+    console.log('  NOTE  pre-#486 copy not present (data/mlb-before-486.db): reproduction skipped, not failed');
+  } else if (path.resolve(PRE486) === realDb) {
+    ok('refuses the live data/mlb.db (only the pinned pre-#486 copy reproduces the artifact)', false, PRE486);
   } else {
     const Database = require(path.join(R, 'node_modules/better-sqlite3'));
     const tb = require(path.join(R, 'services/trends-backtest'));
-    const sdb = new Database(SCRATCH_COPY, { readonly: true, fileMustExist: true });
+    const sdb = new Database(PRE486, { readonly: true, fileMustExist: true });
     const run = tb.runTrendsBacktest(sdb, { root: R });
     sdb.close();
     const A3 = JSON.parse(read('docs/trends-results-2026-09-29.json'));
@@ -444,7 +449,7 @@ console.log('\nh. the backtest still reproduces the committed artifact exactly (
       fields++; if ((r.holdout || null) !== a2.holdout) bad2.push(r.scenario + ' holdout');
       fields++; if (JSON.stringify(r.mix) !== a2.source_mix_json) bad2.push(r.scenario + ' mix');
     }
-    ok('every result row and figure matches docs/trends-results-2026-09-29.json exactly (scratch copy, read-only)',
+    ok('every result row and figure matches docs/trends-results-2026-09-29.json exactly (pinned pre-#486 copy, read-only)',
       bad2.length === 0 && run.results.length === A3.trend_results.length, run.results.length + ' rows, ' + fields + ' fields' + (bad2.length ? ' | ' + bad2.slice(0, 5).join(' | ') : ''));
   }
 }

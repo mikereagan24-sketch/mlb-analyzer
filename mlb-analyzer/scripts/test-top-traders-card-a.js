@@ -11,8 +11,11 @@
  *        store) -> docs/polymarket-top-traders-results-2026-09-30.json; skipped
  *        with a "backup not present" NOTE when that file is absent.
  *      Self-tests: one figure altered in either artifact is caught.
- *      Needs data/polymarket.db (read-only) and a SCRATCH COPY of mlb.db via
- *      MLB_DB_PATH (the suite passes one); skipped with a NOTE otherwise.
+ *      Needs data/polymarket.db (read-only). (2026-10-02, #486) The game_log
+ *      side is the PINNED pre-#486 copy, data/mlb-before-486.db, opened
+ *      read-only -- the published artifacts were computed before the game_log
+ *      repair, so a refreshed data/mlb.db must not be what reproduces them.
+ *      Skipped with a "pre-#486 copy not present" NOTE when it is absent.
  *   b. utils/top-traders/rules.js imports nothing; the isolation walk -- roots
  *      server.js, services/model.js, services/jobs.js, utils/pythag-win-prob.js
  *      -- passes with the new router; planted-violation self-tests.
@@ -32,7 +35,8 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const R = path.join(__dirname, '..');
-const SCRATCH_COPY = process.env.MLB_DB_PATH || null;           // the suite's scratch copy (check a)
+const SCRATCH_COPY = process.env.MLB_DB_PATH || null;           // the suite's scratch copy (MLB_DB_PATH for the runner's environment)
+const PRE486 = path.join(R, 'data/mlb-before-486.db');           // the pinned pre-#486 game_log copy (check a), read-only
 const TMP_DB = path.join(os.tmpdir(), '__tt_card_a_' + process.pid + '.db');
 process.env.MLB_DB_PATH = TMP_DB;                                // NEVER data/mlb.db: set before db/schema can load
 const TOKEN = 'test-token-' + crypto.randomBytes(8).toString('hex');
@@ -72,8 +76,8 @@ function ok(label, cond, detail) {
       let status = 0, log;
       try {
         log = execFileSync(process.execPath, ['--max-old-space-size=1536', path.join(R, 'scripts/run-polymarket-top-traders-backtest.js'),
-          '--pm-db', pmDb, '--mlb-db', SCRATCH_COPY, '--json', out, ...extra],
-        { cwd: R, encoding: 'utf8', env: Object.assign({}, process.env, { MLB_DB_PATH: SCRATCH_COPY }) });
+          '--pm-db', pmDb, '--mlb-db', PRE486, '--json', out, ...extra],
+        { cwd: R, encoding: 'utf8', env: Object.assign({}, process.env, { MLB_DB_PATH: SCRATCH_COPY || path.join(os.tmpdir(), '__tt_card_a_runner_' + process.pid + '.db') }) });
       } catch (e) { status = e.status; log = String(e.stdout || '') + String(e.stderr || ''); }
       const json = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null;
       try { fs.unlinkSync(out); } catch (e) { /* not written */ }
@@ -82,10 +86,12 @@ function ok(label, cond, detail) {
     const gateLine = (log) => (log.match(/GATE 1[^\n]*/) || [''])[0];
     // Self-test: one figure altered in the reference artifact must be caught by the comparison.
     const altered = (ref) => { const x = JSON.parse(JSON.stringify(ref)); x.results[0].W += 1; return x; };
-    if (!SCRATCH_COPY || !fs.existsSync(PM)) {
-      console.log('  NOTE  needs data/polymarket.db and MLB_DB_PATH=<scratch copy outside the repo> (the suite passes one)');
-    } else if (path.resolve(SCRATCH_COPY) === realMlb || path.resolve(SCRATCH_COPY).startsWith(path.resolve(R) + path.sep)) {
-      ok('refuses a database inside the repo (never data/mlb.db)', false, SCRATCH_COPY);
+    if (!fs.existsSync(PRE486)) {
+      console.log('  NOTE  pre-#486 copy not present (data/mlb-before-486.db): reproduction skipped, not failed');
+    } else if (!fs.existsSync(PM)) {
+      console.log('  NOTE  needs data/polymarket.db: reproduction skipped, not failed');
+    } else if (path.resolve(PRE486) === realMlb) {
+      ok('refuses the live data/mlb.db (only the pinned pre-#486 copy reproduces the artifacts)', false, PRE486);
     } else {
       // The corrected data: --corrected mode must reproduce the corrected artifact.
       const C = JSON.parse(read(CORRECTED));

@@ -1,6 +1,7 @@
 const { isSaneML } = require('../utils/market-sanity');
 // v2 2026-04-09T20:19:46.283Z
 const fetch = require('node-fetch');
+const { normAbbr, gameIdFor } = require('../utils/statsapi-ids');
 const { db } = require('../db/schema');
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
@@ -1193,18 +1194,9 @@ async function fetchSchedule(dateStr) {
     return [];
   }
 
-  // statsapi → app abbr normalization. Mirrors the TEAM_NORM map in
-  // services/jobs.js so bootstrap rows produce the SAME game_id RotoWire
-  // and the Unabated odds path would compute for the same matchup.
-  // Known divergences:
-  //   WSH (statsapi)  → WAS (us)
-  //   OAK (statsapi)  → ATH (us, post-2025 venue change)
-  //   AZ  (statsapi)  → ARI (us — sportsbook + FanGraphs convention)
-  // Verified 2026-04-25 by spot-checking a slate where SD@AZ surfaced as
-  // sd-az under statsapi's raw abbr but the Unabated odds path keyed on
-  // sd-ari, breaking the join.
-  const ABBR_NORM = { 'WSH': 'WAS', 'OAK': 'ATH', 'AZ': 'ARI' };
-  const norm = a => (ABBR_NORM[a] || a || '').toUpperCase();
+  // statsapi -> app abbr normalization and the game_id rule: utils/statsapi-ids.js
+  // (one implementation, shared with the #486 game_log repair).
+  const norm = normAbbr;
 
   // Format gameDate ISO → "h:MM AM/PM ET", matching RotoWire's convention
   // (the "ET" suffix is what RotoWire's .lineup__time element emits, so
@@ -1289,12 +1281,9 @@ async function fetchSchedule(dateStr) {
     if (g.status?.detailedState === 'Final') continue;
     const aPP = g.teams?.away?.probablePitcher;
     const hPP = g.teams?.home?.probablePitcher;
-    // Doubleheaders: statsapi gives gameNumber 1/2/3 per leg. Single games
-    // are gameNumber 1 implicitly. game_id appends '-g{N}' when N > 1 so the
-    // UNIQUE(game_date, game_id) constraint holds across legs.
+    // Doubleheaders: '-g{N}' when gameNumber N > 1 (utils/statsapi-ids.js gameIdFor).
     const gameNumber = g.gameNumber || 1;
-    const baseGameId = (awayAbbr + '-' + homeAbbr).toLowerCase();
-    const finalGameId = gameNumber > 1 ? baseGameId + '-g' + gameNumber : baseGameId;
+    const finalGameId = gameIdFor(awayAbbr, homeAbbr, gameNumber);
 
     // Sanity-warn (do NOT reject) when park-local first-pitch falls before
     // 8 AM. Real makeup-doubleheader Game 2 legs sometimes carry a
