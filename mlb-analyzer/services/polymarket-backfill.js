@@ -57,10 +57,13 @@
 
 const { _internal: POLY } = require('./polymarket');   // POLY_SLUG_TO_ABBR / resolveTeamSlug only
 
-const PAGE = 500;
-const MAX_OFFSET = 10000;          // largest offset /trades accepts
-const GAMMA = 'https://gamma-api.polymarket.com';
-const DATA = 'https://data-api.polymarket.com';
+// Client, discovery, game matching and the half-open window fetch live in
+// utils/polymarket-trades.js (moved 2026-10-01, unchanged), shared with the
+// live top-traders job: one implementation, nothing copied.
+const PT = require('../utils/polymarket-trades');
+const { PAGE, MAX_OFFSET, GAMMA, makeClient, parseStart, marketFromEvent, slugDate, isGame2, SLUG_RE,
+  END_DATE_SLACK_DAYS, iterMoneylineMarkets, etGameTimeToUtc, FALLBACK_TOLERANCE_S, REGULAR_SEASON,
+  gameIndexFromRows, resolveCutoff, pickGame, parseTrade, fetchWindows } = PT;
 
 // ---------------------------------------------------------------- store
 const SCHEMA = `
@@ -119,62 +122,7 @@ function openStore(Database, file) {
   return db;
 }
 
-// ---------------------------------------------------------------- http
-// A tiny client: sequential, a minimum gap between requests, exponential
-// backoff on 429 / 5xx / network errors, every retry logged and counted.
-function makeClient(opts) {
-  const o = Object.assign({ minGapMs: 150, maxAttempts: 8, log: console.log, fetchImpl: globalThis.fetch,
-    sleep: (ms) => new Promise(r => setTimeout(r, ms)), now: () => Date.now() }, opts || {});
-  const stats = { requests: 0, retries: 0, http429: 0 };
-  let last = 0;
-  async function getJson(url) {
-    for (let attempt = 1; ; attempt++) {
-      const wait = last + o.minGapMs - o.now();
-      if (wait > 0) await o.sleep(wait);
-      last = o.now();
-      stats.requests++;
-      let status = 0, body = null, err = null;
-      try {
-        const r = await o.fetchImpl(url, { headers: { 'User-Agent': 'mlb-analyzer-backfill (read-only)' } });
-        status = r.status;
-        const txt = await r.text();
-        try { body = JSON.parse(txt); } catch (e) { body = txt; }
-      } catch (e) { err = e; }
-      const retryable = err || status === 429 || status >= 500;
-      if (!retryable) {
-        if (status >= 400) { const e = new Error('HTTP ' + status + ' ' + JSON.stringify(body).slice(0, 200) + ' ' + url); e.status = status; throw e; }
-        return body;
-      }
-      if (status === 429) stats.http429++;
-      if (attempt >= o.maxAttempts) throw new Error('giving up after ' + attempt + ' attempts: ' + (err ? err.message : 'HTTP ' + status) + ' ' + url);
-      const backoff = Math.min(60000, 1000 * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 250);
-      stats.retries++;
-      o.log('[retry] attempt ' + attempt + ' ' + (err ? err.message : 'HTTP ' + status) + ' -> waiting ' + backoff + ' ms ' + url.slice(0, 140));
-      await o.sleep(backoff);
-    }
-  }
-  return { getJson, stats };
-}
-
 // ---------------------------------------------------------------- discovery
-function parseStart(s) {
-  if (!s) return null;
-  let t = String(s).replace(' ', 'T');
-  if (/[+-]\d\d$/.test(t)) t += ':00';
-  const ms = Date.parse(t);
-  return isNaN(ms) ? null : Math.floor(ms / 1000);
-}
-function marketFromEvent(e) {
-  const m = (e.markets || []).find(x => x.sportsMarketType === 'moneyline');
-  if (!m) return null;
-  const parse = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || []); } catch (x) { return []; } };
-  const outcomes = parse(m.outcomes), prices = parse(m.outcomePrices);
-  const ones = prices.map((p, i) => (String(p) === '1' ? i : -1)).filter(i => i >= 0);
-  const resolved = !!m.closed && ones.length === 1 && prices.length === 2;
-  return { condition_id: m.conditionId, slug: e.slug, event_id: String(e.id),
-    outcome0: outcomes[0] || null, outcome1: outcomes[1] || null,
-    poly_start_utc: parseStart(m.gameStartTime), resolved: resolved ? 1 : 0, winner_idx: resolved ? ones[0] : null };
-}
 function upsertMarket(db, m) {
   db.prepare(`INSERT INTO markets (condition_id, slug, event_id, outcome0, outcome1, poly_start_utc, resolved, winner_idx)
     VALUES (@condition_id, @slug, @event_id, @outcome0, @outcome1, @poly_start_utc, @resolved, @winner_idx)
@@ -190,71 +138,17 @@ async function discoverSlugs(db, client, slugs) {
   }
   return n;
 }
-// ... or by date range (the full run). Gamma refuses offsets past ~2,100 and
-// 2025 fills that, so walk 3-day end_date windows; the game date filter is
-// the slug's own date.
-//
-// An event's end_date is NOT its game date. Measured 2026-09-30: the final
-// weekend's moneyline events (e.g. mlb-nym-wsh-2026-09-27) carry endDate
-// 2026-10-04, a week after the game. The walk used to stop 3 days past `to`,
-// so all 18 of those markets were silently missed. It now runs
-// END_DATE_SLACK_DAYS past `to`; events outside [from, to] by slug date are
-// still skipped.
-const END_DATE_SLACK_DAYS = 21;
+// ... or by date range (the full run): utils/polymarket-trades.js iterMoneylineMarkets
+// (3-day end_date windows, END_DATE_SLACK_DAYS past `to`, filtered by slug date).
 async function discoverRange(db, client, from, to) {
-  const addDays = (d, k) => new Date(Date.parse(d + 'T00:00:00Z') + k * 864e5).toISOString().slice(0, 10);
   let n = 0;
-  for (const closed of ['true', 'false']) {
-    for (let day = addDays(from, -3); day <= addDays(to, END_DATE_SLACK_DAYS); day = addDays(day, 3)) {
-      for (let off = 0; ; off += 100) {
-        const evs = await client.getJson(GAMMA + '/events?series_id=3&closed=' + closed + '&limit=100&offset=' + off
-          + '&end_date_min=' + day + 'T00:00:00Z&end_date_max=' + addDays(day, 3) + 'T00:00:00Z');
-        if (!Array.isArray(evs) || !evs.length) break;
-        for (const e of evs) {
-          const sd = slugDate(e.slug);
-          if (!sd || sd < from || sd > to) continue;
-          const m = marketFromEvent(e);
-          if (m) { upsertMarket(db, m); n++; }
-        }
-        if (evs.length < 100) break;
-      }
-    }
-  }
+  for await (const m of iterMoneylineMarkets(client, from, to)) { upsertMarket(db, m); n++; }
   return n;
 }
 
 // ---------------------------------------------------------------- matching
-const SLUG_RE = /^mlb-([a-z]+)-([a-z]+)-(\d{4}-\d{2}-\d{2})(-dh2)?$/;
-function slugDate(slug) { const m = SLUG_RE.exec(slug || ''); return m ? m[3] : null; }
-const isGame2 = (gid) => /-(g)?2$/.test(gid);
-
-// game_log.game_time is a display string, "h:mm AM|PM ET": the scheduled
-// start on game_date as read on a New York clock (services/first-pitch.js
-// explains why it is never used for arithmetic elsewhere). This converts it
-// to a UTC instant, with DST taken from the platform's America/New_York
-// rules rather than a hand-coded offset. Anything not in exactly that shape
-// -- no "ET", a null, a 24h clock -- returns null: we do not guess a zone.
-// -> epoch seconds | null
-const NY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hourCycle: 'h23',
-  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-function nyOffsetMinutes(ms) {                 // New York wall clock minus UTC, at instant ms
-  const p = {};
-  for (const x of NY.formatToParts(new Date(ms))) p[x.type] = x.value;
-  return (Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - ms) / 60000;
-}
-function etGameTimeToUtc(gameDate, gameTime) {
-  const t = /^\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s+ET\s*$/i.exec(gameTime || '');
-  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(gameDate || '');
-  if (!t || !d || +t[1] < 1 || +t[1] > 12 || +t[2] > 59) return null;
-  const hour = (+t[1] % 12) + (t[3].toUpperCase() === 'PM' ? 12 : 0);
-  const wall = Date.UTC(+d[1], +d[2] - 1, +d[3], hour, +t[2]);
-  // Two passes: the offset is looked up at the instant being solved for, so a
-  // time on a DST-change day settles on the offset actually in force then.
-  let ms = wall - nyOffsetMinutes(wall) * 60000;
-  ms = wall - nyOffsetMinutes(ms) * 60000;
-  return Math.floor(ms / 1000);
-}
-const FALLBACK_TOLERANCE_S = 15 * 60;          // game_time vs Polymarket gameStartTime
+// game_time -> UTC (etGameTimeToUtc) and the 15-minute fallback tolerance:
+// utils/polymarket-trades.js.
 
 // Proves (or disproves) the game_time rule on every game_log row that has
 // BOTH fields. Read-only. A mismatch is 'no_et_zone' (the string is not in
@@ -279,44 +173,12 @@ function auditGameTimeRule(mlbDb) {
   return { total: rows.length, exact, rate: rows.length ? exact / rows.length : null, byKind, mismatches };
 }
 
-// MLB's regular season, per statsapi.mlb.com /api/v1/seasons/{year}
-// (regularSeasonStartDate / regularSeasonEndDate, read 2026-09-30). Regular
-// season only (Mike, 2026-09-30): a slug date before the start is spring
-// training, after the end is postseason, both excluded. NOT game_log's first
-// date: game_log starts 2026-04-04, nine days after opening day (#486), and
-// using it mislabeled ~110 regular-season markets as spring training.
-const REGULAR_SEASON = {
-  2026: { start: '2026-03-25', end: '2026-09-27' },     // opener NYY @ SF; postseason from 09-28
-};
+// MLB's regular season (REGULAR_SEASON) and the cutoff rule (resolveCutoff):
+// utils/polymarket-trades.js.
 
 // game_log lookup, built once from a READ-ONLY handle.
 function loadGameIndex(mlbDb) {
-  const byKey = new Map(), dates = new Set();
-  for (const g of mlbDb.prepare('SELECT game_date, game_id, scheduled_start_utc, first_pitch_utc, game_time, COALESCE(is_removed,0) removed FROM game_log').iterate()) {
-    dates.add(g.game_date);
-    if (g.removed) continue;
-    const [a, h] = g.game_id.split('-');
-    const k = g.game_date + '|' + a + '|' + h;
-    if (!byKey.has(k)) byKey.set(k, []);
-    byKey.get(k).push({ game_id: g.game_id, game_date: g.game_date, scheduled_start_utc: g.scheduled_start_utc,
-      first_pitch_utc: g.first_pitch_utc, game_time: g.game_time });
-  }
-  return { byKey, dates };
-}
-
-// The pre-game cutoff for a matched game (decision 4 and its fallback).
-// -> { cutoff_utc, cutoff_source } | { reason }
-function resolveCutoff(g, polyStartUtc) {
-  const s = parseStart(g.scheduled_start_utc), f = parseStart(g.first_pitch_utc);
-  if (f != null && (s == null || f < s)) return { cutoff_utc: f, cutoff_source: 'first_pitch_utc' };
-  if (s != null) return { cutoff_utc: s, cutoff_source: 'scheduled_start_utc' };
-  if (!g.game_time) return { reason: 'no_start_time' };                     // no start field at all
-  const t = etGameTimeToUtc(g.game_date, g.game_time);
-  if (t == null) return { reason: 'game_time_unparseable' };                 // e.g. no "ET" zone
-  // A postponed game keeps its original game_time slot while Polymarket's
-  // start moves to the make-up date, so this check is what catches it.
-  if (polyStartUtc == null || Math.abs(t - polyStartUtc) > FALLBACK_TOLERANCE_S) return { reason: 'start_time_unconfirmed' };
-  return { cutoff_utc: t, cutoff_source: 'fallback_confirmed' };
+  return gameIndexFromRows(mlbDb.prepare('SELECT game_date, game_id, scheduled_start_utc, first_pitch_utc, game_time, COALESCE(is_removed,0) removed FROM game_log').iterate());
 }
 
 // Markets excluded by hand, each with its evidence. Checked before any
@@ -333,7 +195,7 @@ function matchMarket(m, gi, allSlugs) {
   if (MANUAL_EXCLUSIONS[m.slug]) return { status: 'excluded', reason: MANUAL_EXCLUSIONS[m.slug] };
   const p = SLUG_RE.exec(m.slug || '');
   if (!p) return { status: 'excluded', reason: 'nonstandard_slug' };
-  const date = p[3], dh2 = !!p[4];
+  const date = p[3];
   const season = REGULAR_SEASON[date.slice(0, 4)];
   if (!season) return { status: 'excluded', reason: 'season_dates_unknown' };
   if (date < season.start) return { status: 'excluded', reason: 'spring_training' };
@@ -343,18 +205,9 @@ function matchMarket(m, gi, allSlugs) {
   if (!t0 || !t1) return { status: 'excluded', reason: 'unresolved_team_name' };
   let cands = gi.byKey.get(date + '|' + t0 + '|' + t1), outcome0IsHome = 0;
   if (!cands) { cands = gi.byKey.get(date + '|' + t1 + '|' + t0); outcome0IsHome = 1; }
-  if (!cands || !cands.length) return { status: 'excluded', reason: 'unmatched' };
-  let g;
-  if (cands.length === 1) {
-    if (dh2 && !isGame2(cands[0].game_id)) return { status: 'excluded', reason: 'unmatched' };
-    g = cands[0];
-  } else {
-    const g1 = cands.find(c => !isGame2(c.game_id)), g2 = cands.find(c => isGame2(c.game_id));
-    if (dh2) g = g2;
-    else if (allSlugs.has(m.slug + '-dh2')) g = g1;           // an explicit game-2 market exists: this is game 1
-    else return { status: 'excluded', reason: 'dh_single_market' };
-    if (!g) return { status: 'excluded', reason: 'unmatched' };
-  }
+  const pg = pickGame(m.slug, cands, allSlugs);
+  if (pg.reason) return { status: 'excluded', reason: pg.reason };
+  const g = pg.g;
   const c = resolveCutoff(g, m.poly_start_utc);
   if (c.reason) return { status: 'excluded', reason: c.reason };
   if (!m.resolved) return { status: 'excluded', reason: 'unresolved' };
@@ -476,9 +329,6 @@ function walletIdFn(db) {
     return id;
   };
 }
-const tradesUrl = (cid, a, b, offset, limit) => DATA + '/trades?' + new URLSearchParams({
-  market: cid, takerOnly: 'false', start: String(a), end: String(b), offset: String(offset), limit: String(limit) });
-
 // Fetch every pre-game fill of one matched market, KEEPING EVERY ROW (decision
 // 1). Windows are half-open [t_start, t_end): the first is [0, cutoff), so a
 // fill at or after the cutoff is never in any window. A trade at ts belongs to
@@ -500,42 +350,31 @@ async function fetchMarket(db, client, m, opts) {
   const delWin = db.prepare('DELETE FROM fills WHERE market_id = ? AND ts >= ? AND ts < ?');
   const setWin = db.prepare('UPDATE windows SET status = ?, fills = ?, dups = 0 WHERE market_id = ? AND t_start = ? AND t_end = ?');
   const addWin = db.prepare("INSERT OR IGNORE INTO windows (market_id, t_start, t_end, status, half_open) VALUES (?, ?, ?, 'pending', 1)");
-  for (;;) {
-    const w = db.prepare("SELECT t_start, t_end FROM windows WHERE market_id = ? AND status = 'pending' ORDER BY t_end DESC LIMIT 1").get(m.id);
-    if (!w) break;
-    delWin.run(m.id, w.t_start, w.t_end);                      // resume safety: drop a partial window
-    // Over the cap? One row at offset MAX_OFFSET means > MAX_OFFSET fills.
-    const probe = await client.getJson(tradesUrl(m.condition_id, w.t_start, w.t_end - 1, MAX_OFFSET, 1));
-    if (Array.isArray(probe) && probe.length) {
-      if (w.t_end - w.t_start <= 1) throw new Error('window [' + w.t_start + ', ' + w.t_end + ') is a single second over the offset cap: cannot split -- ' + m.slug);
-      // [a, b) -> [a, mid) + [mid, b): a trade at exactly mid goes to the second, only.
-      const mid = Math.floor((w.t_start + w.t_end) / 2);
-      db.transaction(() => {
-        setWin.run('split', null, m.id, w.t_start, w.t_end);
-        addWin.run(m.id, w.t_start, mid);
-        addWin.run(m.id, mid, w.t_end);
-        db.prepare('UPDATE markets SET split_needed = 1 WHERE id = ?').run(m.id);
-      })();
-      continue;
-    }
-    // Page it. Newest first; the window is under the cap, so offsets never pass it.
+  // The window store is this database's windows table, so a kill resumes at window level.
+  const store = {
+    next: () => db.prepare("SELECT t_start, t_end FROM windows WHERE market_id = ? AND status = 'pending' ORDER BY t_end DESC LIMIT 1").get(m.id) || null,
+    begin: (w) => delWin.run(m.id, w.t_start, w.t_end),           // resume safety: drop a partial window
+    split: (w, mid) => db.transaction(() => {
+      setWin.run('split', null, m.id, w.t_start, w.t_end);
+      addWin.run(m.id, w.t_start, mid);
+      addWin.run(m.id, mid, w.t_end);
+      db.prepare('UPDATE markets SET split_needed = 1 WHERE id = ?').run(m.id);
+    })(),
+    done: (w, n) => setWin.run('done', n, m.id, w.t_start, w.t_end),
+  };
+  await fetchWindows(client, m.condition_id, store, (w, page) => {
     let n = 0;
-    for (let off = 0; off <= MAX_OFFSET; off += PAGE) {
-      const page = await client.getJson(tradesUrl(m.condition_id, w.t_start, w.t_end - 1, off, PAGE));
-      if (!Array.isArray(page)) throw new Error('non-array page for ' + m.slug);
-      db.transaction(() => {
-        for (const t of page) {
-          const ts = Number(t.timestamp);
-          if (!(ts >= w.t_start && ts < w.t_end && ts < m.cutoff_utc)) continue;   // defensive: the API filters too
-          insFill.run(m.id, walletId(t.proxyWallet), ts, t.side === 'BUY' ? 1 : -1, Number(t.outcomeIndex), Number(t.price), Number(t.size));
-          n++;
-        }
-      })();
-      o.onPage();
-      if (page.length < PAGE) break;
-    }
-    setWin.run('done', n, m.id, w.t_start, w.t_end);
-  }
+    db.transaction(() => {
+      for (const raw of page) {
+        const t = parseTrade(raw);
+        if (!(t.ts >= w.t_start && t.ts < w.t_end && t.ts < m.cutoff_utc)) continue;   // defensive: the API filters too
+        insFill.run(m.id, walletId(t.wallet), t.ts, t.side, t.outcome, t.price, t.size);
+        n++;
+      }
+    })();
+    o.onPage();
+    return n;
+  }, m.slug);
   const wc = db.prepare("SELECT COUNT(*) c, SUM(fills) f FROM windows WHERE market_id = ? AND status = 'done'").get(m.id);
   db.prepare("UPDATE markets SET status = 'fetched', window_count = ?, fills_stored = ?, duplicates_dropped = 0, requests = requests + ? WHERE id = ?")
     .run(wc.c, wc.f || 0, client.stats.requests - req0, m.id);
