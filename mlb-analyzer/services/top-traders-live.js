@@ -15,12 +15,26 @@
 // serial job queue (services/jobs.js _queued, passed in by server.js as
 // withMemLog), so a pass never runs alongside another job. A tick while that
 // job is still queued or running enqueues nothing. Per game:
-//   - provisional passes at about T-3h, T-1h and T-15m before the scheduled
-//     start (game_log.scheduled_start_utc); a late start runs only the latest
-//     due pass. None at or after the cutoff.
+//   - provisional passes at T-24h, T-12h, T-3h, T-1h and T-15m before the
+//     scheduled start (PASSES; amended 2026-10-02 at the owner's request --
+//     T-36h was dropped because game_log loads a date's games only about 32 h
+//     ahead, median). Times are taken from the CURRENT scheduled_start_utc on
+//     every tick, so a moved start re-times the remaining passes. A late load
+//     runs only the latest due pass. None at or after the cutoff. Look-ahead:
+//     the previous PT date through one PT date ahead (what game_log holds).
+//   - a provisional pass that finds no Polymarket market yet writes nothing and
+//     logs it; that pass is remembered (in memory) as tried, and the next pass
+//     tries again.
 //   - the final pass once BOTH odds_locked_at and the cutoff have passed (+2
 //     minutes). With no lock 6 hours after the cutoff, the final row records
 //     the price-step skip instead (decision 6, #488).
+//
+// PLACEHOLDER GUARD (2026-10-02): only game_log rows that are not removed and
+// whose game_id is exactly two valid team codes (the backfill matcher's set:
+// services/polymarket.js POLY_SLUG_TO_ABBR), plus the doubleheader suffix the
+// matcher accepts (-2 / -g2), are processed. Anything else -- e.g. the stale
+// postseason placeholder "atl/phi-lad", or the All-Star "al-nl" -- is skipped
+// and logged once per game id: no fetch, no provisional row, no final row.
 //
 // TRADES: there is no trade id, so NOTHING is de-duplicated; every row
 // Polymarket returns is kept, identical repeats included. All fetching goes
@@ -54,11 +68,25 @@ const PT = require('../utils/polymarket-trades');
 const RULES = require('../utils/top-traders/rules');
 const { _internal: POLY } = require('./polymarket');   // resolveTeamSlug only (team name -> abbr)
 
-const PASSES = [['t180', 180 * 60], ['t60', 60 * 60], ['t15', 15 * 60]];   // [name, seconds before the scheduled start]
+// [name, seconds before the scheduled start], earliest first (names are minutes, kept stable for stored state).
+const PASSES = [['t1440', 24 * 3600], ['t720', 12 * 3600], ['t180', 3 * 3600], ['t60', 3600], ['t15', 15 * 60]];
 const LAG_S = 120;                       // passes stop 2 minutes before now (trades API indexing lag)
 const NO_LOCK_GIVE_UP_S = 6 * 3600;      // final without a lock: record the price-step skip this long after the cutoff
 const TICK_MS = 5 * 60 * 1000;
 
+// The placeholder guard. -> true for 'atl-lad', 'nyy-bos-g2'; false for 'atl/phi-lad', 'al-nl'.
+const TEAM_CODES = new Set(Object.values(POLY.POLY_SLUG_TO_ABBR));
+function validGameId(id) {
+  const m = /^([a-z]+)-([a-z]+)(-g?2)?$/.exec(String(id || ''));
+  return !!m && m[1] !== m[2] && TEAM_CODES.has(m[1]) && TEAM_CODES.has(m[2]);
+}
+const _loggedSkips = new Set();                  // date|game id|reason already logged (once each)
+function logSkipOnce(log, date, id, why) {
+  const k = date + '|' + id + '|' + why;
+  if (_loggedSkips.has(k)) return;
+  _loggedSkips.add(k);
+  log('[top-traders-live] ' + date + ' ' + id + ': skipped -- ' + why + ' (no fetch, no rows)');
+}
 const isOn = (env) => String((env || process.env).TOP_TRADERS_LIVE || '').trim().toLowerCase() === 'on';
 let _db = null;
 const appDb = () => (_db || (_db = require('../db/schema').db));   // the app's handle; opened lazily
@@ -98,7 +126,7 @@ const marketRow = (db, g) => db.prepare('SELECT * FROM top_trader_live_markets W
 // (team names -> abbrs, doubleheaders, cutoff): the backfill's own rules, from
 // utils/polymarket-trades.js. Runs only when a game of the date has no market yet.
 async function discoverMarkets(db, client, date, games, nowS) {
-  const live = games.filter(g => !g.removed);
+  const live = games.filter(g => !g.removed && validGameId(g.game_id));
   if (live.every(g => { const r = marketRow(db, g); return r && r.condition_id; })) return 0;
   const markets = [];
   for await (const m of PT.iterMoneylineMarkets(client, date, date)) markets.push(m);
@@ -123,12 +151,7 @@ async function discoverMarkets(db, client, date, games, nowS) {
         outcome0_is_home: o0h, cutoff_utc: c.cutoff_utc || null, cutoff_source: c.cutoff_source || null, reason: c.reason || null, at: isoNow(nowS) });
       matched.add(pg.g.game_id);
     }
-    for (const g of live) {
-      if (matched.has(g.game_id)) continue;
-      const r = marketRow(db, g);
-      if (!r || !r.condition_id) up.run({ game_date: date, game_id: g.game_id, condition_id: null, slug: null, outcome0_is_home: null,
-        cutoff_utc: null, cutoff_source: null, reason: 'no_polymarket_market', at: isoNow(nowS) });
-    }
+    // A game with no market yet: nothing is written; the next pass discovers again.
   })();
   return markets.length;
 }
@@ -230,10 +253,14 @@ async function runGame(opts, gameDate, gameId, kind, passName) {
   if (!isOn(opts.env)) return { disabled: true };                       // KILL SWITCH: no fetch, no write
   const { db, client, nowS } = opts;
   const log = opts.log || (() => {});
+  // PLACEHOLDER GUARD: no fetch, no provisional row, no final row.
+  if (!validGameId(gameId)) { logSkipOnce(log, gameDate, gameId, 'not two valid team codes'); return { skipped: 'invalid_game_id' }; }
+  const games = gamesOn(db, gameDate);
+  const row = games.find(x => x.game_id === gameId);
+  if (row && row.removed) { logSkipOnce(log, gameDate, gameId, 'removed in game_log'); return { skipped: 'removed' }; }
   const snap = snapshotFor(db, gameDate);
   if (snap.reason) { log('[top-traders-live] ' + gameDate + ' ' + gameId + ': nothing done -- ' + snap.reason); return { skipped: snap.reason }; }
-  const games = gamesOn(db, gameDate);
-  const g = games.find(x => x.game_id === gameId && !x.removed);
+  const g = row;
   if (!g) return { skipped: 'no_game_log_row' };
   // Idempotent: once a game has its final row, no pass of either kind fetches or writes anything for it.
   if (hasFinal(db, g)) return { skipped: 'final_exists' };
@@ -256,6 +283,8 @@ async function runGame(opts, gameDate, gameId, kind, passName) {
     return Object.assign(base, { skipped: 'not_eligible' });
   }
   if (!mkt || !mkt.condition_id) {
+    if (kind === 'provisional') log('[top-traders-live] ' + gameDate + ' ' + gameId + ': ' + ((mkt && mkt.reason) || 'no Polymarket market listed yet')
+      + ' -- nothing written; the next pass tries again');
     if (kind === 'final') writeFinal(db, g, logRow(g, {}, snap, 'final', 0, nowS, { skip: (mkt && mkt.reason) || 'no_polymarket_market', wallets: null }));
     return Object.assign(base, { skipped: (mkt && mkt.reason) || 'no_polymarket_market', requests: client.stats.requests - req0 });
   }
@@ -309,11 +338,14 @@ function summarize(g, mkt, lean) {
 
 // ---------------------------------------------------------------- what is due
 // -> [{ game_date, game_id, kind, pass }]  (pure: reads game_log and the job's own tables)
-function duePasses(db, nowS, dates) {
+// opts: { tried: Set of 'date|game_id|pass' (provisional passes that found no market), onSkip(date, id, why) }
+function duePasses(db, nowS, dates, opts) {
+  const o = opts || {}, tried = o.tried || new Set(), onSkip = o.onSkip || (() => {});
   const due = [];
   for (const date of dates) {
     for (const g of gamesOn(db, date)) {
-      if (g.removed) continue;
+      if (g.removed) { onSkip(date, g.game_id, 'removed in game_log'); continue; }
+      if (!validGameId(g.game_id)) { onSkip(date, g.game_id, 'not two valid team codes'); continue; }
       const start = PT.parseStart(g.scheduled_start_utc);
       const c = PT.resolveCutoff(g, null);
       if (start == null || c.reason) continue;
@@ -327,12 +359,14 @@ function duePasses(db, nowS, dates) {
       if (nowS >= cutoff) continue;
       const done = new Set(String((stateOf(db, g) || {}).passes || '').split(',').filter(Boolean));
       const latest = PASSES.filter(([, off]) => nowS >= start - off).pop();     // the latest pass whose time has come
-      if (latest && !done.has(latest[0])) due.push({ game_date: date, game_id: g.game_id, kind: 'provisional', pass: latest[0] });
+      if (latest && !done.has(latest[0]) && !tried.has(date + '|' + g.game_id + '|' + latest[0])) due.push({ game_date: date, game_id: g.game_id, kind: 'provisional', pass: latest[0] });
     }
   }
   return due;
 }
 const ptDate = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+// The scheduler's dates: the previous PT date through one PT date ahead (what game_log holds).
+const lookAheadDates = (nowMs) => { const t = ptDate(nowMs); return [addDays(t, -1), t, addDays(t, 1)]; };
 
 // ---------------------------------------------------------------- scheduler
 // queued: services/jobs.js _queued (exported as withMemLog). -> { stop, tick } | null when off.
@@ -342,16 +376,17 @@ function startTopTradersLive(o) {
     log('[top-traders-live] TOP_TRADERS_LIVE is off: the live lean job is disabled (no fetches, no writes). Set TOP_TRADERS_LIVE=on to enable.');
     return null;
   }
-  log('[top-traders-live] TOP_TRADERS_LIVE=on: the live lean job is enabled (passes at T-3h / T-1h / T-15m, final after lock and cutoff; every 5 min through the job queue).');
+  log('[top-traders-live] TOP_TRADERS_LIVE=on: the live lean job is enabled (passes at T-24h / T-12h / T-3h / T-1h / T-15m, final after lock and cutoff; every 5 min through the job queue).');
   let pending = false;
+  const tried = new Set();                          // provisional passes that found no market (retried at the next pass)
   const tick = () => {
     if (pending) return null;                         // the previous tick's job is still queued or running
     const nowMs = (o.nowMs || Date.now)();
     let due;
     try {
       const db = o.db || appDb();
-      const today = ptDate(nowMs);
-      due = duePasses(db, Math.floor(nowMs / 1000), [addDays(today, -1), today]);
+      due = duePasses(db, Math.floor(nowMs / 1000), lookAheadDates(nowMs),
+        { tried, onSkip: (date, id, why) => logSkipOnce(log, date, id, why) });
     } catch (e) { log('[top-traders-live] tick failed: ' + (e && e.message ? e.message : e)); return null; }
     if (!due.length) return null;
     pending = true;
@@ -361,6 +396,7 @@ function startTopTradersLive(o) {
       for (const d of due) {
         try {
           const r = await runGame({ db, client, nowS: Math.floor((o.nowMs || Date.now)() / 1000), env, log }, d.game_date, d.game_id, d.kind, d.pass);
+          if (d.kind === 'provisional' && r && r.skipped === 'no_polymarket_market') tried.add(d.game_date + '|' + d.game_id + '|' + d.pass);
           log('[top-traders-live] ' + d.pass + ' ' + d.game_date + ' ' + d.game_id + ' ' + JSON.stringify(r));
         } catch (e) {
           log('[top-traders-live] ' + d.pass + ' ' + d.game_date + ' ' + d.game_id + ' FAILED: ' + (e && e.message ? e.message : e));
@@ -376,6 +412,6 @@ function startTopTradersLive(o) {
 }
 
 module.exports = {
-  startTopTradersLive, runGame, duePasses, snapshotFor, isOn,
+  startTopTradersLive, runGame, duePasses, snapshotFor, isOn, validGameId, lookAheadDates,
   _internals: { PASSES, LAG_S, NO_LOCK_GIVE_UP_S, leanFromStored, fetchAndStore, qualifiedByAddr, discoverMarkets, setState, stateOf },
 };
