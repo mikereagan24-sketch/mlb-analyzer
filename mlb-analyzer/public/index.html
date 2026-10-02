@@ -723,6 +723,40 @@ function _mktBaselineSuffix(s){
   if (!suffix) return '';
   return ' <span style="color:var(--text3);font-size:10px">' + suffix + '</span>';
 }
+// MONEYLINE PRICE SOURCE AT SIGNAL TIME (#484, 2026-10-02). Visibility only:
+// where the signal's price came from, whether the game's moneyline was
+// genuinely cross-checked against a second venue, and the book depth at that
+// price. Rows created before this was recorded say so rather than guess.
+// Kalshi is listed first wherever two venues appear.
+var _PS_LABEL = { kalshi: 'Kalshi', polymarket: 'Polymarket', poly: 'Polymarket' };
+function _psLabel(v){ return v == null ? null : (_PS_LABEL[String(v).toLowerCase()] || String(v)); }
+function _priceSourceText(s){
+  if (!s || s.signal_type !== 'ML') return '';
+  if (s.ml_price_source == null) return 'Source: not recorded';
+  var st = s.ml_xcheck_status === 'cross-checked' ? 'cross-checked'
+         : s.ml_xcheck_status === 'single-source' ? 'single source'
+         : s.ml_xcheck_status === 'no-market' ? 'no market'
+         : 'cross-check not recorded';
+  var depth = s.ml_depth_usd != null
+    ? ' · $' + Math.round(Number(s.ml_depth_usd)).toLocaleString('en-US') + ' at this price' : '';
+  return 'Source: ' + _psLabel(s.ml_price_source) + ' · ' + st + depth;
+}
+function _priceSourceTitle(s){
+  if (!s || s.signal_type !== 'ML' || s.ml_price_source == null) return 'Price source was not recorded for this signal (created before 2026-10-02).';
+  var vs = [s.ml_price_source, s.ml_xcheck_source].filter(Boolean).map(function(v){ return String(v).toLowerCase() === 'poly' ? 'polymarket' : String(v).toLowerCase(); });
+  vs = vs.filter(function(v, i){ return vs.indexOf(v) === i; })
+         .sort(function(a, b){ return a === 'kalshi' ? -1 : b === 'kalshi' ? 1 : a.localeCompare(b); });
+  var venues = 'Venues: ' + vs.map(_psLabel).join(', ');
+  var depth = s.ml_depth_usd != null
+    ? 'Depth: $' + Number(s.ml_depth_usd).toFixed(2) + ' of asks at or better than the $100 fill price.'
+    : 'Depth not recorded: ' + (s.ml_depth_reason || 'unknown') + '.';
+  return venues + '. ' + depth + ' Nothing is blocked on source or depth.';
+}
+function _priceSourceTag(s){
+  var t = _priceSourceText(s);
+  if (!t) return '';
+  return ' <span class="price-source-tag" title="' + escapeHtml(_priceSourceTitle(s)) + '" style="color:var(--text3);font-size:10px">' + escapeHtml(t) + '</span>';
+}
 function _mktBaselineTitle(s){
   if (!s) return '';
   var first = s.created_at ? 'first emitted ' + s.created_at : '';
@@ -2055,6 +2089,7 @@ function logBetControlFor(sig, g) {
   } else if (sig.price_venue) {
     venueBits = ' <span style="color:var(--text3);font-size:10px">@' + escapeHtml(String(sig.price_venue)) + '</span>';
   }
+  venueBits += _priceSourceTag(sig);
   var fmt = function (v) { return v == null ? '?' : (Number(v) > 0 ? '+' : '') + v; };
   // A total is a quantity, not a signed price: "8.5", never "+8.5". fmt's
   // sign prefix is correct for American odds and wrong for the line itself.
@@ -2952,7 +2987,7 @@ function renderLoggedBets(g){
       : '<span style="color:var(--text3)">pending</span>';
     return '<div style="font-size:11px;margin-top:3px">'
       + '<span style="color:var(--green)">✓ logged</span> '
-      + s.signal_type + ' ' + s.signal_side + ' @ <b>' + px(s) + '</b> ' + badge
+      + s.signal_type + ' ' + s.signal_side + ' @ <b>' + px(s) + '</b> ' + badge + _priceSourceTag(s)
       + '<div style="font-size:10px;color:var(--text3);margin-left:14px">model now: ' + why + '</div>'
       + '</div>';
   }).join('');
@@ -5293,6 +5328,7 @@ function renderSignalTracking(signals) {
       +'<span style="width:55px;color:var(--text2)">'+s.signal_side+(s.bet_line!=null?' <span title="locked '+(s.bet_locked_at||'')+'">🔒</span>':'')+'</span>'
       +'<span style="width:110px" title="'+_mktBaselineTitle(s)+'">mkt: '+fmtML(s.market_line)+_mktBaselineSuffix(s)+'</span>'
       +'<span style="width:60px">mdl: '+modelML+'</span>'
+      +_priceSourceTag(s)
       +'<span style="width:90px;display:flex;gap:4px;align-items:center">'
         +'<input id="'+inputId+'" type="number" placeholder="bet" value="'+betVal+'" style="width:56px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;font-size:11px">'
         +'<button style="font-size:10px;padding:2px 5px;border:1px solid var(--border);border-radius:4px;cursor:pointer" '

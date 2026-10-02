@@ -17,6 +17,7 @@ const { seasonRosterSet } = require('./season-roster');
 const { calcCLV, clvForSignal } = require('./clv');
 const { writeSnapshot } = require('./snapshot');
 const { retryTransient } = require('../utils/transient-retry');
+const { mlCrossCheck, normVenue, depthForSignal } = require('../utils/price-source');
 const { checkMarketMLPairSanity, isSaneSpreadPrice } = require('../utils/market-sanity');
 const {
   parseEtWallClockStringMin,
@@ -923,6 +924,7 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   let _venueByMarket = { ml_away: null, ml_home: null }; // filled in when override applies
   let _venueStaleFlag = _venueAware; // start true; cleared once a valid override lands
   let _venueServedFromSnapshot = false; // audit flag when tier-1 came from snapshot
+  let _venueRowUsed = null; // the comparison row the override read (#484: depth at signal time)
   // START STATE, COMPUTED ONCE AND EARLY. (2026-09-02)
   //
   // This used to be evaluated only at the refusal further down, AFTER the
@@ -973,6 +975,7 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
       if (snap) { rowForGame = snap; _venueServedFromSnapshot = true; }
     }
     if (rowForGame) {
+      _venueRowUsed = rowForGame;
       const bestA = _pickBestML(rowForGame, 'away');
       const bestH = _pickBestML(rowForGame, 'home');
       if (bestA) { game.market_away_ml = bestA.ml; _venueByMarket.ml_away = bestA.venue; _venueStaleFlag = false; }
@@ -1385,7 +1388,8 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   //   bet_signal_audit entries so refresh history is reconstructable,
   //   (b) detect orphan rows to deactivate at the tail.
   const existingRows = db.prepare(
-    'SELECT id, signal_type, signal_side, market_line, model_line, edge_pct, category, price_venue, venue_stale, is_active, bet_line, bet_locked_at, closing_line, clv FROM bet_signals WHERE game_date=? AND game_id=?'
+    'SELECT id, signal_type, signal_side, market_line, model_line, edge_pct, category, price_venue, venue_stale, is_active, bet_line, bet_locked_at, closing_line, clv, '
+    + 'ml_price_source, ml_xcheck_status, ml_xcheck_source, ml_depth_usd, ml_depth_reason FROM bet_signals WHERE game_date=? AND game_id=?'
   ).all(gameRow.game_date, gameRow.game_id);
   const existingByKey = {};
   for (const r of existingRows) existingByKey[r.signal_type + '|' + r.signal_side] = r;
@@ -1581,7 +1585,40 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
         + ' price ' + _preRow.market_line + ' rather than downgrading to '
         + _sigMarketLine + ' (single-source fallback).');
     }
+    // PRICE PROVENANCE AT SIGNAL TIME (#484, 2026-10-02). Display only:
+    // computed from values already in hand, after every pricing decision
+    // above, and read by nothing that decides a signal or a price.
+    //   source: the venue whose price this row carries -- the venue winner
+    //     when the override priced it, else the stored market's ml_source.
+    //   cross-check: the odds job's last unlocked-pass answer for the game.
+    //   depth: from the comparison row the override read; no new fetch.
+    // A preserved venue price (the no-downgrade guard above) keeps the
+    // provenance that came with it.
+    const _prov = { ml_price_source: null, ml_xcheck_status: null, ml_xcheck_source: null, ml_depth_usd: null, ml_depth_reason: null };
+    if (sig.type === 'ML') {
+      if (_preservedVenue) {
+        for (const k of Object.keys(_prov)) _prov[k] = _preRow[k] != null ? _preRow[k] : null;
+      } else {
+        _prov.ml_price_source = normVenue(_venueOut || gl.ml_source || null);
+        _prov.ml_xcheck_status = gl.ml_xcheck_status || null;
+        _prov.ml_xcheck_source = gl.ml_xcheck_source || null;
+        if (_venueOut) {
+          const _d = depthForSignal(_venueRowUsed, _venueOut, sig.side);
+          _prov.ml_depth_usd = _d.usd; _prov.ml_depth_reason = _d.reason;
+        } else {
+          _prov.ml_depth_reason = !_venueAware ? 'venue-aware pricing off: stored market price, no order book read'
+            : _startedNow ? 'game started: no pre-game order book read'
+            : !_venueRowUsed ? 'no venue comparison available: stored market price'
+            : 'no fillable venue quote at the $100 stake: stored market price';
+        }
+      }
+    }
     q.upsertSignal.run({
+      ml_price_source: _prov.ml_price_source,
+      ml_xcheck_status: _prov.ml_xcheck_status,
+      ml_xcheck_source: _prov.ml_xcheck_source,
+      ml_depth_usd: _prov.ml_depth_usd,
+      ml_depth_reason: _prov.ml_depth_reason,
       game_log_id: gl.id,
       game_date: gameRow.game_date,
       game_id: gameRow.game_id,
@@ -1971,13 +2008,14 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
   }
   const activeRows = db.prepare(
     "SELECT bs.id, bs.game_id, bs.signal_type, bs.signal_side, bs.market_line, bs.model_line, bs.edge_pct, bs.category, bs.price_venue, bs.venue_stale, bs.bet_locked_at, bs.updated_at, bs.created_at, bs.lineup_hash, "
-  + "gl.odds_locked_at, gl.lineups_quality_at, gl.market_away_ml, gl.market_home_ml, "
+  + "gl.odds_locked_at, gl.lineups_quality_at, gl.market_away_ml, gl.market_home_ml, gl.ml_xcheck_status, gl.ml_xcheck_source, "
   + "gl.away_lineup_json, gl.home_lineup_json, gl.away_lineup_status, gl.home_lineup_status "
   + "FROM bet_signals bs JOIN game_log gl ON gl.game_date = bs.game_date AND gl.game_id = bs.game_id "
   + "WHERE bs.game_date = ? AND bs.is_active = 1 AND bs.signal_type = 'ML'"
   ).all(dateStr);
   const updateStmt = db.prepare(
-    "UPDATE bet_signals SET market_line=?, edge_pct=?, price_venue=?, venue_stale=?, updated_at=datetime('now') "
+    "UPDATE bet_signals SET market_line=?, edge_pct=?, price_venue=?, venue_stale=?, "
+  + "ml_price_source=?, ml_xcheck_status=?, ml_xcheck_source=?, ml_depth_usd=?, ml_depth_reason=?, updated_at=datetime('now') "
   + "WHERE id=? AND bet_locked_at IS NULL"
   );
   // Snapshot-fallback tier (feat/venue-comparison-resilience, 2026-07-10).
@@ -2115,7 +2153,10 @@ async function refreshSignalBaselines(dateStr, settings, opts) {
     const modelP = impliedP(row.model_line);
     const marketP = impliedP(newMarket);
     const newEdge = Math.max(0, modelP - marketP);
-    const res = updateStmt.run(newMarket, parseFloat(newEdge.toFixed(4)), newVenue, newStale, row.id);
+    // Provenance moves with the baseline it describes (#484); display only.
+    const _d = depthForSignal(cmpRow, newVenue, row.signal_side);
+    const res = updateStmt.run(newMarket, parseFloat(newEdge.toFixed(4)), newVenue, newStale,
+      normVenue(newVenue), row.ml_xcheck_status || null, row.ml_xcheck_source || null, _d.usd, _d.reason, row.id);
     if (res.changes > 0) {
       stats.refreshed++;
       try {
@@ -5166,6 +5207,26 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
     // book, which is what single-source means.
     const _xSrc = o.poly_away_ml != null && o.poly_home_ml != null ? 'polymarket' : null;
     const singleSource = haveMarket && (!_xSrc || _xSrc === o.ml_source);
+    // A CROSS-CHECK NEEDS TWO DISTINCT VENUES. (2026-10-02, #484)
+    //
+    // singleSource above compares the second venue with THIS PASS's
+    // ml_source, which is null whenever no override priced the row this
+    // pass -- and 'polymarket' !== null then reads as two venues. That is
+    // how 114 locked Polymarket-priced games (2026-08-04..09-16) were stored
+    // as cross-checked against Polymarket. _mlXc is the corrected answer
+    // (utils/price-source.js): distinct, known venues, both priced this pass.
+    //
+    // singleSource STILL decides whether the comparison below runs, unchanged:
+    // its "disagree on favorite" result suppresses ML signals (processGame
+    // Signals), so narrowing it could unsuppress one. _mlXc only adds the
+    // single-source text where the comparison was not a real two-venue one,
+    // and is stored for display. Neither blocks anything.
+    const _mlXc = mlCrossCheck({
+      haveMarket,
+      primarySource: o.ml_source || (existing && existing.ml_source) || null,
+      primaryAway: o.market_away_ml, primaryHome: o.market_home_ml,
+      xcheckSource: _xSrc, xcheckAway: o.poly_away_ml, xcheckHome: o.poly_home_ml,
+    });
     const reasons = [];
     // DH-crossed writes rejected upstream get stamped FIRST so they
     // surface even when the row also has other reasons (or when the
@@ -5190,6 +5251,7 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
         o.market_away_ml, o.market_home_ml,
         o.poly_away_ml, o.poly_home_ml, _xSrc
       );
+      if (_mlXc.status !== 'cross-checked') reasons.push('single-source, no cross-check available');
       if (sanityReason) reasons.push(sanityReason);
       if (divergenceReason) reasons.push(divergenceReason);
     }
@@ -5425,6 +5487,10 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
            o.market_spread_src || null,
            oddsFlagged, oddsReason,
            dateStr, o.game_id);
+    // This pass's cross-check, for the signals created from this price.
+    // Unlocked passes only: a locked row keeps the status it was priced
+    // under (locked passes read no second venue at all).
+    q.setMlCrossCheck.run(_mlXc.status, _mlXc.xcheck_source, dateStr, o.game_id);
     const gameRow = q.getGameById.get(dateStr, o.game_id);
     if (gameRow) { processGameSignals(gameRow, wobaIdx, settings); updated++; }
   }
