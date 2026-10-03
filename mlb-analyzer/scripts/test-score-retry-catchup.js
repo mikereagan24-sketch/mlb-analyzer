@@ -50,13 +50,16 @@ const sg = (date, away, home, as, hs, status, o) => Object.assign({ gamePk: ++pk
   status: { detailedState: status || 'Final', abstractGameState: /^(Final|Completed|Game Over|Postponed|Cancelled)/.test(status || 'Final') ? 'Final' : 'Live' },
   teams: { away: { team: { abbreviation: away, name: NAMES[away] }, score: as }, home: { team: { abbreviation: home, name: NAMES[home] }, score: hs } } }, (o && o.extra) || {});
 const SCHED = {
-  '2026-09-04': [sg('2026-09-04', 'SEA', 'TEX', 6, 2, 'Completed Early: Rain'), sg('2026-09-04', 'BOS', 'TOR', 3, 1)],
+  // sea-tex: a finished game the score job cannot score -- its away team name is one the parser's TEAM_MAP does not
+  // know (the All-Star mechanism). It was a "Completed Early" game until #504 taught the score job to score those.
+  '2026-09-04': [sg('2026-09-04', 'SEA', 'TEX', 6, 2), sg('2026-09-04', 'BOS', 'TOR', 3, 1)],
   '2026-09-05': [sg('2026-09-05', 'CLE', 'KC', 5, 4)],
   '2026-09-06': [sg('2026-09-06', 'LAD', 'SD', 2, 1)],
   '2026-09-07': [sg('2026-09-07', 'CHC', 'MIL', 4, 3), sg('2026-09-07', 'TOR', 'BAL', null, null, 'Postponed', { official: '2026-09-08' })],
   '2026-09-08': [sg('2026-09-08', 'NYM', 'TB', 10, 4), sg('2026-09-08', 'NYY', 'LAA', 6, 3)],
   '2026-09-09': [sg('2026-09-09', 'LAD', 'SD', 7, 0)],
 };
+SCHED['2026-09-04'][0].teams.away.team.name = 'Seattle Mariners (unmapped name)';
 const net = { urls: [], foreign: [], plan: [] };      // plan: queued failures for the score fetch, consumed in order
 function jsonResp(status, body) { return { ok: status >= 200 && status < 300, status, json: async () => body }; }
 function sockErr(code) { const e = new Error('request to https://statsapi.mlb.com/ failed, reason: connect ' + code); e.code = code; e.type = 'system'; return e; }
@@ -115,8 +118,8 @@ function addRow(r) {
 }
 const row = (d, id, away, home, extra) => Object.assign({ game_date: d, game_id: id, away_team: away, home_team: home }, extra || {});
 const pkOf = (d, away) => SCHED[d].find(g => g.teams.away.team.abbreviation === away).gamePk;
-// 09-04: a Completed Early game the score job (Final-only, #504) cannot score, plus a scored game. Run logged.
-addRow(row('2026-09-04', 'sea-tex', 'SEA', 'TEX', { game_pk: pkOf('2026-09-04', 'SEA'), game_status: 'Completed Early: Rain' }));
+// 09-04: a finished game the score job cannot score (an unmapped team name, see SCHED), plus a scored game. Run logged.
+addRow(row('2026-09-04', 'sea-tex', 'SEA', 'TEX', { game_pk: pkOf('2026-09-04', 'SEA'), game_status: 'Final' }));
 addRow(row('2026-09-04', 'bos-tor', 'BOS', 'TOR', { game_pk: pkOf('2026-09-04', 'BOS'), away_score: 3, home_score: 1, game_status: 'Final' }));
 // 09-05: scored, but NO score run logged (the 9/02 pattern) -- e.g. pitcher usage never recorded.
 addRow(row('2026-09-05', 'cle-kc', 'CLE', 'KC', { game_pk: pkOf('2026-09-05', 'CLE'), away_score: 5, home_score: 4, game_status: 'Final' }));
@@ -222,7 +225,7 @@ function getJson(port, p) {
   const urls0 = net.urls.length;
   const out1 = await jobs.runScoreCatchupJob({ today: TODAY, runScoreJob: spyRun });
   ok('window = the 7 dates before today (09-03 .. 09-09)', out1.dates.join(',') === '2026-09-03,2026-09-04,2026-09-05,2026-09-06,2026-09-07,2026-09-08,2026-09-09', out1.dates.join(','));
-  ok('runs the score job for exactly: 09-04 (unscored Completed Early), 09-05 (no run logged), 09-08 (unscored finished games)',
+  ok('runs the score job for exactly: 09-04 (a finished game it cannot score), 09-05 (no run logged), 09-08 (unscored finished games)',
     calls.join(',') === '2026-09-04,2026-09-05,2026-09-08', calls.join(','));
   ok('09-08: both games scored by the score job, statuses no longer stuck', score('2026-09-08', 'nym-tb') === '10-4' && score('2026-09-08', 'nyy-laa') === '6-3');
   const bet = db.prepare("SELECT outcome, pnl FROM bet_signals WHERE game_date = '2026-09-08' AND game_id = 'nym-tb'").get();
@@ -269,8 +272,8 @@ function getJson(port, p) {
   console.log('\nd. a date that stays unscored is a health-check warning, once');
   {
     const warnRows = cronRows('score-catchup', '2026-09-04').filter(r => r.status === 'warn');
-    ok('exactly one warn row for 09-04 after two catch-up mornings, naming sea-tex and its status',
-      warnRows.length === 1 && warnRows[0].games_skipped_ids === 'sea-tex' && /sea-tex \(Completed Early: Rain\)/.test(warnRows[0].message), JSON.stringify(warnRows));
+    ok('exactly one warn row for 09-04 after two catch-up mornings, naming sea-tex',
+      warnRows.length === 1 && warnRows[0].games_skipped_ids === 'sea-tex' && /still unscored after the catch-up score run: sea-tex$/.test(warnRows[0].message), JSON.stringify(warnRows));
     const express = require(path.join(R, 'node_modules/express'));
     const app = express();
     app.use('/api', require(path.join(R, 'routes/api')));

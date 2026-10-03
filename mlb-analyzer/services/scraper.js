@@ -1,7 +1,7 @@
 const { isSaneML } = require('../utils/market-sanity');
 // v2 2026-04-09T20:19:46.283Z
 const fetch = require('node-fetch');
-const { normAbbr, gameIdFor } = require('../utils/statsapi-ids');
+const { normAbbr, gameIdFor, isScoredFinal } = require('../utils/statsapi-ids');
 const { db } = require('../db/schema');
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
@@ -501,7 +501,11 @@ function parseScoresJson(data) {
   const games = (data.dates||[])[0]?.games || [];
   const results = [];
   for (const g of games) {
-    if (g.status?.detailedState !== 'Final') continue;
+    // Completed games only, with both scores: Final, Game Over, Completed
+    // Early -- never Postponed / Cancelled / Suspended (utils/statsapi-ids.js,
+    // #504). This was `detailedState !== 'Final'`, which dropped every
+    // Completed Early game (2026-08-02 phi-bal never got its score).
+    if (!isScoredFinal(g.status, g.teams?.away?.score, g.teams?.home?.score)) continue;
     const awayName = g.teams?.away?.team?.name;
     const homeName = g.teams?.home?.team?.name;
     const awayScore = g.teams?.away?.score;
