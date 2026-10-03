@@ -1907,6 +1907,40 @@ On 2026-10-01 a one-line "does `routes/api.js` still load?" check, run without
 written (the modified time and size were unchanged), but the read-only rule was
 broken by a check that looked harmless.
 
+**The default now refuses (2026-10-03).** `utils/local-db-guard.js` throws
+before any read-write open of this repo's `data/mlb.db`:
+
+```
+Refusing to open the local data/mlb.db: set MLB_DB_PATH to a scratch copy, or set MLB_ALLOW_LOCAL_DB=1 if you really mean it
+```
+
+`db/schema.js` calls it before opening its connection. So does every script that
+opens `data/mlb.db` read-write by its literal path: `backfill-first-pitch`,
+`backfill-pitcher-usage`, `verify-totals-closing-capture`, and the `--apply` mode
+of `backfill-totals-bet-price`, `fix-corrupt-totals-rows`,
+`null-fabricated-totals-closing`, `tag-park-factor-regime` and
+`tag-post-start-pricing`. Those scripts need the guard of their own because an
+`MLB_DB_PATH` scratch copy satisfies `db/schema`, while their direct open still
+pointed at the real file. The guard allows the open only when:
+
+- the process is the real server (`server.js` is the entry point: `npm start`,
+  `nodemon server.js`), or
+- `MLB_ALLOW_LOCAL_DB=1` is set explicitly.
+
+It does not affect production (`/data/mlb.db` on Render is a different path),
+any other `MLB_DB_PATH`, or `{ readonly: true }` opens.
+
+**`MLB_ALLOW_LOCAL_DB=1` is for deliberate use only:** writing to the local copy
+on purpose, such as the remediation that `scripts/refresh-analysis-db.sh` re-applies
+after a promote (that script sets it on each such command and never exports it).
+Never set it to get past the refusal in a check, a test or an analysis run. The
+refusal means the run should be using a scratch copy. Never export it in a
+shell profile.
+
+The guard is a backstop. It does not replace the rule above, and it does not
+cover Python (`scripts/ingest_roof_status.py` opens `data/mlb.db` with
+`sqlite3.connect`).
+
 How to apply:
 
 - **In a script or test:** set `process.env.MLB_DB_PATH` as the first statement,

@@ -17,6 +17,10 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 // points it at a temp file. Unset everywhere else, including Render, so the
 // path below is unchanged in every existing environment.
 const DB_PATH = process.env.MLB_DB_PATH || path.join(DATA_DIR, 'mlb.db');
+// Refuses a read-write open of the local data/mlb.db unless this process is
+// server.js or MLB_ALLOW_LOCAL_DB=1 is set (utils/local-db-guard.js). Production's
+// /data/mlb.db and any other MLB_DB_PATH are untouched by it.
+require('../utils/local-db-guard').assertLocalDbOpenAllowed(DB_PATH);
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
