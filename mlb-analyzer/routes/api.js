@@ -945,6 +945,43 @@ router.post('/upload/rr-roles', requireOriginAllowlist, requireBookmarkletToken,
   }
 });
 
+// SPECIFIC /upload/<name> ROUTES GO ABOVE THE CATCH-ALL BELOW. (#495, 2026-10-03)
+// Express runs routes in registration order and POST /upload/:key? matches
+// any single segment, so a specific route registered after it is never
+// reached. /upload/pit-proj-ip sat below it from 2026-08-03: the page's
+// admin-token upload hit the catch-all's bookmarklet-token check instead
+// (and with a bookmarklet token would have been ingested as a wOBA key).
+// Bulk-upload pitcher IP projections from a FanGraphs Steamer CSV.
+// Expected columns: Name, Team, IP, GS. Rows where an existing record has
+// is_override=1 are left untouched — manual overrides are sticky.
+// UI-only drop-zone (not a bookmarklet target). Owner decision
+// 2026-08-03: use admin token, not origin allowlist. Symmetric with
+// other UI-only writes.
+router.post('/upload/pit-proj-ip', requireAdminToken, upload.single('file'), (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+    const rows = parseCSVPitIP(file.buffer);
+    if (!rows.length) return res.status(400).json({ error: 'No valid rows parsed. Need columns: Name, Team, IP, GS.' });
+    let upserted = 0;
+    let skippedOverrides = 0;
+    const tx = db.transaction((items) => {
+      for (const r of items) {
+        const norm = normName(r.name);
+        if (!norm) continue;
+        const info = q.upsertPitProjIPBulk.run(r.name, norm, r.team, r.ipPerStart, r.seasonIP, r.seasonGS);
+        if (info.changes > 0) upserted++;
+        else skippedOverrides++;
+      }
+    });
+    tx(rows);
+    q.logUpload.run('pit-proj-ip', file.originalname, rows.length);
+    res.json({ success: true, filename: file.originalname, rows_parsed: rows.length, upserted, skipped_overrides: skippedOverrides });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Manual CSV upload (Data Import UI drop-zone). Kept as the fallback path
 // even after FG Daily Sync — the owner can still drop a CSV if the
 // bookmarklet ever fails on a given day.
@@ -1081,37 +1118,6 @@ router.get('/woba-status', (req, res) => {
   const status = {};
   rows.forEach(r => { status[r.data_key] = { rows: r.row_count, uploadedAt: r.uploaded_at }; });
   res.json(status);
-});
-
-// Bulk-upload pitcher IP projections from a FanGraphs Steamer CSV.
-// Expected columns: Name, Team, IP, GS. Rows where an existing record has
-// is_override=1 are left untouched — manual overrides are sticky.
-// UI-only drop-zone (not a bookmarklet target). Owner decision
-// 2026-08-03: use admin token, not origin allowlist. Symmetric with
-// other UI-only writes.
-router.post('/upload/pit-proj-ip', requireAdminToken, upload.single('file'), (req, res) => {
-  try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ error: 'No file uploaded' });
-    const rows = parseCSVPitIP(file.buffer);
-    if (!rows.length) return res.status(400).json({ error: 'No valid rows parsed. Need columns: Name, Team, IP, GS.' });
-    let upserted = 0;
-    let skippedOverrides = 0;
-    const tx = db.transaction((items) => {
-      for (const r of items) {
-        const norm = normName(r.name);
-        if (!norm) continue;
-        const info = q.upsertPitProjIPBulk.run(r.name, norm, r.team, r.ipPerStart, r.seasonIP, r.seasonGS);
-        if (info.changes > 0) upserted++;
-        else skippedOverrides++;
-      }
-    });
-    tx(rows);
-    q.logUpload.run('pit-proj-ip', file.originalname, rows.length);
-    res.json({ success: true, filename: file.originalname, rows_parsed: rows.length, upserted, skipped_overrides: skippedOverrides });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Manual single-row override. Survives monthly bulk re-uploads.

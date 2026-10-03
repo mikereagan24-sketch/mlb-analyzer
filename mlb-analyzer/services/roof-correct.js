@@ -47,7 +47,7 @@ const ROOF_VENUES = {
   32:   'MIL American Family Field',
 };
 
-const COMPLETED_STATES = new Set(['Final', 'Game Over', 'Completed Early']);
+const { isCompletedStatus } = require('../utils/statsapi-ids');   // the one completed-game rule (#504)
 const UA = 'mlb-analyzer/1.0 (roof-corrector)';
 
 // One statsapi feed/live fetch. Returns:
@@ -67,7 +67,7 @@ async function fetchActualRoof(gamePk) {
     const wx = gd.weather || {};
     const status = (gd.status && gd.status.detailedState) || '';
     const cond = wx.condition || '';
-    if (!COMPLETED_STATES.has(status)) return { roof: null, condition: cond };
+    if (!isCompletedStatus(gd.status)) return { roof: null, condition: cond };
     if (!cond) return { roof: null, condition: '' };
     const c = String(cond).toLowerCase();
     if (c.includes('roof closed') || c.includes('dome') || c.includes('closed')) {
@@ -262,5 +262,4 @@ module.exports = {
   runRoofStatusCorrect,
   fetchActualRoof,
   ROOF_VENUES,
-  COMPLETED_STATES,
 };

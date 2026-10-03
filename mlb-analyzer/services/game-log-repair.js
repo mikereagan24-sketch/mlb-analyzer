@@ -60,7 +60,7 @@
 // suspended game and one feed request per first_pitch fix. At most MAX_DAYS
 // dates per call.
 
-const { normAbbr, gameIdFor } = require('../utils/statsapi-ids');
+const { normAbbr, gameIdFor, isScoredFinal } = require('../utils/statsapi-ids');
 
 const CATEGORIES = ['missing_game', 'wrong_score', 'missing_score', 'start_time', 'game_pk', 'first_pitch',
   'postponed_duplicate', 'placeholder', 'dh_assignment'];
@@ -102,7 +102,8 @@ function refOf(g) {
   const st = (g.status && g.status.detailedState) || null;
   return { pk: g.gamePk, type: g.gameType, date: g.officialDate, id: gameIdFor(away, home, gn), base: (away + '-' + home).toLowerCase(), gn,
     away, home, start: isoZ(g.gameDate), status: st,
-    final: !!(g.status && g.status.abstractGameState === 'Final') && !isPostponed(st),
+    // The one completed-game rule (utils/statsapi-ids.js), shared with the score fetch.
+    final: isScoredFinal(g.status, g.teams.away.score, g.teams.home.score),
     as: g.teams.away.score == null ? null : Number(g.teams.away.score), hs: g.teams.home.score == null ? null : Number(g.teams.home.score) };
 }
 
