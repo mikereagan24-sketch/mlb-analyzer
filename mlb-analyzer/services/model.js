@@ -1,7 +1,7 @@
 /** Model service â all settings from DB, no hardcoded constants */
 // Fallback used when settings doesn't carry a valid PA_WEIGHTS array
 // (should never happen in the Render deploy — getSettings seeds it).
-const PA_WEIGHTS_DEFAULT = [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
+const { PA_WEIGHTS_DEFAULT } = require('../utils/pa-weights');   // the one fallback; settings.PA_WEIGHTS wins
 
 // Per-lineup-position batters-faced distributions for opener_aware mode.
 // Index [0] = leadoff, [8] = 9-hole. Sum of OPENER_FACED ≈ 4.5 BF

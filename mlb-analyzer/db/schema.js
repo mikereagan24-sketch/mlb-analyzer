@@ -317,7 +317,6 @@ INSERT OR IGNORE INTO app_settings VALUES ('relief_pit_weight', '0.20');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_start', '0.315');
   INSERT OR IGNORE INTO app_settings VALUES ('bat_dflt_opp', '0.320');
   INSERT OR IGNORE INTO app_settings VALUES ('unknown_pitcher_woba', '0.335');
-  INSERT OR IGNORE INTO app_settings VALUES ('pa_weights', '[4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7]');
   INSERT OR IGNORE INTO app_settings VALUES ('wp_clamp_lo', '0.25');
   INSERT OR IGNORE INTO app_settings VALUES ('wp_clamp_hi', '0.75');
   INSERT OR IGNORE INTO app_settings VALUES ('tot_prob_lo', '0.20');
@@ -338,6 +337,9 @@ INSERT OR IGNORE INTO app_settings VALUES ('odds_api_key', '');
   INSERT OR IGNORE INTO app_settings VALUES ('lineup_cron', '0 17 * * *');
   INSERT OR IGNORE INTO app_settings VALUES ('scores_cron', '0 7 * * *');
 `);
+// Seeded from the one shared fallback (utils/pa-weights.js). INSERT OR IGNORE:
+// a new database only; an existing setting is never touched.
+db.prepare("INSERT OR IGNORE INTO app_settings VALUES ('pa_weights', ?)").run(JSON.stringify(require('../utils/pa-weights').PA_WEIGHTS_DEFAULT));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS team_rosters (

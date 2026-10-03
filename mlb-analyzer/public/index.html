@@ -604,7 +604,7 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
       <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Evaluate signal edges against the best net at-size price across Poly + Kalshi (services/odds-comparison.js). Requires fillable-at-stake; partial-fill books fall back to Kalshi with venue_stale=1. Cohort stays v7 (see 2026-07-08 amendment in the v7 birth cert). Default OFF — byte-identical to Kalshi-only.">Venue-aware signal edges</label><input type="checkbox" id="s-signal-venue-aware" style="margin-left:4px"></div>
       <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Kalshi-direct MLB moneylines. When ON, fetch pre-game MLB moneylines directly from Kalshi and OVERRIDE market_away_ml/market_home_ml on any oddsRaw row Kalshi covers. Polymarket fills games Kalshi does not cover; there is no other ML source (the Unabated fetch was removed 2026-09-17). Locked games skipped. Fee-adjusted for the all-in price the bettor pays.">Kalshi-direct ML override</label><input type="checkbox" id="s-kalshi-direct-primary" style="margin-left:4px"></div>
       <div class="setting-row" style="grid-column:1/-1;display:flex;align-items:center;gap:8px"><label title="Kalshi-direct MLB totals. When ON, fetch pre-game MLB totals from Kalshi and populate market_total + fee-adjusted over/under_price. Post-#230 this is the SOLE writer of totals market baselines — leave OFF and Totals signals are suppressed slate-wide (model.js primary-only gate). Rung: the line an earlier Kalshi pass persisted for the game today, if still on the ladder within 0.5; otherwise Kalshi's auto-picked rung. Locked games skipped.">Kalshi-direct totals override</label><input type="checkbox" id="s-kalshi-direct-totals" style="margin-left:4px"></div>
-      <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder="4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7"></div>
+      <div class="setting-row"><label title="Plate appearance weights by batting order position. Comma-separated, 9 values. Higher = more PA expected.">Lineup order weights (1-9)</label><input type="text" id="s-pa-weights" placeholder=""></div>
       <div class="setting-row"><label title="Lower bound for win probability clamp. Caps extreme ML output. Default 0.25 (cap ≈ ±300).">Win prob clamp lo</label><input type="number" id="s-wp-clamp-lo" step="0.01" min="0.05" max="0.45"></div>
       <div class="setting-row"><label title="Upper bound for win probability clamp. Caps extreme ML output. Default 0.75 (cap ≈ ±300).">Win prob clamp hi</label><input type="number" id="s-wp-clamp-hi" step="0.01" min="0.55" max="0.95"></div>
       <div class="setting-row"><label title="Lower bound for model's over-probability on totals. Default 0.20.">Total prob clamp lo</label><input type="number" id="s-tot-prob-lo" step="0.01" min="0.05" max="0.45"></div>
@@ -643,13 +643,21 @@ code{background:var(--bg2);padding:1px 5px;border-radius:3px;font-size:11px}
      the game card behind. Must load BEFORE the main script block,
      which calls it during the first render. -->
 <script src="/highlight-gate.js"></script>
+<!-- The lineup-order PA weights fallback: the same file services/model.js
+     and services/jobs.js require (utils/pa-weights.js). Before the main
+     script, which seeds window.PA_WEIGHTS from it. -->
+<script src="/pa-weights.js"></script>
 <script>
 
   // Lineup-order PA weights used by the Matchup-tab preview renders.
   // Seeded with server defaults; overwritten once /api/settings loads
   // (see loadSettings below and the page-boot fetch at the bottom of <script>).
   // Matches services/model.js PA_WEIGHTS_DEFAULT exactly.
-  window.PA_WEIGHTS = window.PA_WEIGHTS || [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
+  // The fallback is utils/pa-weights.js, shared with the server; the saved
+  // setting replaces it as soon as loadSettings() returns (init() starts it
+  // first thing), and the open cards redraw then (_redrawForPaWeights).
+  window.PA_WEIGHTS = window.PA_WEIGHTS || window.PaWeights.PA_WEIGHTS_DEFAULT.slice();
+  (function(){ var el = document.getElementById('s-pa-weights'); if (el) el.placeholder = window.PaWeights.PA_WEIGHTS_DEFAULT.join(','); })();
 const KEY_LABELS={'bat-proj-lhp':'Batters vs LHP (Steamer)','bat-proj-rhp':'Batters vs RHP (Steamer)','pit-proj-lhb':'Pitchers vs LHB (Steamer)','pit-proj-rhb':'Pitchers vs RHB (Steamer)','bat-act-lhp':'Batters vs LHP (actual)','bat-act-rhp':'Batters vs RHP (actual)','pit-act-lhb':'Pitchers vs LHB (actual)','pit-act-rhb':'Pitchers vs RHB (actual)'};
 const FILE_KEY_TESTS=[{key:'bat-proj-lhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-proj-rhp',t:n=>/bat/i.test(n)&&/proj|steam/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-proj-lhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-proj-rhb',t:n=>/pit/i.test(n)&&/proj|steam/i.test(n)&&/rhb|_rh/i.test(n)},{key:'bat-act-lhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/lhp|_lh/i.test(n)},{key:'bat-act-rhp',t:n=>/bat/i.test(n)&&/act|actual/i.test(n)&&/rhp|_rh/i.test(n)},{key:'pit-act-lhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/lhb|_lh/i.test(n)},{key:'pit-act-rhb',t:n=>/pit/i.test(n)&&/act|actual/i.test(n)&&/rhb|_rh/i.test(n)}];
 function detectKey(fn){const n=fn.toLowerCase();for(const{key,t}of FILE_KEY_TESTS)if(t(n))return key;return null;}
@@ -955,7 +963,11 @@ function fmtTotalsBlock(g) {
   return 'O/U ' + g.market_total + ' (' + fmtML(g.over_price) + '/' + fmtML(g.under_price) + ')';
 }
 function fmtDate(d){return d?d.slice(0,10):'';}
-function todayStr(){return new Date().toLocaleDateString('en-CA');}
+// Today's PT slate date, YYYY-MM-DD: the same rule as services/jobs.js
+// todayStr(), so the page and the server agree on "today". It used the
+// browser's own zone, which is the wrong day for a browser outside PT (in the
+// evening PT, a UTC-zoned browser already shows tomorrow).
+function todayStr(){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'});}
 
 // Convert ET game time string to PT display
 function utcToPT(utcStr) {
@@ -987,7 +999,22 @@ let muSelectedGame=null;
 let btFrom='',btTo='';
 let serverWoba={};  // wOBA data fetched from server for matchup tab
 
+// PAGE BOOT. (#485, 2026-10-03) init() had not run since 1b3904c
+// (2026-04-11), whose edit swallowed the `init();` line along with 58 others
+// -- so the header stayed on "Loading...", the date was blank, no games
+// loaded until a click, and the saved settings (PA weights included) reached
+// the page only when the Model tab was opened. Nothing else loads any of
+// this at boot, so restoring the call duplicates no request. It runs once
+// (guarded), from the end of the last script block, where every function it
+// calls is defined.
+let _initStarted=false;
 async function init(){
+  if(_initStarted)return;
+  _initStarted=true;
+  // Settings FIRST and not awaited: they arrive in parallel with the games,
+  // never delaying the cards, and loadSettings redraws whatever already
+  // rendered with the fallback weights.
+  loadSettings();
   const d=document.getElementById('games-date');
   d.value=todayStr();
   document.getElementById('bt-from').value='2026-04-09';
@@ -997,10 +1024,6 @@ async function init(){
   await fetchServerWoba();
   // Slate health is fire-and-forget — never blocks games render.
   refreshHealth();
-  // Populate window.PA_WEIGHTS (and the rest of the Model form) from
-  // the live settings so Matchup-tab previews match what the server
-  // uses. Fire-and-forget — loadSettings has its own error handling.
-  loadSettings();
 }
 
 async function fetchServerWoba(){
@@ -1499,7 +1522,9 @@ async function pullWeather(btn){
     // server runWeatherJob fetches Open-Meteo per game with a retry
     // and can run 15-20s on a full slate. Client abort would leave
     // the server mid-run and misreport failure.
-    const tom=new Date(date+'T12:00:00');tom.setDate(tom.getDate()+1);
+    // The day after the slate date, stepped at UTC noon so no browser zone
+    // can shift it (local noon was off by a day from UTC+12 eastward).
+    const tom=new Date(date+'T12:00:00Z');tom.setUTCDate(tom.getUTCDate()+1);
     const tStr=tom.toISOString().split('T')[0];
     if(st) st.textContent='⛅ Fetching weather for '+date+'...';
     const j1=await api('/jobs/weather',{method:'POST',body:JSON.stringify({date})});
@@ -2493,6 +2518,33 @@ function renderGameResult(g){
     (g.away_score!=null?'<div style="font-size:9px;color:var(--text2);text-align:center;margin-top:5px">Final: '+g.away_team+' '+g.away_score+' · '+g.home_team+' '+g.home_score+'</div>':'');
 }
 
+// The per-batter PA breakdown of the game detail, drawn from the current
+// window.PA_WEIGHTS. Its own function so loadSettings can redraw it when the
+// saved weights arrive without re-running analyzeGame (which switches tabs).
+function _renderBreakdowns(g){
+  const mkBD=(lu,oppHand,el)=>{
+    if(!el)return;
+    el.innerHTML=lu.map((b,i)=>{
+      const eff=b.hand==='S'?(oppHand==='R'?'L':'R'):b.hand;
+      const woba=b.vsRHP||b.vsLHP?((oppHand==='R'?(b.vsRHP||0.310):(b.vsLHP||0.310)).toFixed(3)):'—';
+      return'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:.5px solid var(--border);font-size:12px">'+
+        '<span><span class="hbadge h'+eff+'" style="font-size:9px;width:18px;height:16px;line-height:16px">'+(b.hand==='S'?'S→'+eff:b.hand)+'</span> '+b.name+'</span>'+
+        '<span style="color:var(--text2)">'+window.PA_WEIGHTS[i]+'</span></div>';
+    }).join('');
+  };
+  mkBD(g.away_lineup||[],g.home_sp_hand||'R',document.getElementById('a-bd'));
+  mkBD(g.home_lineup||[],g.away_sp_hand||'R',document.getElementById('h-bd'));
+}
+// Saved PA weights arrived (or changed): redraw what was drawn with the old
+// ones -- the open Matchups card (its PA column and "Wtd avg" footer) and the
+// game-detail breakdown. Nothing else on the page reads window.PA_WEIGHTS.
+function _redrawForPaWeights(){
+  try{
+    const mu=document.getElementById('sec-matchups');
+    if(mu&&mu.classList.contains('active')&&muSelectedGame)renderMatchupGame(muSelectedGame);
+    if(currentGame)_renderBreakdowns(currentGame);
+  }catch(e){console.warn('[pa-weights] redraw failed',e);}
+}
 function analyzeGame(gameId,date){
   const g=currentGames.find(x=>x.game_id===gameId);
   if(!g)return;
@@ -2558,17 +2610,7 @@ function analyzeGame(gameId,date){
   setComp('comp-a','ca-lbl','ca-model','ca-mkt','ca-edge',g.away_team+' Moneyline',effAwayML(g)!=null?fmtML(effAwayML(g)):'—',(function(){var m=_resolveAwayML(g,sigs);return m!=null?fmtML(m):'—';})(),sigs.find(s=>s.signal_side==='away'&&s.signal_type==='ML'));
   setComp('comp-h','ch-lbl','ch-model','ch-mkt','ch-edge',g.home_team+' Moneyline',effHomeML(g)!=null?fmtML(effHomeML(g)):'—',(function(){var m=_resolveHomeML(g,sigs);return m!=null?fmtML(m):'—';})(),sigs.find(s=>s.signal_side==='home'&&s.signal_type==='ML'));
   setComp('comp-t','ct-lbl','ct-model','ct-mkt','ct-edge','Over/Under',effTotal(g)!=null?parseFloat(effTotal(g)).toFixed(1):'—',(_resolveTotalMkt(g,sigs)||g.market_total||'—'),sigs.find(s=>s.signal_type==='Total'));
-  const mkBD=(lu,oppHand,el)=>{
-    el.innerHTML=lu.map((b,i)=>{
-      const eff=b.hand==='S'?(oppHand==='R'?'L':'R'):b.hand;
-      const woba=b.vsRHP||b.vsLHP?((oppHand==='R'?(b.vsRHP||0.310):(b.vsLHP||0.310)).toFixed(3)):'—';
-      return'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:.5px solid var(--border);font-size:12px">'+
-        '<span><span class="hbadge h'+eff+'" style="font-size:9px;width:18px;height:16px;line-height:16px">'+(b.hand==='S'?'S→'+eff:b.hand)+'</span> '+b.name+'</span>'+
-        '<span style="color:var(--text2)">'+window.PA_WEIGHTS[i]+'</span></div>';
-    }).join('');
-  };
-  mkBD(g.away_lineup||[],g.home_sp_hand||'R',document.getElementById('a-bd'));
-  mkBD(g.home_lineup||[],g.away_sp_hand||'R',document.getElementById('h-bd'));
+  _renderBreakdowns(g);
   document.getElementById('a-bd-hdr').textContent=g.away_team+' vs '+g.home_sp+' ('+(g.home_sp_hand||'?')+'HP)';
   document.getElementById('h-bd-hdr').textContent=g.home_team+' vs '+g.away_sp+' ('+(g.away_sp_hand||'?')+'HP)';
   document.getElementById('ai-out').textContent='Click above to generate narrative analysis.';
@@ -3427,11 +3469,13 @@ async function rerunModel(gameId){
 // handoff context (+1.44pp CLV) — surfaced explicitly in the
 // timing breakdown.
 function _clvDefaultRange(){
-  const to = new Date();
-  const from = new Date(to);
-  from.setDate(to.getDate() - 30);
-  const fmt = (d) => d.toISOString().slice(0, 10);
-  return { from: fmt(from), to: fmt(to) };
+  // Game dates, so they end on TODAY'S PT SLATE (todayStr). The old range
+  // ended on the UTC date (toISOString), which is tomorrow after 5 PM PT.
+  // The 30-day step is done at UTC noon, which cannot cross a date boundary.
+  const to = todayStr();
+  const from = new Date(to + 'T12:00:00Z');
+  from.setUTCDate(from.getUTCDate() - 30);
+  return { from: from.toISOString().slice(0, 10), to: to };
 }
 async function loadClvTab(){
   const fromEl = document.getElementById('clv-from');
@@ -3766,6 +3810,9 @@ function renderTrendsResults(d){
   // Sortable header cell: click sorts, a second click reverses; arrow on the active column.
   const thS = (col, label) => '<th style="' + th + ';cursor:pointer;user-select:none;white-space:nowrap" onclick="trendsSortBy(\'' + col + '\')">'
     + label + (_trendsSort.col === col ? (_trendsSort.dir > 0 ? ' ▲' : ' ▼') : '') + '</th>';
+  // PT date, the same rule as todayStr() -- written out here because the
+  // trends block runs standalone (scripts/test-trends-results-tab.js executes
+  // it in isolation), so it must not depend on a helper defined elsewhere.
   const slateDate = slate && slate.date ? slate.date : new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   // Footnotes, from the artifact's own numbers.
   const byId = {}; inPrim.forEach(r => { byId[r.scenario_id] = r; });
@@ -6127,7 +6174,9 @@ async function loadSettings(){
       var _paw = s.pa_weights ? JSON.parse(s.pa_weights) : null;
       if (Array.isArray(_paw) && _paw.length === 9) {
         set('s-pa-weights', _paw.join(','));
+        var _pawChanged = JSON.stringify(window.PA_WEIGHTS) !== JSON.stringify(_paw);
         window.PA_WEIGHTS = _paw;
+        if (_pawChanged) _redrawForPaWeights();
       }
     } catch(e) { /* leave input blank if malformed */ }
     // Expose the raw settings object so other client code (mt(), Matchup
@@ -6277,7 +6326,7 @@ function openManualBetForGame(gameId, date, game) {
 function openManualModal(){
   var bg=document.getElementById('manual-modal-bg');
   // Pre-fill date from backtest from-date
-  document.getElementById('mb-date').value=document.getElementById('bt-from').value||new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'});
+  document.getElementById('mb-date').value=document.getElementById('bt-from').value||todayStr();   // PT slate date, as everywhere else
   loadManualGames();
   bg.classList.add('open');
 }
@@ -6406,6 +6455,9 @@ async function submitManualBet(){
     }
   }catch(e){st.textContent='Error: '+e.message;st.style.color='#e05';}
 }
+// Boot (#485): the last line of the last script block, so every function
+// init() calls is defined and the whole page is parsed.
+init();
 </script>
 </body>
 </html>
