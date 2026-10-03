@@ -8,7 +8,7 @@ const { fetchTeamBaserunning, fetchPlayerBaserunning, fetchPlayerBaserunningTrai
 const { getKalshiMlbLines, getKalshiMlbTotals, getKalshiMlbSpreads, kalshiTakerFeeRate } = require('./kalshi');
 const { getPolymarketMlbLines, polyTakerFeeRate } = require('./polymarket');
 const empiricalSpreadEdge = require('./empirical-spread-edge');
-const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES } = require('./model');
+const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES, buildWobaIndex } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
 // One definition of the season roster, shared with the harness so the two
@@ -402,7 +402,7 @@ function getOddsApiKey() {
 }
 
 function getWobaIndex() {
-  const rows = db.prepare('SELECT data_key, player_name, woba, sample_size FROM woba_data').all();
+  const rows = db.prepare('SELECT data_key, player_name, woba, sample_size, fg_player_id, mlbam_id FROM woba_data').all();
   return _buildIdxFromRows(rows);
 }
 
@@ -427,11 +427,9 @@ function getWobaIndexAsOf(date) {
 // Shared index builder: rows → { data_key: { normName: {woba, sample} } }
 // with pitcher_woba_override entries overlaid on the projection keys.
 function _buildIdxFromRows(rows) {
-  const idx = {};
-  for (const r of rows) {
-    if (!idx[r.data_key]) idx[r.data_key] = {};
-    idx[r.data_key][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
-  }
+  // The shared builder (services/model.js buildWobaIndex) -- this was a second
+  // copy of it, and the id-first rule (#473) has to live in one place.
+  const idx = buildWobaIndex(rows);
   try {
     const overrides = q.listWobaOverrides ? q.listWobaOverrides.all() : [];
     for (const o of overrides) {
@@ -443,6 +441,12 @@ function _buildIdxFromRows(rows) {
         if (existing.startsWith(nameKey + ' ')) {
           idx[key][existing] = { woba: o.woba, sample: 600 };
         }
+      }
+      // The same override reaches that player's id slots (#473).
+      const byId = idx[key]._byId || {}, idName = idx[key]._idName || {};
+      for (const id of Object.keys(byId)) {
+        const nk = idName[id] || '';
+        if (nk === nameKey || nk.startsWith(nameKey + ' ')) byId[id] = { woba: o.woba, sample: 600, id };
       }
     }
   } catch (e) {
