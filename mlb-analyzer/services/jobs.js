@@ -11,6 +11,7 @@ const empiricalSpreadEdge = require('./empirical-spread-edge');
 const { runModel, getSignals, calcPnl, calcRunlinePnl, buildSpStartIndex, forecastSpIP, VENUE_ID_OVERRIDES, buildWobaIndex } = require('./model');
 const { fetchParkWind } = require('./weather');
 const { normName, stripSfx, fuzzyLookup } = require('../utils/names');
+const { PA_WEIGHTS_DEFAULT } = require('../utils/pa-weights');
 // One definition of the season roster, shared with the harness so the two
 // cannot answer "is this player on this team" differently.
 const { seasonRosterSet } = require('./season-roster');
@@ -283,12 +284,13 @@ function getSettings() {
     BAT_DFLT_OPP:   num('bat_dflt_opp',  0.320),
     UNKNOWN_PITCHER_WOBA: num('unknown_pitcher_woba', 0.335),
     PA_WEIGHTS:        (function(){
-      var raw = s['pa_weights'] || '[4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7]';
+      // Fallback: utils/pa-weights.js, the one shared default (#485 follow-up).
+      var raw = s['pa_weights'] || JSON.stringify(PA_WEIGHTS_DEFAULT);
       try {
         var parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length === 9 && parsed.every(function(x){return typeof x === 'number' && !isNaN(x);})) return parsed;
       } catch(e) {}
-      return [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
+      return PA_WEIGHTS_DEFAULT.slice();
     })(),
     WP_CLAMP_LO:       num('wp_clamp_lo',       _d('wp_clamp_lo', 0.25)),
     WP_CLAMP_HI:       num('wp_clamp_hi',       _d('wp_clamp_hi', 0.75)),

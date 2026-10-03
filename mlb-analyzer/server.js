@@ -180,6 +180,16 @@ app.get('/highlight-gate.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'utils', 'highlight-gate.js'));
 });
 
+// The lineup-order PA weights fallback, served to the browser from the same
+// file the server requires (utils/pa-weights.js; UMD footer), on the
+// highlight-gate pattern above and for the same reason: one constant, no copy
+// in public/ to drift. no-store for the same deploy-generation reason.
+app.get('/pa-weights.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.sendFile(path.join(__dirname, 'utils', 'pa-weights.js'));
+});
+
 // Version endpoint
 app.get('/api/version', (req, res) => res.json({
   build: '2026-04-11T14:20:01.140Z',

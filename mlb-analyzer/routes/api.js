@@ -7773,7 +7773,7 @@ router.get('/debug/model-trace', (req, res) => {
 
     const PA_WEIGHTS = (Array.isArray(settings.PA_WEIGHTS) && settings.PA_WEIGHTS.length === 9)
       ? settings.PA_WEIGHTS
-      : [4.65,4.55,4.5,4.5,4.25,4.13,4,3.85,3.7];
+      : require('../utils/pa-weights').PA_WEIGHTS_DEFAULT;
 
     // PR 4 (v4 cohort): per-side SP pitching weights derived from F4
     // forecast IP. Mirrors model.js's computeSpPitWeightFromForecast.
