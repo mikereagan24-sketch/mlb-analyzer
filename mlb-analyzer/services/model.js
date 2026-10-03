@@ -50,6 +50,7 @@ const VENUE_ID_OVERRIDES = {
 };
 
 const { normName, fuzzyLookup, stripSfx } = require('../utils/names');
+const { idOf, hasIdMark, stripIdMark, cleanMlbam } = require('../utils/player-identity');
 const { pythagWinProb } = require('../utils/pythag-win-prob');
 const { pickVenueOverride } = require('./scraper');
 const { getWobaParkFactor, neutralizeWoba, computeStintWeightedFactor } = require('./park-factors-woba');
@@ -73,11 +74,39 @@ const stintCache = require('./stint-cache');
 // its only query is behind a lazy require inside seasonRosterSet.
 const { onTeamPredicate: _onTeamPredicate } = require('./season-roster');
 
+// BY ID FIRST, THEN BY NAME. (#473, 2026-10-02)
+//
+// Name slots are what every lookup reads, and on rows without ids they are
+// exactly what they were (last row wins). A row WITH an id is also filed under
+// idx[key]._byId['m<mlbam>' | 'f<fangraphs id>'] -- non-enumerable, so code
+// that counts or scans name keys sees no change -- and when two DIFFERENT ids
+// land on one name slot the slot keeps the larger sample instead of whichever
+// came last; the other player stays reachable by id, never merged into it.
+// A row stored under a disambiguated name ("Name #m123 TEAM") is id-only.
+function _slotFor(idx, key) {
+  if (!idx[key]) {
+    idx[key] = {};
+    Object.defineProperty(idx[key], '_byId', { value: {}, enumerable: false, writable: true });
+    Object.defineProperty(idx[key], '_idName', { value: {}, enumerable: false, writable: true });
+    Object.defineProperty(idx[key], '_hasIds', { value: false, enumerable: false, writable: true });
+  }
+  return idx[key];
+}
 function buildWobaIndex(rows) {
   const idx = {};
   for (const r of rows) {
-    if (!idx[r.data_key]) idx[r.data_key] = {};
-    idx[r.data_key][normName(r.player_name)] = { woba: r.woba, sample: r.sample_size };
+    const slot = _slotFor(idx, r.data_key);
+    const id = idOf(r);
+    const e = id ? { woba: r.woba, sample: r.sample_size, id } : { woba: r.woba, sample: r.sample_size };
+    if (id && !slot._byId[id]) { slot._byId[id] = e; slot._idName[id] = normName(stripIdMark(r.player_name)); slot._hasIds = true; }
+    if (hasIdMark(r.player_name)) continue;
+    const nk = normName(r.player_name);
+    const prev = slot[nk];
+    if (prev && prev.id && id && prev.id !== id) {
+      if ((e.sample || 0) > (prev.sample || 0)) slot[nk] = e;
+      continue;
+    }
+    slot[nk] = e;
   }
   return idx;
 }
@@ -556,8 +585,47 @@ function getBatterWoba(idx, name, hand, teamHint, wProj, wAct, minPA, settings, 
   return { vsLHP: d.vsLHP, vsRHP: d.vsRHP, source:'fallback' };
 }
 
-function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings) {
+// A PITCHER WITH A KNOWN MLBAM ID IS LOOKED UP BY IT. (#473, 2026-10-02)
+//
+// When two pitchers share a stored name, the one with the smaller sample is
+// filed as "Name #m<id> TEAM" and kept out of the name slot (buildWobaIndex),
+// so a name lookup returns his namesake. game_log carries the starter's and
+// the bulk guy's MLBAM ids, kept in step with their names (the upsert clears
+// a stale id when the name changes). With an id: that player's own row first;
+// failing that, a name hit is used unless it belongs to a DIFFERENT MLBAM id,
+// which would be the namesake. Without an id, or on rows uploaded before ids
+// were kept, this is exactly the old name lookup.
+//
+// Done as a VIEW in front of the unchanged name lookups below: each pitcher
+// key is narrowed to this pitcher's own row (or to nothing, for a namesake
+// with a different id), filed under the exact keys fuzzyLookup tries first.
+// The blendWoba calls stay byte-identical (test-matchup-woba-inputs.js guards
+// their argument list).
+function _lookupIdFirst(keyMap, name, teamHint, mlbamId) {
+  const m = cleanMlbam(mlbamId) ? 'm' + cleanMlbam(mlbamId) : null;
+  if (m && keyMap && keyMap._byId && keyMap._byId[m]) return keyMap._byId[m];
+  const hit = fuzzyLookup(keyMap, name, teamHint);
+  if (m && hit && hit.id && hit.id[0] === 'm' && hit.id !== m) return null;
+  return hit;
+}
+function _pitcherIdView(idx, name, teamHint, mlbamId) {
+  if (!cleanMlbam(mlbamId) || !idx) return idx;
+  // No row of these keys carries an id (every upload before #473): the plain
+  // name lookup is already the whole answer, at no extra cost.
+  if (!['pit-proj-lhb', 'pit-act-lhb', 'pit-proj-rhb', 'pit-act-rhb'].some(k => idx[k] && idx[k]._hasIds)) return idx;
+  const k = normName(name);
+  const view = Object.assign({}, idx);
+  for (const key of ['pit-proj-lhb', 'pit-act-lhb', 'pit-proj-rhb', 'pit-act-rhb']) {
+    const e = _lookupIdFirst(idx[key], name, teamHint, mlbamId);
+    const one = {};
+    if (e) { one[k] = e; if (teamHint) one[k + ' ' + String(teamHint).toLowerCase()] = e; }
+    view[key] = one;
+  }
+  return view;
+}
+function getPitcherWoba(idx, name, hand, teamHint, wProj, wAct, minBF, settings, mlbamId) {
   if (minBF == null) minBF = 100;
+  idx = _pitcherIdView(idx, name, teamHint, mlbamId);
   const pf = resolveNeutralizationFactor(teamHint, settings, { playerName: name, isPitcher: true });
   const bL = blendWoba(
     fuzzyLookup(idx['pit-proj-lhb'], name, teamHint),
@@ -853,8 +921,8 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
   const WP_CLAMP_LO = num(settings.WP_CLAMP_LO, 0.25);
   const WP_CLAMP_HI = num(settings.WP_CLAMP_HI, 0.75);
 
-  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT, MIN_BF, settings);
-  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT, MIN_BF, settings);
+  const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ, W_ACT, MIN_BF, settings, game.away_sp_id);
+  const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ, W_ACT, MIN_BF, settings, game.home_sp_id);
 
   // Phase 2: per-side opener opts. is_opener_game_<side>=1 means that
   // team is using an opener — the listed SP is the opener and bulk_guy_*
@@ -1076,7 +1144,8 @@ function runModel(game, wobaIdx, settings, mode, quiet) {
     //   docs/per-slot-pitcher-hand-open-question-2026-09-19.md
     //   docs/bulk-hand-measured-inert-2026-09-19.md
     // Re-run: node --max-old-space-size=1536 scripts/probe-bulk-hand-channel.js
-    const bulkW = getPitcherWoba(wobaIdx, bulkSp, 'R', team, W_PROJ, W_ACT, MIN_BF, settings);
+    const bulkW = getPitcherWoba(wobaIdx, bulkSp, 'R', team, W_PROJ, W_ACT, MIN_BF, settings,
+      side === 'away' ? game.bulk_guy_away_id : game.bulk_guy_home_id);
     let bulkVsL = bulkW.vsLHB;
     let bulkVsR = bulkW.vsRHB;
     if (bulkW.source === 'fallback') {

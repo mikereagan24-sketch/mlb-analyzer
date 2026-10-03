@@ -374,8 +374,12 @@ function cleanupOrphanedSweepRuns(q, nowPtIso) {
 // object. Returns null if the date has no snapshot rows. Cached by the
 // caller — DO NOT call this in the inner combination loop.
 function loadWobaSnapshot(db, snapshotDate) {
+  // The player ids (#473) only when this database has the columns: callers
+  // may pass a raw read-only handle on a file db/schema has never migrated.
+  const cols = new Set(db.prepare("PRAGMA table_info(woba_data_snapshot)").all().map(c => c.name));
+  const ids = cols.has('fg_player_id') && cols.has('mlbam_id') ? ', fg_player_id, mlbam_id' : '';
   const rows = db.prepare(
-    "SELECT data_key, player_name, woba, sample_size FROM woba_data_snapshot WHERE snapshot_date=?"
+    "SELECT data_key, player_name, woba, sample_size" + ids + " FROM woba_data_snapshot WHERE snapshot_date=?"
   ).all(snapshotDate);
   if (!rows.length) return null;
   return buildWobaIndex(rows);

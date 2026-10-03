@@ -326,6 +326,14 @@ function parseCSV(buffer, isPitcher, floors) {
   const periodCol = PERIOD_COLS
     .map(want => Object.keys(records[0]).find(h => h.toLowerCase() === want))
     .find(Boolean);
+  // PLAYER IDS (#473, 2026-10-02). FanGraphs sends both with every row --
+  // projections as PlayerId / MLBAMID (services/fangraphs.js PIT_PROJ_COLS),
+  // the splits API as playerId / xMLBAMID -- and they used to be dropped
+  // right here, leaving name as the only identity. Exact header, case
+  // folded, first spelling in this order wins.
+  const _hdr = (wants) => wants.map(w => Object.keys(records[0]).find(h => h.toLowerCase() === w)).find(Boolean);
+  const fgIdCol = _hdr(['playerid', 'idfg', 'fg_player_id']);
+  const mlbamCol = _hdr(['mlbamid', 'xmlbamid', 'mlbam_id', 'mlbam']);
   if (!wobaCol || !nameCol) return [];
   // COUNTED, because the old floor's effect was unobservable after the fact:
   // rows died here, before any table, so "how many real hitters did it
@@ -430,7 +438,10 @@ function parseCSV(buffer, isPitcher, floors) {
     // period: the source's own label for what this row covers, or null
     // when the source does not label rows at all. Never derived.
     const period = periodCol ? String(r[periodCol] == null ? '' : r[periodCol]).trim() : null;
-    rows.push({ name, woba, sample, team, period });
+    const { cleanFgId, cleanMlbam } = require('../utils/player-identity');
+    const fg_player_id = fgIdCol ? cleanFgId(r[fgIdCol]) : null;
+    const mlbam_id = mlbamCol ? cleanMlbam(r[mlbamCol]) : null;
+    rows.push({ name, woba, sample, team, period, fg_player_id, mlbam_id });
   }
   if (rejected.belowFloor || rejected.bad || rejected.belowSample || rejected.keptBelowOldFloor) {
     console.log('[woba-parse] kept ' + rows.length
@@ -7101,8 +7112,8 @@ router.get('/debug/bullpen', (req, res) => {
     // An alias rather than a rename so the ~20 call sites below are
     // untouched; the implementation is now the one in utils/names.
     const norm = normName;
-    const projRows = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?").all('pit-proj-'+hand,'% '+team);
-    const actRows  = db.prepare("SELECT player_name,woba,sample_size FROM woba_data WHERE data_key=?").all('pit-act-'+hand);
+    const projRows = db.prepare("SELECT player_name,woba,sample_size,fg_player_id,mlbam_id FROM woba_data WHERE data_key=? AND player_name LIKE ?").all('pit-proj-'+hand,'% '+team);
+    const actRows  = db.prepare("SELECT player_name,woba,sample_size,fg_player_id,mlbam_id FROM woba_data WHERE data_key=?").all('pit-act-'+hand);
     // Apply pitcher_woba_override entries to projRows. The raw SQL above
     // bypasses getWobaIndex(), so manually overlay overrides here so the
     // bullpen report reflects the same projections the model uses.
@@ -7123,11 +7134,15 @@ router.get('/debug/bullpen', (req, res) => {
     } catch (e) {
       console.warn('[bullpen-report] override overlay failed (non-fatal): ' + e.message);
     }
-    const actIdx={}; for(const r of actRows) actIdx[norm(r.player_name)]=r;
+    // By id first, as the pricing pool does (#473): a twin stored as
+    // "Name #m<id> TEAM" is shown under its plain name with its OWN actuals.
+    const { idOf: _idOf, stripIdMark: _stripMark, hasIdMark: _hasMark } = require('../utils/player-identity');
+    const actIdx={}, actById={};
+    for(const r of actRows){ const i=_idOf(r); if(i&&!actById[i]) actById[i]=r; if(!_hasMark(r.player_name)) actIdx[norm(r.player_name)]=r; }
     const sets=getSettings(); const WP=weightOr(sets.W_PROJ,0.65), WA=weightOr(sets.W_ACT,0.35);
     const starterLast=sp?norm(sp).split(' ').pop():'';
     const pitchers=projRows.map(proj=>{
-      const nameClean=proj.player_name.replace(/ [A-Z]{2,3}$/,'');
+      const nameClean=_stripMark(proj.player_name).replace(/ [A-Z]{2,3}$/,'');
       const pNorm=norm(nameClean); const lastName=pNorm.split(' ').pop();
       const isStarter=!!starterLast&&pNorm.includes(starterLast);
       // SHARED fuzzyLookup, not a fourth staging copy. (2026-09-18)
@@ -7141,7 +7156,8 @@ router.get('/debug/bullpen', (req, res) => {
       // reports what it reported yesterday, minus the drift surface.
       // Re-run: node scripts/test-normalizer-single-source.js
       const fuzzyLookupAct = (name, teamHint) => fuzzyLookup(actIdx, name, teamHint);
-      const actMatch = fuzzyLookupAct(pNorm, team);      const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
+      const _pi=_idOf(proj); let actMatch = _pi ? (actById[_pi]||null) : null;
+      if (!actMatch) { const _n = fuzzyLookupAct(pNorm, team); actMatch = (_n && _pi && _idOf(_n) && _idOf(_n) !== _pi) ? null : _n; }      const blended=actMatch?WP*proj.woba+WA*actMatch.woba:proj.woba;
       return{name:nameClean,role:isStarter?'SP':'RP',proj_woba:+proj.woba.toFixed(4),proj_sample:+proj.sample_size.toFixed(1),act_woba:actMatch?+actMatch.woba.toFixed(4):null,act_sample:actMatch?+actMatch.sample_size:null,act_match:actMatch?norm(actMatch.player_name||''):null,blended_woba:+blended.toFixed(4),calc:actMatch?WP+'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ'+proj.woba.toFixed(4)+' + '+WA+'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ'+actMatch.woba.toFixed(4)+' = '+blended.toFixed(4):'proj only (no act match) = '+proj.woba.toFixed(4)};
     });
     // Load active roster ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ prefer RP-tagged pitchers from team_rosters
@@ -7785,8 +7801,8 @@ router.get('/debug/model-trace', (req, res) => {
     // must be updated in lockstep — the actual_runModel block below acts
     // as a sanity check.
     const effHandLocal = (bh, ph) => bh==='S' ? (ph==='R'?'L':'R') : bh;
-    const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
-    const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ_, W_ACT_, MIN_BF_, settings);
+    const pwA = getPitcherWoba(wobaIdx, game.away_sp, game.away_sp_hand, game.away_team, W_PROJ_, W_ACT_, MIN_BF_, settings, game.away_sp_id);
+    const pwH = getPitcherWoba(wobaIdx, game.home_sp, game.home_sp_hand, game.home_team, W_PROJ_, W_ACT_, MIN_BF_, settings, game.home_sp_id);
 
     const traceBatter = (b, oppPitcherHand, pwOpp, oppBullpenScalar, ownTeam, spPitW_in, relPitW_in, ownRosterSet) => {
       const eff = effHandLocal(b.hand, oppPitcherHand);

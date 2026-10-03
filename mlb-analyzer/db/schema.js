@@ -2,6 +2,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const { normName, fuzzyLookup } = require('../utils/names');
+const { idOf, identityKey, cleanFgId, cleanMlbam, markName, stripIdMark, hasIdMark } = require('../utils/player-identity');
 
 let DATA_DIR;
 if (process.env.RENDER) {
@@ -1322,6 +1323,13 @@ try {
   console.error('[schema] fielding_frv PK widening FAILED: ' + (e && e.message));
 }
 try { db.exec("ALTER TABLE game_log ADD COLUMN ml_source TEXT"); } catch(e) {}
+// Player identity on wOBA rows (#473, 2026-10-02): FanGraphs PlayerId and
+// MLBAM id, kept from the upload instead of discarded. NULL on rows written
+// before this, until their key's next upload. utils/player-identity.js.
+try { db.exec("ALTER TABLE woba_data ADD COLUMN fg_player_id TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE woba_data ADD COLUMN mlbam_id INTEGER"); } catch(e) {}
+try { db.exec("ALTER TABLE woba_data_snapshot ADD COLUMN fg_player_id TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE woba_data_snapshot ADD COLUMN mlbam_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(e) {}
 // The odds job's moneyline cross-check on its last UNLOCKED pass (#484,
 // 2026-10-02): 'cross-checked' | 'single-source' | 'no-market', and the second
@@ -2581,10 +2589,11 @@ try {
 
 const q = {
   upsertWoba: db.prepare(`
-    INSERT INTO woba_data (data_key, player_name, woba, sample_size, uploaded_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    INSERT INTO woba_data (data_key, player_name, woba, sample_size, uploaded_at, fg_player_id, mlbam_id)
+    VALUES (?, ?, ?, ?, datetime('now'), ?, ?)
     ON CONFLICT(data_key, player_name) DO UPDATE SET
-      woba = excluded.woba, sample_size = excluded.sample_size, uploaded_at = excluded.uploaded_at
+      woba = excluded.woba, sample_size = excluded.sample_size, uploaded_at = excluded.uploaded_at,
+      fg_player_id = excluded.fg_player_id, mlbam_id = excluded.mlbam_id
   `),
   getWobaByKey: db.prepare(`SELECT player_name, woba, sample_size FROM woba_data WHERE data_key = ?`),
   clearWobaKey: db.prepare(`DELETE FROM woba_data WHERE data_key = ?`),
@@ -3821,9 +3830,47 @@ q.getFatiguedPitchers = (teamAbbr, gameDate, gameNumber) => {
 // an ingest failure that wiped the previous good upload. Clearing and
 // inserting in one transaction means a rejected batch rolls back to the
 // last good data instead.
+// TWO PLAYERS, ONE NAME: NEVER MERGED. (#473, 2026-10-02)
+//
+// Runs BEFORE upsertWobaBatch's collision / period-split classification and
+// leaves it untouched. Rows sharing a stored name but carrying DIFFERENT ids
+// are different players, not a duplicate and not a period split: the id with
+// the largest sample keeps the plain name (what a name lookup got before);
+// every other id is stored under "Name #<id> TEAM", reachable by id. Rows
+// without an id keep the plain name and the old rule, since a stored name is
+// all they have. -> { rows, separated: [stored names moved] }
+function separateByIdentity(rows) {
+  const byName = new Map();
+  for (const r of rows) {
+    const id = idOf(r);
+    if (!id) continue;
+    if (!byName.has(r.name)) byName.set(r.name, new Map());
+    const ids = byName.get(r.name);
+    ids.set(id, Math.max(ids.get(id) || 0, r.sample || 0));
+  }
+  const keep = new Map();                                      // name -> the id that keeps the plain name
+  for (const [name, ids] of byName) {
+    if (ids.size < 2) continue;
+    let best = null, bestS = -1;
+    for (const [id, s] of ids) if (s > bestS) { best = id; bestS = s; }
+    keep.set(name, best);
+  }
+  if (!keep.size) return { rows, separated: [] };
+  const separated = [];
+  const out = rows.map(r => {
+    const id = idOf(r);
+    if (!id || !keep.has(r.name) || keep.get(r.name) === id) return r;
+    const name = markName(r.name, id, r.team);
+    if (!separated.includes(name)) separated.push(name);
+    return Object.assign({}, r, { name });
+  });
+  return { rows: out, separated };
+}
+
 q.upsertWobaBatch = (key, rows) => {
-  const tx = db.transaction((k, rs) => {
+  const tx = db.transaction((k, rs0) => {
     db.prepare('DELETE FROM woba_data WHERE data_key = ?').run(k);
+    const { rows: rs, separated } = separateByIdentity(rs0);
     // TWO KINDS OF DUPLICATE, TOLD APART STRUCTURALLY. (2026-09-22)
     //
     //   PERIOD SPLIT   the source returned one row per period for one
@@ -3882,7 +3929,11 @@ q.upsertWobaBatch = (key, rows) => {
         + ' Check services/fangraphs.js strGroup (expect career, which labels every row Total).'
         + ' Offenders: ' + splits.slice(0, 5).join('; '));
     }
-    for (const r of first.values()) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0);
+    for (const r of first.values()) q.upsertWoba.run(k, r.name, r.woba, r.sample || 0, cleanFgId(r.fg_player_id), cleanMlbam(r.mlbam_id));
+    if (separated.length) {
+      console.warn('[woba-ingest] ' + k + ': ' + separated.length + ' different player(s) sharing a name kept'
+        + ' separately by id: ' + separated.slice(0, 10).join(', '));
+    }
     if (collisions.length) {
       // Reported, not thrown -- but never silent. The silence is what
       // hid the original defect.
@@ -3896,7 +3947,7 @@ q.upsertWobaBatch = (key, rows) => {
     // INSERT OR REPLACE pick last-write-wins on a collided name while
     // woba_data holds the larger sample -- a live/backtest divergence
     // that could not exist while duplicates threw.
-    return { collisions: [...new Set(collisions)], kept: [...first.values()] };
+    return { collisions: [...new Set(collisions)], separated, kept: [...first.values()] };
   });
   // Returned so the upload result can surface the collision list.
   return tx(key, rows);
@@ -3905,7 +3956,7 @@ q.upsertWobaBatch = (key, rows) => {
 // Daily wOBA snapshot helpers (date-accurate backtest support).
 q._snapClearKeyDate = db.prepare("DELETE FROM woba_data_snapshot WHERE snapshot_date=? AND data_key=?");
 q._snapInsert = db.prepare(
-  "INSERT OR REPLACE INTO woba_data_snapshot (snapshot_date, data_key, player_name, woba, sample_size) VALUES (?,?,?,?,?)"
+  "INSERT OR REPLACE INTO woba_data_snapshot (snapshot_date, data_key, player_name, woba, sample_size, fg_player_id, mlbam_id) VALUES (?,?,?,?,?,?,?)"
 );
 // Snapshot one key's rows for a given date. Clears any existing rows for
 // (date,key) first so a same-day re-refresh replaces rather than appends.
@@ -3913,7 +3964,7 @@ q._snapInsert = db.prepare(
 q.snapshotWobaKey = (snapshotDate, key, rows) => {
   const tx = db.transaction((d, k, rs) => {
     q._snapClearKeyDate.run(d, k);
-    for (const r of rs) q._snapInsert.run(d, k, r.name, r.woba, r.sample || 0);
+    for (const r of rs) q._snapInsert.run(d, k, r.name, r.woba, r.sample || 0, cleanFgId(r.fg_player_id), cleanMlbam(r.mlbam_id));
   });
   tx(snapshotDate, key, rows);
 };
@@ -3928,7 +3979,7 @@ q.getSnapshotDateAsOf = db.prepare(
 );
 // Load all rows for a specific snapshot_date.
 q.loadSnapshotRows = db.prepare(
-  "SELECT data_key, player_name, woba, sample_size FROM woba_data_snapshot WHERE snapshot_date=?"
+  "SELECT data_key, player_name, woba, sample_size, fg_player_id, mlbam_id FROM woba_data_snapshot WHERE snapshot_date=?"
 );
 
 // ------------------------------------------------------------------
@@ -4633,10 +4684,13 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   const starterNorm = normName(starterName).split(' ').pop();
   const projKey = 'pit-proj-'+vsHand;
   const projRows = db.prepare(
-    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=? AND player_name LIKE ?"
+    "SELECT player_name, woba, sample_size, fg_player_id, mlbam_id FROM woba_data WHERE data_key=? AND player_name LIKE ?"
   ).all(projKey, '% '+teamLower.toUpperCase());
-  const rosterRows = db.prepare("SELECT player_name,role FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
+  const rosterRows = db.prepare("SELECT player_name,role,mlb_id FROM team_rosters WHERE team=? AND role='RP'").all(teamAbbr.toUpperCase());
   const activeRPSet = new Set(rosterRows.map(r=>normName(r.player_name)));
+  // Roster identity (#473): the RP ids, and which roster names carry one.
+  const activeRPIds = new Set(rosterRows.map(r => cleanMlbam(r.mlb_id)).filter(Boolean));
+  const rosterNameHasId = new Set(rosterRows.filter(r => cleanMlbam(r.mlb_id)).map(r => normName(r.player_name)));
   const hasRoster = activeRPSet.size > 0;
   if (!projRows.length && !hasRoster) return null;
   // Fatigue log stores full names from MLB Stats API — exact match only, no last-name fallback.
@@ -4666,7 +4720,7 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
     return (f && f.reasons.length) ? f.reasons.join('+') : 'fatigued';
   };
   const bullpenProj = projRows.filter(r => {
-    const nameClean = r.player_name.replace(/ [A-Z]{2,3}$/, '');
+    const nameClean = stripIdMark(r.player_name).replace(/ [A-Z]{2,3}$/, '');
     const pn = normName(nameClean);
     // The starter is not an exclusion worth reporting -- he is not a
     // reliever and was never in the pool. Recording him would bury the
@@ -4699,16 +4753,49 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
       // SAFE AGAINST NAME-FORMAT DRIFT: a rostered arm that loses its exact
       // projection match is not silently dropped. It falls through to the
       // roster-fallback injection below and surfaces in `fallbacks`.
+      // BY ID FIRST. (#473, 2026-10-02) A projection row carrying an MLBAM id
+      // is admitted when that id is on the RP roster; when the roster has this
+      // NAME under a different id, it is a different player who only shares
+      // the name, and stays out. Rows without an id use the exact-name rule.
+      const _mid = cleanMlbam(r.mlbam_id);
+      if (_mid && activeRPIds.size) {
+        if (activeRPIds.has(_mid)) return true;
+        if (rosterNameHasId.has(pn)) return false;
+      }
       return activeRPSet.has(pn);
     }
     return r.sample_size >= 5;
   });
+  // ONE PITCHER, ONE POOL ENTRY. (#473) Two stored rows of the same player --
+  // one FanGraphs row saved under two spellings -- used to count twice.
+  // Same player = same id, or, with no ids, same normalized name AND the same
+  // numbers (utils/player-identity.js). Different players are never merged.
+  const _seenIdent = new Set();
+  const bullpenProjUnique = bullpenProj.filter(r => {
+    const k = identityKey(r, stripIdMark(r.player_name).replace(/ [A-Z]{2,3}$/, ''));
+    if (_seenIdent.has(k)) return false;
+    _seenIdent.add(k);
+    return true;
+  });
   const actKey = 'pit-act-'+vsHand;
   const actRows = db.prepare(
-    "SELECT player_name, woba, sample_size FROM woba_data WHERE data_key=?"
+    "SELECT player_name, woba, sample_size, fg_player_id, mlbam_id FROM woba_data WHERE data_key=?"
   ).all(actKey);
-  const actIdx = {};
-  for (const r of actRows) actIdx[normName(r.player_name)] = r;
+  // Actuals by id first, then by name (#473). A name slot shared by two
+  // different ids keeps the larger sample instead of the last row; a row
+  // without ids is filed exactly as before.
+  const actIdx = {}, actById = {};
+  for (const r of actRows) {
+    const id = idOf(r);
+    if (id && !actById[id]) actById[id] = r;
+    if (hasIdMark(r.player_name)) continue;
+    const nk = normName(r.player_name), prev = actIdx[nk];
+    if (prev && idOf(prev) && id && idOf(prev) !== id) {
+      if ((r.sample_size || 0) > (prev.sample_size || 0)) actIdx[nk] = r;
+      continue;
+    }
+    actIdx[nk] = r;
+  }
 
   const W_PROJ = (wProj != null) ? wProj : 0.65;
   const W_ACT = (wAct != null) ? wAct : 0.35;
@@ -4727,9 +4814,16 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // standalone callers (scripts/) that don't thread minBF still get the
   // same behavior as getPitcherWoba's default.
   const minSample = (minBF != null) ? minBF : 100;
-  const pitchers = bullpenProj.map(proj => {
-    const pName = normName(proj.player_name.replace(/ [A-Z]+$/, ''));
-    const actMatch = fuzzyLookup(actIdx, pName, teamAbbr);
+  const pitchers = bullpenProjUnique.map(proj => {
+    const pName = normName(stripIdMark(proj.player_name).replace(/ [A-Z]+$/, ''));
+    // The pitcher's own actuals: by id when the projection row has one; a
+    // name match is used only when it cannot be a different player (#473).
+    const _pid = idOf(proj);
+    let actMatch = _pid ? (actById[_pid] || null) : null;
+    if (!actMatch) {
+      const byName = fuzzyLookup(actIdx, pName, teamAbbr);
+      actMatch = (byName && _pid && idOf(byName) && idOf(byName) !== _pid) ? null : byName;
+    }
     const useAct = actMatch && actMatch.woba && actMatch.sample_size >= minSample;
     // PARK-NEUTRALIZE THE ACTUALS TERM, exactly as getBatterWoba and
     // getPitcherWoba do. (2026-08-31)
@@ -4798,10 +4892,12 @@ q.getBullpenWoba = (teamAbbr, starterName, vsHand, wProj, wAct, gameDate, unknow
   // belongs in the fallback list where he is visible as such.
   if (hasRoster) {
     const representedFull = new Set(pitchers.map(p => p.name));
+    const representedIds = new Set(bullpenProjUnique.map(p => cleanMlbam(p.mlbam_id)).filter(Boolean));
     for (const r of rosterRows) {
       const rName = normName(r.player_name);
       if (!rName) continue;
       if (representedFull.has(rName)) continue;
+      if (cleanMlbam(r.mlb_id) && representedIds.has(cleanMlbam(r.mlb_id))) continue;
       if (starterNorm && rName.includes(starterNorm)) continue;
       if (fatiguedSet.has(rName)) { note(rName, reasonFor(rName)); continue; }
       pitchers.push({ name: rName, woba: unknownWoba, sample: 0, fallback: true,
