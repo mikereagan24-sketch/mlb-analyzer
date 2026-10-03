@@ -1323,6 +1323,12 @@ try {
 }
 try { db.exec("ALTER TABLE game_log ADD COLUMN ml_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_ml_source TEXT"); } catch(e) {}
+// The odds job's moneyline cross-check on its last UNLOCKED pass (#484,
+// 2026-10-02): 'cross-checked' | 'single-source' | 'no-market', and the second
+// venue when there was one. Read by signal creation for display; NULL on rows
+// priced before this column existed. Blocks nothing.
+try { db.exec("ALTER TABLE game_log ADD COLUMN ml_xcheck_status TEXT"); } catch(e) {}
+try { db.exec("ALTER TABLE game_log ADD COLUMN ml_xcheck_source TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_id INTEGER"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN venue_name TEXT"); } catch(e) {}
 try { db.exec("ALTER TABLE game_log ADD COLUMN xcheck_home_ml INTEGER"); } catch(e) {}
@@ -2827,6 +2833,28 @@ const q = {
     try { db.prepare("ALTER TABLE bet_signals ADD COLUMN model_away_ml_at_emit INTEGER").run(); } catch(e) {}
     return true;
   })(),
+  // Moneyline price provenance AT SIGNAL TIME (#484, 2026-10-02). Visibility
+  // only: nothing reads these to decide a signal or a price.
+  //   ml_price_source   venue the signal's moneyline price came from
+  //                     ('kalshi' | 'polymarket'), at emit / last baseline
+  //   ml_xcheck_status  the game's cross-check then: 'cross-checked' |
+  //                     'single-source' | 'no-market'
+  //   ml_xcheck_source  the second venue when cross-checked
+  //   ml_depth_usd      dollars of asks at or better than the price the $100
+  //                     fill reached, on ml_price_source's book
+  //   ml_depth_reason   why ml_depth_usd is NULL
+  // All NULL on rows created before this change: shown as "not recorded",
+  // never backfilled. Like price_venue, they refresh with the baseline while
+  // the bet is unlocked and freeze with it at bet_locked_at.
+  _priceSourceColumnsMigration: (() => {
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN ml_price_source TEXT").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN ml_xcheck_status TEXT").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN ml_xcheck_source TEXT").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN ml_depth_usd REAL").run(); } catch(e) {}
+    try { db.prepare("ALTER TABLE bet_signals ADD COLUMN ml_depth_reason TEXT").run(); } catch(e) {}
+    return true;
+  })(),
+  setMlCrossCheck: db.prepare(`UPDATE game_log SET ml_xcheck_status = ?, ml_xcheck_source = ? WHERE game_date = ? AND game_id = ?`),
   insertSignal: db.prepare(`
     INSERT INTO bet_signals (
       game_log_id, game_date, game_id, signal_type, signal_side, signal_label,
@@ -2878,6 +2906,7 @@ const q = {
       price_venue, venue_stale, lineup_hash,
       model_line_source, model_total_at_emit, opener_model_total_at_emit,
       model_home_ml_at_emit, model_away_ml_at_emit,
+      ml_price_source, ml_xcheck_status, ml_xcheck_source, ml_depth_usd, ml_depth_reason,
       updated_at
     ) VALUES (
       @game_log_id, @game_date, @game_id, @signal_type, @signal_side, @signal_label,
@@ -2887,6 +2916,7 @@ const q = {
       @price_venue, @venue_stale, @lineup_hash,
       @model_line_source, @model_total_at_emit, @opener_model_total_at_emit,
       @model_home_ml_at_emit, @model_away_ml_at_emit,
+      @ml_price_source, @ml_xcheck_status, @ml_xcheck_source, @ml_depth_usd, @ml_depth_reason,
       datetime('now')
     )
     ON CONFLICT(game_date, game_id, signal_type, signal_side) DO UPDATE SET
@@ -2909,6 +2939,11 @@ const q = {
       opener_model_total_at_emit = excluded.opener_model_total_at_emit,
       model_home_ml_at_emit      = excluded.model_home_ml_at_emit,
       model_away_ml_at_emit      = excluded.model_away_ml_at_emit,
+      ml_price_source            = excluded.ml_price_source,
+      ml_xcheck_status           = excluded.ml_xcheck_status,
+      ml_xcheck_source           = excluded.ml_xcheck_source,
+      ml_depth_usd               = excluded.ml_depth_usd,
+      ml_depth_reason            = excluded.ml_depth_reason,
       outcome                    = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.outcome ELSE excluded.outcome END,
       pnl                        = CASE WHEN bet_signals.outcome IN ('win','loss','push') THEN bet_signals.pnl     ELSE excluded.pnl     END,
       is_active                  = 1,

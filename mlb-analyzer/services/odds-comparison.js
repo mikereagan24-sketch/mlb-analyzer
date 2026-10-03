@@ -12,6 +12,7 @@
 
 const poly   = require('./polymarket');
 const kalshi = require('./kalshi');
+const { depthAtFillPrice } = require('../utils/price-source');
 
 const DEFAULT_STAKE_USD = 100;
 const STRIKE_TOL = 1e-6;  // exact strike-match tolerance
@@ -39,6 +40,10 @@ function priceAtSize(walkFn, book, stakeUsd, feeFn) {
     eff_price:      round4(effP),
     net_american:   priceToAmerican(effP),
     levels_used:    walk.levels_consumed.length,
+    // Dollars of asks at or better than the deepest price this fill reached,
+    // from the book already walked above (#484, 2026-10-02). Recorded on
+    // signals for visibility; nothing prices or gates on it.
+    depth_usd:      depthAtFillPrice(Array.isArray(book) ? book : (book && book.asks), walk.levels_consumed),
   };
 }
 
