@@ -49,6 +49,8 @@ require(path.join(R, 'db/schema'));
 const Database = require(path.join(R, 'node_modules/better-sqlite3'));
 
 const APPLY = process.argv.includes('--apply');
+// utils/local-db-guard.js: refuses --apply of data/mlb.db unless MLB_ALLOW_LOCAL_DB=1.
+require(path.join(R, 'utils/local-db-guard')).assertLocalDbOpenAllowed(path.join(R, 'data/mlb.db'), { readonly: !APPLY });
 const db = new Database(path.join(R, 'data/mlb.db'), { readonly: !APPLY });
 
 const FIXES = [

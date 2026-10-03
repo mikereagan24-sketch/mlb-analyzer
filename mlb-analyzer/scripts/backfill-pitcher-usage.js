@@ -24,6 +24,8 @@ if (!fs.existsSync(DB_PATH)) {
   process.exit(1);
 }
 
+// utils/local-db-guard.js: refuses a read-write open of data/mlb.db unless MLB_ALLOW_LOCAL_DB=1.
+require(path.join(__dirname, '..', 'utils', 'local-db-guard')).assertLocalDbOpenAllowed(DB_PATH);
 const db = new Database(DB_PATH);
 
 // Ensure the table exists — safe on fresh DBs or DBs that pre-date the

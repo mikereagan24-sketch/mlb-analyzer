@@ -26,6 +26,8 @@ require(path.join(R, 'db/schema'));
 const Database = require(path.join(R, 'node_modules/better-sqlite3'));
 const { clvForSignal } = require(path.join(R, 'services/clv'));
 
+// utils/local-db-guard.js: refuses a read-write open of data/mlb.db unless MLB_ALLOW_LOCAL_DB=1.
+require(path.join(R, 'utils/local-db-guard')).assertLocalDbOpenAllowed(path.join(R, 'data/mlb.db'));
 const db = new Database(path.join(R, 'data/mlb.db'));
 
 // Mirrors services/jobs.js closingValuesFor. Kept in step deliberately:

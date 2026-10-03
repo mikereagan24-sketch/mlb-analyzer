@@ -54,6 +54,10 @@
 #   bash scripts/refresh-analysis-db.sh --promote    # ...and promote + re-apply
 
 set -euo pipefail
+# This script always targets data/mlb.db. An inherited MLB_DB_PATH would
+# send some steps to a scratch copy and others to data/mlb.db, splitting
+# the remediation between two databases. (2026-10-03)
+unset MLB_DB_PATH
 cd "$(dirname "$0")/.."
 
 # ── PICK THE NODE THAT CAN ACTUALLY OPEN THE DATABASE ────────────────
@@ -350,9 +354,15 @@ if (g < 1000) { console.error("game_log only " + g + " rows -- refusing"); proce
 console.log("  quick_check ok   game_log=" + g + "   logged bets=" + b);
 ' "${SNAP}"
 
+# MLB_ALLOW_LOCAL_DB=1 ON EVERY STEP THAT OPENS data/mlb.db READ-WRITE. (2026-10-03)
+# utils/local-db-guard.js refuses a read-write open of data/mlb.db from
+# anything but server.js. This script is one of the few deliberate writers:
+# the freshness report (step 3 and the final one) opens it through db/schema,
+# and step 5's remediation writes to it. The override is given per command,
+# never exported, so nothing else this shell runs inherits it.
 echo "=== 3/5 freshness comparison ==="
 set +e
-"$NODE" scripts/pipeline-freshness.js --compare "${SNAP}"
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/pipeline-freshness.js --compare "${SNAP}"
 set -e
 
 if [ "${PROMOTE}" -ne 1 ]; then
@@ -451,7 +461,7 @@ echo "=== 5/5 re-applying local-only remediation ==="
 #
 # fix-corrupt-totals-rows handles the 2 rows the migration REFUSES
 # (price-shaped bet_line with no usable market_line), so it follows it.
-"$NODE" scripts/backfill-first-pitch.js
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/backfill-first-pitch.js
 # tag-post-start-pricing.js --apply WAS HERE, and is deliberately gone.
 # (2026-09-14) The tag is now written on PRODUCTION by the registered
 # backfill task market_contamination_post_first_pitch, so a refresh brings
@@ -461,15 +471,15 @@ echo "=== 5/5 re-applying local-only remediation ==="
 # months. ONE SOURCE OF TRUTH: production computes it, the refresh copies
 # it. scripts/tag-post-start-pricing.js still reports, and still takes
 # --apply by hand for a copy that predates the prod backfill.
-"$NODE" scripts/backfill-pitcher-debut.js --apply
-"$NODE" scripts/backfill-totals-bet-price.js --apply
-"$NODE" scripts/fix-corrupt-totals-rows.js --apply
-"$NODE" scripts/null-fabricated-totals-closing.js --apply
-"$NODE" scripts/rederive-ml-closing-lines.js --apply
-"$NODE" scripts/regrade-stale-totals-pnl.js --apply
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/backfill-pitcher-debut.js --apply
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/backfill-totals-bet-price.js --apply
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/fix-corrupt-totals-rows.js --apply
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/null-fabricated-totals-closing.js --apply
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/rederive-ml-closing-lines.js --apply
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/regrade-stale-totals-pnl.js --apply
 
 echo ""
 echo "=== final freshness ==="
-"$NODE" scripts/pipeline-freshness.js || true
+MLB_ALLOW_LOCAL_DB=1 "$NODE" scripts/pipeline-freshness.js || true
 echo ""
 echo "Undo: cp data/mlb.db.local-pre-refresh-${STAMP} data/mlb.db"

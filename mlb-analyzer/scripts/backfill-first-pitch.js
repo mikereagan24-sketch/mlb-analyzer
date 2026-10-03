@@ -24,6 +24,8 @@ const FROM = args[0] || '2026-01-01';
 const TO = args[1] || '2026-12-31';
 const SLEEP_MS = 120;
 
+// utils/local-db-guard.js: refuses a read-write open of data/mlb.db unless MLB_ALLOW_LOCAL_DB=1.
+require(path.join(R, 'utils/local-db-guard')).assertLocalDbOpenAllowed(path.join(R, 'data/mlb.db'));
 const db = new Database(path.join(R, 'data/mlb.db'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
