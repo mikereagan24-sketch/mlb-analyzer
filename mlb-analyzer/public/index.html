@@ -5648,6 +5648,40 @@ function renderBucketSections(signals){
 // Predicate: does this signal meet its section's threshold? Used by
 // the overall-ROI summary at the top of the backtest tab to scope to
 // actionable bets. Overs are EXCLUDED entirely (no threshold defined).
+// Summary-card totals. (2026-10-05, #520)
+//
+// mode 'all' (All Signals): threshold-aware, as before -- a signal counts
+// only if it meets its direction's highlight minimum, and Overs never count.
+// That answers "how would the model do at today's thresholds".
+//
+// mode 'logged' (Logged Bets Only): EVERY graded logged bet counts -- Overs
+// and below-threshold bets included -- because there the cards answer "how
+// have my bets done". Before this, logged mode applied the same threshold
+// filter: on 2026-10-05 the v7 cards showed 201 bets at +$539.92 while all
+// 300 graded logged bets totalled -$765.56. The population is the API's own
+// (GET /api/backtest, mode=logged: cohort, date range and the contamination
+// exclusion are applied server-side to `signals` and `overall` alike), so in
+// logged mode these totals equal the API's `overall` for the same selection.
+// Pushes are counted in W-L-P but, as in `overall`, add no P&L or stake.
+function backtestSummaryTotals(signals, thr, mode) {
+  var allLogged = mode === 'logged';
+  var t = { plays: 0, wins: 0, losses: 0, pushes: 0, pnl: 0, wagered: 0, allLogged: allLogged };
+  for (var i = 0; i < (signals || []).length; i++) {
+    var s = signals[i];
+    if (s.outcome !== 'win' && s.outcome !== 'loss' && s.outcome !== 'push') continue;
+    if (!allLogged && !signalMeetsBacktestThreshold(s, thr)) continue;
+    t.plays++;
+    if (s.outcome === 'win') t.wins++;
+    else if (s.outcome === 'loss') t.losses++;
+    else t.pushes++;
+    t.pnl += Number(s.pnl) || 0;
+    if (s.outcome !== 'push') t.wagered += wageredForSignal(s);
+  }
+  t.roi = t.wagered > 0 ? (t.pnl / t.wagered * 100) : 0;
+  t.winRate = (t.wins + t.losses) > 0 ? (t.wins / (t.wins + t.losses) * 100) : null;
+  return t;
+}
+
 function signalMeetsBacktestThreshold(s, thr) {
   if (!s) return false;
   var e = Number(s.edge_pct);
@@ -5802,36 +5836,31 @@ async function loadBacktest(){
     // Summary cards — computed from the filtered signals so combined mode
     // matches what the bucket sections show (the API-provided `overall`
     // would aggregate across all cohorts when apiCohort='all').
-    // Threshold-aware (feat/backtest-threshold-aware-totals): only count
-    // signals that meet their section's direction-specific minimum, and
-    // exclude Overs entirely. Sub-threshold + Overs rows still appear
-    // in the bucket tables for context.
+    // All Signals: threshold-aware (feat/backtest-threshold-aware-totals):
+    // only signals that meet their section's direction-specific minimum,
+    // Overs excluded; sub-threshold + Overs rows still appear in the bucket
+    // tables for context. Logged Bets Only: every graded logged bet (#520).
+    // See backtestSummaryTotals.
     const thr = _bktThresholds();
-    let sumPnl = 0, sumWagered = 0, wins = 0, losses = 0, pushes = 0, plays = 0;
-    for (const s of signals) {
-      if (s.outcome !== 'win' && s.outcome !== 'loss' && s.outcome !== 'push') continue;
-      if (!signalMeetsBacktestThreshold(s, thr)) continue;
-      plays++;
-      if (s.outcome === 'win') wins++;
-      else if (s.outcome === 'loss') losses++;
-      else pushes++;
-      sumPnl += Number(s.pnl) || 0;
-      if (s.outcome !== 'push') sumWagered += wageredForSignal(s);
-    }
-    const roi = sumWagered > 0 ? (sumPnl / sumWagered * 100) : 0;
-    const winRate = (wins + losses) > 0 ? (wins / (wins + losses) * 100) : null;
+    const tot = backtestSummaryTotals(signals, thr, btMode);
+    const sumPnl = tot.pnl, sumWagered = tot.wagered, wins = tot.wins, losses = tot.losses, pushes = tot.pushes, plays = tot.plays;
+    const roi = tot.roi, winRate = tot.winRate;
     // Build a single-line scope label so the summary makes its filter
     // obvious. The thresholds come from settings, so render them out
     // explicitly rather than hardcoding 2pp/4.5pp/7pp in the header text.
     // Threshold settings are decimals (0.02 = 2pp); display in pp units.
     function _ppFmt(pp) { return (pp * 100).toFixed(2).replace(/0+$/, '').replace(/\.$/, '') + 'pp'; }
-    const scopeLabel = 'Favs ≥' + _ppFmt(thr.favPp)
-                     + ' + Dogs ≥' + _ppFmt(thr.dogPp)
-                     + ' + Unders ≥' + _ppFmt(thr.underPp);
+    const scopeLabel = tot.allLogged
+      ? 'All logged bets · no edge threshold'
+      : 'Favs ≥' + _ppFmt(thr.favPp)
+        + ' + Dogs ≥' + _ppFmt(thr.dogPp)
+        + ' + Unders ≥' + _ppFmt(thr.underPp);
+    const pnlSub = tot.allLogged ? 'All logged bets · $100/play' : '$100/play (actionable)';
+    const playsSub = tot.allLogged ? ' logged bets · ' : ' actionable plays · ';
     document.getElementById('bt-summary').innerHTML=
-      '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(sumPnl>=0?'green':'red')+'">'+(sumPnl>=0?'+':'')+'$'+sumPnl.toFixed(0)+'</div><div class="metric-sub">$100/play (actionable)</div></div>'+
+      '<div class="metric-card"><div class="metric-label">Total P&L</div><div class="metric-val '+(sumPnl>=0?'green':'red')+'">'+(sumPnl>=0?'+':'')+'$'+sumPnl.toFixed(0)+'</div><div class="metric-sub">'+pnlSub+'</div></div>'+
       '<div class="metric-card"><div class="metric-label">Overall ROI</div><div class="metric-val '+(roi>=0?'green':'red')+'">'+(roi>=0?'+':'')+roi.toFixed(2)+'%</div><div class="metric-sub">'+scopeLabel+'</div></div>'+
-      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+wins+'-'+losses+'-'+pushes+'</div><div class="metric-sub">'+plays+' actionable plays · '+(winRate!=null?winRate.toFixed(1)+'% win':'—')+'</div></div>'+
+      '<div class="metric-card"><div class="metric-label">W-L-P</div><div class="metric-val">'+wins+'-'+losses+'-'+pushes+'</div><div class="metric-sub">'+plays+playsSub+(winRate!=null?winRate.toFixed(1)+'% win':'—')+'</div></div>'+
       '<div class="metric-card"><div class="metric-label">Wagered</div><div class="metric-val">$'+sumWagered.toFixed(0)+'</div><div class="metric-sub">'+from+' – '+to+'</div></div>';
     renderRunlineCompanion(signals);
     renderSignalTracking(signals);
