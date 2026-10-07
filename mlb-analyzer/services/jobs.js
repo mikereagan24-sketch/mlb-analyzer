@@ -602,6 +602,24 @@ function _deactivationReason(dType, dSide, finalMdl, mktRef, outSuppressed) {
   }
   return base + ' — suppressed (' + String(rec.reason || 'unspecified') + ').';
 }
+// The short, stable reason on a logged bet the model no longer emits (#519).
+// Stable on purpose -- no prices or model numbers -- so it only changes, and
+// only writes, when the reason changes. The full text goes in the audit row.
+function _notEmittedShortReason(suppressed, reasonKey, reasonText, dType, dSide, outSuppressed) {
+  if (suppressed) return 'model suppressed (' + (reasonText[reasonKey] || reasonKey || 'unspecified').toString().toLowerCase() + ')';
+  const rec = (Array.isArray(outSuppressed) ? outSuppressed : []).find(x =>
+    x && x.type === dType && (x.side === dSide || x.side === 'both'));
+  if (!rec) return 'edge below floor';
+  if (rec.reason === 'edge_hard_cap') return 'edge above the hard cap (distrusted, not cooled)';
+  if (rec.gate) {
+    const r = String(rec.reason || '');
+    if (/DH-crossed/i.test(r)) return 'market rejected by the doubleheader guard';
+    if (/disagree on favorite/i.test(r)) return 'market rejected (sources disagree on favorite)';
+    if (/live in-game/i.test(r)) return 'market rejected (live in-game price)';
+    return 'market rejected (implausible price pair)';
+  }
+  return 'suppressed (' + String(rec.reason || 'unspecified') + ')';
+}
 function processGameSignals(gameRow, wobaIdx, settings, opts) {
   // opts.venueRowsByGid: optional map { [game_id]: comparisonRow } from
   // services/odds-comparison.js runComparison, prefetched slate-wide so
@@ -1394,7 +1412,7 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
   //   bet_signal_audit entries so refresh history is reconstructable,
   //   (b) detect orphan rows to deactivate at the tail.
   const existingRows = db.prepare(
-    'SELECT id, signal_type, signal_side, market_line, model_line, edge_pct, category, price_venue, venue_stale, is_active, bet_line, bet_locked_at, closing_line, clv, '
+    'SELECT id, signal_type, signal_side, market_line, model_line, edge_pct, category, price_venue, venue_stale, is_active, bet_line, bet_locked_at, closing_line, clv, notes, '
     + 'ml_price_source, ml_xcheck_status, ml_xcheck_source, ml_depth_usd, ml_depth_reason FROM bet_signals WHERE game_date=? AND game_id=?'
   ).all(gameRow.game_date, gameRow.game_id);
   const existingByKey = {};
@@ -1755,6 +1773,24 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
         console.error('[signal-reactivate] failed for ' + gameRow.game_id + ': ' + e.message);
       }
     }
+    // A logged bet kept active while the model did not emit it (#519) is
+    // emitting again: drop the "Model no longer recommends" note. Only that
+    // note, only on a logged row; nothing else changes.
+    if (_preRow && _preRow.bet_line != null && _preRow.is_active === 1
+        && typeof _preRow.notes === 'string' && _preRow.notes.indexOf('Model no longer recommends:') === 0) {
+      try {
+        const _cr = q.clearLoggedBetNotEmittedNote.run(_preRow.id);
+        if (_cr && _cr.changes) {
+          q.insertBetSignalAudit({
+            signal_id: _preRow.id, game_date: gameRow.game_date, game_id: gameRow.game_id,
+            signal_type: sig.type, signal_side: sig.side, action: 'emitted_again',
+            bet_line: _preRow.bet_line, closing_line: _preRow.closing_line, clv: _preRow.clv,
+            source: 'process_game_signals_upsert',
+            detail: 'cleared: ' + _preRow.notes,
+          });
+        }
+      } catch (e) { /* non-fatal: a stale note, nothing else */ }
+    }
     // Refresh audit trail. Records action='insert' on first sight and
     // action='refresh' on every subsequent pass that changes a tracked
     // column. Locked rows produce no audit because the WHERE guard on
@@ -1933,6 +1969,37 @@ function processGameSignals(gameRow, wobaIdx, settings, opts) {
     // on it and we distrust the number' point a reader in opposite
     // directions when deciding whether to hedge. Same defect the
     // 'Lineup incomplete' hardcode had, in its sibling branch.
+
+    // A LOGGED BET IS NEVER DEACTIVATED. (2026-10-07, #519)
+    //
+    // Logged = bet_line IS NOT NULL (utils/logged-bets.js and every other
+    // "what was actually bet" query). Deactivating one took a real bet off the
+    // card and, after first pitch, did so on a manual rerun of a past date --
+    // 266 logged bets this season, including 10/01 phi-atl (ATL ML -103, a
+    // doubleheader-guard false positive). The money was never affected (grading
+    // and every total ignore is_active), but the bet should stay where it was
+    // struck. So: say WHY the model no longer emits it -- a short note on the
+    // bet and an audit row -- and change nothing else: not is_active, outcome,
+    // pnl, a price or the lock. Written only when the reason changes, so the
+    // cron does not add a row every pass. q.deactivateSignal also refuses
+    // logged rows (AND bet_line IS NULL) as a backstop.
+    if (preRow.bet_line != null) {
+      const shortNote = 'Model no longer recommends: ' + _notEmittedShortReason(suppressed, reasonKey, REASON_TEXT, dType, dSide, outSuppressed);
+      if (preRow.notes !== shortNote) {
+        q.noteLoggedBetNotEmitted.run(shortNote, preRow.id);
+        try {
+          q.insertBetSignalAudit({
+            signal_id: preRow.id, game_date: gameRow.game_date, game_id: gameRow.game_id,
+            signal_type: dType, signal_side: dSide, action: 'no_longer_emitted',
+            bet_line: preRow.bet_line, closing_line: preRow.closing_line, clv: preRow.clv,
+            source: 'process_game_signals_upsert',
+            detail: shortNote + ' | ' + note,
+          });
+        } catch (e) { /* audit failure must not block lifecycle */ }
+        console.log('[model] Logged bet kept active, no longer emitted: ' + dType + '/' + dSide + ' | ' + note);
+      }
+      continue;
+    }
 
     q.deactivateSignal.run(note, gameRow.game_date, gameRow.game_id, dType, dSide);
     try {
@@ -8857,4 +8924,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { gradeBetSignalsForGame, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { gradeBetSignalsForGame, _notEmittedShortReason, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };

@@ -3004,12 +3004,35 @@ const q = {
   // Locked rows keep their captured bet_line/bet_locked_at/closing_line/
   // clv intact; UI simply stops surfacing them on the Games tab while
   // backtest/CLV paths still see the row.
+  //
+  // NEVER A LOGGED BET. (2026-10-07, #519) `AND bet_line IS NULL` is the
+  // backstop: a logged bet (bet_line IS NOT NULL, the codebase's definition --
+  // utils/logged-bets.js, getLoggedInactiveByDate, backtest mode=logged) is
+  // never deactivated automatically. The cleanup in processGameSignals skips
+  // logged rows before it gets here and records noteLoggedBetNotEmitted instead.
   deactivateSignal: db.prepare(`
     UPDATE bet_signals SET
       is_active = 0,
       notes = ?,
       updated_at = datetime('now')
     WHERE game_date = ? AND game_id = ? AND signal_type = ? AND signal_side = ?
+      AND bet_line IS NULL
+  `),
+  // A logged bet the model no longer emits: say why, change nothing else.
+  // (2026-10-07, #519) Touches notes and updated_at only -- never is_active,
+  // outcome, pnl, a price, a line or the lock.
+  noteLoggedBetNotEmitted: db.prepare(`
+    UPDATE bet_signals SET
+      notes = ?,
+      updated_at = datetime('now')
+    WHERE id = ? AND bet_line IS NOT NULL
+  `),
+  // The same bet emitting again: clear that note (and only that note).
+  clearLoggedBetNotEmittedNote: db.prepare(`
+    UPDATE bet_signals SET
+      notes = NULL,
+      updated_at = datetime('now')
+    WHERE id = ? AND bet_line IS NOT NULL AND notes LIKE 'Model no longer recommends:%'
   `),
   getSignalsByDate: db.prepare(`SELECT * FROM bet_signals WHERE game_date = ? AND is_active = 1 ORDER BY game_id`),
   // Logged bets the live signal query cannot see. (2026-08-30)
