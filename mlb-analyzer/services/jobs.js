@@ -2943,65 +2943,9 @@ async function runLineupJob(dateStr) {
             const nowPT=new Date(new Date().toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));
             const minsToGame=gameMinsPT-(nowPT.getHours()*60+nowPT.getMinutes());
             if(minsToGame<=10&&minsToGame>=-240){
-              // FREEZE THE SPREAD-CELL AXIS HERE, atomically with the
-              // lock. (2026-09-11)
-              //
-              // market_total_at_emit is set in the SAME statement that
-              // sets odds_locked_at, guarded by the same
-              // `odds_locked_at IS NULL`. That is deliberate: two
-              // statements could interleave with an odds pass and leave
-              // a row locked-but-unstamped or stamped-but-unlocked, and
-              // "the axis froze at lock" has to be true of the row, not
-              // just of the intention. Before this, the stamp landed at
-              // FIRST COMPUTATION (~04:01), and the cell moves between
-              // that build and first pitch on 28.3% of games.
-              //
-              // market_total may legitimately be NULL here (Kalshi and
-              // Poly both silent), leaving the axis unstamped. Such a
-              // row falls back to market_total exactly as historical
-              // rows do, and is counted below rather than passed over.
-              db.prepare("UPDATE game_log SET odds_locked_at=datetime('now'), market_total_at_emit=market_total WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
-              const _lk = q.getGameById.get(dateStr, gameId);
-              console.log('[odds] Locked '+gameId+' ('+minsToGame+'min)'
-                + '  spread-cell axis=' + (_lk && _lk.market_total_at_emit != null
-                    ? 'FROZEN@' + _lk.market_total_at_emit
-                    : 'UNSTAMPED (no market total at lock — cell stays on the fallback)'));
-              // Auto-set closing lines on any ML signals for this game.
-              //
-              // ---- CLV CAVEAT ----
-              // When kalshi_direct_primary_enabled is on, market_*_ml below
-              // is the FEE-ADJUSTED Kalshi price (set in runOddsJob's
-              // Kalshi-direct override block), NOT the raw market. CLV
-              // computed here is therefore fee-skewed — systematically
-              // inflated by roughly the per-contract fee — and is NOT
-              // directly comparable to a true closing line. Known, accepted
-              // consequence of storing the all-in price everywhere. See
-              // feat/kalshi-fee-adjusted-lines.
-              const gameForClose = q.getGameById.get(dateStr, gameId);
-              if (gameForClose) {
-                // ML filter removed 2026-08-23 -- totals were never captured.
-                const mlSigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, gameId);
-                for (const sig of mlSigs) {
-                  const _cw = writeClosing(db, sig, gameForClose);
-                  const closingLine = _cw.closingLine;
-                  const clv = _cw.clv;
-                  try {
-                    q.insertBetSignalAudit({
-                      signal_id: sig.id,
-                      game_date: dateStr,
-                      game_id: gameId,
-                      signal_type: sig.signal_type,
-                      signal_side: sig.signal_side,
-                      action: 'set_closing_line',
-                      bet_line: sig.bet_line,
-                      closing_line: closingLine,
-                      clv: clv,
-                      source: 'cron_closing_lock',
-                      detail: 'odds locked at game start gate',
-                    });
-                  } catch(e) { /* audit failure must not block lifecycle */ }
-                }
-              }
+              // The lock itself lives in lockGameOdds (shared with the
+              // per-game lock pass, #488); same statements, label and detail.
+              lockGameOdds(dateStr, gameId, minsToGame+'min', 'odds locked at game start gate');
             }
           }
         }
@@ -3749,6 +3693,171 @@ function closingValuesFor(sig, gameRow) {
     closingLine: sig.signal_side === 'away' ? gameRow.market_away_ml : gameRow.market_home_ml,
     closingPrice: null,
   };
+}
+
+// lockGameOdds -- THE odds lock for one game. (2026-10-07, #488)
+//
+// Extracted verbatim from runLineupJob's T-10 block so the per-game lock
+// pass (runPerGameLockPass, below) runs the same statements in the same
+// order and writes the same values. runLineupJob still calls it from the
+// same place, under the same conditions, with the same log label and audit
+// detail, so the lineup-pull lock is unchanged and stays as the fallback.
+//
+// What a lock is, all of it: odds_locked_at and market_total_at_emit on
+// game_log (one UPDATE, guarded by odds_locked_at IS NULL), then
+// closing_line / closing_price / clv on every bet_signals row of the game
+// that has no closing_line yet, computed from the game_log row as it stands
+// (the frozen pre-lock prices), each with a set_closing_line audit row. No
+// odds fetch, no model, no signals: after this, processGameSignals returns
+// early for the game (locked and unscored) and the odds passes skip it.
+//
+// The odds job's started-game catch-up (runOddsJob) is a separate lock site
+// and is not routed through here: it computes closes from the freshly
+// fetched odds, not the stored row.
+//
+// Synchronous on purpose: callers check odds_locked_at and call this in the
+// same tick, so nothing can interleave between the check and the lock.
+function lockGameOdds(dateStr, gameId, label, detail) {
+  // FREEZE THE SPREAD-CELL AXIS HERE, atomically with the
+  // lock. (2026-09-11)
+  //
+  // market_total_at_emit is set in the SAME statement that
+  // sets odds_locked_at, guarded by the same
+  // `odds_locked_at IS NULL`. That is deliberate: two
+  // statements could interleave with an odds pass and leave
+  // a row locked-but-unstamped or stamped-but-unlocked, and
+  // "the axis froze at lock" has to be true of the row, not
+  // just of the intention. Before this, the stamp landed at
+  // FIRST COMPUTATION (~04:01), and the cell moves between
+  // that build and first pitch on 28.3% of games.
+  //
+  // market_total may legitimately be NULL here (Kalshi and
+  // Poly both silent), leaving the axis unstamped. Such a
+  // row falls back to market_total exactly as historical
+  // rows do, and is counted below rather than passed over.
+  db.prepare("UPDATE game_log SET odds_locked_at=datetime('now'), market_total_at_emit=market_total WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr,gameId);
+  const _lk = q.getGameById.get(dateStr, gameId);
+  console.log('[odds] Locked '+gameId+' ('+label+')'
+    + '  spread-cell axis=' + (_lk && _lk.market_total_at_emit != null
+        ? 'FROZEN@' + _lk.market_total_at_emit
+        : 'UNSTAMPED (no market total at lock — cell stays on the fallback)'));
+  // Auto-set closing lines on any ML signals for this game.
+  //
+  // ---- CLV CAVEAT ----
+  // When kalshi_direct_primary_enabled is on, market_*_ml below
+  // is the FEE-ADJUSTED Kalshi price (set in runOddsJob's
+  // Kalshi-direct override block), NOT the raw market. CLV
+  // computed here is therefore fee-skewed — systematically
+  // inflated by roughly the per-contract fee — and is NOT
+  // directly comparable to a true closing line. Known, accepted
+  // consequence of storing the all-in price everywhere. See
+  // feat/kalshi-fee-adjusted-lines.
+  const gameForClose = q.getGameById.get(dateStr, gameId);
+  if (gameForClose) {
+    // ML filter removed 2026-08-23 -- totals were never captured.
+    const mlSigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, gameId);
+    for (const sig of mlSigs) {
+      const _cw = writeClosing(db, sig, gameForClose);
+      const closingLine = _cw.closingLine;
+      const clv = _cw.clv;
+      try {
+        q.insertBetSignalAudit({
+          signal_id: sig.id,
+          game_date: dateStr,
+          game_id: gameId,
+          signal_type: sig.signal_type,
+          signal_side: sig.signal_side,
+          action: 'set_closing_line',
+          bet_line: sig.bet_line,
+          closing_line: closingLine,
+          clv: clv,
+          source: 'cron_closing_lock',
+          detail: detail,
+        });
+      } catch(e) { /* audit failure must not block lifecycle */ }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Per-game odds lock pass. (2026-10-07, #488)
+//
+// WHY. The lock above only ran inside a lineup pull (8, 10, 12-18 PT and
+// 11 PM PT), and only for a game the pull reached between 10 minutes before
+// and 4 hours after its first pitch. Measured on the 2026 regular season
+// (local copy through 9/30, 2,262 played games): 825 locked at or before
+// the scheduled start, 877 locked after it (507 of them 15-30 minutes
+// late: a 3:40 PM PT start waits for the 4 PM pull), and 289 never locked
+// (mostly 6:38-7:15 PM PT starts: the 6 PM pull is too early and the
+// 11 PM pull locked no game all season). A never-locked game gets no real
+// closing line or CLV, no top-traders final pass (no_odds_locked_at), and
+// drops out of the trends backtest and slate (odds_locked_at required).
+// Postseason so far: 9/30 chc-sd and 10/06 mil-sd never locked; 9/29
+// chc-sd, 10/03 nyy-tb and 10/03 sd-mil locked about 30 minutes late.
+//
+// WHAT. A one-minute tick (startCronJobs) reads today's PT game_log rows
+// and, for each game whose CURRENT scheduled_start_utc puts it inside the
+// lock window and that is not locked yet, queues one job that calls
+// lockGameOdds. Reading the start on every tick means a moved start
+// re-times the lock with no timers to cancel. The window is the lineup
+// path's own (10 minutes before to 4 hours after), so the pass locks at
+// T-10, within a minute plus any wait for the job queue.
+//
+// Skips: already locked, removed (is_removed), postponed or cancelled
+// (game_status), placeholder ids (not team-team, e.g. "atl/phi-lad"),
+// and rows with no scheduled_start_utc (the lineup-pull lock still covers
+// those, by game_time).
+const PER_GAME_LOCK_BEFORE_MIN = 10;
+const PER_GAME_LOCK_AFTER_MIN = 240;
+const _lockIdOk = (id) => /^[a-z]{2,3}-[a-z]{2,3}(-g?\d)?$/.test(String(id || ''));
+
+// -> [{ game_date, game_id, scheduled_start_utc, mins_to_start }] due now. Pure read.
+function dueGameLocks(nowMs) {
+  const now = nowMs == null ? Date.now() : nowMs;
+  const dateStr = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const rows = db.prepare(
+    'SELECT game_date, game_id, scheduled_start_utc, odds_locked_at, game_status, COALESCE(is_removed, 0) AS removed '
+    + 'FROM game_log WHERE game_date = ?'
+  ).all(dateStr);
+  const due = [];
+  for (const r of rows) {
+    if (r.odds_locked_at || r.removed) continue;
+    if (/^(Postponed|Cancelled)/.test(r.game_status || '')) continue;
+    if (!_lockIdOk(r.game_id) || !r.scheduled_start_utc) continue;
+    const start = Date.parse(r.scheduled_start_utc);
+    if (!Number.isFinite(start)) continue;
+    const minsToStart = (start - now) / 60000;
+    if (minsToStart <= PER_GAME_LOCK_BEFORE_MIN && minsToStart >= -PER_GAME_LOCK_AFTER_MIN) {
+      due.push({ game_date: r.game_date, game_id: r.game_id,
+        scheduled_start_utc: r.scheduled_start_utc, mins_to_start: Math.round(minsToStart) });
+    }
+  }
+  return due;
+}
+
+// Locks every game due now. Re-checks inside the job, so a game the lineup
+// pull locked while this waited in the queue is skipped, never re-locked.
+function runPerGameLockPass(nowMs) {
+  const due = dueGameLocks(nowMs);
+  const locked = [];
+  for (const d of due) {
+    const row = q.getGameById.get(d.game_date, d.game_id);
+    if (!row || row.odds_locked_at) continue;
+    lockGameOdds(d.game_date, d.game_id, d.mins_to_start + 'min, per-game lock pass',
+      'odds locked at game start gate (per-game lock pass)');
+    locked.push(d.game_id);
+  }
+  // A cron_log row only when a game was locked (at most one per game per
+  // day), so the lock leaves a record the way the other jobs do.
+  if (locked.length) {
+    try {
+      q.logCron.run('odds_lock', due[0].game_date, 'success',
+        'per-game lock pass locked ' + locked.join(', '), locked.length);
+    } catch (e) {
+      console.warn('[per-game-lock] cron_log write failed (non-fatal): ' + (e && e.message));
+    }
+  }
+  return { due: due.length, locked };
 }
 
 // One write path for both types, so the two call sites cannot drift.
@@ -4809,6 +4918,26 @@ function startCronJobs() {
         _queued('odds ' + label, () => runOddsJob(todayStr())));
     }, { timezone: 'America/Los_Angeles' });
   });
+
+  // --- Per-game odds lock (#488): every minute, through the job queue ---
+  // Not a fixed cron: each game's own scheduled_start_utc decides when it
+  // locks (T-10, see runPerGameLockPass). The tick itself is one SELECT on
+  // today's rows and queues a job only when a game is due; `pending` keeps
+  // a queued or running pass from being queued again behind a long job.
+  let _lockPending = false;
+  const _lockTick = setInterval(() => {
+    if (_lockPending) return;
+    let due;
+    try { due = dueGameLocks(); }
+    catch (e) { console.warn('[per-game-lock] tick failed: ' + (e && e.message)); return; }
+    if (!due.length) return;
+    _lockPending = true;
+    const p = _queued('per-game lock (' + due.map(d => d.game_id).join(', ') + ')',
+      () => runPerGameLockPass());
+    _cronFire('per-game lock', p);
+    Promise.resolve(p).catch(() => {}).finally(() => { _lockPending = false; });
+  }, 60000);
+  if (_lockTick.unref) _lockTick.unref();
 
   // --- Scores: 4AM PT ---
   cron.schedule('0 4 * * *', () => {
@@ -8924,4 +9053,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { gradeBetSignalsForGame, _notEmittedShortReason, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { gradeBetSignalsForGame, _notEmittedShortReason, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, lockGameOdds, dueGameLocks, runPerGameLockPass, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
