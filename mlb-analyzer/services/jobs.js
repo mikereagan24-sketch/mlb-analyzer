@@ -24,8 +24,10 @@ const {
   parseEtWallClockStringMin,
   parseKalshiHhmmMin,
   parseIsoToEtMin,
-  checkSourceStartMatchesSchedule,
+  countGamesBetween,
+  checkSourceAssignment,
 } = require('../utils/dh-assignment-guard');
+const { gameIdFor } = require('../utils/statsapi-ids');
 
 // Cohort assignment by game_date. Shared by processGameSignals (auto-
 // emitted signals) AND routes/api.js POST /signals/manual (manual bet
@@ -5731,6 +5733,31 @@ async function runOddsJob(dateStr, opts) {
     // defined here, not by any book.
     const scheduleRows = await ensureScheduleBootstrap(dateStr);
 
+    // Games between two teams today, for the DH-assignment guard below
+    // (kalshi-start-time-source). game_log rows AND the schedule: the
+    // schedule drops Final games, so on a doubleheader day it alone would
+    // show one game once game 1 is over. The pair's game_log rows are
+    // looked up by game_id (either home/away order, legs 1-3), not by
+    // reading the slate: runOddsJob resolves rows by id and does not
+    // enumerate the slate (scripts/test-cron-chain-order.js). Removed rows
+    // are skipped, as getGamesByDate skips them.
+    const _pairRows = new Map();
+    const _gamesBetween = (teamA, teamB) => {
+      if (!teamA || !teamB) return 0;
+      const key = [String(teamA), String(teamB)].sort().join('|').toUpperCase();
+      if (!_pairRows.has(key)) {
+        const rows = [];
+        for (const [x, y] of [[teamA, teamB], [teamB, teamA]]) {
+          for (const n of [1, 2, 3]) {
+            const r = q.getGameById.get(dateStr, gameIdFor(x, y, n));
+            if (r && !r.is_removed) rows.push(r);
+          }
+        }
+        _pairRows.set(key, rows);
+      }
+      return countGamesBetween(teamA, teamB, _pairRows.get(key), scheduleRows);
+    };
+
     // ====================================================================
     // Complete the 2026-07-10 demote (fix/complete-demote-seed-oddsraw-
     // from-schedule, 2026-07-22).
@@ -5916,10 +5943,19 @@ async function runOddsJob(dateStr, opts) {
             // game_time within ±30 min. On mismatch: reject the write,
             // stamp odds_flag_reason downstream, let processGameSignals'
             // suppression gate catch it.
+            //
+            // The ticker HHMM is the ORIGINAL scheduled time and never
+            // changes; Kalshi publishes no real start time (its
+            // occurrence_datetime is that time + 3h). So a mismatch only
+            // rejects on a doubleheader day; with one game between the
+            // teams today the market is matched by teams and date
+            // (kalshi-start-time-source, 2026-10-08 CLE-CWS).
             const _kalStartMin = parseKalshiHhmmMin(k.start_et);
             const _schedStartMin = parseEtWallClockStringMin(existing && existing.game_time);
-            const _dhMismatch = checkSourceStartMatchesSchedule(
-              _kalStartMin, _schedStartMin, 'kalshi', gameId);
+            const _dhCheck = checkSourceAssignment(
+              _kalStartMin, _schedStartMin, 'kalshi', gameId, _gamesBetween(o.awayTeam, o.homeTeam));
+            if (_dhCheck.note) console.log('[dh-guard] ' + _dhCheck.note);
+            const _dhMismatch = _dhCheck.rejected;
             if (_dhMismatch) {
               console.warn('[dh-guard] ' + _dhMismatch);
               _dhFlagByGid[gameId] = (_dhFlagByGid[gameId] ? _dhFlagByGid[gameId] + ' | ' : '') + _dhMismatch;
@@ -6080,11 +6116,15 @@ async function runOddsJob(dateStr, opts) {
           // land within 90 min of each other) the loser is silently
           // dropped and the winner may get labeled with the wrong
           // game_number. Verify Poly's game_start_time_iso matches
-          // statsapi within ±30 min.
+          // statsapi within ±30 min. Same rule as Kalshi: a mismatch only
+          // rejects on a doubleheader day (gameStartTime also misses
+          // MLB's time moves on single games).
           const _polyStartMin = parseIsoToEtMin(p.game_start_time_iso);
           const _schedStartMinP = parseEtWallClockStringMin(existing && existing.game_time);
-          const _polyDhMismatch = checkSourceStartMatchesSchedule(
-            _polyStartMin, _schedStartMinP, 'polymarket', p.game_id);
+          const _polyDhCheck = checkSourceAssignment(
+            _polyStartMin, _schedStartMinP, 'polymarket', p.game_id, _gamesBetween(o.awayTeam, o.homeTeam));
+          if (_polyDhCheck.note) console.log('[dh-guard] ' + _polyDhCheck.note);
+          const _polyDhMismatch = _polyDhCheck.rejected;
           if (_polyDhMismatch) {
             console.warn('[dh-guard] ' + _polyDhMismatch);
             _dhFlagByGid[p.game_id] = (_dhFlagByGid[p.game_id] ? _dhFlagByGid[p.game_id] + ' | ' : '') + _polyDhMismatch;
