@@ -27,6 +27,9 @@
 // auto-suppress via the null-market gate in getSignals (nothing new
 // wrote, prior value may already be stale-but-honest).
 //
+// Since kalshi-start-time-source (2026-10-08) the time check decides only
+// on a doubleheader day; see checkSourceAssignment below.
+//
 // Tolerance: 30 min is comfortably below the typical DH-leg gap
 // (usually 3-6 hours for a split doubleheader, ~30 min for a straight
 // makeup DH) and comfortably above any legitimate schedule drift.
@@ -100,10 +103,63 @@ function checkSourceStartMatchesSchedule(sourceEtMin, scheduleEtMin, sourceLabel
     + ' — DH-crossed or wrong-leg market, write REJECTED';
 }
 
+// How many games MLB has between these two teams today, counted from any
+// number of row lists (game_log rows and the statsapi schedule rows),
+// de-duplicated by game_id. Home/away order is ignored. The caller passes
+// game_log's rows as well as the schedule because fetchSchedule drops
+// Final games: on a doubleheader day the schedule alone shows one game
+// once game 1 is over.
+function countGamesBetween(teamA, teamB, ...rowLists) {
+  if (!teamA || !teamB) return 0;
+  const a = String(teamA).toUpperCase(), b = String(teamB).toUpperCase();
+  const ids = new Set();
+  for (const rows of rowLists) {
+    for (const r of rows || []) {
+      if (!r || !r.game_id) continue;
+      const x = String(r.away_team || '').toUpperCase(), y = String(r.home_team || '').toUpperCase();
+      if ((x === a && y === b) || (x === b && y === a)) ids.add(r.game_id);
+    }
+  }
+  return ids.size;
+}
+
+// The write-site decision (kalshi-start-time-source). A venue's start time
+// is not always the real one: Kalshi's ticker HHMM is the time the game
+// was ORIGINALLY scheduled for and never changes ("originally scheduled
+// for Oct 8, 2026 at 5:00 PM EDT" in its rules; occurrence_datetime and
+// expected_expiration_time are that same time + 3h), and Polymarket's
+// gameStartTime missed MLB's time moves too. Measured 2026-10-08 over the
+// season: 22 of 36 Kalshi events the time check rejects were the only
+// game between those teams that day (2026-10-08 CLE-CWS: ticker 17:00 ET,
+// MLB 20:00 ET).
+//
+// So the time check only decides on a doubleheader day:
+//   - times agree (±30 min)              → accept, as before.
+//   - times disagree, exactly ONE game   → accept, matched by teams and
+//     between the teams today              date; `note` says so for the log.
+//   - times disagree, any other count    → reject, as before (a real
+//     (a doubleheader, or unknown)         doubleheader, or no schedule).
+//
+// Returns { rejected: reason|null, note: string|null }.
+function checkSourceAssignment(sourceEtMin, scheduleEtMin, sourceLabel, gameId, gamesBetween) {
+  const mismatch = checkSourceStartMatchesSchedule(sourceEtMin, scheduleEtMin, sourceLabel, gameId);
+  if (!mismatch) return { rejected: null, note: null };
+  if (gamesBetween !== 1) return { rejected: mismatch, note: null };
+  const hhmm = (min) => String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0');
+  return {
+    rejected: null,
+    note: (sourceLabel || 'source') + ' ' + gameId + ' matched by teams and date: ticker/event '
+      + hhmm(sourceEtMin) + ' ET vs schedule ' + hhmm(scheduleEtMin) + ' ET (Δ=' + (sourceEtMin - scheduleEtMin)
+      + ' min), the only game between these teams today, write accepted',
+  };
+}
+
 module.exports = {
   parseEtWallClockStringMin,
   parseKalshiHhmmMin,
   parseIsoToEtMin,
   checkSourceStartMatchesSchedule,
+  countGamesBetween,
+  checkSourceAssignment,
   START_MISMATCH_TOL_MIN,
 };
