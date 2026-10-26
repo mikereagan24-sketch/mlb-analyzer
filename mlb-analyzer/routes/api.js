@@ -1810,7 +1810,8 @@ router.post('/jobs/fix-signals', requireAdminToken, (req, res) => {
             ) * 1000) / 10.0
         ELSE NULL END
       WHERE closing_line IS NULL AND outcome != 'pending' AND market_line IS NOT NULL
-        AND signal_type='ML'`).run();
+        AND signal_type='ML'
+        AND id NOT IN (SELECT signal_id FROM bet_signal_audit WHERE action = 'withheld_closing_line' AND signal_id IS NOT NULL)`).run();
     const fixed = db.prepare('SELECT COUNT(*) as n FROM bet_signals WHERE closing_line IS NOT NULL').get();
     res.json({success:true, withClosingLine: fixed.n});
   } catch(e) { res.status(500).json({error:e.message}); }

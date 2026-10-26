@@ -55,8 +55,13 @@ const insGl = db.prepare(`INSERT INTO game_log (game_date, game_id, away_team, h
 const insSig = db.prepare(`INSERT INTO bet_signals (game_log_id, game_date, game_id, signal_type, signal_side, category, market_line, model_line, edge_pct,
   outcome, pnl, bet_line, bet_price, bet_locked_at, is_active, cohort) VALUES
   (@gl, @d, @g, @type, @side, @cat, @mkt, @model, 0.04, 'pending', 0, @bl, @bp, @lk, 1, 'v7')`);
+// game_time as MLB's schedule writes it for the same start ("9:38 PM ET").
+// The fixtures used to keep a fixed '9:38 PM ET' whatever the start; since
+// lock-correctness (#528) a game_time that disagrees with scheduled_start_utc
+// makes the pass ask MLB, so the two now agree as they do in production.
+const etOf = (st) => new Date(st).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET';
 function addGame(o) {
-  insGl.run(Object.assign({ t: '9:38 PM ET', status: 'Scheduled', removed: 0, aml: 113, hml: -137, tot: 7.5, op: -108, up: -112, lock: null }, o));
+  insGl.run(Object.assign({ t: o.st ? etOf(o.st) : '9:38 PM ET', status: 'Scheduled', removed: 0, aml: 113, hml: -137, tot: 7.5, op: -108, up: -112, lock: null }, o));
   return db.prepare('SELECT id FROM game_log WHERE game_date = ? AND game_id = ?').get(o.d, o.g).id;
 }
 function addSig(gl, d, g, o) {
@@ -125,7 +130,7 @@ try {
     const D = '2099-06-03', G = 'lad-sf', OLD = Date.parse('2099-06-03T23:00:00Z');
     addGame({ d: D, g: G, a: 'LAD', h: 'SF', st: '2099-06-03T23:00:00Z' });
     // delayed two hours before the old window opened
-    db.prepare('UPDATE game_log SET scheduled_start_utc = ? WHERE game_date = ? AND game_id = ?').run('2099-06-04T01:00:00Z', D, G);
+    db.prepare('UPDATE game_log SET scheduled_start_utc = ?, game_time = ? WHERE game_date = ? AND game_id = ?').run('2099-06-04T01:00:00Z', etOf('2099-06-04T01:00:00Z'), D, G);
     const NEW = Date.parse('2099-06-04T01:00:00Z');
     ok('c: later start -- not locked at the old T-10', pass(OLD - 10 * MIN).locked.length === 0 && !gameRow(D, G).odds_locked_at);
     ok('c: later start -- not locked at the old start either', pass(OLD).locked.length === 0 && !gameRow(D, G).odds_locked_at);
@@ -134,7 +139,7 @@ try {
 
     const D2 = '2099-06-04', G2 = 'ari-col', OLD2 = Date.parse('2099-06-05T01:40:00Z');
     addGame({ d: D2, g: G2, a: 'ARI', h: 'COL', st: '2099-06-05T01:40:00Z' });
-    db.prepare('UPDATE game_log SET scheduled_start_utc = ? WHERE game_date = ? AND game_id = ?').run('2099-06-04T22:10:00Z', D2, G2);
+    db.prepare('UPDATE game_log SET scheduled_start_utc = ?, game_time = ? WHERE game_date = ? AND game_id = ?').run('2099-06-04T22:10:00Z', etOf('2099-06-04T22:10:00Z'), D2, G2);
     const NEW2 = Date.parse('2099-06-04T22:10:00Z');
     ok('c: earlier start -- locked at the new T-10, hours before the old one', pass(NEW2 - 10 * MIN).locked.includes(G2) && NEW2 < OLD2 - 3 * 60 * MIN);
   }

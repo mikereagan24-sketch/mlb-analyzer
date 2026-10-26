@@ -99,10 +99,19 @@ ok('a missing book side is refused, not treated as zero',
    divergence(8.5, -110, -110, null, null, null) === null);
 
 // ---- the corpus the fix is measured against -------------------------
+// 2026-10-26: the window is FIXED, not "the last 30 days from today". The
+// xcheck_* columns came from the Unabated feed, removed 2026-09-17; game_log
+// holds them for 2026-04-24..2026-09-17 only, so a rolling window emptied
+// out around 2026-10-17 and this test started failing on the date alone.
+// The window is still 30 days, now anchored to the last day of xcheck data
+// (2026-08-18..2026-09-17), the same span the test covered on its last
+// day of live data. The earlier xcheck rows are not added: six of them,
+// all before 2026-07-20, exceed the 0.08 rule. That is a separate question,
+// not one to settle by widening the corpus here.
 const { db } = require(path.join(R, 'db/schema'));
 const rows = db.prepare(
   "SELECT market_total, over_price, under_price, xcheck_total, xcheck_over_price, xcheck_under_price "
-  + "FROM game_log WHERE game_date >= date('now','-30 days')").all();
+  + "FROM game_log WHERE game_date >= date('2026-09-17','-30 days') AND game_date <= '2026-09-17'").all();
 let both = 0, fires = 0;
 for (const r of rows) {
   const d = divergence(r.market_total, r.over_price, r.under_price,

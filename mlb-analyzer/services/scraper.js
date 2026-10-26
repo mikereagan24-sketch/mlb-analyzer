@@ -1321,6 +1321,10 @@ async function fetchSchedule(dateStr) {
       away_team: awayAbbr,
       home_team: homeAbbr,
       time: fmtET(g.gameDate),
+      // MLB's scheduled start as an instant (statsapi gameDate), for the
+      // per-game lock's start check (jobs.js _lockStart). `time` above is
+      // the display form of the same value.
+      start_utc: g.gameDate || null,
       // id carried alongside the name (2026-09-14). It was already in
       // hand -- handById is keyed on it three lines up -- and throwing
       // it away forced every consumer to re-derive it from "F. Last".

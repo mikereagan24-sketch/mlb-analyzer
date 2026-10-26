@@ -3713,13 +3713,21 @@ function closingValuesFor(sig, gameRow) {
 // odds fetch, no model, no signals: after this, processGameSignals returns
 // early for the game (locked and unscored) and the odds passes skip it.
 //
-// The odds job's started-game catch-up (runOddsJob) is a separate lock site
-// and is not routed through here: it computes closes from the freshly
-// fetched odds, not the stored row.
+// The odds job's started-game catch-up (runOddsJob) locks through here too
+// since lock-correctness (2026-10-26, #525): before that it computed closes
+// from the freshly fetched odds, which for a started game are in-game prices.
+//
+// opts.withholdCloses (a reason string): lock the game but write NO closing
+// line. Each signal that would have got one gets a withheld_closing_line
+// audit row instead, with the reason. The started-game site passes it when
+// the stored row's last odds write came after first pitch, so the row may
+// hold an in-game price. The ML backfill skips withheld signals, so no
+// close is guessed for them later either.
 //
 // Synchronous on purpose: callers check odds_locked_at and call this in the
 // same tick, so nothing can interleave between the check and the lock.
-function lockGameOdds(dateStr, gameId, label, detail) {
+function lockGameOdds(dateStr, gameId, label, detail, opts) {
+  const withhold = opts && opts.withholdCloses ? String(opts.withholdCloses) : null;
   // FREEZE THE SPREAD-CELL AXIS HERE, atomically with the
   // lock. (2026-09-11)
   //
@@ -3759,6 +3767,24 @@ function lockGameOdds(dateStr, gameId, label, detail) {
     // ML filter removed 2026-08-23 -- totals were never captured.
     const mlSigs = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, gameId);
     for (const sig of mlSigs) {
+      if (withhold) {
+        try {
+          q.insertBetSignalAudit({
+            signal_id: sig.id,
+            game_date: dateStr,
+            game_id: gameId,
+            signal_type: sig.signal_type,
+            signal_side: sig.signal_side,
+            action: 'withheld_closing_line',
+            bet_line: sig.bet_line,
+            closing_line: null,
+            clv: null,
+            source: 'cron_closing_lock',
+            detail: detail + ': ' + withhold,
+          });
+        } catch(e) { /* audit failure must not block lifecycle */ }
+        continue;
+      }
       const _cw = writeClosing(db, sig, gameForClose);
       const closingLine = _cw.closingLine;
       const clv = _cw.clv;
@@ -3809,16 +3835,76 @@ function lockGameOdds(dateStr, gameId, label, detail) {
 // (game_status), placeholder ids (not team-team, e.g. "atl/phi-lad"),
 // and rows with no scheduled_start_utc (the lineup-pull lock still covers
 // those, by game_time).
+//
+// STALE START TIMES (lock-correctness, 2026-10-26, #528). scheduled_start_utc
+// is written by refreshFirstPitch, whose lineup-pull call (onlyMissing)
+// re-reads a game only once its stored start has passed, so when MLB moves a
+// start the old time stays until it is over. game_time is rewritten from
+// MLB's schedule on every odds and lineup pass. On 2026-10-08 CLE @ CWS still
+// had 21:00Z (the original 5:00 PM ET) while game_time said 8:00 PM ET, and
+// this pass locked it at 20:50Z, 3 hours early. 10/16 and 10/17 TB @ CLE
+// locked early the same way. game_time is not always the right one either: on
+// a doubleheader day it can carry the other leg's time.
+//
+// So when the two disagree by more than 5 minutes, neither decides. The game
+// becomes due when the EARLIER time is within T-10, and the queued job
+// (refreshLockStarts) asks MLB: one fetchSchedule for the date, cached 15
+// minutes (5 after a failure). MLB's start decides and is written back to
+// scheduled_start_utc. With no answer from MLB, the LATER of the two decides,
+// so the pass never locks more than T-10 ahead of either. When the two agree
+// nothing changes: no fetch, same due list, same lock.
 const PER_GAME_LOCK_BEFORE_MIN = 10;
 const PER_GAME_LOCK_AFTER_MIN = 240;
+const LOCK_START_DISAGREE_MIN = 5;
+const LOCK_START_CHECK_TTL_MS = 15 * 60000;
+const LOCK_START_CHECK_FAIL_TTL_MS = 5 * 60000;
+const LOCK_START_FETCH_TIMEOUT_MS = 15000;
 const _lockIdOk = (id) => /^[a-z]{2,3}-[a-z]{2,3}(-g?\d)?$/.test(String(id || ''));
+const _lockStartChecks = new Map();   // game_date -> { at, rows } (rows null after a failed fetch)
 
-// -> [{ game_date, game_id, scheduled_start_utc, mins_to_start }] due now. Pure read.
+// game_time ("8:00 PM ET", ET wall clock) on game_date -> UTC ms, or NaN.
+function _gameTimeUtcMs(dateStr, gameTime) {
+  const m = /^(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(String(gameTime || '').trim());
+  if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || ''))) return NaN;
+  let h = parseInt(m[1], 10) % 12;
+  if (m[3].toUpperCase() === 'PM') h += 12;
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  // ET's offset on that date (EDT or EST), from the platform's zone data.
+  const noon = new Date(Date.UTC(y, mo - 1, d, 12));
+  const etNoon = Date.parse(noon.toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T') + 'Z');
+  return Date.UTC(y, mo - 1, d, h, parseInt(m[2], 10)) + (noon.getTime() - etNoon);
+}
+
+// The start a lock decision uses for one row. basis:
+//   'scheduled'  the two stored times agree (or game_time is unreadable)
+//   'mlb'        they disagree; MLB's schedule, checked within the TTL
+//   'later'      they disagree; MLB gave no answer within the TTL
+//   'check'      they disagree; not checked yet (startMs is the earlier, to
+//                queue the check in time; latestMs is the later)
+function _lockStart(r, now) {
+  const sched = Date.parse(r.scheduled_start_utc);
+  const gt = _gameTimeUtcMs(r.game_date, r.game_time);
+  if (!Number.isFinite(gt) || Math.abs(gt - sched) <= LOCK_START_DISAGREE_MIN * 60000) {
+    return { startMs: sched, latestMs: sched, basis: 'scheduled' };
+  }
+  const c = _lockStartChecks.get(r.game_date);
+  if (c && now - c.at < (c.rows ? LOCK_START_CHECK_TTL_MS : LOCK_START_CHECK_FAIL_TTL_MS)) {
+    const m = c.rows && (c.rows.find(x => r.game_pk != null && x.game_pk === r.game_pk)
+      || c.rows.find(x => x.game_id === r.game_id));
+    const mlb = m ? Date.parse(m.start_utc) : NaN;
+    if (Number.isFinite(mlb)) return { startMs: mlb, latestMs: mlb, basis: 'mlb' };
+    return { startMs: Math.max(sched, gt), latestMs: Math.max(sched, gt), basis: 'later' };
+  }
+  return { startMs: Math.min(sched, gt), latestMs: Math.max(sched, gt), basis: 'check' };
+}
+
+// -> [{ game_date, game_id, scheduled_start_utc, mins_to_start, start_basis, mins_to_latest }]
+// due now. Reads game_log and the in-memory start-check cache; writes nothing.
 function dueGameLocks(nowMs) {
   const now = nowMs == null ? Date.now() : nowMs;
   const dateStr = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   const rows = db.prepare(
-    'SELECT game_date, game_id, scheduled_start_utc, odds_locked_at, game_status, COALESCE(is_removed, 0) AS removed '
+    'SELECT game_date, game_id, game_pk, scheduled_start_utc, game_time, odds_locked_at, game_status, COALESCE(is_removed, 0) AS removed '
     + 'FROM game_log WHERE game_date = ?'
   ).all(dateStr);
   const due = [];
@@ -3826,26 +3912,72 @@ function dueGameLocks(nowMs) {
     if (r.odds_locked_at || r.removed) continue;
     if (/^(Postponed|Cancelled)/.test(r.game_status || '')) continue;
     if (!_lockIdOk(r.game_id) || !r.scheduled_start_utc) continue;
-    const start = Date.parse(r.scheduled_start_utc);
-    if (!Number.isFinite(start)) continue;
-    const minsToStart = (start - now) / 60000;
+    if (!Number.isFinite(Date.parse(r.scheduled_start_utc))) continue;
+    const s = _lockStart(r, now);
+    const minsToStart = (s.startMs - now) / 60000;
     if (minsToStart <= PER_GAME_LOCK_BEFORE_MIN && minsToStart >= -PER_GAME_LOCK_AFTER_MIN) {
       due.push({ game_date: r.game_date, game_id: r.game_id,
-        scheduled_start_utc: r.scheduled_start_utc, mins_to_start: Math.round(minsToStart) });
+        scheduled_start_utc: r.scheduled_start_utc, mins_to_start: Math.round(minsToStart),
+        start_basis: s.basis, mins_to_latest: Math.round((s.latestMs - now) / 60000) });
     }
   }
   return due;
 }
 
+// The queued job's first step: for due games whose two start times disagree
+// and that MLB has not been asked about within the TTL, one fetchSchedule per
+// date (the bootstrap's own statsapi path, nothing written but the start).
+// Where MLB's start differs from scheduled_start_utc, it is written back, so
+// the next tick and gameHasStarted read the right time. Never throws.
+async function refreshLockStarts(nowMs) {
+  const now = nowMs == null ? Date.now() : nowMs;
+  const toCheck = dueGameLocks(now).filter(d => d.start_basis === 'check');
+  const dates = [...new Set(toCheck.map(d => d.game_date))];
+  for (const date of dates) {
+    let timer = null;
+    try {
+      const rows = await Promise.race([
+        fetchSchedule(date),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timed out after ' + LOCK_START_FETCH_TIMEOUT_MS + 'ms')), LOCK_START_FETCH_TIMEOUT_MS); }),
+      ]);
+      _lockStartChecks.set(date, { at: now, rows: Array.isArray(rows) ? rows : [] });
+    } catch (e) {
+      _lockStartChecks.set(date, { at: now, rows: null });
+      console.warn('[per-game-lock] start check for ' + date + ' failed (' + (e && e.message)
+        + '); locking on the later of the two start times');
+    } finally { if (timer) clearTimeout(timer); }
+  }
+  for (const d of toCheck) {
+    const row = q.getGameById.get(d.game_date, d.game_id);
+    if (!row || row.odds_locked_at) continue;
+    const s = _lockStart(row, now);
+    const iso = new Date(s.startMs).toISOString().replace('.000Z', 'Z');
+    console.log('[per-game-lock] ' + d.game_id + ': scheduled_start_utc ' + row.scheduled_start_utc
+      + ' disagrees with game_time ' + row.game_time + '; ' + (s.basis === 'mlb' ? 'MLB says ' + iso : 'no MLB answer, using the later ' + iso));
+    if (s.basis === 'mlb' && Date.parse(row.scheduled_start_utc) !== s.startMs) {
+      db.prepare('UPDATE game_log SET scheduled_start_utc = ? WHERE game_date = ? AND game_id = ? AND odds_locked_at IS NULL')
+        .run(iso, d.game_date, d.game_id);
+    }
+  }
+}
+
 // Locks every game due now. Re-checks inside the job, so a game the lineup
 // pull locked while this waited in the queue is skipped, never re-locked.
+// A game still unchecked (start_basis 'check': its two start times disagree
+// and refreshLockStarts has not run) locks only once the LATER time is
+// within T-10.
 function runPerGameLockPass(nowMs) {
   const due = dueGameLocks(nowMs);
   const locked = [];
   for (const d of due) {
     const row = q.getGameById.get(d.game_date, d.game_id);
     if (!row || row.odds_locked_at) continue;
-    lockGameOdds(d.game_date, d.game_id, d.mins_to_start + 'min, per-game lock pass',
+    if (d.start_basis === 'check' && d.mins_to_latest > PER_GAME_LOCK_BEFORE_MIN) {
+      console.log('[per-game-lock] ' + d.game_id + ': not locking on the earlier of two disagreeing start times ('
+        + row.scheduled_start_utc + ' vs ' + row.game_time + ')');
+      continue;
+    }
+    lockGameOdds(d.game_date, d.game_id, (d.start_basis === 'check' ? d.mins_to_latest : d.mins_to_start) + 'min, per-game lock pass',
       'odds locked at game start gate (per-game lock pass)');
     locked.push(d.game_id);
   }
@@ -3903,7 +4035,10 @@ function backfillMlClosingLines() {
   const rows = db.prepare(
     "SELECT id, game_date, game_id, signal_type, signal_side, bet_line, market_line "
     + "FROM bet_signals WHERE closing_line IS NULL AND signal_type='ML' "
-    + "AND outcome != 'pending' AND market_line IS NOT NULL"
+    + "AND outcome != 'pending' AND market_line IS NOT NULL "
+    // A close the lock withheld on purpose (its row may hold an in-game
+    // price, see lockGameOdds) stays empty: no assumption either.
+    + "AND id NOT IN (SELECT signal_id FROM bet_signal_audit WHERE action = 'withheld_closing_line' AND signal_id IS NOT NULL)"
   ).all();
   if (!rows.length) { console.log('[closing-backfill] nothing to backfill'); return 0; }
 
@@ -4935,7 +5070,7 @@ function startCronJobs() {
     if (!due.length) return;
     _lockPending = true;
     const p = _queued('per-game lock (' + due.map(d => d.game_id).join(', ') + ')',
-      () => runPerGameLockPass());
+      async () => { await refreshLockStarts(); return runPerGameLockPass(); });
     _cronFire('per-game lock', p);
     Promise.resolve(p).catch(() => {}).finally(() => { _lockPending = false; });
   }, 60000);
@@ -5582,31 +5717,29 @@ function processOddsArray(dateStr, oddsRaw, settings, opts) {
       // the same UPDATE for the same reason as the T-10 site above; a
       // lock that skipped the stamp would leave the cell live after
       // first pitch, which is the defect in the other direction.
-      db.prepare("UPDATE game_log SET odds_locked_at=datetime('now'), market_total_at_emit=market_total WHERE game_date=? AND game_id=? AND odds_locked_at IS NULL").run(dateStr, o.game_id);
-      console.log('[odds] Skipping started game: '+o.game_id+' (locked, spread-cell axis frozen)');
-      // ML filter removed 2026-08-23 -- totals were never captured. `o` carries
-      // market_total / over_price / under_price alongside the ML fields.
-      const mlSigsO = db.prepare("SELECT * FROM bet_signals WHERE game_date=? AND game_id=? AND closing_line IS NULL").all(dateStr, o.game_id);
-      for (const sig of mlSigsO) {
-        const _cw = writeClosing(db, sig, o);
-        const closingLine = _cw.closingLine;
-        const clv = _cw.clv;
-        try {
-          q.insertBetSignalAudit({
-            signal_id: sig.id,
-            game_date: dateStr,
-            game_id: o.game_id,
-            signal_type: sig.signal_type,
-            signal_side: sig.signal_side,
-            action: 'set_closing_line',
-            bet_line: sig.bet_line,
-            closing_line: closingLine,
-            clv: clv,
-            source: 'cron_closing_lock',
-            detail: 'odds-job started-game close',
-          });
-        } catch(e) { /* audit failure must not block lifecycle */ }
-      }
+      //
+      // THE STORED ROW, NOT THIS PASS'S ODDS (lock-correctness, 2026-10-26,
+      // #525). This site used to write closes from `o`, the odds just
+      // fetched, which for a game already under way are in-game prices:
+      // 21 graded regular-season logged bets, e.g. 8/26 tb-det ML closed at
+      // +268 against a stored pre-start -122. It now locks through
+      // lockGameOdds like the other two sites. The stored row has been
+      // frozen since its last odds write, because the price UPDATE below never
+      // runs on a started game. If that write (odds_quality_at) came after
+      // first pitch, the row may hold an in-game price too, so the lock
+      // writes no closing line, only a withheld_closing_line audit.
+      // First pitch is first_pitch_utc when known, else the later of
+      // scheduled_start_utc and game_time (never the earlier of two
+      // disagreeing times; see the per-game lock pass).
+      const _qualMs = existing.odds_quality_at ? Date.parse(String(existing.odds_quality_at).replace(' ', 'T') + 'Z') : NaN;
+      const _fpMs = existing.first_pitch_utc ? Date.parse(existing.first_pitch_utc)
+        : Math.max(Date.parse(existing.scheduled_start_utc || '') || -Infinity, _gameTimeUtcMs(dateStr, existing.game_time) || -Infinity);
+      const _writtenAfterStart = Number.isFinite(_qualMs) && Number.isFinite(_fpMs) && _qualMs > _fpMs;
+      lockGameOdds(dateStr, o.game_id, 'started-game catch-up', 'odds-job started-game lock (stored row)',
+        _writtenAfterStart ? { withholdCloses: 'the stored row\'s last odds write (' + existing.odds_quality_at
+          + ' UTC) came after first pitch (' + new Date(_fpMs).toISOString() + '); no closing line set' } : null);
+      console.log('[odds] Skipping started game: '+o.game_id+' (locked from the stored row'
+        + (_writtenAfterStart ? ', closes withheld: last odds write after first pitch' : '') + ')');
       refreshLockedLabels.run(
         o.ml_source || null,
         o.total_source || null,
@@ -9093,4 +9226,4 @@ async function runRosterJobIfStale(maxAgeHrs = 24) {
   }
 }
 
-module.exports = { gradeBetSignalsForGame, _notEmittedShortReason, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, lockGameOdds, dueGameLocks, runPerGameLockPass, runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
+module.exports = { gradeBetSignalsForGame, _notEmittedShortReason, fetchScoresWithRetry, runScoreCatchupJob, SCORE_RETRY_DELAYS_MS, buildOrphanDeleteSql, runPitcherBattedBallJob, runParkFactorsJob, runParkFactorsJobIfStale, runFirstPitchBackfillJob, runFirstPitchBackfillIfMissing, runRosterJob, runRosterJobIfStale, runSeasonRosterJob, runFangraphsRolesJob, runFangraphsWobaSyncJob, runCatcherFramingJob, runCatcherFramingHistJob, runFieldingFrvJob, runBaserunningJob, runPlayerBaserunningJob, runPlayerBaserunningTrailingJob, runLineupJob, runScoreJob, runOddsJob, runWeatherJob, runPitcherUsageBackfill, detectOpeners, processGameSignals, processOddsArray, lockGameOdds, dueGameLocks, runPerGameLockPass, refreshLockStarts, _resetLockStartChecks: () => _lockStartChecks.clear(), runMorningCaptureJob, getWobaIndex, getWobaIndexAsOf, getSettings, getOddsApiKey, refreshFirstPitch, backfillMlClosingLines, startCronJobs, nowPtIso, withMemLog: _queued, resolveCatcherMlbId, resolveBacktestMlbId, cohortForGameDate };
