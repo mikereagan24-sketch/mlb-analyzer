@@ -72,9 +72,14 @@ const eng = fs.readFileSync(path.join(R, 'services/empirical-spread-edge.js'), '
 // stamped, nothing rewrites it. What changed is WHEN it gets stamped.
 // scripts/test-spread-cell-live-axis.js owns the timing rule.
 const jobsSrc = fs.readFileSync(path.join(R, 'services/jobs.js'), 'utf8');
+// 2026-10-26 (#525/#528): the odds job's started-game catch-up stopped
+// carrying its own copy of the lock UPDATE and now goes through
+// lockGameOdds, so every lock site shares ONE statement. The count below
+// is of statements, not sites; test-spread-cell-live-axis.js checks that
+// nothing else sets odds_locked_at.
 const lockStmts = jobsSrc.match(/UPDATE game_log SET odds_locked_at=datetime\('now'\)[^"]*/g) || [];
 ok('the freeze is WRITE-ONCE, at the lock sites',
-   lockStmts.length === 2
+   lockStmts.length === 1
    && lockStmts.every(s => /market_total_at_emit=market_total/.test(s)
                         && /odds_locked_at IS NULL/.test(s)),
    'a later pass with a moved line must not overwrite it');

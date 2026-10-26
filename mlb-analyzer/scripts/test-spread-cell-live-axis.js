@@ -46,9 +46,21 @@ ok('generateEmpiricalSpreadSignals reports live vs frozen counts',
 
 // ---- 2. the freeze is ATOMIC with the lock --------------------------
 // Two statements could interleave with an odds pass and leave a row
-// locked-but-unstamped. Both lock sites must do it in one UPDATE.
+// locked-but-unstamped. Every lock site must do it in one UPDATE.
+// 2026-10-26 (#525/#528): the odds job's started-game catch-up used to
+// carry its own copy of that UPDATE; it now calls lockGameOdds, so all
+// lock sites share ONE statement. Pinned three ways: one statement, every
+// lock site calls it, and nothing else in jobs.js sets odds_locked_at.
 const lockStmts = jobs.match(/UPDATE game_log SET odds_locked_at=datetime\('now'\)[^"]*/g) || [];
-ok('both lock sites exist', lockStmts.length === 2, lockStmts.length + ' found');
+ok('one lock statement, shared by every lock site', lockStmts.length === 1, lockStmts.length + ' found');
+const lockCalls = (jobs.match(/\blockGameOdds\(/g) || []).length - 1;   // minus the definition
+ok('the game-start gate, the per-game pass and the odds job all lock through it',
+   lockCalls === 3
+   && /lockGameOdds\(dateStr, o\.game_id, 'started-game catch-up'/.test(jobs),
+   lockCalls + ' call(s)');
+const otherWrites = (jobs.match(/odds_locked_at\s*=\s*(?!NULL)[^\s,]/g) || []).length;
+ok('nothing else in jobs.js sets odds_locked_at', otherWrites === 1,
+   otherWrites + ' assignment(s) -- a second copy could skip the stamp');
 ok('EVERY lock site stamps the axis in the SAME statement',
    lockStmts.length > 0 && lockStmts.every(s => /market_total_at_emit=market_total/.test(s)),
    lockStmts.filter(s => /market_total_at_emit=market_total/.test(s)).length
